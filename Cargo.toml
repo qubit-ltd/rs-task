@@ -1,0 +1,27 @@
+[package]
+name = "qubit-task"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Haixing Hu <starfish.hu@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/qubit-ltd/rs-task"
+description = "Task-oriented services built on top of qubit-executor and qubit-thread-pool"
+homepage = "https://github.com/qubit-ltd/rs-task"
+documentation = "https://docs.rs/qubit-task"
+readme = "README.md"
+keywords = ["task", "concurrent", "executor", "service"]
+categories = ["concurrency", "asynchronous"]
+
+[lib]
+name = "qubit_task"
+doctest = true
+
+[dependencies]
+qubit-executor = { path = "../rs-executor" }
+qubit-thread-pool = { path = "../rs-thread-pool" }
+qubit-function = "0.10"
+thiserror = "2.0"
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time"] }
