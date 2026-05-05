@@ -11,15 +11,25 @@
 
 use std::{
     io,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        mpsc,
+    },
     thread,
     time::Duration,
 };
 
 use qubit_executor::TaskExecutionError;
 use qubit_executor::service::RejectedExecution;
-use qubit_thread_pool::{ThreadPool, ThreadPoolBuildError};
-use qubit_task::service::{TaskExecutionService, TaskExecutionServiceError, TaskStatus};
+use qubit_task::service::{
+    TaskExecutionService,
+    TaskExecutionServiceError,
+    TaskStatus,
+};
+use qubit_thread_pool::{
+    ThreadPool,
+    ThreadPoolBuildError,
+};
 
 /// Creates a current-thread Tokio runtime for driving async termination APIs.
 fn create_runtime() -> tokio::runtime::Runtime {
@@ -49,12 +59,22 @@ fn wait_started(receiver: mpsc::Receiver<()>) {
         .expect("task should start within timeout");
 }
 
+/// Returns a successful unit task result.
+fn successful_unit_task() -> Result<(), io::Error> {
+    Ok(())
+}
+
+/// Returns a successful numeric task result.
+fn successful_usize_task() -> Result<usize, io::Error> {
+    Ok(42)
+}
+
 #[test]
 fn test_task_execution_service_tracks_successful_task() {
     let service = TaskExecutionService::new().expect("service should be created");
 
     let handle = service
-        .submit_callable(1, || Ok::<usize, io::Error>(42))
+        .submit_callable(1, successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("service should accept task");
 
     assert_eq!(handle.get().expect("task should succeed"), 42);
@@ -82,12 +102,43 @@ fn test_task_execution_service_cancel_unknown_and_terminal_tasks() {
     assert!(!service.cancel(404));
 
     let handle = service
-        .submit_callable(1, || Ok::<usize, io::Error>(42))
+        .submit_callable(1, successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("service should accept task");
     assert_eq!(handle.get().expect("task should succeed"), 42);
 
     assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
     assert!(!service.cancel(1));
+    service.shutdown();
+    create_runtime().block_on(service.await_termination());
+}
+
+#[test]
+fn test_task_execution_service_cancel_running_task_returns_false() {
+    let service = create_single_worker_service();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+
+    let handle = service
+        .submit(1, move || {
+            started_tx
+                .send(())
+                .expect("test should receive task start signal");
+            release_rx
+                .recv()
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            Ok::<(), io::Error>(())
+        })
+        .expect("running task should be accepted");
+    wait_started(started_rx);
+
+    assert_eq!(service.status(1), Some(TaskStatus::Running));
+    assert!(!service.cancel(1));
+    assert_eq!(service.status(1), Some(TaskStatus::Running));
+    release_tx
+        .send(())
+        .expect("running task should receive release signal");
+    handle.get().expect("running task should complete");
+    assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
     service.shutdown();
     create_runtime().block_on(service.await_termination());
 }
@@ -145,7 +196,7 @@ fn test_task_execution_service_rejects_duplicate_task_id() {
         .expect("first task should be accepted");
     wait_started(started_rx);
 
-    let duplicate = service.submit(1, || Ok::<(), io::Error>(()));
+    let duplicate = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
 
     assert!(matches!(
         duplicate,
@@ -166,11 +217,11 @@ fn test_task_execution_service_suspend_rejects_new_tasks() {
     assert!(!service.is_suspended());
     service.suspend();
     assert!(service.is_suspended());
-    let rejected = service.submit(1, || Ok::<(), io::Error>(()));
+    let rejected = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
     service.resume();
     assert!(!service.is_suspended());
     let accepted = service
-        .submit(1, || Ok::<(), io::Error>(()))
+        .submit(1, successful_unit_task as fn() -> Result<(), io::Error>)
         .expect("service should accept after resume");
 
     assert!(matches!(
@@ -201,7 +252,7 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let second = service
-        .submit_callable(2, || Ok::<usize, io::Error>(42))
+        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("queued task should be accepted");
 
     let stats = service.stats();
@@ -257,6 +308,20 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
 }
 
 #[test]
+fn test_task_execution_service_wait_methods_return_when_no_tasks_are_active() {
+    let service = TaskExecutionService::new().expect("service should be created");
+
+    service.await_in_flight_tasks_completion();
+    service.await_idle();
+
+    let stats = service.stats();
+    assert_eq!(stats.total, 0);
+    assert_eq!(service.status(1), None);
+    service.shutdown();
+    create_runtime().block_on(service.await_termination());
+}
+
+#[test]
 fn test_task_execution_service_shutdown_now_cancels_queued_task() {
     let service = create_single_worker_service();
     let (started_tx, started_rx) = mpsc::channel();
@@ -275,7 +340,7 @@ fn test_task_execution_service_shutdown_now_cancels_queued_task() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let queued = service
-        .submit_callable(2, || Ok::<usize, io::Error>(42))
+        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("queued task should be accepted");
 
     let report = service.shutdown_now();
@@ -300,7 +365,7 @@ fn test_task_execution_service_removes_record_when_pool_rejects() {
         .build()
         .expect("service should be created with lazy worker spawning");
 
-    let result = service.submit(1, || Ok::<(), io::Error>(()));
+    let result = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
 
     assert!(matches!(
         result,
@@ -332,7 +397,7 @@ fn test_task_execution_service_cancels_queued_task() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let queued = service
-        .submit_callable(2, || Ok::<usize, io::Error>(42))
+        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("queued task should be accepted");
 
     assert!(service.cancel(2));

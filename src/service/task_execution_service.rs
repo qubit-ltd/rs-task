@@ -9,25 +9,45 @@
  ******************************************************************************/
 use std::{
     collections::HashMap,
-    panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    panic::{
+        AssertUnwindSafe,
+        catch_unwind,
+    },
+    sync::{
+        Arc,
+        Condvar,
+        Mutex,
+        MutexGuard,
+    },
 };
 
-use qubit_function::{Callable, Runnable};
+use qubit_function::{
+    Callable,
+    Runnable,
+};
 
+use qubit_executor::service::{
+    ExecutorService,
+    ShutdownReport,
+};
 use qubit_executor::{
     TaskCompletion,
     TaskCompletionPair,
     TaskExecutionError,
     TaskHandle,
 };
-use qubit_executor::service::{ExecutorService, ShutdownReport};
-use qubit_thread_pool::{PoolJob, ThreadPool, ThreadPoolBuildError};
+use qubit_thread_pool::{
+    PoolJob,
+    ThreadPool,
+    ThreadPoolBuildError,
+};
 
 use super::{
     task_execution_service_builder::TaskExecutionServiceBuilder,
     task_execution_service_error::TaskExecutionServiceError,
-    task_execution_stats::TaskExecutionStats, task_id::TaskId, task_status::TaskStatus,
+    task_execution_stats::TaskExecutionStats,
+    task_id::TaskId,
+    task_status::TaskStatus,
 };
 
 /// Managed task execution service built on [`ThreadPool`].
@@ -94,7 +114,7 @@ pub struct TaskExecutionService {
 }
 
 impl TaskExecutionService {
-    /// Creates a service using the default [`ThreadPoolBuilder`] settings (worker
+    /// Creates a service using the default [`super::ThreadPoolBuilder`] settings (worker
     /// counts, queue, and other defaults match [`ThreadPool::builder`]).
     ///
     /// # Example
@@ -117,7 +137,8 @@ impl TaskExecutionService {
 
     /// Returns a [`TaskExecutionServiceBuilder`] so you can tune the backing pool
     /// before [`TaskExecutionServiceBuilder::build`] (for example
-    /// [`ThreadPoolBuilder::pool_size`], [`ThreadPoolBuilder::queue_capacity`]).
+    /// [`super::ThreadPoolBuilder::pool_size`],
+    /// [`super::ThreadPoolBuilder::queue_capacity`]).
     ///
     /// # Example
     ///
@@ -136,7 +157,7 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// A builder holding the default [`ThreadPoolBuilder`].
+    /// A builder holding the default [`super::ThreadPoolBuilder`].
     #[inline]
     pub fn builder() -> TaskExecutionServiceBuilder {
         TaskExecutionServiceBuilder::default()
@@ -553,11 +574,11 @@ struct TaskExecutionServiceState {
 }
 
 impl TaskExecutionServiceState {
-    /// Acquires service state while tolerating poisoned locks.
+    /// Acquires service state.
     fn lock_inner(&self) -> MutexGuard<'_, TaskExecutionServiceInner> {
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("task execution service state lock should not be poisoned")
     }
 
     /// Registers a submitted task.
@@ -611,9 +632,11 @@ impl TaskExecutionServiceState {
     /// Updates a task status.
     fn set_status(&self, task_id: TaskId, status: TaskStatus) {
         let mut inner = self.lock_inner();
-        if let Some(record) = inner.tasks.get_mut(&task_id) {
-            record.status = status;
-        }
+        let record = inner
+            .tasks
+            .get_mut(&task_id)
+            .expect("task status can only be updated for a registered task");
+        record.status = status;
         self.idle.notify_all();
     }
 
@@ -649,10 +672,7 @@ impl TaskExecutionServiceState {
             .iter()
             .any(|task_id| inner.task_is_active(*task_id))
         {
-            inner = self
-                .idle
-                .wait(inner)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner = self.wait_for_idle_notification(inner);
         }
     }
 
@@ -660,11 +680,18 @@ impl TaskExecutionServiceState {
     fn await_idle(&self) {
         let mut inner = self.lock_inner();
         while inner.has_active_tasks() {
-            inner = self
-                .idle
-                .wait(inner)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner = self.wait_for_idle_notification(inner);
         }
+    }
+
+    /// Waits for a state transition notification.
+    fn wait_for_idle_notification<'a>(
+        &self,
+        inner: MutexGuard<'a, TaskExecutionServiceInner>,
+    ) -> MutexGuard<'a, TaskExecutionServiceInner> {
+        self.idle
+            .wait(inner)
+            .expect("task execution service state lock should not be poisoned")
     }
 }
 
