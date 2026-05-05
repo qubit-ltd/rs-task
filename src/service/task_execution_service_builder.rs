@@ -7,11 +7,14 @@
  *    Licensed under the Apache License, Version 2.0.
  *
  ******************************************************************************/
-use qubit_thread_pool::{ThreadPoolBuildError, ThreadPoolBuilder};
+use qubit_thread_pool::{
+    ThreadPoolBuildError,
+    ThreadPoolBuilder,
+};
 
 use super::task_execution_service::TaskExecutionService;
 
-/// Builder for [`TaskExecutionService`], used to configure the backing [`ThreadPool`]
+/// Builder for [`TaskExecutionService`], used to configure the backing [`super::ThreadPool`]
 /// before the service is created.
 ///
 /// # Design

@@ -16,12 +16,16 @@ categories = ["concurrency", "asynchronous"]
 [lib]
 name = "qubit_task"
 doctest = true
+test = false
 
 [dependencies]
 qubit-executor = { path = "../rs-executor" }
 qubit-thread-pool = { path = "../rs-thread-pool" }
-qubit-function = "0.10"
+qubit-function = "0.11"
 thiserror = "2.0"
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time"] }
+
+[patch.crates-io]
+qubit-executor = { path = "../rs-executor" }
