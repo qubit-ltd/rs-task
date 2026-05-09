@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-executor"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "qubit-atomic",
  "qubit-function",
@@ -135,9 +135,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-function"
-version = "0.11.2"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdac38d5ed76324aaf340709253af4aa596bc01014d169c2b5e7e736c6504362"
+checksum = "da19a04aa84248448c3bfd7a5791d5e62adbf0c25fa93c91b0f3b72a051e61a4"
 dependencies = [
  "parking_lot",
  "pastey",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-thread-pool"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "crossbeam-deque",
  "qubit-executor",

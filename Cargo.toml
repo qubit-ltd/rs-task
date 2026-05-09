@@ -21,7 +21,7 @@ test = false
 [dependencies]
 qubit-executor = { path = "../rs-executor" }
 qubit-thread-pool = { path = "../rs-thread-pool" }
-qubit-function = "0.11"
+qubit-function = "0.12"
 thiserror = "2.0"
 
 [dev-dependencies]
