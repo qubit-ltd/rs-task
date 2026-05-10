@@ -12,10 +12,7 @@
 use std::time::Duration;
 
 use qubit_task::service::{
-    TaskExecutionService,
-    TaskExecutionServiceBuilder,
-    ThreadPool,
-    ThreadPoolBuildError,
+    TaskExecutionService, TaskExecutionServiceBuilder, ThreadPool, ThreadPoolBuildError,
 };
 
 /// Creates a current-thread Tokio runtime for driving async termination APIs.
@@ -32,7 +29,7 @@ fn test_task_execution_service_builder_builds_default_service() {
         .build()
         .expect("default builder should create service");
 
-    assert!(!service.is_shutdown());
+    assert!(!service.is_not_running());
     assert!(service.thread_pool().maximum_pool_size() > 0);
     service.shutdown();
     create_runtime().block_on(service.await_termination());

@@ -7,10 +7,7 @@
  *    Licensed under the Apache License, Version 2.0.
  *
  ******************************************************************************/
-use qubit_thread_pool::{
-    ThreadPoolBuildError,
-    ThreadPoolBuilder,
-};
+use qubit_thread_pool::{ThreadPoolBuildError, ThreadPoolBuilder};
 
 use super::task_execution_service::TaskExecutionService;
 
