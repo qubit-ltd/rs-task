@@ -11,25 +11,15 @@
 
 use std::{
     io,
-    sync::{
-        Arc,
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     thread,
     time::Duration,
 };
 
 use qubit_executor::TaskExecutionError;
 use qubit_executor::service::RejectedExecution;
-use qubit_task::service::{
-    TaskExecutionService,
-    TaskExecutionServiceError,
-    TaskStatus,
-};
-use qubit_thread_pool::{
-    ThreadPool,
-    ThreadPoolBuildError,
-};
+use qubit_task::service::{TaskExecutionService, TaskExecutionServiceError, TaskStatus};
+use qubit_thread_pool::{ThreadPool, ThreadPoolBuildError};
 
 /// Creates a current-thread Tokio runtime for driving async termination APIs.
 fn create_runtime() -> tokio::runtime::Runtime {
@@ -322,7 +312,7 @@ fn test_task_execution_service_wait_methods_return_when_no_tasks_are_active() {
 }
 
 #[test]
-fn test_task_execution_service_shutdown_now_cancels_queued_task() {
+fn test_task_execution_service_stop_cancels_queued_task() {
     let service = create_single_worker_service();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -343,10 +333,10 @@ fn test_task_execution_service_shutdown_now_cancels_queued_task() {
         .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("queued task should be accepted");
 
-    let report = service.shutdown_now();
+    let report = service.stop();
 
     assert_eq!(report.queued, 1);
-    assert!(service.is_shutdown());
+    assert!(service.is_not_running());
     assert_eq!(service.status(2), Some(TaskStatus::Cancelled));
     assert!(matches!(queued.get(), Err(TaskExecutionError::Cancelled)));
     assert!(!service.is_terminated());

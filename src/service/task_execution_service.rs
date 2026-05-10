@@ -9,45 +9,20 @@
  ******************************************************************************/
 use std::{
     collections::HashMap,
-    panic::{
-        AssertUnwindSafe,
-        catch_unwind,
-    },
-    sync::{
-        Arc,
-        Condvar,
-        Mutex,
-        MutexGuard,
-    },
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 
-use qubit_function::{
-    Callable,
-    Runnable,
-};
+use qubit_function::{Callable, Runnable};
 
-use qubit_executor::service::{
-    ExecutorService,
-    ShutdownReport,
-};
-use qubit_executor::{
-    TaskCompletion,
-    TaskCompletionPair,
-    TaskExecutionError,
-    TaskHandle,
-};
-use qubit_thread_pool::{
-    PoolJob,
-    ThreadPool,
-    ThreadPoolBuildError,
-};
+use qubit_executor::service::{ExecutorService, StopReport};
+use qubit_executor::{TaskCompletion, TaskCompletionPair, TaskExecutionError, TaskHandle};
+use qubit_thread_pool::{PoolJob, ThreadPool, ThreadPoolBuildError};
 
 use super::{
     task_execution_service_builder::TaskExecutionServiceBuilder,
     task_execution_service_error::TaskExecutionServiceError,
-    task_execution_stats::TaskExecutionStats,
-    task_id::TaskId,
-    task_status::TaskStatus,
+    task_execution_stats::TaskExecutionStats, task_id::TaskId, task_status::TaskStatus,
 };
 
 /// Managed task execution service built on [`ThreadPool`].
@@ -82,7 +57,7 @@ use super::{
 ///
 /// # Shutdown
 ///
-/// [`Self::shutdown`] and [`Self::shutdown_now`] delegate to the backing pool.
+/// [`Self::shutdown`] and [`Self::stop`] delegate to the backing pool.
 /// [`Self::await_termination`] returns a [`Future`](std::future::Future) that must be
 /// driven in an async context (`.await`) or on a suitable runtime (for example
 /// `tokio::runtime::Handle::current().block_on` from blocking code).
@@ -469,7 +444,7 @@ impl TaskExecutionService {
     /// fn main() -> Result<(), ThreadPoolBuildError> {
     ///     let service = TaskExecutionService::new()?;
     ///     service.shutdown();
-    ///     assert!(service.is_shutdown());
+    ///     assert!(service.is_not_running());
     ///     Ok(())
     /// }
     /// ```
@@ -478,7 +453,7 @@ impl TaskExecutionService {
         self.pool.shutdown();
     }
 
-    /// Initiates immediate shutdown of the backing pool.
+    /// Initiates immediate stop of the backing pool.
     ///
     /// # Example
     ///
@@ -487,7 +462,7 @@ impl TaskExecutionService {
     ///
     /// fn main() -> Result<(), ThreadPoolBuildError> {
     ///     let service = TaskExecutionService::new()?;
-    ///     let _report = service.shutdown_now();
+    ///     let _report = service.stop();
     ///     Ok(())
     /// }
     /// ```
@@ -496,14 +471,14 @@ impl TaskExecutionService {
     ///
     /// A count-based report from the backing pool.
     #[inline]
-    pub fn shutdown_now(&self) -> ShutdownReport {
-        self.pool.shutdown_now()
+    pub fn stop(&self) -> StopReport {
+        self.pool.stop()
     }
 
-    /// Returns whether the backing pool has begun shutdown.
+    /// Returns whether the backing pool no longer accepts new work.
     #[inline]
-    pub fn is_shutdown(&self) -> bool {
-        self.pool.is_shutdown()
+    pub fn is_not_running(&self) -> bool {
+        self.pool.is_not_running()
     }
 
     /// Returns whether the backing pool has terminated.

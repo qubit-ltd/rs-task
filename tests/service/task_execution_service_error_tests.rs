@@ -11,10 +11,7 @@
 
 use std::io;
 
-use qubit_task::service::{
-    TaskExecutionService,
-    TaskExecutionServiceError,
-};
+use qubit_task::service::{TaskExecutionService, TaskExecutionServiceError};
 
 /// Creates a current-thread Tokio runtime for driving async termination APIs.
 fn create_runtime() -> tokio::runtime::Runtime {

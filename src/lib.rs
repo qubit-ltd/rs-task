@@ -14,8 +14,4 @@
 
 pub mod service;
 
-pub use qubit_executor::{
-    TaskExecutionError,
-    TaskHandle,
-    TaskResult,
-};
+pub use qubit_executor::{TaskExecutionError, TaskHandle, TaskResult};

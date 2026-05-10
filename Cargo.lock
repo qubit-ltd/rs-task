@@ -64,6 +64,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneshot"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe21416a02c693fb9f980befcb230ecc70b0b3d1cc4abf88b9675c4c1457f0c"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -125,8 +131,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-executor"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
+ "oneshot",
  "qubit-atomic",
  "qubit-function",
  "qubit-lock",
@@ -135,9 +142,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-function"
-version = "0.12.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da19a04aa84248448c3bfd7a5791d5e62adbf0c25fa93c91b0f3b72a051e61a4"
+checksum = "68fdce1e55a6889c95c94e174616614f40eaaacac9969fe5b3fd841f79468df0"
 dependencies = [
  "parking_lot",
  "pastey",
@@ -145,9 +152,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-lock"
-version = "0.3.2"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b51e033e60614e51c6ad5ba76e58f08d0e88533a641162900bb85a091d82114"
+checksum = "d2f0eac9b079bace6c7b11fc76e2ee44bcebc900424eb8307d55a1a9db98b9c0"
 dependencies = [
  "parking_lot",
  "tokio",
@@ -166,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-thread-pool"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossbeam-deque",
  "qubit-executor",
