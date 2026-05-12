@@ -623,22 +623,22 @@ dependencies = [
 
 [[package]]
 name = "qubit-cas"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9606dca6d41db875efe6e6285c5b334790cf841179c4babc43732c71240ba662"
+checksum = "d0244bea39a7da1dd271e32cf6ecf57d789011240ab9c7b2c5c8eee9e17f4cc8"
 dependencies = [
  "konst",
  "qubit-atomic",
  "qubit-error",
- "qubit-function 0.13.1",
+ "qubit-function 0.13.2",
  "qubit-retry",
 ]
 
 [[package]]
 name = "qubit-datatype"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "125bd60aeaf759c0ac4794131d033c20f69e2389494629c9368b9d944126a071"
+checksum = "2f5aa4c50ea71d2c565d3192ac23efd30d9ba9471f6a1c90c0c5f703ea18c581"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -651,20 +651,20 @@ dependencies = [
 
 [[package]]
 name = "qubit-error"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8f052350ff3e4adffde1814a929c8403af2307552d2b4d0253f47818d26c09"
+checksum = "90433a2af2e18418b735badd446c54ed8d1e90edcc24d3a986b11d71bdacfd0a"
 
 [[package]]
 name = "qubit-executor"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "log",
  "oneshot",
  "parking_lot",
  "qubit-atomic",
  "qubit-cas",
- "qubit-function 0.13.1",
+ "qubit-function 0.13.2",
  "qubit-lock",
  "qubit-state-machine",
  "thiserror",
@@ -682,9 +682,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-function"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68fdce1e55a6889c95c94e174616614f40eaaacac9969fe5b3fd841f79468df0"
+checksum = "8efec94edc436712d98c514ae339e246e079853d9eaacb1ac38c7dd50ff4f89a"
 dependencies = [
  "parking_lot",
  "pastey",
@@ -717,9 +717,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-serde"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa79ad1fb88f4edef0d927cf809a9cb043355c1bdd46b58d39c4fe16f3b4a683"
+checksum = "a4649d4fa2123159641fdd8a8ad1992b1010e7848c50f92acf54d13496b13d03"
 dependencies = [
  "qubit-datatype",
  "serde",
@@ -728,9 +728,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-state-machine"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8124f85298618cb8fbec3c060459a15d96574d854d91da22c9d9ac275ae156d"
+checksum = "49a353860a91fb10ae2abfec4c83bb4baf19731cd09edc71ffa9db2767b8f579"
 dependencies = [
  "qubit-atomic",
  "qubit-cas",
@@ -742,7 +742,7 @@ name = "qubit-task"
 version = "0.1.0"
 dependencies = [
  "qubit-executor",
- "qubit-function 0.13.1",
+ "qubit-function 0.13.2",
  "qubit-thread-pool",
  "thiserror",
 ]
@@ -753,7 +753,7 @@ version = "0.3.0"
 dependencies = [
  "crossbeam-deque",
  "qubit-executor",
- "qubit-function 0.13.1",
+ "qubit-function 0.13.2",
  "qubit-lock",
  "thiserror",
 ]
@@ -1314,9 +1314,9 @@ dependencies = [
 
 [[package]]
 name = "zerofrom"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69faa1f2a1ea75661980b013019ed6687ed0e83d069bc1114e2cc74c6c04c4df"
+checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
 dependencies = [
  "zerofrom-derive",
 ]
