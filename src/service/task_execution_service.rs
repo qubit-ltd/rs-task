@@ -9,20 +9,45 @@
  ******************************************************************************/
 use std::{
     collections::HashMap,
-    panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    panic::{
+        AssertUnwindSafe,
+        catch_unwind,
+        resume_unwind,
+    },
+    sync::{
+        Arc,
+        Condvar,
+        Mutex,
+        MutexGuard,
+    },
 };
 
-use qubit_function::{Callable, Runnable};
+use qubit_function::{
+    Callable,
+    Runnable,
+};
 
-use qubit_executor::service::{ExecutorService, StopReport};
-use qubit_executor::{TaskCompletion, TaskCompletionPair, TaskExecutionError, TaskHandle};
-use qubit_thread_pool::{PoolJob, ThreadPool, ThreadPoolBuildError};
+use qubit_executor::TaskHandle;
+use qubit_executor::service::{
+    ExecutorService,
+    StopReport,
+};
+use qubit_executor::task::spi::{
+    TaskEndpointPair,
+    TaskSlot,
+};
+use qubit_thread_pool::{
+    ExecutorServiceBuilderError,
+    PoolJob,
+    ThreadPool,
+};
 
 use super::{
     task_execution_service_builder::TaskExecutionServiceBuilder,
     task_execution_service_error::TaskExecutionServiceError,
-    task_execution_stats::TaskExecutionStats, task_id::TaskId, task_status::TaskStatus,
+    task_execution_stats::TaskExecutionStats,
+    task_id::TaskId,
+    task_status::TaskStatus,
 };
 
 /// Managed task execution service built on [`ThreadPool`].
@@ -58,9 +83,8 @@ use super::{
 /// # Shutdown
 ///
 /// [`Self::shutdown`] and [`Self::stop`] delegate to the backing pool.
-/// [`Self::await_termination`] returns a [`Future`](std::future::Future) that must be
-/// driven in an async context (`.await`) or on a suitable runtime (for example
-/// `tokio::runtime::Handle::current().block_on` from blocking code).
+/// [`Self::wait_termination`] blocks the current thread until all accepted work
+/// has completed, failed, panicked, or been cancelled.
 ///
 /// # Example: submit, inspect status, wait for idle, shutdown
 ///
@@ -95,9 +119,9 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ThreadPoolBuildError};
+    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
     ///
-    /// fn main() -> Result<(), ThreadPoolBuildError> {
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let _service = TaskExecutionService::new()?;
     ///     Ok(())
     /// }
@@ -105,8 +129,8 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// `Ok(Self)` on success, or [`ThreadPoolBuildError`] if the pool cannot be built.
-    pub fn new() -> Result<Self, ThreadPoolBuildError> {
+    /// `Ok(Self)` on success, or [`ExecutorServiceBuilderError`] if the pool cannot be built.
+    pub fn new() -> Result<Self, ExecutorServiceBuilderError> {
         Self::builder().build()
     }
 
@@ -119,10 +143,10 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use qubit_task::service::{
-    ///     TaskExecutionService, ThreadPoolBuilder, ThreadPoolBuildError,
+    ///     TaskExecutionService, ThreadPoolBuilder, ExecutorServiceBuilderError,
     /// };
     ///
-    /// fn main() -> Result<(), ThreadPoolBuildError> {
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let _service = TaskExecutionService::builder()
     ///         .thread_pool(ThreadPoolBuilder::default().pool_size(8))
     ///         .build()?;
@@ -222,11 +246,18 @@ impl TaskExecutionService {
         R: Send + 'static,
         E: Send + 'static,
     {
-        let (handle, completion) = TaskCompletionPair::new().into_parts();
-        let cancel_completion = completion.clone();
+        let (handle, slot) = TaskEndpointPair::new().into_parts();
+        let slot = Arc::new(Mutex::new(Some(slot)));
+        let accept_slot = Arc::clone(&slot);
+        let cancel_slot = Arc::clone(&slot);
+        let run_slot = Arc::clone(&slot);
         let cancel_state = Arc::clone(&self.state);
         let cancel: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
-            let cancelled = cancel_completion.cancel();
+            let slot = cancel_slot
+                .lock()
+                .expect("task slot lock should not be poisoned")
+                .take();
+            let cancelled = slot.is_some_and(TaskSlot::cancel_unstarted);
             if cancelled {
                 cancel_state.set_status(task_id, TaskStatus::Cancelled);
             }
@@ -236,8 +267,33 @@ impl TaskExecutionService {
         self.state.register(task_id, Arc::clone(&cancel))?;
 
         let run_state = Arc::clone(&self.state);
-        let job = PoolJob::new(
-            Box::new(move || run_tracked_task(task_id, task, completion, run_state)),
+        let cancel_for_job = Arc::clone(&cancel);
+        let job = PoolJob::with_accept(
+            Box::new(move || {
+                if let Some(slot) = accept_slot
+                    .lock()
+                    .expect("task slot lock should not be poisoned")
+                    .as_ref()
+                {
+                    slot.accept();
+                }
+            }),
+            Box::new(move || {
+                let slot = run_slot
+                    .lock()
+                    .expect("task slot lock should not be poisoned")
+                    .take();
+                if let Some(slot) = slot {
+                    let task = StatusReportingTask {
+                        task_id,
+                        task,
+                        state: run_state,
+                    };
+                    if !slot.run(task) {
+                        cancel_for_job();
+                    }
+                }
+            }),
             Box::new(move || {
                 cancel();
             }),
@@ -352,9 +408,9 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ThreadPoolBuildError};
+    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
     ///
-    /// fn main() -> Result<(), ThreadPoolBuildError> {
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
     ///     service.suspend();
     ///     assert!(service.is_suspended());
@@ -439,9 +495,9 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ThreadPoolBuildError};
+    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
     ///
-    /// fn main() -> Result<(), ThreadPoolBuildError> {
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
     ///     service.shutdown();
     ///     assert!(service.is_not_running());
@@ -458,9 +514,9 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ThreadPoolBuildError};
+    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
     ///
-    /// fn main() -> Result<(), ThreadPoolBuildError> {
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
     ///     let _report = service.stop();
     ///     Ok(())
@@ -487,23 +543,17 @@ impl TaskExecutionService {
         self.pool.is_terminated()
     }
 
-    /// Waits until the backing pool has terminated.
+    /// Blocks until the backing pool has terminated.
     ///
     /// # Example
     ///
     /// ```
-    /// use std::error::Error;
-    /// use qubit_task::service::TaskExecutionService;
+    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
     ///
-    /// fn main() -> Result<(), Box<dyn Error>> {
-    ///     let rt = tokio::runtime::Builder::new_current_thread()
-    ///         .enable_all()
-    ///         .build()?;
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
     ///     service.shutdown();
-    ///     rt.block_on(async {
-    ///         service.await_termination().await;
-    ///     });
+    ///     service.wait_termination();
     ///     assert!(service.is_terminated());
     ///     Ok(())
     /// }
@@ -511,10 +561,10 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// A future that completes after shutdown and worker exit.
+    /// Returns after shutdown and worker exit.
     #[inline]
-    pub fn await_termination(&self) -> <ThreadPool as ExecutorService>::Termination<'_> {
-        self.pool.await_termination()
+    pub fn wait_termination(&self) {
+        self.pool.wait_termination();
     }
 
     /// Returns the backing thread pool.
@@ -522,9 +572,9 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ThreadPoolBuildError};
+    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
     ///
-    /// fn main() -> Result<(), ThreadPoolBuildError> {
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
     ///     let pool = service.thread_pool();
     ///     assert!(pool.maximum_pool_size() > 0);
@@ -697,32 +747,36 @@ struct TaskRecord {
     cancel: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
-/// Runs a task and updates service status around the typed handle result.
-fn run_tracked_task<C, R, E>(
+/// Callable wrapper that keeps service-level status aligned with task outcome.
+struct StatusReportingTask<C> {
+    /// Stable business task ID.
     task_id: TaskId,
-    mut task: C,
-    completion: TaskCompletion<R, E>,
+    /// User task to execute.
+    task: C,
+    /// Shared service registry.
     state: Arc<TaskExecutionServiceState>,
-) where
+}
+
+impl<C, R, E> Callable<R, E> for StatusReportingTask<C>
+where
     C: Callable<R, E>,
 {
-    if !completion.start() {
-        state.set_status(task_id, TaskStatus::Cancelled);
-        return;
-    }
-    state.set_status(task_id, TaskStatus::Running);
-    match catch_unwind(AssertUnwindSafe(|| task.call())) {
-        Ok(Ok(value)) => {
-            state.set_status(task_id, TaskStatus::Succeeded);
-            completion.complete(Ok(value));
-        }
-        Ok(Err(error)) => {
-            state.set_status(task_id, TaskStatus::Failed);
-            completion.complete(Err(TaskExecutionError::Failed(error)));
-        }
-        Err(_) => {
-            state.set_status(task_id, TaskStatus::Panicked);
-            completion.complete(Err(TaskExecutionError::Panicked));
+    /// Runs the user task and records the corresponding service-level status.
+    fn call(&mut self) -> Result<R, E> {
+        self.state.set_status(self.task_id, TaskStatus::Running);
+        match catch_unwind(AssertUnwindSafe(|| self.task.call())) {
+            Ok(Ok(value)) => {
+                self.state.set_status(self.task_id, TaskStatus::Succeeded);
+                Ok(value)
+            }
+            Ok(Err(error)) => {
+                self.state.set_status(self.task_id, TaskStatus::Failed);
+                Err(error)
+            }
+            Err(payload) => {
+                self.state.set_status(self.task_id, TaskStatus::Panicked);
+                resume_unwind(payload);
+            }
         }
     }
 }

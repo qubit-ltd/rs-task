@@ -11,23 +11,25 @@
 
 use std::{
     io,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        mpsc,
+    },
     thread,
     time::Duration,
 };
 
 use qubit_executor::TaskExecutionError;
-use qubit_executor::service::RejectedExecution;
-use qubit_task::service::{TaskExecutionService, TaskExecutionServiceError, TaskStatus};
-use qubit_thread_pool::{ThreadPool, ThreadPoolBuildError};
-
-/// Creates a current-thread Tokio runtime for driving async termination APIs.
-fn create_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create tokio runtime for task execution service tests")
-}
+use qubit_executor::service::SubmissionError;
+use qubit_task::service::{
+    TaskExecutionService,
+    TaskExecutionServiceError,
+    TaskStatus,
+};
+use qubit_thread_pool::{
+    ExecutorServiceBuilderError,
+    ThreadPool,
+};
 
 /// Creates a service backed by a single-worker thread pool.
 fn create_single_worker_service() -> TaskExecutionService {
@@ -71,7 +73,7 @@ fn test_task_execution_service_tracks_successful_task() {
     assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
     assert_eq!(service.stats().succeeded, 1);
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -99,7 +101,7 @@ fn test_task_execution_service_cancel_unknown_and_terminal_tasks() {
     assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
     assert!(!service.cancel(1));
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -130,7 +132,7 @@ fn test_task_execution_service_cancel_running_task_returns_false() {
     handle.get().expect("running task should complete");
     assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -141,7 +143,7 @@ fn test_task_execution_service_builder_propagates_pool_build_error() {
 
     assert!(matches!(
         result,
-        Err(ThreadPoolBuildError::ZeroMaximumPoolSize),
+        Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),
     ));
 }
 
@@ -164,7 +166,7 @@ fn test_task_execution_service_tracks_failure_and_panic() {
     assert_eq!(stats.failed, 1);
     assert_eq!(stats.panicked, 1);
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -197,7 +199,7 @@ fn test_task_execution_service_rejects_duplicate_task_id() {
         .expect("blocking task should receive release signal");
     first.get().expect("first task should complete");
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -220,7 +222,7 @@ fn test_task_execution_service_suspend_rejects_new_tasks() {
     ));
     accepted.get().expect("accepted task should complete");
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -294,7 +296,7 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
     idle_waiter.join().expect("idle waiter should not panic");
 
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -308,7 +310,7 @@ fn test_task_execution_service_wait_methods_return_when_no_tasks_are_active() {
     assert_eq!(stats.total, 0);
     assert_eq!(service.status(1), None);
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -344,7 +346,7 @@ fn test_task_execution_service_stop_cancels_queued_task() {
         .send(())
         .expect("blocking task should receive release signal");
     first.get().expect("first task should complete");
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
     assert!(service.is_terminated());
 }
 
@@ -360,12 +362,12 @@ fn test_task_execution_service_removes_record_when_pool_rejects() {
     assert!(matches!(
         result,
         Err(TaskExecutionServiceError::Rejected(
-            RejectedExecution::WorkerSpawnFailed { .. },
+            SubmissionError::WorkerSpawnFailed { .. },
         )),
     ));
     assert_eq!(service.status(1), None);
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -400,5 +402,5 @@ fn test_task_execution_service_cancels_queued_task() {
     service.await_idle();
     assert_eq!(service.stats().cancelled, 1);
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }

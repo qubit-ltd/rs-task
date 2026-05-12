@@ -11,15 +11,10 @@
 
 use std::io;
 
-use qubit_task::service::{TaskExecutionService, TaskExecutionServiceError};
-
-/// Creates a current-thread Tokio runtime for driving async termination APIs.
-fn create_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create tokio runtime for error tests")
-}
+use qubit_task::service::{
+    TaskExecutionService,
+    TaskExecutionServiceError,
+};
 
 /// Returns a successful unit task result.
 fn successful_unit_task() -> Result<(), io::Error> {
@@ -52,5 +47,5 @@ fn test_task_execution_service_error_reports_rejected_submission() {
 
     assert!(matches!(error, TaskExecutionServiceError::Rejected(_)));
     assert!(!error.to_string().is_empty());
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }

@@ -12,16 +12,11 @@
 use std::time::Duration;
 
 use qubit_task::service::{
-    TaskExecutionService, TaskExecutionServiceBuilder, ThreadPool, ThreadPoolBuildError,
+    ExecutorServiceBuilderError,
+    TaskExecutionService,
+    TaskExecutionServiceBuilder,
+    ThreadPool,
 };
-
-/// Creates a current-thread Tokio runtime for driving async termination APIs.
-fn create_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create tokio runtime for builder tests")
-}
 
 #[test]
 fn test_task_execution_service_builder_builds_default_service() {
@@ -32,7 +27,7 @@ fn test_task_execution_service_builder_builds_default_service() {
     assert!(!service.is_not_running());
     assert!(service.thread_pool().maximum_pool_size() > 0);
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -50,7 +45,7 @@ fn test_task_execution_service_builder_applies_thread_pool_builder() {
     assert_eq!(service.thread_pool().maximum_pool_size(), 2);
     assert_eq!(service.thread_pool().stats().queued_tasks, 0);
     service.shutdown();
-    create_runtime().block_on(service.await_termination());
+    service.wait_termination();
 }
 
 #[test]
@@ -61,6 +56,6 @@ fn test_task_execution_service_builder_returns_pool_build_error() {
 
     assert!(matches!(
         result,
-        Err(ThreadPoolBuildError::ZeroMaximumPoolSize),
+        Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),
     ));
 }
