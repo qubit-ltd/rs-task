@@ -7,7 +7,10 @@
  *    Licensed under the Apache License, Version 2.0.
  *
  ******************************************************************************/
-use qubit_thread_pool::{ThreadPoolBuildError, ThreadPoolBuilder};
+use qubit_thread_pool::{
+    ExecutorServiceBuilderError,
+    ThreadPoolBuilder,
+};
 
 use super::task_execution_service::TaskExecutionService;
 
@@ -31,10 +34,10 @@ use super::task_execution_service::TaskExecutionService;
 ///
 /// ```
 /// use qubit_task::service::{
-///     TaskExecutionServiceBuilder, ThreadPoolBuilder, ThreadPoolBuildError,
+///     TaskExecutionServiceBuilder, ThreadPoolBuilder, ExecutorServiceBuilderError,
 /// };
 ///
-/// fn main() -> Result<(), ThreadPoolBuildError> {
+/// fn main() -> Result<(), ExecutorServiceBuilderError> {
 ///     let _service = TaskExecutionServiceBuilder::default()
 ///         .thread_pool(
 ///             ThreadPoolBuilder::default()
@@ -58,10 +61,10 @@ impl TaskExecutionServiceBuilder {
     ///
     /// ```
     /// use qubit_task::service::{
-    ///     TaskExecutionServiceBuilder, ThreadPoolBuilder, ThreadPoolBuildError,
+    ///     TaskExecutionServiceBuilder, ThreadPoolBuilder, ExecutorServiceBuilderError,
     /// };
     ///
-    /// fn main() -> Result<(), ThreadPoolBuildError> {
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let _service = TaskExecutionServiceBuilder::default()
     ///         .thread_pool(ThreadPoolBuilder::default().pool_size(2))
     ///         .build()?;
@@ -87,9 +90,9 @@ impl TaskExecutionServiceBuilder {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionServiceBuilder, ThreadPoolBuildError};
+    /// use qubit_task::service::{TaskExecutionServiceBuilder, ExecutorServiceBuilderError};
     ///
-    /// fn main() -> Result<(), ThreadPoolBuildError> {
+    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let _service = TaskExecutionServiceBuilder::default().build()?;
     ///     Ok(())
     /// }
@@ -98,8 +101,8 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// `Ok(TaskExecutionService)` when [`ThreadPoolBuilder`] settings are valid and
-    /// workers start successfully; otherwise [`ThreadPoolBuildError`].
-    pub fn build(self) -> Result<TaskExecutionService, ThreadPoolBuildError> {
+    /// workers start successfully; otherwise [`ExecutorServiceBuilderError`].
+    pub fn build(self) -> Result<TaskExecutionService, ExecutorServiceBuilderError> {
         let pool = self.pool_builder.build()?;
         Ok(TaskExecutionService::from_thread_pool(pool))
     }

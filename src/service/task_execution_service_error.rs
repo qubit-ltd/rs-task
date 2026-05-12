@@ -9,7 +9,7 @@
  ******************************************************************************/
 use thiserror::Error;
 
-use qubit_executor::service::RejectedExecution;
+use qubit_executor::service::SubmissionError;
 
 use super::task_id::TaskId;
 
@@ -31,5 +31,5 @@ pub enum TaskExecutionServiceError {
 
     /// The underlying thread pool rejected the task.
     #[error(transparent)]
-    Rejected(#[from] RejectedExecution),
+    Rejected(#[from] SubmissionError),
 }
