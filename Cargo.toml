@@ -12,6 +12,16 @@ documentation = "https://docs.rs/qubit-task"
 readme = "README.md"
 keywords = ["task", "concurrent", "executor", "service"]
 categories = ["concurrency", "asynchronous"]
+exclude = [
+    "align-ci.sh",
+    "ci-check.sh",
+    "coverage.sh",
+    "style-check.sh",
+    "update-submodule.sh",
+    ".github/*",
+    ".llvm-cov.toml",
+    ".cargo-audit.toml.example",
+]
 
 [lib]
 name = "qubit_task"
@@ -19,7 +29,7 @@ doctest = true
 test = false
 
 [dependencies]
-qubit-executor = { version = "0.3.1", path = "../rs-executor" }
+qubit-executor = { version = "0.3", path = "../rs-executor" }
 qubit-thread-pool = { path = "../rs-thread-pool" }
 qubit-function = "0.13"
 thiserror = "2.0"

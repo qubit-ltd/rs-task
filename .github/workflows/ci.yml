@@ -1,0 +1,14 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  rust-ci:
+    uses: qubit-ltd/rs-ci/.github/workflows/rust-ci.yml@main
+    secrets: inherit
