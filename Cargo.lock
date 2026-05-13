@@ -665,7 +665,7 @@ dependencies = [
  "qubit-atomic",
  "qubit-cas",
  "qubit-function",
- "qubit-lock 0.6.0",
+ "qubit-lock",
  "qubit-state-machine",
  "thiserror",
 ]
@@ -678,13 +678,6 @@ checksum = "43741de765918a040f300ae4879afbf6935c386ec490d4619a76f63b4dd5eda3"
 dependencies = [
  "parking_lot",
  "pastey",
-]
-
-[[package]]
-name = "qubit-lock"
-version = "0.6.0"
-dependencies = [
- "parking_lot",
 ]
 
 [[package]]
@@ -746,12 +739,14 @@ dependencies = [
 
 [[package]]
 name = "qubit-thread-pool"
-version = "0.4.0"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5111db203c69dd280f014543fdb79e7c3d9d38c151ad55424db83a4386e262c0"
 dependencies = [
  "crossbeam-deque",
  "qubit-executor",
  "qubit-function",
- "qubit-lock 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-lock",
  "thiserror",
 ]
 
