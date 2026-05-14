@@ -1,6 +1,6 @@
 [package]
 name = "qubit-task"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -29,10 +29,7 @@ doctest = true
 test = false
 
 [dependencies]
-qubit-executor = { version = "0.3" }
-qubit-thread-pool = { version = "0.5" }
+qubit-executor = { version = "0.4" }
+qubit-thread-pool = { version = "0.6", path = "../rs-thread-pool" }
 qubit-function = "0.13"
 thiserror = "2.0"
-
-[patch.crates-io]
-qubit-executor = { version = "0.3.1", path = "../rs-executor" }
