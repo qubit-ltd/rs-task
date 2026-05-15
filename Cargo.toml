@@ -29,7 +29,7 @@ doctest = true
 test = false
 
 [dependencies]
-qubit-executor = { version = "0.4" }
-qubit-thread-pool = { version = "0.6", path = "../rs-thread-pool" }
+qubit-executor = { version = "0.5.1" }
+qubit-thread-pool = { version = "0.7.1" }
 qubit-function = "0.13"
 thiserror = "2.0"

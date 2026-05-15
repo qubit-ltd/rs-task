@@ -613,9 +613,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-atomic"
-version = "0.11.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33d68a50d78ab3da351a5b600dbbf7aa022068e1809d9e5e32b92fd9dc0a46a2"
+checksum = "362cd5e89ec359fd4d5985cd5372af7f22847c489ae533064fc6c9252ecddbd5"
 dependencies = [
  "arc-swap",
  "portable-atomic",
@@ -623,9 +623,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-cas"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a22121104b2062d7a94a3c3a3e95771c7ccb9087242662f7d6baa8dd3fdb3787"
+checksum = "a02d530d2c2207716d19e62ed4c613a168c8a949d9f5aac43fb1fb9cb880d7f2"
 dependencies = [
  "konst",
  "qubit-atomic",
@@ -657,9 +657,9 @@ checksum = "7d469a0405040734040db3479b6c5c47188fc2ea05258d9db51a9c12601e1466"
 
 [[package]]
 name = "qubit-executor"
-version = "0.4.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612bf8b6f5363f842c66bd7fc30e7e32dfe9e704ffee0167362cd65a57b87f5e"
+checksum = "d41dcfc60f7ecb714203b3ecc0bdaa2e7f801467d93a18fece7033a67695e4b9"
 dependencies = [
  "log",
  "oneshot",
@@ -720,9 +720,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-state-machine"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c7b1f93523ea543e0046a47fc836ae8366712f49a441787ed9d51eff4548968"
+checksum = "273f1d45e9b75a9aaf42ab546a1f2dd8f85c959d71646b3818915801d0b3bd8e"
 dependencies = [
  "qubit-atomic",
  "qubit-cas",
@@ -741,7 +741,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-thread-pool"
-version = "0.6.0"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bcd894fc749b6880598107f4d83ac83073f3493b4ae92056c88eebbe01c0313"
 dependencies = [
  "crossbeam-deque",
  "qubit-executor",
