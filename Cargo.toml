@@ -1,6 +1,6 @@
 [package]
 name = "qubit-task"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -12,15 +12,18 @@ documentation = "https://docs.rs/qubit-task"
 readme = "README.md"
 keywords = ["task", "concurrent", "executor", "service"]
 categories = ["concurrency", "asynchronous"]
-exclude = [
-    "align-ci.sh",
-    "ci-check.sh",
-    "coverage.sh",
-    "style-check.sh",
-    "update-submodule.sh",
-    ".github/*",
-    ".llvm-cov.toml",
-    ".cargo-audit.toml.example",
+include = [
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/README.zh_CN.md",
+    "/RUST_CODING_STYLE.md",
+    "/RUST_CODING_STYLE.zh_CN.md",
+    "/doc/**/user_guide*.md",
+    "/examples/**",
+    "/resources/**",
+    "/src/**",
+    "/tests/**",
 ]
 
 [lib]
@@ -29,7 +32,7 @@ doctest = true
 test = false
 
 [dependencies]
-qubit-executor = { version = "0.5.1" }
-qubit-thread-pool = { version = "0.7.1" }
-qubit-function = "0.13"
+qubit-executor = { version = "0.6" }
+qubit-thread-pool = { version = "0.8" }
+qubit-function = "0.14"
 thiserror = "2.0"
