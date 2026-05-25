@@ -9,9 +9,10 @@
 #
 ################################################################################
 #
-# Sync and update Git submodules from the repository root (this repo uses .rs-ci).
+# Sync and update Git submodules from the repository root.
 # Run from repo root: ./update-submodule.sh
-# Matches common CI steps: submodule sync + update --init --recursive.
+# By default, updates submodules to the latest commit on their remote tracking
+# branches.
 #
 
 set -euo pipefail
@@ -20,11 +21,12 @@ usage() {
     cat <<'EOF_USAGE'
 Usage: ./update-submodule.sh [options]
 
-Run git submodule sync / update from the repository root; updates all submodules by default.
+Run git submodule sync / update from the repository root; updates all submodules
+to their remote tracking branch by default.
 
 Options:
   --shallow     Shallow clone (passes --depth 1 to git submodule update)
-  --remote      Use latest commit on the remote tracking branch (passes --remote to git submodule update)
+  --no-remote   Use the commits recorded by the superproject instead of remote tracking branches
   -h, --help    Show this help
 
 Environment:
@@ -43,14 +45,14 @@ PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$PROJECT_ROOT"
 
 shallow=0
-remote=0
+remote=1
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --shallow)
             shallow=1
             ;;
-        --remote)
-            remote=1
+        --no-remote)
+            remote=0
             ;;
         -h | --help)
             usage
