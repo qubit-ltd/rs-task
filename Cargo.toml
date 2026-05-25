@@ -1,6 +1,6 @@
 [package]
 name = "qubit-task"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -32,7 +32,7 @@ doctest = true
 test = false
 
 [dependencies]
-qubit-executor = { version = "0.6" }
-qubit-thread-pool = { version = "0.8" }
-qubit-function = "0.14"
+qubit-executor = { version = "0.7" }
+qubit-thread-pool = { version = "0.9" }
+qubit-function = "0.15"
 thiserror = "2.0"
