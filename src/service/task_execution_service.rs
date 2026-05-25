@@ -198,11 +198,7 @@ impl TaskExecutionService {
     /// [`TaskExecutionServiceError`] when the ID is duplicated, the service is
     /// suspended, or the backing pool rejects the task.
     #[inline]
-    pub fn submit<T, E>(
-        &self,
-        task_id: TaskId,
-        mut task: T,
-    ) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
+    pub fn submit<T, E>(&self, task_id: TaskId, mut task: T) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
     where
         T: Runnable<E> + Send + 'static,
         E: Send + 'static,
@@ -279,10 +275,7 @@ impl TaskExecutionService {
                 }
             }),
             Box::new(move || {
-                let slot = run_slot
-                    .lock()
-                    .expect("task slot lock should not be poisoned")
-                    .take();
+                let slot = run_slot.lock().expect("task slot lock should not be poisoned").take();
                 if let Some(slot) = slot {
                     let task = StatusReportingTask {
                         task_id,
@@ -638,20 +631,14 @@ impl TaskExecutionServiceState {
 
     /// Gets a task status.
     fn status(&self, task_id: TaskId) -> Option<TaskStatus> {
-        self.lock_inner()
-            .tasks
-            .get(&task_id)
-            .map(|record| record.status)
+        self.lock_inner().tasks.get(&task_id).map(|record| record.status)
     }
 
     /// Gets a task cancel callback if the task is active.
     fn cancel_callback(&self, task_id: TaskId) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
         let inner = self.lock_inner();
         let record = inner.tasks.get(&task_id)?;
-        record
-            .status
-            .is_active()
-            .then(|| Arc::clone(&record.cancel))
+        record.status.is_active().then(|| Arc::clone(&record.cancel))
     }
 
     /// Updates a task status.
@@ -693,10 +680,7 @@ impl TaskExecutionServiceState {
             .iter()
             .filter_map(|(&task_id, record)| record.status.is_active().then_some(task_id))
             .collect::<Vec<_>>();
-        while task_ids
-            .iter()
-            .any(|task_id| inner.task_is_active(*task_id))
-        {
+        while task_ids.iter().any(|task_id| inner.task_is_active(*task_id)) {
             inner = self.wait_for_idle_notification(inner);
         }
     }
@@ -730,9 +714,7 @@ struct TaskExecutionServiceInner {
 impl TaskExecutionServiceInner {
     /// Returns whether a retained task ID is still active.
     fn task_is_active(&self, task_id: TaskId) -> bool {
-        self.tasks
-            .get(&task_id)
-            .is_some_and(|record| record.status.is_active())
+        self.tasks.get(&task_id).is_some_and(|record| record.status.is_active())
     }
 
     /// Returns whether any retained task is still active.

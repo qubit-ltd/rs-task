@@ -54,8 +54,5 @@ fn test_task_execution_service_builder_returns_pool_build_error() {
         .thread_pool(ThreadPool::builder().pool_size(0))
         .build();
 
-    assert!(matches!(
-        result,
-        Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),
-    ));
+    assert!(matches!(result, Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),));
 }
