@@ -1,19 +1,16 @@
-/*******************************************************************************
- *
- *    Copyright (c) 2025 - 2026 Haixing Hu.
- *
- *    SPDX-License-Identifier: Apache-2.0
- *
- *    Licensed under the Apache License, Version 2.0.
- *
- ******************************************************************************/
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use super::task_status::TaskStatus;
 
 /// Count snapshot for a [`TaskExecutionService`](super::TaskExecutionService).
 ///
 /// Counters are derived from the service registry and therefore include
 /// terminal task records retained for inspection.
-///
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TaskExecutionStats {
     /// Number of tasks accepted by the service.

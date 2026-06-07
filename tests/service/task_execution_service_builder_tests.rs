@@ -1,12 +1,10 @@
-/*******************************************************************************
- *
- *    Copyright (c) 2025 - 2026 Haixing Hu.
- *
- *    SPDX-License-Identifier: Apache-2.0
- *
- *    Licensed under the Apache License, Version 2.0.
- *
- ******************************************************************************/
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Tests for [`TaskExecutionServiceBuilder`](qubit_task::service::TaskExecutionServiceBuilder).
 
 use std::time::Duration;
@@ -54,5 +52,8 @@ fn test_task_execution_service_builder_returns_pool_build_error() {
         .thread_pool(ThreadPool::builder().pool_size(0))
         .build();
 
-    assert!(matches!(result, Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),));
+    assert!(matches!(
+        result,
+        Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),
+    ));
 }
