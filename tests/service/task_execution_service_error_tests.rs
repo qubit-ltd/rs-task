@@ -1,12 +1,10 @@
-/*******************************************************************************
- *
- *    Copyright (c) 2025 - 2026 Haixing Hu.
- *
- *    SPDX-License-Identifier: Apache-2.0
- *
- *    Licensed under the Apache License, Version 2.0.
- *
- ******************************************************************************/
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Tests for [`TaskExecutionServiceError`](qubit_task::service::TaskExecutionServiceError).
 
 use std::io;
@@ -37,10 +35,13 @@ fn test_task_execution_service_error_formats_suspended_service() {
 
 #[test]
 fn test_task_execution_service_error_reports_rejected_submission() {
-    let service = TaskExecutionService::new().expect("service should be created");
+    let service =
+        TaskExecutionService::new().expect("service should be created");
     service.shutdown();
 
-    let error = match service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>) {
+    let error = match service
+        .submit(1, successful_unit_task as fn() -> Result<(), io::Error>)
+    {
         Ok(_) => panic!("shutdown service should reject new tasks"),
         Err(error) => error,
     };

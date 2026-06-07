@@ -1,12 +1,10 @@
-/*******************************************************************************
- *
- *    Copyright (c) 2025 - 2026 Haixing Hu.
- *
- *    SPDX-License-Identifier: Apache-2.0
- *
- *    Licensed under the Apache License, Version 2.0.
- *
- ******************************************************************************/
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use thiserror::Error;
 
 use qubit_executor::service::SubmissionError;
@@ -18,7 +16,6 @@ use super::task_id::TaskId;
 ///
 /// This error is about the service submission path. The accepted task's own
 /// result is still reported through [`TaskHandle`](qubit_executor::TaskHandle).
-///
 #[derive(Debug, Error)]
 pub enum TaskExecutionServiceError {
     /// Another retained task record already uses the same task ID.

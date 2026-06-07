@@ -1,12 +1,10 @@
-/*******************************************************************************
- *
- *    Copyright (c) 2025 - 2026 Haixing Hu.
- *
- *    SPDX-License-Identifier: Apache-2.0
- *
- *    Licensed under the Apache License, Version 2.0.
- *
- ******************************************************************************/
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::{
     collections::HashMap,
     panic::{
@@ -52,33 +50,37 @@ use super::{
 
 /// Managed task execution service built on [`ThreadPool`].
 ///
-/// Assigns a stable business [`TaskId`] per task and tracks service-level status
-/// (submitted, running, succeeded, failed, cancelled, panicked). The typed task
-/// outcome is still retrieved through [`TaskHandle`].
+/// Assigns a stable business [`TaskId`] per task and tracks service-level
+/// status (submitted, running, succeeded, failed, cancelled, panicked). The
+/// typed task outcome is still retrieved through [`TaskHandle`].
 ///
 /// # Responsibilities
 ///
 /// - **Registry**: The same [`TaskId`] cannot be submitted again while a record
-///   for it exists; a duplicate returns [`TaskExecutionServiceError::DuplicateTask`].
-///   Use this when you need lookup by ID, optional pre-start cancellation, or
-///   long-lived task bookkeeping.
-/// - **Thread pool**: Owns a [`ThreadPool`] for queuing and worker threads; queue
-///   internals are not exposed. Configure the pool via [`TaskExecutionServiceBuilder`]
-///   or [`Self::builder`].
-/// - **Submission semantics**: [`Self::submit`] / [`Self::submit_callable`] returning
-///   `Ok(handle)` means only that the **service accepted** the task—not that it
-///   started or succeeded. Observe the final result with [`TaskHandle::get`] or by
-///   awaiting the handle’s [`Future`](std::future::Future) implementation.
+///   for it exists; a duplicate returns
+///   [`TaskExecutionServiceError::DuplicateTask`]. Use this when you need
+///   lookup by ID, optional pre-start cancellation, or long-lived task
+///   bookkeeping.
+/// - **Thread pool**: Owns a [`ThreadPool`] for queuing and worker threads;
+///   queue internals are not exposed. Configure the pool via
+///   [`TaskExecutionServiceBuilder`] or [`Self::builder`].
+/// - **Submission semantics**: [`Self::submit`] / [`Self::submit_callable`]
+///   returning `Ok(handle)` means only that the **service accepted** the
+///   task—not that it started or succeeded. Observe the final result with
+///   [`TaskHandle::get`] or by awaiting the handle’s
+///   [`Future`](std::future::Future) implementation.
 ///
 /// # Suspend
 ///
-/// [`Self::suspend`] rejects **new** submissions ([`TaskExecutionServiceError::Suspended`]).
-/// Tasks already queued or running are unaffected. [`Self::resume`] re-enables submission.
+/// [`Self::suspend`] rejects **new** submissions
+/// ([`TaskExecutionServiceError::Suspended`]). Tasks already queued or running
+/// are unaffected. [`Self::resume`] re-enables submission.
 ///
 /// # Cancel
 ///
-/// [`Self::cancel`] may succeed only **before** the task starts running; once running,
-/// cancellation behavior follows [`TaskHandle`] and the internal completion protocol.
+/// [`Self::cancel`] may succeed only **before** the task starts running; once
+/// running, cancellation behavior follows [`TaskHandle`] and the internal
+/// completion protocol.
 ///
 /// # Shutdown
 ///
@@ -106,15 +108,15 @@ use super::{
 ///     Ok(())
 /// }
 /// ```
-///
 pub struct TaskExecutionService {
     pool: ThreadPool,
     state: Arc<TaskExecutionServiceState>,
 }
 
 impl TaskExecutionService {
-    /// Creates a service using the default [`super::ThreadPoolBuilder`] settings (worker
-    /// counts, queue, and other defaults match [`ThreadPool::builder`]).
+    /// Creates a service using the default [`super::ThreadPoolBuilder`]
+    /// settings (worker counts, queue, and other defaults match
+    /// [`ThreadPool::builder`]).
     ///
     /// # Example
     ///
@@ -129,13 +131,14 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// `Ok(Self)` on success, or [`ExecutorServiceBuilderError`] if the pool cannot be built.
+    /// `Ok(Self)` on success, or [`ExecutorServiceBuilderError`] if the pool
+    /// cannot be built.
     pub fn new() -> Result<Self, ExecutorServiceBuilderError> {
         Self::builder().build()
     }
 
-    /// Returns a [`TaskExecutionServiceBuilder`] so you can tune the backing pool
-    /// before [`TaskExecutionServiceBuilder::build`] (for example
+    /// Returns a [`TaskExecutionServiceBuilder`] so you can tune the backing
+    /// pool before [`TaskExecutionServiceBuilder::build`] (for example
     /// [`super::ThreadPoolBuilder::pool_size`],
     /// [`super::ThreadPoolBuilder::queue_capacity`]).
     ///
@@ -198,7 +201,11 @@ impl TaskExecutionService {
     /// [`TaskExecutionServiceError`] when the ID is duplicated, the service is
     /// suspended, or the backing pool rejects the task.
     #[inline]
-    pub fn submit<T, E>(&self, task_id: TaskId, mut task: T) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
+    pub fn submit<T, E>(
+        &self,
+        task_id: TaskId,
+        mut task: T,
+    ) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
     where
         T: Runnable<E> + Send + 'static,
         E: Send + 'static,
@@ -275,7 +282,10 @@ impl TaskExecutionService {
                 }
             }),
             Box::new(move || {
-                let slot = run_slot.lock().expect("task slot lock should not be poisoned").take();
+                let slot = run_slot
+                    .lock()
+                    .expect("task slot lock should not be poisoned")
+                    .take();
                 if let Some(slot) = slot {
                     let task = StatusReportingTask {
                         task_id,
@@ -631,14 +641,23 @@ impl TaskExecutionServiceState {
 
     /// Gets a task status.
     fn status(&self, task_id: TaskId) -> Option<TaskStatus> {
-        self.lock_inner().tasks.get(&task_id).map(|record| record.status)
+        self.lock_inner()
+            .tasks
+            .get(&task_id)
+            .map(|record| record.status)
     }
 
     /// Gets a task cancel callback if the task is active.
-    fn cancel_callback(&self, task_id: TaskId) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+    fn cancel_callback(
+        &self,
+        task_id: TaskId,
+    ) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
         let inner = self.lock_inner();
         let record = inner.tasks.get(&task_id)?;
-        record.status.is_active().then(|| Arc::clone(&record.cancel))
+        record
+            .status
+            .is_active()
+            .then(|| Arc::clone(&record.cancel))
     }
 
     /// Updates a task status.
@@ -678,9 +697,14 @@ impl TaskExecutionServiceState {
         let task_ids = inner
             .tasks
             .iter()
-            .filter_map(|(&task_id, record)| record.status.is_active().then_some(task_id))
+            .filter_map(|(&task_id, record)| {
+                record.status.is_active().then_some(task_id)
+            })
             .collect::<Vec<_>>();
-        while task_ids.iter().any(|task_id| inner.task_is_active(*task_id)) {
+        while task_ids
+            .iter()
+            .any(|task_id| inner.task_is_active(*task_id))
+        {
             inner = self.wait_for_idle_notification(inner);
         }
     }
@@ -714,7 +738,9 @@ struct TaskExecutionServiceInner {
 impl TaskExecutionServiceInner {
     /// Returns whether a retained task ID is still active.
     fn task_is_active(&self, task_id: TaskId) -> bool {
-        self.tasks.get(&task_id).is_some_and(|record| record.status.is_active())
+        self.tasks
+            .get(&task_id)
+            .is_some_and(|record| record.status.is_active())
     }
 
     /// Returns whether any retained task is still active.

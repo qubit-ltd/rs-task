@@ -1,12 +1,10 @@
-/*******************************************************************************
- *
- *    Copyright (c) 2025 - 2026 Haixing Hu.
- *
- *    SPDX-License-Identifier: Apache-2.0
- *
- *    Licensed under the Apache License, Version 2.0.
- *
- ******************************************************************************/
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use qubit_thread_pool::{
     ExecutorServiceBuilderError,
     ThreadPoolBuilder,
@@ -14,21 +12,22 @@ use qubit_thread_pool::{
 
 use super::task_execution_service::TaskExecutionService;
 
-/// Builder for [`TaskExecutionService`], used to configure the backing [`super::ThreadPool`]
-/// before the service is created.
+/// Builder for [`TaskExecutionService`], used to configure the backing
+/// [`super::ThreadPool`] before the service is created.
 ///
 /// # Design
 ///
-/// Configuration is delegated to [`ThreadPoolBuilder`] (pool sizes, queue capacity,
-/// thread name prefix, and so on). This type exists so future **service-level** options
-/// can be added without pushing every thread-pool construction detail onto
-/// [`TaskExecutionService`].
+/// Configuration is delegated to [`ThreadPoolBuilder`] (pool sizes, queue
+/// capacity, thread name prefix, and so on). This type exists so future
+/// **service-level** options can be added without pushing every thread-pool
+/// construction detail onto [`TaskExecutionService`].
 ///
 /// # Relation to [`TaskExecutionService::builder`]
 ///
-/// [`TaskExecutionService::builder`] returns `TaskExecutionServiceBuilder::default()`.
-/// For default pool settings you can use [`TaskExecutionService::new`] or
-/// `TaskExecutionService::builder().build()`.
+/// [`TaskExecutionService::builder`] returns
+/// `TaskExecutionServiceBuilder::default()`. For default pool settings you can
+/// use [`TaskExecutionService::new`] or `TaskExecutionService::builder().
+/// build()`.
 ///
 /// # Example: custom pool, then build the service
 ///
@@ -48,14 +47,14 @@ use super::task_execution_service::TaskExecutionService;
 ///     Ok(())
 /// }
 /// ```
-///
 #[derive(Debug, Default, Clone)]
 pub struct TaskExecutionServiceBuilder {
     pool_builder: ThreadPoolBuilder,
 }
 
 impl TaskExecutionServiceBuilder {
-    /// Sets the [`ThreadPoolBuilder`] used when [`Self::build`] creates the pool.
+    /// Sets the [`ThreadPoolBuilder`] used when [`Self::build`] creates the
+    /// pool.
     ///
     /// # Example
     ///
@@ -74,7 +73,8 @@ impl TaskExecutionServiceBuilder {
     ///
     /// # Parameters
     ///
-    /// * `pool_builder` - Builder that produces the backing [`super::ThreadPool`].
+    /// * `pool_builder` - Builder that produces the backing
+    ///   [`super::ThreadPool`].
     ///
     /// # Returns
     ///
@@ -100,9 +100,12 @@ impl TaskExecutionServiceBuilder {
     ///
     /// # Returns
     ///
-    /// `Ok(TaskExecutionService)` when [`ThreadPoolBuilder`] settings are valid and
-    /// workers start successfully; otherwise [`ExecutorServiceBuilderError`].
-    pub fn build(self) -> Result<TaskExecutionService, ExecutorServiceBuilderError> {
+    /// `Ok(TaskExecutionService)` when [`ThreadPoolBuilder`] settings are valid
+    /// and workers start successfully; otherwise
+    /// [`ExecutorServiceBuilderError`].
+    pub fn build(
+        self,
+    ) -> Result<TaskExecutionService, ExecutorServiceBuilderError> {
         let pool = self.pool_builder.build()?;
         Ok(TaskExecutionService::from_thread_pool(pool))
     }
