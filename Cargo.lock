@@ -541,12 +541,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pastey"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -655,12 +649,6 @@ dependencies = [
 [[package]]
 name = "qubit-function"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64b876303bc4075ea5ad008d170e3e8e41337153465dfa9b85f89648a411ed53"
-dependencies = [
- "parking_lot",
- "pastey",
-]
 
 [[package]]
 name = "qubit-lock"
