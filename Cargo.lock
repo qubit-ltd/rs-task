@@ -134,9 +134,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -541,6 +541,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -587,6 +593,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qubit-argument"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52917ecf4305b3a354fca78aa569dfbfb2e12fe651a539760f3d66bc6034c96e"
+
+[[package]]
 name = "qubit-atomic"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -598,9 +610,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-cas"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71c7d679bf6fa32307d991738973f159eb77dff75bc40a608b1bb5a3a63fb13f"
+version = "0.9.0"
 dependencies = [
  "qubit-atomic",
  "qubit-error",
@@ -609,10 +619,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qubit-clock"
+version = "0.9.0"
+
+[[package]]
 name = "qubit-datatype"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f9e4a0a8a57c0d8ba7535ae716be6dbcd60644b9394c182c23742ead05b1661"
+version = "0.3.0"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -631,9 +643,7 @@ checksum = "da626589381bfcb778362b1a33268b471a40812c7d796f036a8864c1d43a4de2"
 
 [[package]]
 name = "qubit-executor"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b8a1914280edeaedceee8e4fbd1538d22c581866fe22a8df9b66efe2902c939"
+version = "0.7.1"
 dependencies = [
  "log",
  "oneshot",
@@ -648,7 +658,10 @@ dependencies = [
 
 [[package]]
 name = "qubit-function"
-version = "0.15.1"
+version = "0.16.0"
+dependencies = [
+ "parking_lot",
+]
 
 [[package]]
 name = "qubit-lock"
@@ -662,12 +675,11 @@ dependencies = [
 
 [[package]]
 name = "qubit-retry"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3ad0138e2f9041b5c77285efbbca5770ba0426bc7c3fa868c5300b2943c4e8f"
+version = "0.16.0"
 dependencies = [
  "parse-display",
- "qubit-datatype",
+ "qubit-argument",
+ "qubit-clock",
  "qubit-error",
  "qubit-function",
  "qubit-serde",
@@ -677,9 +689,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-serde"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "834f6fb5f818424eb1d2330d3223eac0f97ced251a8d2eee56b5e7a7007dd779"
+version = "0.3.0"
 dependencies = [
  "qubit-datatype",
  "serde",
@@ -688,9 +698,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-state-machine"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "136d0353dc24bd99614a2932f0c68357219d03e2d9d0d64b1b21e28c4c94f0f7"
+version = "0.6.0"
 dependencies = [
  "qubit-atomic",
  "qubit-cas",
@@ -710,8 +718,6 @@ dependencies = [
 [[package]]
 name = "qubit-thread-pool"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8a48b960010ae76af0128f7fc0d01fb22e68ed24e66f30e2c36575fd6b8b90f"
 dependencies = [
  "crossbeam-deque",
  "qubit-executor",
@@ -1327,3 +1333,51 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[patch.unused]]
+name = "qubit-batch"
+version = "0.10.0"
+
+[[patch.unused]]
+name = "qubit-codec-misc"
+version = "0.2.0"
+
+[[patch.unused]]
+name = "qubit-config"
+version = "0.14.0"
+
+[[patch.unused]]
+name = "qubit-event-bus"
+version = "0.8.0"
+
+[[patch.unused]]
+name = "qubit-fs"
+version = "0.2.0"
+
+[[patch.unused]]
+name = "qubit-http"
+version = "0.10.0"
+
+[[patch.unused]]
+name = "qubit-magika"
+version = "0.8.0"
+
+[[patch.unused]]
+name = "qubit-metadata"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "qubit-mime"
+version = "0.9.0"
+
+[[patch.unused]]
+name = "qubit-progress"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "qubit-rayon-batch"
+version = "0.8.0"
+
+[[patch.unused]]
+name = "qubit-value"
+version = "0.8.0"
