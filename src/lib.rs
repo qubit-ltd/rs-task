@@ -11,9 +11,3 @@
 //! qubit-thread-pool`.
 
 pub mod service;
-
-pub use qubit_executor::{
-    TaskExecutionError,
-    TaskHandle,
-    TaskResult,
-};

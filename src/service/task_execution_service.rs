@@ -7,45 +7,21 @@
 // =============================================================================
 use std::{
     collections::HashMap,
-    panic::{
-        AssertUnwindSafe,
-        catch_unwind,
-        resume_unwind,
-    },
-    sync::{
-        Arc,
-        Condvar,
-        Mutex,
-        MutexGuard,
-    },
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 
-use qubit_function::{
-    Callable,
-    Runnable,
-};
+use qubit_function::{Callable, Runnable};
 
 use qubit_executor::TaskHandle;
-use qubit_executor::service::{
-    ExecutorService,
-    StopReport,
-};
-use qubit_executor::task::spi::{
-    TaskEndpointPair,
-    TaskSlot,
-};
-use qubit_thread_pool::{
-    ExecutorServiceBuilderError,
-    PoolJob,
-    ThreadPool,
-};
+use qubit_executor::service::{ExecutorService, ExecutorServiceBuilderError, StopReport};
+use qubit_executor::task::spi::{TaskEndpointPair, TaskSlotCell};
+use qubit_thread_pool::{PoolJob, ThreadPool};
 
 use super::{
     task_execution_service_builder::TaskExecutionServiceBuilder,
     task_execution_service_error::TaskExecutionServiceError,
-    task_execution_stats::TaskExecutionStats,
-    task_id::TaskId,
-    task_status::TaskStatus,
+    task_execution_stats::TaskExecutionStats, task_id::TaskId, task_status::TaskStatus,
 };
 
 /// Managed task execution service built on [`ThreadPool`].
@@ -121,7 +97,8 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
+    /// use qubit_executor::service::ExecutorServiceBuilderError;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let _service = TaskExecutionService::new()?;
@@ -145,9 +122,9 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{
-    ///     TaskExecutionService, ThreadPoolBuilder, ExecutorServiceBuilderError,
-    /// };
+    /// use qubit_executor::service::ExecutorServiceBuilderError;
+    /// use qubit_task::service::TaskExecutionService;
+    /// use qubit_thread_pool::ThreadPoolBuilder;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let _service = TaskExecutionService::builder()
@@ -250,17 +227,13 @@ impl TaskExecutionService {
         E: Send + 'static,
     {
         let (handle, slot) = TaskEndpointPair::new().into_parts();
-        let slot = Arc::new(Mutex::new(Some(slot)));
+        let slot = Arc::new(TaskSlotCell::new(slot));
         let accept_slot = Arc::clone(&slot);
         let cancel_slot = Arc::clone(&slot);
         let run_slot = Arc::clone(&slot);
         let cancel_state = Arc::clone(&self.state);
         let cancel: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
-            let slot = cancel_slot
-                .lock()
-                .expect("task slot lock should not be poisoned")
-                .take();
-            let cancelled = slot.is_some_and(TaskSlot::cancel_unstarted);
+            let cancelled = cancel_slot.cancel_unstarted();
             if cancelled {
                 cancel_state.set_status(task_id, TaskStatus::Cancelled);
             }
@@ -273,19 +246,10 @@ impl TaskExecutionService {
         let cancel_for_job = Arc::clone(&cancel);
         let job = PoolJob::with_accept(
             Box::new(move || {
-                if let Some(slot) = accept_slot
-                    .lock()
-                    .expect("task slot lock should not be poisoned")
-                    .as_ref()
-                {
-                    slot.accept();
-                }
+                accept_slot.accept();
             }),
             Box::new(move || {
-                let slot = run_slot
-                    .lock()
-                    .expect("task slot lock should not be poisoned")
-                    .take();
+                let slot = run_slot.take();
                 if let Some(slot) = slot {
                     let task = StatusReportingTask {
                         task_id,
@@ -411,7 +375,8 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
+    /// use qubit_executor::service::ExecutorServiceBuilderError;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
@@ -498,7 +463,8 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
+    /// use qubit_executor::service::ExecutorServiceBuilderError;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
@@ -517,7 +483,8 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
+    /// use qubit_executor::service::ExecutorServiceBuilderError;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
@@ -551,7 +518,8 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
+    /// use qubit_executor::service::ExecutorServiceBuilderError;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
@@ -575,7 +543,8 @@ impl TaskExecutionService {
     /// # Example
     ///
     /// ```
-    /// use qubit_task::service::{TaskExecutionService, ExecutorServiceBuilderError};
+    /// use qubit_executor::service::ExecutorServiceBuilderError;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let service = TaskExecutionService::new()?;
@@ -648,10 +617,7 @@ impl TaskExecutionServiceState {
     }
 
     /// Gets a task cancel callback if the task is active.
-    fn cancel_callback(
-        &self,
-        task_id: TaskId,
-    ) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+    fn cancel_callback(&self, task_id: TaskId) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
         let inner = self.lock_inner();
         let record = inner.tasks.get(&task_id)?;
         record
@@ -697,9 +663,7 @@ impl TaskExecutionServiceState {
         let task_ids = inner
             .tasks
             .iter()
-            .filter_map(|(&task_id, record)| {
-                record.status.is_active().then_some(task_id)
-            })
+            .filter_map(|(&task_id, record)| record.status.is_active().then_some(task_id))
             .collect::<Vec<_>>();
         while task_ids
             .iter()
