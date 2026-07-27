@@ -18,16 +18,6 @@ mod task_execution_stats;
 mod task_id;
 mod task_status;
 
-pub use qubit_executor::service::{
-    StopReport,
-    SubmissionError,
-};
-pub use qubit_thread_pool::{
-    ExecutorServiceBuilderError,
-    ThreadPool,
-    ThreadPoolBuilder,
-    ThreadPoolStats,
-};
 pub use task_execution_service::TaskExecutionService;
 pub use task_execution_service_builder::TaskExecutionServiceBuilder;
 pub use task_execution_service_error::TaskExecutionServiceError;

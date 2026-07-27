@@ -9,12 +9,9 @@
 
 use std::time::Duration;
 
-use qubit_task::service::{
-    ExecutorServiceBuilderError,
-    TaskExecutionService,
-    TaskExecutionServiceBuilder,
-    ThreadPool,
-};
+use qubit_executor::service::ExecutorServiceBuilderError;
+use qubit_task::service::{TaskExecutionService, TaskExecutionServiceBuilder};
+use qubit_thread_pool::ThreadPool;
 
 #[test]
 fn test_task_execution_service_builder_builds_default_service() {
