@@ -138,8 +138,6 @@ dependencies = [
 [[package]]
 name = "qubit-clock"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38fc24f18d694b74188032e77ac925a87efb0fe365fea68d85eb7d54c18774d8"
 dependencies = [
  "qubit-collections 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
@@ -169,6 +167,7 @@ dependencies = [
  "oneshot",
  "parking_lot",
  "qubit-atomic",
+ "qubit-clock",
  "qubit-collections 0.2.0",
  "qubit-fast-cas",
  "qubit-function",
@@ -219,6 +218,7 @@ version = "0.9.0"
 dependencies = [
  "crossbeam-deque",
  "qubit-argument",
+ "qubit-clock",
  "qubit-executor",
  "qubit-function",
  "qubit-lock",
