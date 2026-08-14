@@ -16,4 +16,6 @@ permissions:
 jobs:
   rust-ci:
     uses: qubit-ltd/rs-ci/.github/workflows/rust-ci.yml@main
+    with:
+      coverage_enforce_thresholds: "1"
     secrets: inherit
