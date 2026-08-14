@@ -11,7 +11,7 @@ use qubit_thread_pool::ThreadPoolBuilder;
 use super::task_execution_service::TaskExecutionService;
 
 /// Builder for [`TaskExecutionService`], used to configure the backing
-/// [`super::ThreadPool`] before the service is created.
+/// [`qubit_thread_pool::ThreadPool`] before the service is created.
 ///
 /// # Design
 ///
@@ -72,7 +72,7 @@ impl TaskExecutionServiceBuilder {
     /// # Parameters
     ///
     /// * `pool_builder` - Builder that produces the backing
-    ///   [`super::ThreadPool`].
+    ///   [`qubit_thread_pool::ThreadPool`].
     ///
     /// # Returns
     ///

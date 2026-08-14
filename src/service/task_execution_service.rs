@@ -97,9 +97,9 @@ pub struct TaskExecutionService {
 }
 
 impl TaskExecutionService {
-    /// Creates a service using the default [`super::ThreadPoolBuilder`]
-    /// settings (worker counts, queue, and other defaults match
-    /// [`ThreadPool::builder`]).
+    /// Creates a service using the default
+    /// [`qubit_thread_pool::ThreadPoolBuilder`] settings (worker counts,
+    /// queue, and other defaults match [`ThreadPool::builder`]).
     ///
     /// # Example
     ///
@@ -123,8 +123,8 @@ impl TaskExecutionService {
 
     /// Returns a [`TaskExecutionServiceBuilder`] so you can tune the backing
     /// pool before [`TaskExecutionServiceBuilder::build`] (for example
-    /// [`super::ThreadPoolBuilder::pool_size`],
-    /// [`super::ThreadPoolBuilder::queue_capacity`]).
+    /// [`qubit_thread_pool::ThreadPoolBuilder::pool_size`],
+    /// [`qubit_thread_pool::ThreadPoolBuilder::queue_capacity`]).
     ///
     /// # Example
     ///
@@ -143,7 +143,7 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// A builder holding the default [`super::ThreadPoolBuilder`].
+    /// A builder holding the default [`qubit_thread_pool::ThreadPoolBuilder`].
     #[inline]
     pub fn builder() -> TaskExecutionServiceBuilder {
         TaskExecutionServiceBuilder::default()
