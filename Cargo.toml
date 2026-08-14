@@ -32,7 +32,7 @@ doctest = true
 test = false
 
 [dependencies]
-qubit-executor = { version = "0.7", path = "../rs-executor" }
-qubit-thread-pool = { version = "0.9", path = "../rs-thread-pool" }
+qubit-executor = { version = "0.8", path = "../rs-executor" }
+qubit-thread-pool = { version = "0.10", path = "../rs-thread-pool" }
 qubit-function = "0.16"
 thiserror = "2.0"

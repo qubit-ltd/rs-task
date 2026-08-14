@@ -5,24 +5,31 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use std::{
-    collections::HashMap,
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-    sync::{Arc, Condvar, Mutex, MutexGuard},
-};
-
-use qubit_function::{Callable, Runnable};
+use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
+use std::panic::resume_unwind;
+use std::sync::Arc;
+use std::sync::Condvar;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 use qubit_executor::TaskHandle;
-use qubit_executor::service::{ExecutorService, ExecutorServiceBuilderError, StopReport};
-use qubit_executor::task::spi::{TaskEndpointPair, TaskSlotCell};
-use qubit_thread_pool::{PoolJob, ThreadPool};
+use qubit_executor::service::ExecutorService;
+use qubit_executor::service::ExecutorServiceBuilderError;
+use qubit_executor::service::StopReport;
+use qubit_executor::task::spi::TaskEndpointPair;
+use qubit_executor::task::spi::TaskSlotCell;
+use qubit_function::Callable;
+use qubit_function::Runnable;
+use qubit_thread_pool::PoolJob;
+use qubit_thread_pool::ThreadPool;
 
-use super::{
-    task_execution_service_builder::TaskExecutionServiceBuilder,
-    task_execution_service_error::TaskExecutionServiceError,
-    task_execution_stats::TaskExecutionStats, task_id::TaskId, task_status::TaskStatus,
-};
+use super::task_execution_service_builder::TaskExecutionServiceBuilder;
+use super::task_execution_service_error::TaskExecutionServiceError;
+use super::task_execution_stats::TaskExecutionStats;
+use super::task_id::TaskId;
+use super::task_status::TaskStatus;
 
 /// Managed task execution service built on [`ThreadPool`].
 ///
@@ -617,7 +624,10 @@ impl TaskExecutionServiceState {
     }
 
     /// Gets a task cancel callback if the task is active.
-    fn cancel_callback(&self, task_id: TaskId) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+    fn cancel_callback(
+        &self,
+        task_id: TaskId,
+    ) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
         let inner = self.lock_inner();
         let record = inner.tasks.get(&task_id)?;
         record
@@ -663,7 +673,9 @@ impl TaskExecutionServiceState {
         let task_ids = inner
             .tasks
             .iter()
-            .filter_map(|(&task_id, record)| record.status.is_active().then_some(task_id))
+            .filter_map(|(&task_id, record)| {
+                record.status.is_active().then_some(task_id)
+            })
             .collect::<Vec<_>>();
         while task_ids
             .iter()

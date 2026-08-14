@@ -102,7 +102,9 @@ impl TaskExecutionServiceBuilder {
     /// `Ok(TaskExecutionService)` when [`ThreadPoolBuilder`] settings are valid
     /// and workers start successfully; otherwise
     /// [`ExecutorServiceBuilderError`].
-    pub fn build(self) -> Result<TaskExecutionService, ExecutorServiceBuilderError> {
+    pub fn build(
+        self,
+    ) -> Result<TaskExecutionService, ExecutorServiceBuilderError> {
         let pool = self.pool_builder.build()?;
         Ok(TaskExecutionService::from_thread_pool(pool))
     }
