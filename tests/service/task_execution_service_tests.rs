@@ -7,16 +7,18 @@
 // =============================================================================
 //! Tests for [`TaskExecutionService`](qubit_task::service::TaskExecutionService).
 
-use std::{
-    io,
-    sync::{Arc, mpsc},
-    thread,
-    time::Duration,
-};
+use std::io;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use qubit_executor::TaskExecutionError;
-use qubit_executor::service::{ExecutorServiceBuilderError, SubmissionError};
-use qubit_task::service::{TaskExecutionService, TaskExecutionServiceError, TaskStatus};
+use qubit_executor::service::ExecutorServiceBuilderError;
+use qubit_executor::service::SubmissionError;
+use qubit_task::service::TaskExecutionService;
+use qubit_task::service::TaskExecutionServiceError;
+use qubit_task::service::TaskStatus;
 use qubit_thread_pool::ThreadPool;
 
 /// Creates a service backed by a single-worker thread pool.
@@ -51,10 +53,14 @@ fn successful_usize_task() -> Result<usize, io::Error> {
 
 #[test]
 fn test_task_execution_service_tracks_successful_task() {
-    let service = TaskExecutionService::new().expect("service should be created");
+    let service =
+        TaskExecutionService::new().expect("service should be created");
 
     let handle = service
-        .submit_callable(1, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(
+            1,
+            successful_usize_task as fn() -> Result<usize, io::Error>,
+        )
         .expect("service should accept task");
 
     assert_eq!(handle.get().expect("task should succeed"), 42);
@@ -76,13 +82,17 @@ fn test_task_status_is_active_only_for_in_flight_states() {
 
 #[test]
 fn test_task_execution_service_cancel_unknown_and_terminal_tasks() {
-    let service = TaskExecutionService::new().expect("service should be created");
+    let service =
+        TaskExecutionService::new().expect("service should be created");
 
     assert_eq!(service.status(404), None);
     assert!(!service.cancel(404));
 
     let handle = service
-        .submit_callable(1, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(
+            1,
+            successful_usize_task as fn() -> Result<usize, io::Error>,
+        )
         .expect("service should accept task");
     assert_eq!(handle.get().expect("task should succeed"), 42);
 
@@ -137,7 +147,8 @@ fn test_task_execution_service_builder_propagates_pool_build_error() {
 
 #[test]
 fn test_task_execution_service_tracks_failure_and_panic() {
-    let service = TaskExecutionService::new().expect("service should be created");
+    let service =
+        TaskExecutionService::new().expect("service should be created");
 
     let failed = service
         .submit_callable(1, || Err::<(), _>(io::Error::other("failed")))
@@ -176,7 +187,8 @@ fn test_task_execution_service_rejects_duplicate_task_id() {
         .expect("first task should be accepted");
     wait_started(started_rx);
 
-    let duplicate = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
+    let duplicate = service
+        .submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
 
     assert!(matches!(
         duplicate,
@@ -192,12 +204,14 @@ fn test_task_execution_service_rejects_duplicate_task_id() {
 
 #[test]
 fn test_task_execution_service_suspend_rejects_new_tasks() {
-    let service = TaskExecutionService::new().expect("service should be created");
+    let service =
+        TaskExecutionService::new().expect("service should be created");
 
     assert!(!service.is_suspended());
     service.suspend();
     assert!(service.is_suspended());
-    let rejected = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
+    let rejected = service
+        .submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
     service.resume();
     assert!(!service.is_suspended());
     let accepted = service
@@ -232,7 +246,10 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let second = service
-        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(
+            2,
+            successful_usize_task as fn() -> Result<usize, io::Error>,
+        )
         .expect("queued task should be accepted");
 
     let stats = service.stats();
@@ -289,7 +306,8 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
 
 #[test]
 fn test_task_execution_service_wait_methods_return_when_no_tasks_are_active() {
-    let service = TaskExecutionService::new().expect("service should be created");
+    let service =
+        TaskExecutionService::new().expect("service should be created");
 
     service.await_in_flight_tasks_completion();
     service.await_idle();
@@ -320,7 +338,10 @@ fn test_task_execution_service_stop_cancels_queued_task() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let queued = service
-        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(
+            2,
+            successful_usize_task as fn() -> Result<usize, io::Error>,
+        )
         .expect("queued task should be accepted");
 
     let report = service.stop();
@@ -345,7 +366,8 @@ fn test_task_execution_service_removes_record_when_pool_rejects() {
         .build()
         .expect("service should be created with lazy worker spawning");
 
-    let result = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
+    let result = service
+        .submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
 
     assert!(matches!(
         result,
@@ -377,7 +399,10 @@ fn test_task_execution_service_cancels_queued_task() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let queued = service
-        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(
+            2,
+            successful_usize_task as fn() -> Result<usize, io::Error>,
+        )
         .expect("queued task should be accepted");
 
     assert!(service.cancel(2));

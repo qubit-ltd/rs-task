@@ -10,7 +10,8 @@
 use std::time::Duration;
 
 use qubit_executor::service::ExecutorServiceBuilderError;
-use qubit_task::service::{TaskExecutionService, TaskExecutionServiceBuilder};
+use qubit_task::service::TaskExecutionService;
+use qubit_task::service::TaskExecutionServiceBuilder;
 use qubit_thread_pool::ThreadPool;
 
 #[test]

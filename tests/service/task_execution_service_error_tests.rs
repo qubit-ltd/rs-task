@@ -9,10 +9,8 @@
 
 use std::io;
 
-use qubit_task::service::{
-    TaskExecutionService,
-    TaskExecutionServiceError,
-};
+use qubit_task::service::TaskExecutionService;
+use qubit_task::service::TaskExecutionServiceError;
 
 /// Returns a successful unit task result.
 fn successful_unit_task() -> Result<(), io::Error> {

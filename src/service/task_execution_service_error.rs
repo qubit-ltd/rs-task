@@ -5,9 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use thiserror::Error;
-
 use qubit_executor::service::SubmissionError;
+use thiserror::Error;
 
 use super::task_id::TaskId;
 
