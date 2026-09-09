@@ -137,9 +137,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-clock"
-version = "0.12.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d57ead76f106a1c5b2eac4e859bacd2ed8f1e13024fe8c03c9f829fc30fa65"
+checksum = "4b6ac8d4db46f084d6e21db1f091901d8a1561bacfe73d40eefae0cc4581a5e1"
 dependencies = [
  "qubit-collections 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
@@ -189,9 +189,9 @@ checksum = "59f10e916324739b811520fbfb24746f4822ad9ea1adb53c79fc04b7c090e5ed"
 
 [[package]]
 name = "qubit-lock"
-version = "0.13.1"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c5f8269c5d3724894dd39b34daf14a14ee6eeb693f9e6a803aea0aacaae56c1"
+checksum = "a2ea5af382d3ff3ac9da757dbe984a7ea1ed73d1a289e92f61dbf7eed0771cba"
 dependencies = [
  "parking_lot",
  "qubit-clock",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-state-machine"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "qubit-fast-cas",
  "thiserror",
