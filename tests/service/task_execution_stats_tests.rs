@@ -28,8 +28,7 @@ fn test_task_execution_stats_default_is_empty() {
 
 #[test]
 fn test_task_execution_stats_counts_terminal_outcomes() {
-    let service =
-        TaskExecutionService::new().expect("service should be created");
+    let service = TaskExecutionService::new().expect("service should be created");
     let succeeded = service
         .submit(1, || Ok::<(), io::Error>(()))
         .expect("successful task should be accepted");
