@@ -35,4 +35,4 @@ test = false
 qubit-executor = { path = "../rs-executor" }
 qubit-thread-pool = { path = "../rs-thread-pool" }
 qubit-function = "0.18"
-thiserror = "2.0"
+thiserror = "^2.0"

@@ -1,4 +1,4 @@
-[submodule ".rs-ci"]
-	path = .rs-ci
+[submodule ".infra/tools/rs-ci"]
+	path = .infra/tools/rs-ci
 	url = https://github.com/qubit-ltd/rs-ci
 	branch = main

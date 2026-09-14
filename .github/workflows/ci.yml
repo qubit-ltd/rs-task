@@ -14,6 +14,12 @@ permissions:
   id-token: write
 
 jobs:
+  dependency-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: qubit-ltd/rs-dependency-policy/.github/actions/check@39895c60b725068b7a72dc14d0ae18ee60c30e46
+
   rust-ci:
     uses: qubit-ltd/rs-ci/.github/workflows/rust-ci.yml@main
     with:
