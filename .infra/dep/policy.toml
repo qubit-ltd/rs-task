@@ -1,0 +1,5 @@
+format = 2
+source = "https://github.com/qubit-ltd/rs-dependency-policy.git"
+revision = "39895c60b725068b7a72dc14d0ae18ee60c30e46"
+baseline = "v2026.09.14"
+internal-prefixes = ["qubit-"]
