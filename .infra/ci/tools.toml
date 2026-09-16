@@ -1,0 +1,35 @@
+[rs-infra-style]
+source = "https://github.com/qubit-ltd/rs-infra-style.git"
+revision = "fb9fa731409534ff62e841bee4237644876274f9"
+binary = "rs-infra-style"
+package = "qubit-infra-style"
+
+[rs-infra-verify]
+source = "https://github.com/qubit-ltd/rs-infra-verify.git"
+revision = "c01e036da6e367b3adcc7f40c3c39134baaeecca"
+binary = "rs-infra-verify"
+package = "qubit-infra-verify"
+
+[rs-infra-coverage]
+source = "https://github.com/qubit-ltd/rs-infra-coverage.git"
+revision = "549a5183f0ff14185b72f80ee7e967c75b14ac4f"
+binary = "rs-infra-coverage"
+package = "qubit-infra-coverage"
+
+[rs-infra-pages]
+source = "https://github.com/qubit-ltd/rs-infra-pages.git"
+revision = "d8057d937294edcb456e40d6768c87f3a5b7c815"
+binary = "rs-infra-pages"
+package = "qubit-infra-pages"
+
+[rs-infra-ci]
+source = "https://github.com/qubit-ltd/rs-infra-ci.git"
+revision = "210bc1b1bd0257a2f2dfe90ffd8b2569062e80f3"
+binary = "rs-infra-ci"
+package = "qubit-infra-ci"
+
+[rs-infra-dependency]
+source = "https://github.com/qubit-ltd/rs-infra-dependency.git"
+revision = "1239fb3f7d7c65b989d98b3a4a4fd8bc01c6c1f2"
+binary = "rs-infra-dependency"
+package = "qubit-infra-dependency"

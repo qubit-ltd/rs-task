@@ -13,15 +13,286 @@ permissions:
   pages: write
   id-token: write
 
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  dependency-policy:
+  dependency-baseline:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: qubit-ltd/rs-dependency-policy/.github/actions/check@39895c60b725068b7a72dc14d0ae18ee60c30e46
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/tools/prepare-local-path-dependencies.sh
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Check dependency baseline
+        run: ./dependency-update.sh --check
 
-  rust-ci:
-    uses: qubit-ltd/rs-ci/.github/workflows/rust-ci.yml@main
-    with:
-      coverage_enforce_thresholds: "1"
-    secrets: inherit
+  verify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/tools/prepare-local-path-dependencies.sh
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Install Rustfmt toolchain
+        if: runner.os == 'Linux'
+        run: rustup toolchain install nightly-2026-06-05 --profile minimal --component rustfmt --component clippy
+      - name: Run infrastructure CI orchestration
+        run: ./ci-check.sh --only=verify
+      - name: Run style, hook, and coverage Clippy
+        if: runner.os == 'Linux'
+        run: ./ci-check.sh --only=style,clippy,coverage-cfg-clippy,project-hook
+      - name: Install Clippy toolchain on additional platforms
+        if: runner.os != 'Linux'
+        run: rustup toolchain install nightly-2026-06-05 --profile minimal --component clippy
+      - name: Run Clippy on additional platforms
+        if: runner.os != 'Linux'
+        run: ./ci-check.sh --only=clippy
+      - name: Install legacy CI build toolchain
+        run: rustup toolchain install 1.94.0 --profile minimal
+      - name: Run documentation tests
+        run: cargo +1.94.0 test --doc --verbose
+      - name: Run README dependency-version check
+        run: ./.infra/tools/infra-tool.sh rs-infra-verify --project "$GITHUB_WORKSPACE" run --suite readme
+      - name: Install documentation toolchain
+        run: rustup toolchain install 1.94.0 --profile minimal
+      - name: Generate strict all-features documentation
+        run: RUSTDOCFLAGS="-D warnings -D missing-docs" cargo +1.94.0 doc --all-features --no-deps --verbose
+      - name: Upload documentation artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustdoc
+          path: target/doc
+          retention-days: 14
+          if-no-files-found: error
+
+  feature-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/tools/prepare-local-path-dependencies.sh
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Install matrix build toolchain
+        run: rustup toolchain install 1.94.0 --profile minimal
+      - name: Install matrix Clippy toolchain when required
+        run: |
+          if jq -e 'any(.checks[]; (.commands | index("clippy")) != null)' \
+              .infra/ci/cargo-matrix.json >/dev/null; then
+            rustup toolchain install nightly-2026-06-05 --profile minimal --component clippy
+          fi
+      - name: Run configured feature and dependency matrix
+        run: |
+          ./ci-check.sh --only=feature-matrix
+
+  coverage:
+    needs: [verify]
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/tools/prepare-local-path-dependencies.sh
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --version 0.8.6 --locked
+      - name: Collect and check coverage
+        env:
+          # Rust 1.94 non-incremental coverage can lose counters for inline functions.
+          CARGO_INCREMENTAL: "1"
+        run: ./coverage.sh
+      - name: Build project (release)
+        if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          cargo +1.94.0 build --release --verbose
+      - name: Comment coverage on pull request
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- rs-infra-coverage-report -->';
+            const body = marker + '\n' + fs.readFileSync('coverage-summary.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const previous = comments.find((comment) => comment.user.type === 'Bot' && comment.body && comment.body.includes(marker));
+            if (previous) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-reports
+          path: |
+            lcov.info
+            coverage.txt
+            coverage.json
+            coverage-badge.json
+            coverage-summary.md
+            ci-summary.json
+            target/llvm-cov/html
+            target/llvm-cov/cobertura.xml
+          retention-days: 14
+          if-no-files-found: error
+
+  pages:
+    if: ${{ always() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.verify.result == 'success' && needs.coverage.result == 'success' && (needs.feature-matrix.result == 'success' || needs.feature-matrix.result == 'skipped') }}
+    needs: [verify, feature-matrix, coverage]
+    outputs:
+      deploy: ${{ steps.pages-config.outputs.deploy }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Validate Pages configuration
+        id: pages-config
+        run: |
+          jq -e '.deploy | type == "boolean"' .infra/ci/pages.json >/dev/null
+          echo "deploy=$(jq -r .deploy .infra/ci/pages.json)" >> "$GITHUB_OUTPUT"
+      - name: Prepare local path dependencies
+        run: ./.infra/tools/prepare-local-path-dependencies.sh
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-reports
+          path: .
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Build Pages site
+        run: ./.infra/tools/infra-tool.sh rs-infra-pages --project "$GITHUB_WORKSPACE" build
+      - name: Prepare Pages artifact
+        run: ./.infra/tools/infra-tool.sh rs-infra-pages --project "$GITHUB_WORKSPACE" artifact
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  pages-deploy:
+    if: needs.pages.outputs.deploy == 'true' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [pages]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/deploy-pages@v4
+
+  advanced-verification:
+    name: Infrastructure suite (${{ matrix.suite }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: miri, os: ubuntu-latest}
+          - {suite: miri, os: macos-14}
+          - {suite: address-sanitizer, os: ubuntu-latest}
+          - {suite: address-sanitizer, os: macos-14}
+          - {suite: loom, os: ubuntu-latest}
+          - {suite: fuzz, os: ubuntu-latest}
+          - {suite: audit, os: ubuntu-latest}
+          - {suite: cross, os: ubuntu-latest}
+          - {suite: platform, os: ubuntu-latest}
+    env:
+      RS_INFRA_NIGHTLY_TOOLCHAIN: nightly-2026-06-05
+      RS_INFRA_FUZZ_MODE: smoke
+      RS_INFRA_FUZZ_SECONDS_PER_TARGET: "10"
+      RS_INFRA_FUZZ_MAX_LEN: "4096"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/tools/prepare-local-path-dependencies.sh
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Detect optional suite configuration
+        id: suite-config
+        run: |
+          set -euo pipefail
+          suite='${{ matrix.suite }}'
+          enabled=false
+          case "$suite" in
+            audit) enabled=true ;;
+            fuzz)
+              if [ -f fuzz/Cargo.toml ] && grep -q 'cargo-fuzz' fuzz/Cargo.toml && grep -q 'true' fuzz/Cargo.toml; then
+                enabled=true
+              fi
+              ;;
+            cross)
+              if [ -f .infra/ci/cross.toml ] || [ -f Cross.toml ]; then enabled=true; fi
+              ;;
+            platform)
+              if [ -f .infra/ci/platform.toml ]; then enabled=true; fi
+              ;;
+            miri|address-sanitizer|loom)
+              enabled=$(cargo metadata --no-deps --format-version 1                 | python3 -c 'import json,sys; d=json.load(sys.stdin); m=set(d["workspace_members"]); s=sys.argv[1]; found=False
+          for p in d["packages"]:
+           if p["id"] not in m: continue
+           md=p.get("metadata") or {}; cfg=md.get("rs-infra") or {}
+           deps=p.get("dependencies") or []
+           if s == "miri" and cfg.get("miri") is True: found=True
+           elif s == "address-sanitizer" and "address" in cfg.get("sanitizers",[]): found=True
+           elif s == "loom" and any(x.get("name") == "loom" for x in deps): found=True
+          print("true" if found else "false")' "$suite")
+              ;;
+          esac
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+      - name: Install suite-specific tools
+        if: ${{ steps.suite-config.outputs.enabled == 'true' && (matrix.suite != 'fuzz' || env.RS_INFRA_FUZZ_MODE != 'disabled') }}
+        run: |
+          case "${{ matrix.suite }}" in
+            audit) cargo install cargo-audit --locked ;;
+            fuzz)
+              rustup toolchain install "$RS_INFRA_NIGHTLY_TOOLCHAIN" --profile minimal
+              cargo install cargo-fuzz --locked --version 0.13.2
+              ;;
+            cross) cargo install cross --locked ;;
+            miri)
+              rustup toolchain install "$RS_INFRA_NIGHTLY_TOOLCHAIN" --profile minimal --component miri,rust-src
+              cargo +"$RS_INFRA_NIGHTLY_TOOLCHAIN" miri setup
+              ;;
+            address-sanitizer) rustup toolchain install "$RS_INFRA_NIGHTLY_TOOLCHAIN" --profile minimal --component rust-src ;;
+          esac
+      - name: Run configured infrastructure suite
+        if: ${{ steps.suite-config.outputs.enabled == 'true' }}
+        run: |
+          if [ "${{ matrix.suite }}" = "loom" ]; then
+            export RUSTFLAGS="--cfg loom"
+          fi
+          ./.infra/tools/infra-tool.sh rs-infra-verify --project "$GITHUB_WORKSPACE" run --suite "${{ matrix.suite }}"
+      - name: Skip unconfigured infrastructure suite
+        if: ${{ steps.suite-config.outputs.enabled != 'true' }}
+        run: echo "${{ matrix.suite }} is not configured; skipping."
+      - name: Upload fuzz crash artifacts
+        if: ${{ failure() && matrix.suite == 'fuzz' && steps.suite-config.outputs.enabled == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ github.sha }}
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+          retention-days: 14
