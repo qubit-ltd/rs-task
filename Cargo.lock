@@ -195,6 +195,8 @@ dependencies = [
 [[package]]
 name = "qubit-state-machine"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94a5faf8ecee502c4f1a70d315c784e1513b3559d373ce1c41d9050281c214da"
 dependencies = [
  "qubit-fast-cas",
  "thiserror",
