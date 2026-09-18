@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use qubit_executor::service::SubmissionError;
+use qubit_thread_pool::PoolJobSubmissionError;
 use thiserror::Error;
 
 use super::task_id::TaskId;
@@ -28,4 +29,17 @@ pub enum TaskExecutionServiceError {
     /// The underlying thread pool rejected the task.
     #[error(transparent)]
     Rejected(#[from] SubmissionError),
+
+    /// The pool acceptance callback panicked before the task was published.
+    #[error("thread pool task acceptance callback panicked")]
+    AcceptancePanicked,
+}
+
+impl From<PoolJobSubmissionError> for TaskExecutionServiceError {
+    fn from(error: PoolJobSubmissionError) -> Self {
+        match error {
+            PoolJobSubmissionError::Rejected(error) => Self::Rejected(error),
+            PoolJobSubmissionError::AcceptancePanicked => Self::AcceptancePanicked,
+        }
+    }
 }
