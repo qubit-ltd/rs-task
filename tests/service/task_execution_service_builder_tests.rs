@@ -12,6 +12,7 @@ use std::time::Duration;
 use qubit_executor::service::ExecutorServiceBuilderError;
 use qubit_task::service::TaskExecutionService;
 use qubit_task::service::TaskExecutionServiceBuilder;
+use qubit_task::service::TaskStatus;
 use qubit_thread_pool::ThreadPool;
 
 #[test]
@@ -51,4 +52,42 @@ fn test_task_execution_service_builder_returns_pool_build_error() {
         .build();
 
     assert!(matches!(result, Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),));
+}
+
+#[test]
+fn test_task_execution_service_builder_sets_completed_history_capacity() {
+    let service = TaskExecutionService::builder()
+        .completed_history_capacity(1)
+        .build()
+        .expect("service should be created");
+    for id in 1..=2 {
+        service
+            .submit(id, || Ok::<(), ()>(()))
+            .expect("task should be accepted")
+            .get()
+            .expect("task should complete");
+    }
+    assert_eq!(service.status(1), None);
+    assert_eq!(service.status(2), Some(TaskStatus::Succeeded));
+    assert_eq!(service.stats().total, 1);
+    service.shutdown();
+    service.wait_termination();
+}
+
+#[test]
+fn test_task_execution_service_builder_default_history_is_bounded() {
+    let service = TaskExecutionService::new().expect("service should be created");
+    for id in 0..=1024 {
+        service
+            .submit(id, || Ok::<(), ()>(()))
+            .expect("task should be accepted")
+            .get()
+            .expect("task should complete");
+    }
+    assert_eq!(service.status(0), None);
+    assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
+    assert_eq!(service.status(1024), Some(TaskStatus::Succeeded));
+    assert_eq!(service.stats().total, 1024);
+    service.shutdown();
+    service.wait_termination();
 }
