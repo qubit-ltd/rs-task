@@ -45,9 +45,20 @@ use super::task_execution_service::TaskExecutionService;
 ///     Ok(())
 /// }
 /// ```
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct TaskExecutionServiceBuilder {
     pool_builder: ThreadPoolBuilder,
+    history_capacity: usize,
+}
+
+impl Default for TaskExecutionServiceBuilder {
+    /// Uses the default thread pool and retains at most 1024 terminal statuses.
+    fn default() -> Self {
+        Self {
+            pool_builder: ThreadPoolBuilder::default(),
+            history_capacity: 1024,
+        }
+    }
 }
 
 impl TaskExecutionServiceBuilder {
@@ -83,6 +94,16 @@ impl TaskExecutionServiceBuilder {
         self
     }
 
+    /// Sets how many recent terminal task statuses the service retains.
+    ///
+    /// Zero discards each terminal status immediately. This limit does not
+    /// affect active tasks or the backing pool's queue capacity.
+    #[inline]
+    pub fn completed_history_capacity(mut self, capacity: usize) -> Self {
+        self.history_capacity = capacity;
+        self
+    }
+
     /// Builds a [`TaskExecutionService`] from the current configuration.
     ///
     /// # Example
@@ -104,6 +125,6 @@ impl TaskExecutionServiceBuilder {
     /// [`ExecutorServiceBuilderError`].
     pub fn build(self) -> Result<TaskExecutionService, ExecutorServiceBuilderError> {
         let pool = self.pool_builder.build()?;
-        Ok(TaskExecutionService::from_thread_pool(pool))
+        Ok(TaskExecutionService::from_thread_pool(pool, self.history_capacity))
     }
 }

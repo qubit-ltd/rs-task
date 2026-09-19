@@ -29,7 +29,7 @@ include = [
 [lib]
 name = "qubit_task"
 doctest = true
-test = false
+test = true
 
 [dependencies]
 qubit-executor = "0.8"

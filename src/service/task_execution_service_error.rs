@@ -18,7 +18,7 @@ use super::task_id::TaskId;
 /// result is still reported through [`TaskHandle`](qubit_executor::TaskHandle).
 #[derive(Debug, Error)]
 pub enum TaskExecutionServiceError {
-    /// Another retained task record already uses the same task ID.
+    /// Another active task or pending submission already uses this task ID.
     #[error("task {0} already exists")]
     DuplicateTask(TaskId),
 

@@ -9,11 +9,11 @@ use super::task_status::TaskStatus;
 
 /// Count snapshot for a [`TaskExecutionService`](super::TaskExecutionService).
 ///
-/// Counters are derived from the service registry and therefore include
-/// terminal task records retained for inspection.
+/// Counters are derived from accepted active tasks and bounded terminal
+/// records retained for inspection. They are not lifetime totals.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TaskExecutionStats {
-    /// Number of tasks accepted by the service.
+    /// Number of accepted active and retained terminal tasks currently visible.
     pub total: usize,
 
     /// Number of accepted tasks not yet started.
