@@ -5,14 +5,10 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::panic::resume_unwind;
 use std::sync::Arc;
-use std::sync::Condvar;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
 
 use qubit_executor::TaskHandle;
 use qubit_executor::service::ExecutorService;
@@ -27,23 +23,27 @@ use qubit_thread_pool::ThreadPool;
 
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
 use super::task_execution_service_error::TaskExecutionServiceError;
+use super::task_execution_service_state::CancelFn;
+use super::task_execution_service_state::SubmissionToken;
+use super::task_execution_service_state::TaskExecutionServiceState;
 use super::task_execution_stats::TaskExecutionStats;
 use super::task_id::TaskId;
 use super::task_status::TaskStatus;
 
 /// Managed task execution service built on [`ThreadPool`].
 ///
-/// Assigns a stable business [`TaskId`] per task and tracks service-level
-/// status (submitted, running, succeeded, failed, cancelled, panicked). The
-/// typed task outcome is still retrieved through [`TaskHandle`].
+/// Accepts a caller-provided business [`TaskId`] per task and tracks
+/// service-level status (submitted, running, succeeded, failed, cancelled,
+/// panicked). The typed task outcome is still retrieved through [`TaskHandle`].
 ///
 /// # Responsibilities
 ///
-/// - **Registry**: The same [`TaskId`] cannot be submitted again while a record
-///   for it exists; a duplicate returns
+/// - **Registry**: The same [`TaskId`] cannot be submitted again while its task
+///   is active or being submitted; a duplicate returns
 ///   [`TaskExecutionServiceError::DuplicateTask`]. Use this when you need
-///   lookup by ID, optional pre-start cancellation, or long-lived task
-///   bookkeeping.
+///   lookup by ID or optional pre-start cancellation. Terminal statuses are
+///   retained only up to the builder's history capacity (1024 by default). A
+///   terminal ID can be reused; a new submission replaces its old status.
 /// - **Thread pool**: Owns a [`ThreadPool`] for queuing and worker threads;
 ///   queue internals are not exposed. Configure the pool via
 ///   [`TaskExecutionServiceBuilder`] or [`Self::builder`].
@@ -150,10 +150,10 @@ impl TaskExecutionService {
     }
 
     /// Builds a service from an already constructed pool.
-    pub(crate) fn from_thread_pool(pool: ThreadPool) -> Self {
+    pub(crate) fn from_thread_pool(pool: ThreadPool, history_capacity: usize) -> Self {
         Self {
             pool,
-            state: Arc::new(TaskExecutionServiceState::default()),
+            state: Arc::new(TaskExecutionServiceState::new(history_capacity)),
         }
     }
 
@@ -175,7 +175,7 @@ impl TaskExecutionService {
     ///
     /// # Parameters
     ///
-    /// * `task_id` - Stable business ID for registry operations.
+    /// * `task_id` - Caller-provided business ID, unique among active tasks.
     /// * `task` - Runnable to execute.
     ///
     /// # Returns
@@ -212,7 +212,7 @@ impl TaskExecutionService {
     ///
     /// # Parameters
     ///
-    /// * `task_id` - Stable business ID for registry operations.
+    /// * `task_id` - Caller-provided business ID, unique among active tasks.
     /// * `task` - Callable to execute.
     ///
     /// # Returns
@@ -233,23 +233,21 @@ impl TaskExecutionService {
         let slot = Arc::new(TaskSlotCell::new(slot));
         let accept_slot = Arc::clone(&slot);
         let cancel_slot = Arc::clone(&slot);
+        let cancel: CancelFn = Arc::new(move || cancel_slot.cancel_unstarted());
+        let token = self.state.reserve(task_id, cancel)?;
+
+        let accept_state = Arc::clone(&self.state);
+        let accept_token = token.clone();
         let run_slot = Arc::clone(&slot);
-        let cancel_state = Arc::clone(&self.state);
-        let cancel: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
-            let cancelled = cancel_slot.cancel_unstarted();
-            if cancelled {
-                cancel_state.set_status(task_id, TaskStatus::Cancelled);
-            }
-            cancelled
-        });
-
-        self.state.register(task_id, Arc::clone(&cancel))?;
-
         let run_state = Arc::clone(&self.state);
-        let cancel_for_job = Arc::clone(&cancel);
+        let run_token = token.clone();
+        let stop_slot = Arc::clone(&slot);
+        let stop_state = Arc::clone(&self.state);
+        let stop_token = token.clone();
         let job = PoolJob::with_accept(
             Box::new(move || {
                 accept_slot.accept();
+                accept_state.accept(task_id, &accept_token);
             }),
             Box::new(move || {
                 let slot = run_slot.take();
@@ -258,19 +256,20 @@ impl TaskExecutionService {
                         task_id,
                         task,
                         state: run_state,
+                        token: run_token,
                     };
-                    if !slot.run(task) {
-                        cancel_for_job();
-                    }
+                    let _ran = slot.run(task);
                 }
             }),
             Box::new(move || {
-                cancel();
+                if stop_slot.cancel_unstarted() {
+                    stop_state.finish(task_id, &stop_token, TaskStatus::Cancelled);
+                }
             }),
         );
 
         if let Err(error) = self.pool.submit_job(job) {
-            self.state.remove(task_id);
+            self.state.discard(task_id, &token);
             return Err(error.into());
         }
         Ok(handle)
@@ -310,8 +309,15 @@ impl TaskExecutionService {
     /// `true` if the task was cancelled before start, or `false` if no active
     /// task with this ID can be cancelled.
     pub fn cancel(&self, task_id: TaskId) -> bool {
-        let cancel = self.state.cancel_callback(task_id);
-        cancel.is_some_and(|cancel| cancel())
+        let Some((token, cancel)) = self.state.cancel_candidate(task_id) else {
+            return false;
+        };
+        if cancel() {
+            self.state.finish(task_id, &token, TaskStatus::Cancelled);
+            true
+        } else {
+            false
+        }
     }
 
     /// Returns the current status of a task.
@@ -338,8 +344,11 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// `Some(status)` if the service retains a record for this ID, or `None`
-    /// if the ID is unknown.
+    /// `Some(status)` for an accepted active or retained terminal task. Returns
+    /// `None` for an unaccepted reservation, unknown ID, or evicted terminal
+    /// record. A new task with the same ID replaces the old terminal status.
+    /// Cancellation may publish a handle result just before this registry is
+    /// updated; handle and service observations are not an atomic pair.
     #[inline]
     pub fn status(&self, task_id: TaskId) -> Option<TaskStatus> {
         self.state.status(task_id)
@@ -365,7 +374,9 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// A snapshot of retained task records grouped by status.
+    /// A snapshot of accepted active and retained terminal tasks grouped by
+    /// status. `total` is the sum of these visible records, not a lifetime
+    /// submission counter; unaccepted reservations are excluded.
     #[inline]
     pub fn stats(&self) -> TaskExecutionStats {
         self.state.stats()
@@ -411,10 +422,12 @@ impl TaskExecutionService {
         self.state.is_suspended()
     }
 
-    /// Waits for the active task snapshot observed at call time to finish.
+    /// Waits for the submission identity snapshot observed at call time to
+    /// leave the active registry.
     ///
-    /// Tasks submitted after this method starts are not part of the waited
-    /// snapshot. This method blocks the current thread.
+    /// A later submission reusing an ID does not extend this snapshot. This
+    /// method blocks the current thread and does not guarantee that a task
+    /// handle has finished publishing its result.
     ///
     /// # Example
     ///
@@ -440,7 +453,8 @@ impl TaskExecutionService {
 
     /// Waits until the service registry has no submitted or running tasks.
     ///
-    /// This method blocks the current thread and observes real-time idleness.
+    /// This method blocks until no accepted task or pending reservation is
+    /// active. Result publication to a handle may still be in progress.
     ///
     /// # Example
     ///
@@ -566,151 +580,6 @@ impl TaskExecutionService {
     }
 }
 
-/// Shared state for [`TaskExecutionService`].
-#[derive(Default)]
-struct TaskExecutionServiceState {
-    inner: Mutex<TaskExecutionServiceInner>,
-    idle: Condvar,
-}
-
-impl TaskExecutionServiceState {
-    /// Acquires service state.
-    fn lock_inner(&self) -> MutexGuard<'_, TaskExecutionServiceInner> {
-        self.inner
-            .lock()
-            .expect("task execution service state lock should not be poisoned")
-    }
-
-    /// Registers a submitted task.
-    fn register(
-        &self,
-        task_id: TaskId,
-        cancel: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Result<(), TaskExecutionServiceError> {
-        let mut inner = self.lock_inner();
-        if inner.suspended {
-            return Err(TaskExecutionServiceError::Suspended);
-        }
-        if inner.tasks.contains_key(&task_id) {
-            return Err(TaskExecutionServiceError::DuplicateTask(task_id));
-        }
-        inner.tasks.insert(
-            task_id,
-            TaskRecord {
-                status: TaskStatus::Submitted,
-                cancel,
-            },
-        );
-        Ok(())
-    }
-
-    /// Removes a task record.
-    fn remove(&self, task_id: TaskId) {
-        let mut inner = self.lock_inner();
-        inner.tasks.remove(&task_id);
-        self.idle.notify_all();
-    }
-
-    /// Gets a task status.
-    fn status(&self, task_id: TaskId) -> Option<TaskStatus> {
-        self.lock_inner().tasks.get(&task_id).map(|record| record.status)
-    }
-
-    /// Gets a task cancel callback if the task is active.
-    fn cancel_callback(&self, task_id: TaskId) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
-        let inner = self.lock_inner();
-        let record = inner.tasks.get(&task_id)?;
-        record.status.is_active().then(|| Arc::clone(&record.cancel))
-    }
-
-    /// Updates a task status.
-    fn set_status(&self, task_id: TaskId, status: TaskStatus) {
-        let mut inner = self.lock_inner();
-        let record = inner
-            .tasks
-            .get_mut(&task_id)
-            .expect("task status can only be updated for a registered task");
-        record.status = status;
-        self.idle.notify_all();
-    }
-
-    /// Updates suspended flag.
-    fn set_suspended(&self, suspended: bool) {
-        self.lock_inner().suspended = suspended;
-    }
-
-    /// Returns whether new submissions are suspended.
-    fn is_suspended(&self) -> bool {
-        self.lock_inner().suspended
-    }
-
-    /// Returns task statistics.
-    fn stats(&self) -> TaskExecutionStats {
-        let inner = self.lock_inner();
-        let mut stats = TaskExecutionStats::default();
-        for record in inner.tasks.values() {
-            stats.add_status(record.status);
-        }
-        stats
-    }
-
-    /// Waits for active task IDs observed at call time.
-    fn await_in_flight_tasks_completion(&self) {
-        let mut inner = self.lock_inner();
-        let task_ids = inner
-            .tasks
-            .iter()
-            .filter_map(|(&task_id, record)| record.status.is_active().then_some(task_id))
-            .collect::<Vec<_>>();
-        while task_ids.iter().any(|task_id| inner.task_is_active(*task_id)) {
-            inner = self.wait_for_idle_notification(inner);
-        }
-    }
-
-    /// Waits until no retained task record is active.
-    fn await_idle(&self) {
-        let mut inner = self.lock_inner();
-        while inner.has_active_tasks() {
-            inner = self.wait_for_idle_notification(inner);
-        }
-    }
-
-    /// Waits for a state transition notification.
-    fn wait_for_idle_notification<'a>(
-        &self,
-        inner: MutexGuard<'a, TaskExecutionServiceInner>,
-    ) -> MutexGuard<'a, TaskExecutionServiceInner> {
-        self.idle
-            .wait(inner)
-            .expect("task execution service state lock should not be poisoned")
-    }
-}
-
-/// Mutable service state protected by a mutex.
-#[derive(Default)]
-struct TaskExecutionServiceInner {
-    suspended: bool,
-    tasks: HashMap<TaskId, TaskRecord>,
-}
-
-impl TaskExecutionServiceInner {
-    /// Returns whether a retained task ID is still active.
-    fn task_is_active(&self, task_id: TaskId) -> bool {
-        self.tasks.get(&task_id).is_some_and(|record| record.status.is_active())
-    }
-
-    /// Returns whether any retained task is still active.
-    fn has_active_tasks(&self) -> bool {
-        self.tasks.values().any(|record| record.status.is_active())
-    }
-}
-
-/// Registry record for one managed task.
-struct TaskRecord {
-    status: TaskStatus,
-    cancel: Arc<dyn Fn() -> bool + Send + Sync>,
-}
-
 /// Callable wrapper that keeps service-level status aligned with task outcome.
 struct StatusReportingTask<C> {
     /// Stable business task ID.
@@ -719,6 +588,8 @@ struct StatusReportingTask<C> {
     task: C,
     /// Shared service registry.
     state: Arc<TaskExecutionServiceState>,
+    /// Identity of this submission, protecting reused business IDs.
+    token: SubmissionToken,
 }
 
 impl<C, R, E> Callable<R, E> for StatusReportingTask<C>
@@ -727,18 +598,18 @@ where
 {
     /// Runs the user task and records the corresponding service-level status.
     fn call(&mut self) -> Result<R, E> {
-        self.state.set_status(self.task_id, TaskStatus::Running);
+        self.state.start(self.task_id, &self.token);
         match catch_unwind(AssertUnwindSafe(|| self.task.call())) {
             Ok(Ok(value)) => {
-                self.state.set_status(self.task_id, TaskStatus::Succeeded);
+                self.state.finish(self.task_id, &self.token, TaskStatus::Succeeded);
                 Ok(value)
             }
             Ok(Err(error)) => {
-                self.state.set_status(self.task_id, TaskStatus::Failed);
+                self.state.finish(self.task_id, &self.token, TaskStatus::Failed);
                 Err(error)
             }
             Err(payload) => {
-                self.state.set_status(self.task_id, TaskStatus::Panicked);
+                self.state.finish(self.task_id, &self.token, TaskStatus::Panicked);
                 resume_unwind(payload);
             }
         }

@@ -14,6 +14,7 @@
 mod task_execution_service;
 mod task_execution_service_builder;
 mod task_execution_service_error;
+mod task_execution_service_state;
 mod task_execution_stats;
 mod task_id;
 mod task_status;

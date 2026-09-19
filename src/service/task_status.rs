@@ -12,6 +12,7 @@
 /// The status describes service-level progress, not the typed task result
 /// stored in [`TaskHandle`](qubit_executor::TaskHandle). The handle remains the
 /// source of truth for the task's success value or error value.
+/// A completed status may be evicted from the service's bounded history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     /// The task was accepted but has not started running.
