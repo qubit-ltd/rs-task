@@ -9,6 +9,7 @@
 
 use std::io;
 use std::sync::Arc;
+use std::sync::Barrier;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -177,6 +178,42 @@ fn test_task_execution_service_rejects_duplicate_task_id() {
 }
 
 #[test]
+fn test_task_execution_service_reuses_terminal_task_id() {
+    let service = create_single_worker_service();
+    let first = service
+        .submit_callable(7, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .expect("first task should be accepted");
+    assert_eq!(first.get().expect("first task should finish"), 42);
+
+    let second = service
+        .submit_callable(7, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .expect("completed task ID should be reusable");
+    assert_eq!(second.get().expect("second task should finish"), 42);
+    service.shutdown();
+    service.wait_termination();
+}
+
+#[test]
+fn test_task_execution_service_zero_history_drops_terminal_status() {
+    let service = TaskExecutionService::builder()
+        .completed_history_capacity(0)
+        .build()
+        .expect("service should be created");
+    let first = service
+        .submit_callable(7, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .expect("first task should be accepted");
+    assert_eq!(first.get().expect("first task should finish"), 42);
+    assert_eq!(service.status(7), None);
+    assert_eq!(service.stats().total, 0);
+    let second = service
+        .submit(7, successful_unit_task as fn() -> Result<(), io::Error>)
+        .expect("terminal ID should be reusable without history");
+    second.get().expect("second task should finish");
+    service.shutdown();
+    service.wait_termination();
+}
+
+#[test]
 fn test_task_execution_service_suspend_rejects_new_tasks() {
     let service = TaskExecutionService::new().expect("service should be created");
 
@@ -299,6 +336,47 @@ fn test_task_execution_service_stop_cancels_queued_task() {
     first.get().expect("first task should complete");
     service.wait_termination();
     assert!(service.is_terminated());
+}
+
+#[test]
+fn test_task_execution_service_cancel_and_stop_race_keeps_terminal_status() {
+    let service = Arc::new(create_single_worker_service());
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let running = service
+        .submit(1, move || {
+            started_tx.send(()).expect("start signal should send");
+            release_rx.recv().map_err(|error| io::Error::other(error.to_string()))?;
+            Ok::<(), io::Error>(())
+        })
+        .expect("running task should be accepted");
+    wait_started(started_rx);
+    let queued = service
+        .submit(2, successful_unit_task as fn() -> Result<(), io::Error>)
+        .expect("queued task should be accepted");
+
+    let gate = Arc::new(Barrier::new(3));
+    let cancel_service = Arc::clone(&service);
+    let cancel_gate = Arc::clone(&gate);
+    let cancel_thread = thread::spawn(move || {
+        cancel_gate.wait();
+        cancel_service.cancel(2)
+    });
+    let stop_service = Arc::clone(&service);
+    let stop_gate = Arc::clone(&gate);
+    let stop_thread = thread::spawn(move || {
+        stop_gate.wait();
+        stop_service.stop()
+    });
+    gate.wait();
+    let _cancelled = cancel_thread.join().expect("cancel thread should not panic");
+    let _report = stop_thread.join().expect("stop thread should not panic");
+
+    assert_eq!(service.status(2), Some(TaskStatus::Cancelled));
+    assert!(matches!(queued.get(), Err(TaskExecutionError::Cancelled)));
+    release_tx.send(()).expect("running task should be released");
+    running.get().expect("running task should complete");
+    service.wait_termination();
 }
 
 #[test]

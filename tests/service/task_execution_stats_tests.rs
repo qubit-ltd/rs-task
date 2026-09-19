@@ -12,6 +12,7 @@ use std::io;
 use qubit_executor::TaskExecutionError;
 use qubit_task::service::TaskExecutionService;
 use qubit_task::service::TaskExecutionStats;
+use qubit_task::service::TaskStatus;
 
 #[test]
 fn test_task_execution_stats_default_is_empty() {
@@ -48,6 +49,32 @@ fn test_task_execution_stats_counts_terminal_outcomes() {
     assert_eq!(stats.succeeded, 1);
     assert_eq!(stats.failed, 1);
     assert_eq!(stats.panicked, 1);
+    service.shutdown();
+    service.wait_termination();
+}
+
+#[test]
+fn test_task_execution_stats_count_only_retained_records() {
+    let service = TaskExecutionService::builder()
+        .completed_history_capacity(1)
+        .build()
+        .expect("service should be created");
+    for id in 1..=2 {
+        service
+            .submit(id, || Ok::<(), io::Error>(()))
+            .expect("task should be accepted")
+            .get()
+            .expect("task should complete");
+    }
+    let stats = service.stats();
+    assert_eq!(stats.total, 1);
+    assert_eq!(stats.succeeded, 1);
+    assert_eq!(
+        stats.total,
+        stats.submitted + stats.running + stats.succeeded + stats.failed + stats.panicked + stats.cancelled
+    );
+    assert_eq!(service.status(1), None);
+    assert_eq!(service.status(2), Some(TaskStatus::Succeeded));
     service.shutdown();
     service.wait_termination();
 }
