@@ -15,7 +15,7 @@
 
 当前版本的 `rs-task::service::TaskExecutionService` 仍然是执行层服务：
 
-- 为每个任务分配或接收稳定的 `TaskId`。
+- 接收调用方提供的 `TaskId`，并在任务活跃期间保持唯一。
 - 使用 `qubit-thread-pool` 的 `ThreadPool` 执行任务。
 - 维护进程内任务状态：
   - `Submitted`
@@ -25,7 +25,12 @@
   - `Panicked`
   - `Cancelled`
 - 支持通过 `TaskHandle` 获取任务执行结果。
+- 默认保留最近 1024 个终态记录；可用 builder 配置容量，0 表示不保留。
+- 终态 ID 可以复用，新提交会替代该 ID 的旧状态。历史仅是进程内有界快照，不是持久化结果。
 - 支持提交前取消、立即关闭时取消队列任务、等待 idle。
+
+当前版本的 `stats().total` 是当前可查询的活跃任务与保留终态之和，不是累计提交次数。
+`await_idle()` 等待注册表无活跃任务，但不能代替 `TaskHandle` 等待结果发布。
 
 当前版本不负责：
 
