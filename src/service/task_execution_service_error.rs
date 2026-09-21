@@ -9,18 +9,18 @@ use qubit_executor::service::SubmissionError;
 use qubit_thread_pool::PoolJobSubmissionError;
 use thiserror::Error;
 
-use super::task_id::TaskId;
+use super::Id;
 
 /// Error returned when [`TaskExecutionService`](super::TaskExecutionService)
 /// cannot accept a task.
 ///
 /// This error is about the service submission path. The accepted task's own
-/// result is still reported through [`TaskHandle`](qubit_executor::TaskHandle).
+/// result is still reported through [`TaskHandle`](super::TaskHandle).
 #[derive(Debug, Error)]
 pub enum TaskExecutionServiceError {
     /// Another active task or pending submission already uses this task ID.
     #[error("task {0} already exists")]
-    DuplicateTask(TaskId),
+    DuplicateTask(Id),
 
     /// The service is suspended and temporarily refuses new tasks.
     #[error("task execution service is suspended")]

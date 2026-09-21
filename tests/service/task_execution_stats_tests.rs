@@ -10,6 +10,7 @@
 use std::io;
 
 use qubit_executor::TaskExecutionError;
+use qubit_task::service::Id;
 use qubit_task::service::TaskExecutionService;
 use qubit_task::service::TaskExecutionStats;
 use qubit_task::service::TaskStatus;
@@ -31,13 +32,13 @@ fn test_task_execution_stats_default_is_empty() {
 fn test_task_execution_stats_counts_terminal_outcomes() {
     let service = TaskExecutionService::new().expect("service should be created");
     let succeeded = service
-        .submit(1, || Ok::<(), io::Error>(()))
+        .submit(Id::new(1), || Ok::<(), io::Error>(()))
         .expect("successful task should be accepted");
     let failed = service
-        .submit(2, || Err::<(), _>(io::Error::other("failed")))
+        .submit(Id::new(2), || Err::<(), _>(io::Error::other("failed")))
         .expect("failing task should be accepted");
     let panicked = service
-        .submit(3, || -> Result<(), io::Error> { panic!("boom") })
+        .submit(Id::new(3), || -> Result<(), io::Error> { panic!("boom") })
         .expect("panicking task should be accepted");
 
     succeeded.get().expect("successful task should complete");
@@ -61,7 +62,7 @@ fn test_task_execution_stats_count_only_retained_records() {
         .expect("service should be created");
     for id in 1..=2 {
         service
-            .submit(id, || Ok::<(), io::Error>(()))
+            .submit(Id::new(id), || Ok::<(), io::Error>(()))
             .expect("task should be accepted")
             .get()
             .expect("task should complete");
@@ -73,8 +74,8 @@ fn test_task_execution_stats_count_only_retained_records() {
         stats.total,
         stats.submitted + stats.running + stats.succeeded + stats.failed + stats.panicked + stats.cancelled
     );
-    assert_eq!(service.status(1), None);
-    assert_eq!(service.status(2), Some(TaskStatus::Succeeded));
+    assert_eq!(service.status(Id::new(1)), None);
+    assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Succeeded));
     service.shutdown();
     service.wait_termination();
 }

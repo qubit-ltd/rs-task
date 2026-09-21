@@ -10,7 +10,6 @@ use std::panic::catch_unwind;
 use std::panic::resume_unwind;
 use std::sync::Arc;
 
-use qubit_executor::TaskHandle;
 use qubit_executor::service::ExecutorService;
 use qubit_executor::service::ExecutorServiceBuilderError;
 use qubit_executor::service::StopReport;
@@ -21,25 +20,26 @@ use qubit_function::Runnable;
 use qubit_thread_pool::PoolJob;
 use qubit_thread_pool::ThreadPool;
 
+use super::Id;
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
 use super::task_execution_service_error::TaskExecutionServiceError;
 use super::task_execution_service_state::CancelFn;
 use super::task_execution_service_state::SubmissionToken;
 use super::task_execution_service_state::TaskExecutionServiceState;
 use super::task_execution_stats::TaskExecutionStats;
-use super::task_id::TaskId;
+use super::task_handle::TaskHandle;
 use super::task_status::TaskStatus;
 
 /// Managed task execution service built on [`ThreadPool`].
 ///
-/// Accepts a caller-provided business [`TaskId`] per task and tracks
+/// Accepts a caller-provided business [`Id`] per task and tracks
 /// service-level status (submitted, running, succeeded, failed, cancelled,
 /// panicked). The typed task outcome is still retrieved through [`TaskHandle`].
 ///
 /// # Responsibilities
 ///
-/// - **Registry**: The same [`TaskId`] cannot be submitted again while its task
-///   is active or being submitted; a duplicate returns
+/// - **Registry**: The same [`Id`] cannot be submitted again while its task is
+///   active or being submitted; a duplicate returns
 ///   [`TaskExecutionServiceError::DuplicateTask`]. Use this when you need
 ///   lookup by ID or optional pre-start cancellation. Terminal statuses are
 ///   retained only up to the builder's history capacity (1024 by default). A
@@ -75,22 +75,23 @@ use super::task_status::TaskStatus;
 ///
 /// ```
 /// use std::error::Error;
-/// use qubit_task::service::{TaskExecutionService, TaskId, TaskStatus};
+/// use qubit_task::service::{TaskExecutionService, Id, TaskStatus};
 ///
 /// fn main() -> Result<(), Box<dyn Error>> {
 ///     let service = TaskExecutionService::new()?;
-///     let id: TaskId = 1001;
+///     let id: Id = Id::new(1001);
 ///
 ///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
 ///     handle.get().unwrap();
 ///
 ///     assert_eq!(service.status(id), Some(TaskStatus::Succeeded));
 ///
-///     service.await_idle();
+///     service.wait_for_idle();
 ///     service.shutdown();
 ///     Ok(())
 /// }
 /// ```
+#[must_use = "a task execution service must be retained to submit and observe tasks"]
 pub struct TaskExecutionService {
     pool: ThreadPool,
     state: Arc<TaskExecutionServiceState>,
@@ -105,7 +106,7 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
+    /// use qubit_task::service::{Id, TaskExecutionService};
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let _service = TaskExecutionService::new()?;
@@ -130,7 +131,7 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
+    /// use qubit_task::service::{Id, TaskExecutionService};
     /// use qubit_thread_pool::ThreadPoolBuilder;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
@@ -163,11 +164,11 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::TaskExecutionService;
+    /// use qubit_task::service::{Id, TaskExecutionService};
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
-    ///     let handle = service.submit(42_u64, || Ok::<(), ()>(()))?;
+    ///     let handle = service.submit(Id::new(42), || Ok::<(), ()>(()))?;
     ///     handle.get().unwrap();
     ///     Ok(())
     /// }
@@ -185,7 +186,7 @@ impl TaskExecutionService {
     /// [`TaskExecutionServiceError`] when the ID is duplicated, the service is
     /// suspended, or the backing pool rejects the task.
     #[inline]
-    pub fn submit<T, E>(&self, task_id: TaskId, mut task: T) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
+    pub fn submit<T, E>(&self, task_id: Id, mut task: T) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
     where
         T: Runnable<E> + Send + 'static,
         E: Send + 'static,
@@ -199,11 +200,11 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, TaskId};
+    /// use qubit_task::service::{TaskExecutionService, Id};
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
-    ///     let id: TaskId = 7;
+    ///     let id: Id = Id::new(7);
     ///     let handle = service.submit_callable(id, || Ok::<i32, ()>(21))?;
     ///     assert_eq!(handle.get().unwrap(), 21);
     ///     Ok(())
@@ -219,11 +220,7 @@ impl TaskExecutionService {
     ///
     /// `Ok(handle)` if the service accepts the task. The handle reports the
     /// typed task result while this service records only service-level status.
-    pub fn submit_callable<C, R, E>(
-        &self,
-        task_id: TaskId,
-        task: C,
-    ) -> Result<TaskHandle<R, E>, TaskExecutionServiceError>
+    pub fn submit_callable<C, R, E>(&self, task_id: Id, task: C) -> Result<TaskHandle<R, E>, TaskExecutionServiceError>
     where
         C: Callable<R, E> + Send + 'static,
         R: Send + 'static,
@@ -272,7 +269,7 @@ impl TaskExecutionService {
             self.state.discard(task_id, &token);
             return Err(error.into());
         }
-        Ok(handle)
+        Ok(TaskHandle::new(task_id, handle))
     }
 
     /// Attempts to cancel a submitted task by ID.
@@ -283,11 +280,11 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, TaskId};
+    /// use qubit_task::service::{TaskExecutionService, Id};
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
-    ///     let id: TaskId = 1;
+    ///     let id: Id = Id::new(1);
     ///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
     ///     // `true` only if cancelled before a worker starts the task (race with the pool).
     ///     let _cancelled = service.cancel(id);
@@ -308,7 +305,7 @@ impl TaskExecutionService {
     ///
     /// `true` if the task was cancelled before start, or `false` if no active
     /// task with this ID can be cancelled.
-    pub fn cancel(&self, task_id: TaskId) -> bool {
+    pub fn cancel(&self, task_id: Id) -> bool {
         let Some((token, cancel)) = self.state.cancel_candidate(task_id) else {
             return false;
         };
@@ -326,11 +323,11 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, TaskId, TaskStatus};
+    /// use qubit_task::service::{TaskExecutionService, Id, TaskStatus};
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
-    ///     let id: TaskId = 10;
+    ///     let id: Id = Id::new(10);
     ///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
     ///     handle.get().unwrap();
     ///     assert_eq!(service.status(id), Some(TaskStatus::Succeeded));
@@ -350,7 +347,7 @@ impl TaskExecutionService {
     /// Cancellation may publish a handle result just before this registry is
     /// updated; handle and service observations are not an atomic pair.
     #[inline]
-    pub fn status(&self, task_id: TaskId) -> Option<TaskStatus> {
+    pub fn status(&self, task_id: Id) -> Option<TaskStatus> {
         self.state.status(task_id)
     }
 
@@ -360,11 +357,11 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::TaskExecutionService;
+    /// use qubit_task::service::{Id, TaskExecutionService};
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
-    ///     let handle = service.submit(1_u64, || Ok::<(), ()>(()))?;
+    ///     let handle = service.submit(Id::new(1), || Ok::<(), ()>(()))?;
     ///     handle.get().unwrap();
     ///     let snapshot = service.stats();
     ///     assert!(snapshot.total >= 1);
@@ -433,21 +430,21 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, TaskId};
+    /// use qubit_task::service::{TaskExecutionService, Id};
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
-    ///     let a: TaskId = 1;
-    ///     let b: TaskId = 2;
+    ///     let a: Id = Id::new(1);
+    ///     let b: Id = Id::new(2);
     ///     let h1 = service.submit(a, || Ok::<(), ()>(()))?;
     ///     let h2 = service.submit(b, || Ok::<(), ()>(()))?;
-    ///     service.await_in_flight_tasks_completion();
+    ///     service.wait_for_current_tasks();
     ///     h1.get().unwrap();
     ///     h2.get().unwrap();
     ///     Ok(())
     /// }
     /// ```
-    pub fn await_in_flight_tasks_completion(&self) {
+    pub fn wait_for_current_tasks(&self) {
         self.state.await_in_flight_tasks_completion();
     }
 
@@ -460,18 +457,18 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, TaskId};
+    /// use qubit_task::service::{TaskExecutionService, Id};
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
-    ///     let id: TaskId = 1;
+    ///     let id: Id = Id::new(1);
     ///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
     ///     handle.get().unwrap();
-    ///     service.await_idle();
+    ///     service.wait_for_idle();
     ///     Ok(())
     /// }
     /// ```
-    pub fn await_idle(&self) {
+    pub fn wait_for_idle(&self) {
         self.state.await_idle();
     }
 
@@ -583,7 +580,7 @@ impl TaskExecutionService {
 /// Callable wrapper that keeps service-level status aligned with task outcome.
 struct StatusReportingTask<C> {
     /// Stable business task ID.
-    task_id: TaskId,
+    task_id: Id,
     /// User task to execute.
     task: C,
     /// Shared service registry.

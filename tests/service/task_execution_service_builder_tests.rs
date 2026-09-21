@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use qubit_executor::service::ExecutorServiceBuilderError;
+use qubit_task::service::Id;
 use qubit_task::service::TaskExecutionService;
 use qubit_task::service::TaskExecutionServiceBuilder;
 use qubit_task::service::TaskStatus;
@@ -62,13 +63,13 @@ fn test_task_execution_service_builder_sets_completed_history_capacity() {
         .expect("service should be created");
     for id in 1..=2 {
         service
-            .submit(id, || Ok::<(), ()>(()))
+            .submit(Id::new(id), || Ok::<(), ()>(()))
             .expect("task should be accepted")
             .get()
             .expect("task should complete");
     }
-    assert_eq!(service.status(1), None);
-    assert_eq!(service.status(2), Some(TaskStatus::Succeeded));
+    assert_eq!(service.status(Id::new(1)), None);
+    assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Succeeded));
     assert_eq!(service.stats().total, 1);
     service.shutdown();
     service.wait_termination();
@@ -79,14 +80,14 @@ fn test_task_execution_service_builder_default_history_is_bounded() {
     let service = TaskExecutionService::new().expect("service should be created");
     for id in 0..=1024 {
         service
-            .submit(id, || Ok::<(), ()>(()))
+            .submit(Id::new(id), || Ok::<(), ()>(()))
             .expect("task should be accepted")
             .get()
             .expect("task should complete");
     }
-    assert_eq!(service.status(0), None);
-    assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
-    assert_eq!(service.status(1024), Some(TaskStatus::Succeeded));
+    assert_eq!(service.status(Id::new(0)), None);
+    assert_eq!(service.status(Id::new(1)), Some(TaskStatus::Succeeded));
+    assert_eq!(service.status(Id::new(1024)), Some(TaskStatus::Succeeded));
     assert_eq!(service.stats().total, 1024);
     service.shutdown();
     service.wait_termination();
