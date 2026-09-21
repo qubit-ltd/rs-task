@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use qubit_executor::service::ExecutorServiceBuilderError;
-use qubit_task::service::Id;
+use qubit_id::Id;
 use qubit_task::service::TaskExecutionService;
 use qubit_task::service::TaskExecutionServiceBuilder;
 use qubit_task::service::TaskStatus;
@@ -52,7 +52,10 @@ fn test_task_execution_service_builder_returns_pool_build_error() {
         .thread_pool(ThreadPool::builder().pool_size(0))
         .build();
 
-    assert!(matches!(result, Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),));
+    assert!(matches!(
+        result,
+        Err(ExecutorServiceBuilderError::ZeroMaximumPoolSize),
+    ));
 }
 
 #[test]

@@ -53,7 +53,8 @@ let service = TaskExecutionService::builder()
 Submit a callable and consume its handle when the typed result is required:
 
 ~~~rust
-use qubit_task::service::{Id, TaskExecutionService, TaskStatus};
+use qubit_id::Id;
+use qubit_task::service::{TaskExecutionService, TaskStatus};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionService::new()?;

@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::panic::resume_unwind;
@@ -17,10 +18,10 @@ use qubit_executor::task::spi::TaskEndpointPair;
 use qubit_executor::task::spi::TaskSlotCell;
 use qubit_function::Callable;
 use qubit_function::Runnable;
+use qubit_id::Id;
 use qubit_thread_pool::PoolJob;
 use qubit_thread_pool::ThreadPool;
 
-use super::Id;
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
 use super::task_execution_service_error::TaskExecutionServiceError;
 use super::task_execution_service_state::CancelFn;
@@ -75,7 +76,8 @@ use super::task_status::TaskStatus;
 ///
 /// ```
 /// use std::error::Error;
-/// use qubit_task::service::{TaskExecutionService, Id, TaskStatus};
+/// use qubit_id::Id;
+/// use qubit_task::service::{TaskExecutionService, TaskStatus};
 ///
 /// fn main() -> Result<(), Box<dyn Error>> {
 ///     let service = TaskExecutionService::new()?;
@@ -93,7 +95,9 @@ use super::task_status::TaskStatus;
 /// ```
 #[must_use = "a task execution service must be retained to submit and observe tasks"]
 pub struct TaskExecutionService {
+    /// Backing pool that accepts and runs submitted tasks.
     pool: ThreadPool,
+    /// Registry containing task lifecycle state and bounded terminal history.
     state: Arc<TaskExecutionServiceState>,
 }
 
@@ -106,7 +110,7 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::{Id, TaskExecutionService};
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
     ///     let _service = TaskExecutionService::new()?;
@@ -131,7 +135,7 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::{Id, TaskExecutionService};
+    /// use qubit_task::service::TaskExecutionService;
     /// use qubit_thread_pool::ThreadPoolBuilder;
     ///
     /// fn main() -> Result<(), ExecutorServiceBuilderError> {
@@ -145,12 +149,25 @@ impl TaskExecutionService {
     /// # Returns
     ///
     /// A builder holding the default [`qubit_thread_pool::ThreadPoolBuilder`].
+    #[must_use]
     #[inline]
     pub fn builder() -> TaskExecutionServiceBuilder {
         TaskExecutionServiceBuilder::default()
     }
 
-    /// Builds a service from an already constructed pool.
+    /// Builds a service from an already constructed pool and history policy.
+    ///
+    /// The pool is assumed to be configured by the caller; this constructor
+    /// only creates the service registry around it.
+    ///
+    /// # Parameters
+    ///
+    /// * `pool` - Already configured pool owned by the new service.
+    /// * `history_capacity` - Maximum number of terminal statuses to retain.
+    ///
+    /// # Returns
+    ///
+    /// A service using the supplied pool and history policy.
     pub(crate) fn from_thread_pool(pool: ThreadPool, history_capacity: usize) -> Self {
         Self {
             pool,
@@ -164,7 +181,8 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{Id, TaskExecutionService};
+    /// use qubit_id::Id;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
@@ -179,6 +197,11 @@ impl TaskExecutionService {
     /// * `task_id` - Caller-provided business ID, unique among active tasks.
     /// * `task` - Runnable to execute.
     ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Runnable task type.
+    /// * `E` - Error type returned by the runnable.
+    ///
     /// # Returns
     ///
     /// `Ok(handle)` if the service accepts the task. This only means
@@ -186,7 +209,11 @@ impl TaskExecutionService {
     /// [`TaskExecutionServiceError`] when the ID is duplicated, the service is
     /// suspended, or the backing pool rejects the task.
     #[inline]
-    pub fn submit<T, E>(&self, task_id: Id, mut task: T) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
+    pub fn submit<T, E>(
+        &self,
+        task_id: Id,
+        mut task: T,
+    ) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
     where
         T: Runnable<E> + Send + 'static,
         E: Send + 'static,
@@ -200,7 +227,8 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, Id};
+    /// use qubit_id::Id;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
@@ -220,7 +248,17 @@ impl TaskExecutionService {
     ///
     /// `Ok(handle)` if the service accepts the task. The handle reports the
     /// typed task result while this service records only service-level status.
-    pub fn submit_callable<C, R, E>(&self, task_id: Id, task: C) -> Result<TaskHandle<R, E>, TaskExecutionServiceError>
+    ///
+    /// # Type Parameters
+    ///
+    /// * `C` - Callable task type.
+    /// * `R` - Successful result type.
+    /// * `E` - Error type returned by the callable.
+    pub fn submit_callable<C, R, E>(
+        &self,
+        task_id: Id,
+        task: C,
+    ) -> Result<TaskHandle<R, E>, TaskExecutionServiceError>
     where
         C: Callable<R, E> + Send + 'static,
         R: Send + 'static,
@@ -244,7 +282,7 @@ impl TaskExecutionService {
         let job = PoolJob::with_accept(
             Box::new(move || {
                 accept_slot.accept();
-                accept_state.accept(task_id, &accept_token);
+                let _ = accept_state.accept(task_id, &accept_token);
             }),
             Box::new(move || {
                 let slot = run_slot.take();
@@ -260,13 +298,13 @@ impl TaskExecutionService {
             }),
             Box::new(move || {
                 if stop_slot.cancel_unstarted() {
-                    stop_state.finish(task_id, &stop_token, TaskStatus::Cancelled);
+                    let _ = stop_state.finish(task_id, &stop_token, TaskStatus::Cancelled);
                 }
             }),
         );
 
         if let Err(error) = self.pool.submit_job(job) {
-            self.state.discard(task_id, &token);
+            let _ = self.state.discard(task_id, &token);
             return Err(error.into());
         }
         Ok(TaskHandle::new(task_id, handle))
@@ -280,7 +318,8 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, Id};
+    /// use qubit_id::Id;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
@@ -305,12 +344,13 @@ impl TaskExecutionService {
     ///
     /// `true` if the task was cancelled before start, or `false` if no active
     /// task with this ID can be cancelled.
+    #[must_use]
     pub fn cancel(&self, task_id: Id) -> bool {
         let Some((token, cancel)) = self.state.cancel_candidate(task_id) else {
             return false;
         };
         if cancel() {
-            self.state.finish(task_id, &token, TaskStatus::Cancelled);
+            let _ = self.state.finish(task_id, &token, TaskStatus::Cancelled);
             true
         } else {
             false
@@ -323,7 +363,8 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, Id, TaskStatus};
+    /// use qubit_id::Id;
+    /// use qubit_task::service::{TaskExecutionService, TaskStatus};
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
@@ -346,6 +387,7 @@ impl TaskExecutionService {
     /// record. A new task with the same ID replaces the old terminal status.
     /// Cancellation may publish a handle result just before this registry is
     /// updated; handle and service observations are not an atomic pair.
+    #[must_use]
     #[inline]
     pub fn status(&self, task_id: Id) -> Option<TaskStatus> {
         self.state.status(task_id)
@@ -357,7 +399,8 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{Id, TaskExecutionService};
+    /// use qubit_id::Id;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
@@ -374,6 +417,7 @@ impl TaskExecutionService {
     /// A snapshot of accepted active and retained terminal tasks grouped by
     /// status. `total` is the sum of these visible records, not a lifetime
     /// submission counter; unaccepted reservations are excluded.
+    #[must_use]
     #[inline]
     pub fn stats(&self) -> TaskExecutionStats {
         self.state.stats()
@@ -414,6 +458,7 @@ impl TaskExecutionService {
     /// # Returns
     ///
     /// `true` if new submissions are rejected before reaching the pool.
+    #[must_use]
     #[inline]
     pub fn is_suspended(&self) -> bool {
         self.state.is_suspended()
@@ -430,7 +475,8 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, Id};
+    /// use qubit_id::Id;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
@@ -457,7 +503,8 @@ impl TaskExecutionService {
     ///
     /// ```
     /// use std::error::Error;
-    /// use qubit_task::service::{TaskExecutionService, Id};
+    /// use qubit_id::Id;
+    /// use qubit_task::service::TaskExecutionService;
     ///
     /// fn main() -> Result<(), Box<dyn Error>> {
     ///     let service = TaskExecutionService::new()?;
@@ -510,18 +557,21 @@ impl TaskExecutionService {
     /// # Returns
     ///
     /// A count-based report from the backing pool.
+    #[must_use]
     #[inline]
     pub fn stop(&self) -> StopReport {
         self.pool.stop()
     }
 
     /// Returns whether the backing pool no longer accepts new work.
+    #[must_use]
     #[inline]
     pub fn is_not_running(&self) -> bool {
         self.pool.is_not_running()
     }
 
     /// Returns whether the backing pool has terminated.
+    #[must_use]
     #[inline]
     pub fn is_terminated(&self) -> bool {
         self.pool.is_terminated()
@@ -571,6 +621,7 @@ impl TaskExecutionService {
     /// # Returns
     ///
     /// A shared reference for low-level inspection such as pool statistics.
+    #[must_use]
     #[inline]
     pub fn thread_pool(&self) -> &ThreadPool {
         &self.pool
@@ -578,6 +629,10 @@ impl TaskExecutionService {
 }
 
 /// Callable wrapper that keeps service-level status aligned with task outcome.
+///
+/// # Type Parameters
+///
+/// * `C` - User callable whose outcome is reported to the service registry.
 struct StatusReportingTask<C> {
     /// Stable business task ID.
     task_id: Id,
@@ -594,19 +649,30 @@ where
     C: Callable<R, E>,
 {
     /// Runs the user task and records the corresponding service-level status.
+    ///
+    /// # Returns
+    ///
+    /// The user's successful value or error. A panic is recorded as
+    /// [`TaskStatus::Panicked`] and then resumed on the worker thread.
     fn call(&mut self) -> Result<R, E> {
-        self.state.start(self.task_id, &self.token);
+        let _ = self.state.start(self.task_id, &self.token);
         match catch_unwind(AssertUnwindSafe(|| self.task.call())) {
             Ok(Ok(value)) => {
-                self.state.finish(self.task_id, &self.token, TaskStatus::Succeeded);
+                let _ = self
+                    .state
+                    .finish(self.task_id, &self.token, TaskStatus::Succeeded);
                 Ok(value)
             }
             Ok(Err(error)) => {
-                self.state.finish(self.task_id, &self.token, TaskStatus::Failed);
+                let _ = self
+                    .state
+                    .finish(self.task_id, &self.token, TaskStatus::Failed);
                 Err(error)
             }
             Err(payload) => {
-                self.state.finish(self.task_id, &self.token, TaskStatus::Panicked);
+                let _ = self
+                    .state
+                    .finish(self.task_id, &self.token, TaskStatus::Panicked);
                 resume_unwind(payload);
             }
         }
