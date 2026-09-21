@@ -1,6 +1,6 @@
 [package]
 name = "qubit-task"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -17,9 +17,7 @@ include = [
     "/LICENSE",
     "/README.md",
     "/README.zh_CN.md",
-    "/RUST_CODING_STYLE.md",
-    "/RUST_CODING_STYLE.zh_CN.md",
-    "/doc/**/user_guide*.md",
+    "/docs/**",
     "/examples/**",
     "/resources/**",
     "/src/**",
@@ -32,6 +30,7 @@ doctest = true
 test = true
 
 [dependencies]
+qubit-id = "0.6"
 qubit-executor = "0.8"
 qubit-thread-pool = "0.10"
 qubit-function = "0.18"

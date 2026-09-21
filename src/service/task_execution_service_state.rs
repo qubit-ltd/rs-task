@@ -12,9 +12,9 @@ use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
+use super::Id;
 use super::task_execution_service_error::TaskExecutionServiceError;
 use super::task_execution_stats::TaskExecutionStats;
-use super::task_id::TaskId;
 use super::task_status::TaskStatus;
 
 /// Erased cancellation endpoint for a single unstarted task.
@@ -57,11 +57,7 @@ impl TaskExecutionServiceState {
     ///
     /// Returns `Suspended` or `DuplicateTask` without retaining the supplied
     /// endpoint when the reservation cannot be made.
-    pub(super) fn reserve(
-        &self,
-        task_id: TaskId,
-        cancel: CancelFn,
-    ) -> Result<SubmissionToken, TaskExecutionServiceError> {
+    pub(super) fn reserve(&self, task_id: Id, cancel: CancelFn) -> Result<SubmissionToken, TaskExecutionServiceError> {
         let mut inner = self.lock_inner();
         if inner.suspended {
             return Err(TaskExecutionServiceError::Suspended);
@@ -83,7 +79,7 @@ impl TaskExecutionServiceState {
     }
 
     /// Publishes pool acceptance for the matching reservation.
-    pub(super) fn accept(&self, task_id: TaskId, token: &SubmissionToken) -> bool {
+    pub(super) fn accept(&self, task_id: Id, token: &SubmissionToken) -> bool {
         let mut inner = self.lock_inner();
         let Some(record) = inner.active.get_mut(&task_id) else {
             return false;
@@ -96,7 +92,7 @@ impl TaskExecutionServiceState {
     }
 
     /// Marks the matching accepted task as running.
-    pub(super) fn start(&self, task_id: TaskId, token: &SubmissionToken) -> bool {
+    pub(super) fn start(&self, task_id: Id, token: &SubmissionToken) -> bool {
         let mut inner = self.lock_inner();
         let Some(record) = inner.active.get_mut(&task_id) else {
             return false;
@@ -112,7 +108,7 @@ impl TaskExecutionServiceState {
     ///
     /// Returns `false` for a stale token or an already finished task. The
     /// caller must have won the underlying task slot before reporting a result.
-    pub(super) fn finish(&self, task_id: TaskId, token: &SubmissionToken, status: TaskStatus) -> bool {
+    pub(super) fn finish(&self, task_id: Id, token: &SubmissionToken, status: TaskStatus) -> bool {
         debug_assert!(!status.is_active(), "finish requires a terminal status");
         let mut inner = self.lock_inner();
         if !inner.matches_active(task_id, token) {
@@ -129,7 +125,7 @@ impl TaskExecutionServiceState {
     /// A rare rejection after the accept callback may find this submission in
     /// the completed history. It is removed there as well, without touching a
     /// newer submission of the same business ID.
-    pub(super) fn discard(&self, task_id: TaskId, token: &SubmissionToken) -> bool {
+    pub(super) fn discard(&self, task_id: Id, token: &SubmissionToken) -> bool {
         let mut inner = self.lock_inner();
         if inner.matches_active(task_id, token) {
             inner.active.remove(&task_id);
@@ -151,7 +147,7 @@ impl TaskExecutionServiceState {
     ///
     /// The caller must invoke it after releasing the registry lock and pass
     /// the returned token to `finish` if cancellation wins.
-    pub(super) fn cancel_candidate(&self, task_id: TaskId) -> Option<(SubmissionToken, CancelFn)> {
+    pub(super) fn cancel_candidate(&self, task_id: Id) -> Option<(SubmissionToken, CancelFn)> {
         let inner = self.lock_inner();
         let record = inner.active.get(&task_id)?;
         (record.phase == ActivePhase::Submitted).then(|| (record.token.clone(), Arc::clone(&record.cancel)))
@@ -160,7 +156,7 @@ impl TaskExecutionServiceState {
     /// Returns the visible status of the latest retained submission.
     ///
     /// Unaccepted reservations and evicted terminal records return `None`.
-    pub(super) fn status(&self, task_id: TaskId) -> Option<TaskStatus> {
+    pub(super) fn status(&self, task_id: Id) -> Option<TaskStatus> {
         let inner = self.lock_inner();
         if let Some(record) = inner.active.get(&task_id) {
             return match record.phase {
@@ -234,9 +230,9 @@ impl TaskExecutionServiceState {
 /// Mutable state guarded by the registry mutex.
 struct Inner {
     suspended: bool,
-    active: HashMap<TaskId, ActiveRecord>,
-    completed: HashMap<TaskId, CompletedRecord>,
-    completed_order: VecDeque<(TaskId, SubmissionToken)>,
+    active: HashMap<Id, ActiveRecord>,
+    completed: HashMap<Id, CompletedRecord>,
+    completed_order: VecDeque<(Id, SubmissionToken)>,
     history_capacity: usize,
 }
 
@@ -253,14 +249,14 @@ impl Inner {
     }
 
     /// Checks that an active ID still denotes this exact submission.
-    fn matches_active(&self, task_id: TaskId, token: &SubmissionToken) -> bool {
+    fn matches_active(&self, task_id: Id, token: &SubmissionToken) -> bool {
         self.active
             .get(&task_id)
             .is_some_and(|record| record.token.same_as(token))
     }
 
     /// Keeps one terminal status, evicting the oldest completion if needed.
-    fn remember(&mut self, task_id: TaskId, token: SubmissionToken, status: TaskStatus) {
+    fn remember(&mut self, task_id: Id, token: SubmissionToken, status: TaskStatus) {
         if self.history_capacity == 0 {
             return;
         }
@@ -315,6 +311,7 @@ mod tests {
 
     use super::CancelFn;
     use super::TaskExecutionServiceState;
+    use crate::service::Id;
     use crate::service::TaskStatus;
 
     /// Creates a cancellation endpoint without a registry reference.
@@ -326,9 +323,9 @@ mod tests {
     fn test_state_releases_terminal_records_without_reference_cycle() {
         let state = Arc::new(TaskExecutionServiceState::new(1));
         let weak = Arc::downgrade(&state);
-        let token = state.reserve(7, inert_cancel()).expect("ID should be free");
-        assert!(state.accept(7, &token));
-        assert!(state.finish(7, &token, TaskStatus::Succeeded));
+        let token = state.reserve(Id::new(7), inert_cancel()).expect("ID should be free");
+        assert!(state.accept(Id::new(7), &token));
+        assert!(state.finish(Id::new(7), &token, TaskStatus::Succeeded));
         drop(state);
         assert!(weak.upgrade().is_none());
     }
@@ -336,20 +333,22 @@ mod tests {
     #[test]
     fn test_history_capacity_and_reused_id_do_not_retain_stale_entries() {
         let state = TaskExecutionServiceState::new(1);
-        let first = state.reserve(7, inert_cancel()).expect("ID should be free");
-        assert!(state.accept(7, &first));
-        assert!(state.finish(7, &first, TaskStatus::Succeeded));
-        assert_eq!(state.status(7), Some(TaskStatus::Succeeded));
-        let second = state.reserve(7, inert_cancel()).expect("ID should be reusable");
-        assert_eq!(state.status(7), None);
-        assert!(state.accept(7, &second));
-        assert!(state.finish(7, &second, TaskStatus::Failed));
-        assert_eq!(state.status(7), Some(TaskStatus::Failed));
-        let third = state.reserve(8, inert_cancel()).expect("ID should be free");
-        assert!(state.accept(8, &third));
-        assert!(state.finish(8, &third, TaskStatus::Cancelled));
-        assert_eq!(state.status(7), None);
-        assert_eq!(state.status(8), Some(TaskStatus::Cancelled));
+        let first = state.reserve(Id::new(7), inert_cancel()).expect("ID should be free");
+        assert!(state.accept(Id::new(7), &first));
+        assert!(state.finish(Id::new(7), &first, TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(7)), Some(TaskStatus::Succeeded));
+        let second = state
+            .reserve(Id::new(7), inert_cancel())
+            .expect("ID should be reusable");
+        assert_eq!(state.status(Id::new(7)), None);
+        assert!(state.accept(Id::new(7), &second));
+        assert!(state.finish(Id::new(7), &second, TaskStatus::Failed));
+        assert_eq!(state.status(Id::new(7)), Some(TaskStatus::Failed));
+        let third = state.reserve(Id::new(8), inert_cancel()).expect("ID should be free");
+        assert!(state.accept(Id::new(8), &third));
+        assert!(state.finish(Id::new(8), &third, TaskStatus::Cancelled));
+        assert_eq!(state.status(Id::new(7)), None);
+        assert_eq!(state.status(Id::new(8)), Some(TaskStatus::Cancelled));
         let inner = state.lock_inner();
         assert_eq!(inner.completed.len(), 1);
         assert_eq!(inner.completed_order.len(), 1);
@@ -359,13 +358,13 @@ mod tests {
     fn test_history_capacity_two_keeps_two_newest_completions() {
         let state = TaskExecutionServiceState::new(2);
         for id in 1..=3 {
-            let token = state.reserve(id, inert_cancel()).expect("ID should be free");
-            assert!(state.accept(id, &token));
-            assert!(state.finish(id, &token, TaskStatus::Succeeded));
+            let token = state.reserve(Id::new(id), inert_cancel()).expect("ID should be free");
+            assert!(state.accept(Id::new(id), &token));
+            assert!(state.finish(Id::new(id), &token, TaskStatus::Succeeded));
         }
-        assert_eq!(state.status(1), None);
-        assert_eq!(state.status(2), Some(TaskStatus::Succeeded));
-        assert_eq!(state.status(3), Some(TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(1)), None);
+        assert_eq!(state.status(Id::new(2)), Some(TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(3)), Some(TaskStatus::Succeeded));
         assert_eq!(state.stats().total, 2);
         let inner = state.lock_inner();
         assert_eq!(inner.completed.len(), 2);
@@ -375,28 +374,30 @@ mod tests {
     #[test]
     fn test_zero_history_and_stale_callbacks_do_not_change_new_submission() {
         let state = TaskExecutionServiceState::new(0);
-        let first = state.reserve(7, Arc::new(|| true)).expect("ID should be free");
-        assert!(state.accept(7, &first));
-        let (stale_token, stale_cancel) = state.cancel_candidate(7).expect("accepted task");
-        assert!(state.discard(7, &first));
-        let second = state.reserve(7, inert_cancel()).expect("ID should be reusable");
+        let first = state.reserve(Id::new(7), Arc::new(|| true)).expect("ID should be free");
+        assert!(state.accept(Id::new(7), &first));
+        let (stale_token, stale_cancel) = state.cancel_candidate(Id::new(7)).expect("accepted task");
+        assert!(state.discard(Id::new(7), &first));
+        let second = state
+            .reserve(Id::new(7), inert_cancel())
+            .expect("ID should be reusable");
         assert!(stale_cancel());
-        assert!(!state.finish(7, &stale_token, TaskStatus::Cancelled));
-        assert!(!state.discard(7, &first));
-        assert!(state.accept(7, &second));
-        assert_eq!(state.status(7), Some(TaskStatus::Submitted));
-        assert!(state.finish(7, &second, TaskStatus::Succeeded));
-        assert_eq!(state.status(7), None);
+        assert!(!state.finish(Id::new(7), &stale_token, TaskStatus::Cancelled));
+        assert!(!state.discard(Id::new(7), &first));
+        assert!(state.accept(Id::new(7), &second));
+        assert_eq!(state.status(Id::new(7)), Some(TaskStatus::Submitted));
+        assert!(state.finish(Id::new(7), &second, TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(7)), None);
         assert_eq!(state.stats().total, 0);
     }
 
     #[test]
     fn test_reservation_is_hidden_but_waited_for() {
         let state = Arc::new(TaskExecutionServiceState::new(2));
-        let token = state.reserve(7, inert_cancel()).expect("ID should be free");
-        assert_eq!(state.status(7), None);
+        let token = state.reserve(Id::new(7), inert_cancel()).expect("ID should be free");
+        assert_eq!(state.status(Id::new(7)), None);
         assert_eq!(state.stats().total, 0);
-        assert!(state.cancel_candidate(7).is_none());
+        assert!(state.cancel_candidate(Id::new(7)).is_none());
         let (started_tx, started_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let wait_state = Arc::clone(&state);
@@ -407,7 +408,7 @@ mod tests {
         });
         started_rx.recv().expect("waiter should start");
         assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
-        assert!(state.discard(7, &token));
+        assert!(state.discard(Id::new(7), &token));
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("waiter should finish");

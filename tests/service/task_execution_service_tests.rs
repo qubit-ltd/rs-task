@@ -17,6 +17,7 @@ use std::time::Duration;
 use qubit_executor::TaskExecutionError;
 use qubit_executor::service::ExecutorServiceBuilderError;
 use qubit_executor::service::SubmissionError;
+use qubit_task::service::Id;
 use qubit_task::service::TaskExecutionService;
 use qubit_task::service::TaskExecutionServiceError;
 use qubit_task::service::TaskStatus;
@@ -57,11 +58,11 @@ fn test_task_execution_service_tracks_successful_task() {
     let service = TaskExecutionService::new().expect("service should be created");
 
     let handle = service
-        .submit_callable(1, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(Id::new(1), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("service should accept task");
 
     assert_eq!(handle.get().expect("task should succeed"), 42);
-    assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
+    assert_eq!(service.status(Id::new(1)), Some(TaskStatus::Succeeded));
     assert_eq!(service.stats().succeeded, 1);
     service.shutdown();
     service.wait_termination();
@@ -81,16 +82,16 @@ fn test_task_status_is_active_only_for_in_flight_states() {
 fn test_task_execution_service_cancel_unknown_and_terminal_tasks() {
     let service = TaskExecutionService::new().expect("service should be created");
 
-    assert_eq!(service.status(404), None);
-    assert!(!service.cancel(404));
+    assert_eq!(service.status(Id::new(404)), None);
+    assert!(!service.cancel(Id::new(404)));
 
     let handle = service
-        .submit_callable(1, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(Id::new(1), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("service should accept task");
     assert_eq!(handle.get().expect("task should succeed"), 42);
 
-    assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
-    assert!(!service.cancel(1));
+    assert_eq!(service.status(Id::new(1)), Some(TaskStatus::Succeeded));
+    assert!(!service.cancel(Id::new(1)));
     service.shutdown();
     service.wait_termination();
 }
@@ -102,7 +103,7 @@ fn test_task_execution_service_cancel_running_task_returns_false() {
     let (release_tx, release_rx) = mpsc::channel();
 
     let handle = service
-        .submit(1, move || {
+        .submit(Id::new(1), move || {
             started_tx.send(()).expect("test should receive task start signal");
             release_rx.recv().map_err(|err| io::Error::other(err.to_string()))?;
             Ok::<(), io::Error>(())
@@ -110,12 +111,12 @@ fn test_task_execution_service_cancel_running_task_returns_false() {
         .expect("running task should be accepted");
     wait_started(started_rx);
 
-    assert_eq!(service.status(1), Some(TaskStatus::Running));
-    assert!(!service.cancel(1));
-    assert_eq!(service.status(1), Some(TaskStatus::Running));
+    assert_eq!(service.status(Id::new(1)), Some(TaskStatus::Running));
+    assert!(!service.cancel(Id::new(1)));
+    assert_eq!(service.status(Id::new(1)), Some(TaskStatus::Running));
     release_tx.send(()).expect("running task should receive release signal");
     handle.get().expect("running task should complete");
-    assert_eq!(service.status(1), Some(TaskStatus::Succeeded));
+    assert_eq!(service.status(Id::new(1)), Some(TaskStatus::Succeeded));
     service.shutdown();
     service.wait_termination();
 }
@@ -134,16 +135,16 @@ fn test_task_execution_service_tracks_failure_and_panic() {
     let service = TaskExecutionService::new().expect("service should be created");
 
     let failed = service
-        .submit_callable(1, || Err::<(), _>(io::Error::other("failed")))
+        .submit_callable(Id::new(1), || Err::<(), _>(io::Error::other("failed")))
         .expect("service should accept failing task");
     let panicked = service
-        .submit(2, || -> Result<(), io::Error> { panic!("boom") })
+        .submit(Id::new(2), || -> Result<(), io::Error> { panic!("boom") })
         .expect("service should accept panicking task");
 
     assert!(matches!(failed.get(), Err(TaskExecutionError::Failed(_)),));
     assert!(matches!(panicked.get(), Err(TaskExecutionError::Panicked)));
-    assert_eq!(service.status(1), Some(TaskStatus::Failed));
-    assert_eq!(service.status(2), Some(TaskStatus::Panicked));
+    assert_eq!(service.status(Id::new(1)), Some(TaskStatus::Failed));
+    assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Panicked));
     let stats = service.stats();
     assert_eq!(stats.failed, 1);
     assert_eq!(stats.panicked, 1);
@@ -158,7 +159,7 @@ fn test_task_execution_service_rejects_duplicate_task_id() {
     let (release_tx, release_rx) = mpsc::channel();
 
     let first = service
-        .submit(1, move || {
+        .submit(Id::new(1), move || {
             started_tx.send(()).expect("test should receive task start signal");
             release_rx.recv().map_err(|err| io::Error::other(err.to_string()))?;
             Ok::<(), io::Error>(())
@@ -166,9 +167,9 @@ fn test_task_execution_service_rejects_duplicate_task_id() {
         .expect("first task should be accepted");
     wait_started(started_rx);
 
-    let duplicate = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
+    let duplicate = service.submit(Id::new(1), successful_unit_task as fn() -> Result<(), io::Error>);
 
-    assert!(matches!(duplicate, Err(TaskExecutionServiceError::DuplicateTask(1)),));
+    assert!(matches!(duplicate, Err(TaskExecutionServiceError::DuplicateTask(actual)) if actual == Id::new(1)));
     release_tx
         .send(())
         .expect("blocking task should receive release signal");
@@ -181,12 +182,12 @@ fn test_task_execution_service_rejects_duplicate_task_id() {
 fn test_task_execution_service_reuses_terminal_task_id() {
     let service = create_single_worker_service();
     let first = service
-        .submit_callable(7, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(Id::new(7), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("first task should be accepted");
     assert_eq!(first.get().expect("first task should finish"), 42);
 
     let second = service
-        .submit_callable(7, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(Id::new(7), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("completed task ID should be reusable");
     assert_eq!(second.get().expect("second task should finish"), 42);
     service.shutdown();
@@ -200,13 +201,13 @@ fn test_task_execution_service_zero_history_drops_terminal_status() {
         .build()
         .expect("service should be created");
     let first = service
-        .submit_callable(7, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(Id::new(7), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("first task should be accepted");
     assert_eq!(first.get().expect("first task should finish"), 42);
-    assert_eq!(service.status(7), None);
+    assert_eq!(service.status(Id::new(7)), None);
     assert_eq!(service.stats().total, 0);
     let second = service
-        .submit(7, successful_unit_task as fn() -> Result<(), io::Error>)
+        .submit(Id::new(7), successful_unit_task as fn() -> Result<(), io::Error>)
         .expect("terminal ID should be reusable without history");
     second.get().expect("second task should finish");
     service.shutdown();
@@ -220,11 +221,11 @@ fn test_task_execution_service_suspend_rejects_new_tasks() {
     assert!(!service.is_suspended());
     service.suspend();
     assert!(service.is_suspended());
-    let rejected = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
+    let rejected = service.submit(Id::new(1), successful_unit_task as fn() -> Result<(), io::Error>);
     service.resume();
     assert!(!service.is_suspended());
     let accepted = service
-        .submit(1, successful_unit_task as fn() -> Result<(), io::Error>)
+        .submit(Id::new(1), successful_unit_task as fn() -> Result<(), io::Error>)
         .expect("service should accept after resume");
 
     assert!(matches!(rejected, Err(TaskExecutionServiceError::Suspended),));
@@ -240,7 +241,7 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
     let (release_tx, release_rx) = mpsc::channel();
 
     let first = service
-        .submit(1, move || {
+        .submit(Id::new(1), move || {
             started_tx.send(()).expect("test should receive task start signal");
             release_rx.recv().map_err(|err| io::Error::other(err.to_string()))?;
             Ok::<(), io::Error>(())
@@ -248,7 +249,7 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let second = service
-        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(Id::new(2), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("queued task should be accepted");
 
     let stats = service.stats();
@@ -259,7 +260,7 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
     let (snapshot_done_tx, snapshot_done_rx) = mpsc::channel();
     let snapshot_service = Arc::clone(&service);
     let snapshot_waiter = thread::spawn(move || {
-        snapshot_service.await_in_flight_tasks_completion();
+        snapshot_service.wait_for_current_tasks();
         snapshot_done_tx
             .send(())
             .expect("test should receive snapshot completion");
@@ -267,7 +268,7 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
     let (idle_done_tx, idle_done_rx) = mpsc::channel();
     let idle_service = Arc::clone(&service);
     let idle_waiter = thread::spawn(move || {
-        idle_service.await_idle();
+        idle_service.wait_for_idle();
         idle_done_tx.send(()).expect("test should receive idle completion");
     });
 
@@ -295,12 +296,12 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
 fn test_task_execution_service_wait_methods_return_when_no_tasks_are_active() {
     let service = TaskExecutionService::new().expect("service should be created");
 
-    service.await_in_flight_tasks_completion();
-    service.await_idle();
+    service.wait_for_current_tasks();
+    service.wait_for_idle();
 
     let stats = service.stats();
     assert_eq!(stats.total, 0);
-    assert_eq!(service.status(1), None);
+    assert_eq!(service.status(Id::new(1)), None);
     service.shutdown();
     service.wait_termination();
 }
@@ -312,7 +313,7 @@ fn test_task_execution_service_stop_cancels_queued_task() {
     let (release_tx, release_rx) = mpsc::channel();
 
     let first = service
-        .submit(1, move || {
+        .submit(Id::new(1), move || {
             started_tx.send(()).expect("test should receive task start signal");
             release_rx.recv().map_err(|err| io::Error::other(err.to_string()))?;
             Ok::<(), io::Error>(())
@@ -320,14 +321,14 @@ fn test_task_execution_service_stop_cancels_queued_task() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let queued = service
-        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(Id::new(2), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("queued task should be accepted");
 
     let report = service.stop();
 
     assert_eq!(report.queued, 1);
     assert!(service.is_not_running());
-    assert_eq!(service.status(2), Some(TaskStatus::Cancelled));
+    assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Cancelled));
     assert!(matches!(queued.get(), Err(TaskExecutionError::Cancelled)));
     assert!(!service.is_terminated());
     release_tx
@@ -344,7 +345,7 @@ fn test_task_execution_service_cancel_and_stop_race_keeps_terminal_status() {
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let running = service
-        .submit(1, move || {
+        .submit(Id::new(1), move || {
             started_tx.send(()).expect("start signal should send");
             release_rx.recv().map_err(|error| io::Error::other(error.to_string()))?;
             Ok::<(), io::Error>(())
@@ -352,7 +353,7 @@ fn test_task_execution_service_cancel_and_stop_race_keeps_terminal_status() {
         .expect("running task should be accepted");
     wait_started(started_rx);
     let queued = service
-        .submit(2, successful_unit_task as fn() -> Result<(), io::Error>)
+        .submit(Id::new(2), successful_unit_task as fn() -> Result<(), io::Error>)
         .expect("queued task should be accepted");
 
     let gate = Arc::new(Barrier::new(3));
@@ -360,7 +361,7 @@ fn test_task_execution_service_cancel_and_stop_race_keeps_terminal_status() {
     let cancel_gate = Arc::clone(&gate);
     let cancel_thread = thread::spawn(move || {
         cancel_gate.wait();
-        cancel_service.cancel(2)
+        cancel_service.cancel(Id::new(2))
     });
     let stop_service = Arc::clone(&service);
     let stop_gate = Arc::clone(&gate);
@@ -372,7 +373,7 @@ fn test_task_execution_service_cancel_and_stop_race_keeps_terminal_status() {
     let _cancelled = cancel_thread.join().expect("cancel thread should not panic");
     let _report = stop_thread.join().expect("stop thread should not panic");
 
-    assert_eq!(service.status(2), Some(TaskStatus::Cancelled));
+    assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Cancelled));
     assert!(matches!(queued.get(), Err(TaskExecutionError::Cancelled)));
     release_tx.send(()).expect("running task should be released");
     running.get().expect("running task should complete");
@@ -386,7 +387,7 @@ fn test_task_execution_service_removes_record_when_pool_rejects() {
         .build()
         .expect("service should be created with lazy worker spawning");
 
-    let result = service.submit(1, successful_unit_task as fn() -> Result<(), io::Error>);
+    let result = service.submit(Id::new(1), successful_unit_task as fn() -> Result<(), io::Error>);
 
     assert!(matches!(
         result,
@@ -394,7 +395,7 @@ fn test_task_execution_service_removes_record_when_pool_rejects() {
             SubmissionError::WorkerSpawnFailed { .. },
         )),
     ));
-    assert_eq!(service.status(1), None);
+    assert_eq!(service.status(Id::new(1)), None);
     service.shutdown();
     service.wait_termination();
 }
@@ -406,7 +407,7 @@ fn test_task_execution_service_cancels_queued_task() {
     let (release_tx, release_rx) = mpsc::channel();
 
     let first = service
-        .submit(1, move || {
+        .submit(Id::new(1), move || {
             started_tx.send(()).expect("test should receive task start signal");
             release_rx.recv().map_err(|err| io::Error::other(err.to_string()))?;
             Ok::<(), io::Error>(())
@@ -414,17 +415,17 @@ fn test_task_execution_service_cancels_queued_task() {
         .expect("first task should be accepted");
     wait_started(started_rx);
     let queued = service
-        .submit_callable(2, successful_usize_task as fn() -> Result<usize, io::Error>)
+        .submit_callable(Id::new(2), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("queued task should be accepted");
 
-    assert!(service.cancel(2));
-    assert_eq!(service.status(2), Some(TaskStatus::Cancelled));
+    assert!(service.cancel(Id::new(2)));
+    assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Cancelled));
     assert!(matches!(queued.get(), Err(TaskExecutionError::Cancelled)));
     release_tx
         .send(())
         .expect("blocking task should receive release signal");
     first.get().expect("first task should complete");
-    service.await_idle();
+    service.wait_for_idle();
     assert_eq!(service.stats().cancelled, 1);
     service.shutdown();
     service.wait_termination();

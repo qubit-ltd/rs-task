@@ -16,12 +16,13 @@ mod task_execution_service_builder;
 mod task_execution_service_error;
 mod task_execution_service_state;
 mod task_execution_stats;
-mod task_id;
+mod task_handle;
 mod task_status;
 
+pub use qubit_id::Id;
 pub use task_execution_service::TaskExecutionService;
 pub use task_execution_service_builder::TaskExecutionServiceBuilder;
 pub use task_execution_service_error::TaskExecutionServiceError;
 pub use task_execution_stats::TaskExecutionStats;
-pub use task_id::TaskId;
+pub use task_handle::TaskHandle;
 pub use task_status::TaskStatus;

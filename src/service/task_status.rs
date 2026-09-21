@@ -10,7 +10,7 @@
 /// [`TaskExecutionService`](super::TaskExecutionService).
 ///
 /// The status describes service-level progress, not the typed task result
-/// stored in [`TaskHandle`](qubit_executor::TaskHandle). The handle remains the
+/// stored in [`TaskHandle`](super::TaskHandle). The handle remains the
 /// source of truth for the task's success value or error value.
 /// A completed status may be evicted from the service's bounded history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

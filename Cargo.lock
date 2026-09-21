@@ -185,6 +185,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f6ad59d1256f6c62bc2fe153bdd87f224d7cfd7fa81b58dd8ab03aa4836f21a"
 
 [[package]]
+name = "qubit-id"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81a4ddf466a87d57a9b9a33f635e9e6395631a8b8e7e1d1139f2f53f6958a4f1"
+dependencies = [
+ "parking_lot",
+ "qubit-clock",
+ "thiserror",
+]
+
+[[package]]
 name = "qubit-lock"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -206,10 +217,11 @@ dependencies = [
 
 [[package]]
 name = "qubit-task"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "qubit-executor",
  "qubit-function",
+ "qubit-id",
  "qubit-thread-pool",
  "thiserror",
 ]

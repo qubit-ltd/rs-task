@@ -12,6 +12,7 @@ use super::task_status::TaskStatus;
 /// Counters are derived from accepted active tasks and bounded terminal
 /// records retained for inspection. They are not lifetime totals.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[must_use = "task statistics should be inspected or explicitly discarded"]
 pub struct TaskExecutionStats {
     /// Number of accepted active and retained terminal tasks currently visible.
     pub total: usize,
