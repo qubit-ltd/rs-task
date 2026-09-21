@@ -13,6 +13,15 @@
 /// stored in [`TaskHandle`](super::TaskHandle). The handle remains the
 /// source of truth for the task's success value or error value.
 /// A completed status may be evicted from the service's bounded history.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::service::TaskStatus;
+///
+/// assert!(TaskStatus::Running.is_active());
+/// assert!(!TaskStatus::Succeeded.is_active());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     /// The task was accepted but has not started running.
@@ -40,6 +49,7 @@ impl TaskStatus {
     /// # Returns
     ///
     /// `true` for submitted or running tasks.
+    #[must_use]
     #[inline]
     pub const fn is_active(self) -> bool {
         matches!(self, Self::Submitted | Self::Running)

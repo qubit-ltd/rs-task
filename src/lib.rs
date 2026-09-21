@@ -7,7 +7,7 @@
 // =============================================================================
 //! # Qubit Task
 //!
-//! Provides task-oriented services built on top of `qubit-executor and
-//! qubit-thread-pool`.
+//! Provides task-oriented services built on top of `qubit-executor` and
+//! `qubit-thread-pool`.
 
 pub mod service;

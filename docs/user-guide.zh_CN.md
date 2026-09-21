@@ -53,7 +53,8 @@ let service = TaskExecutionService::builder()
 提交 callable；需要类型化结果时消费对应的句柄：
 
 ~~~rust
-use qubit_task::service::{Id, TaskExecutionService, TaskStatus};
+use qubit_id::Id;
+use qubit_task::service::{TaskExecutionService, TaskStatus};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionService::new()?;

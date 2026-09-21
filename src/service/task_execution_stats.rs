@@ -11,6 +11,15 @@ use super::task_status::TaskStatus;
 ///
 /// Counters are derived from accepted active tasks and bounded terminal
 /// records retained for inspection. They are not lifetime totals.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::service::TaskExecutionStats;
+///
+/// let stats = TaskExecutionStats::default();
+/// assert_eq!(stats.total, 0);
+/// ```
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[must_use = "task statistics should be inspected or explicitly discarded"]
 pub struct TaskExecutionStats {

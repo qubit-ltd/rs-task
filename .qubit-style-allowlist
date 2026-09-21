@@ -1,0 +1,3 @@
+# Closely coupled private lifecycle types stay beside their owning service state.
+multiple-public-types | src/service/task_execution_service.rs | Task execution wrapper and status-reporting task form one submission boundary.
+multiple-public-types | src/service/task_execution_service_state.rs | Registry state and its private lifecycle records share one mutex protocol.
