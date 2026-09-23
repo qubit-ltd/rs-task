@@ -10,6 +10,16 @@
 Task-oriented execution services built on `qubit-executor` and
 `qubit-thread-pool`.
 
+## Installation
+
+Add `qubit-task` and the task ID crate used by the examples to `Cargo.toml`:
+
+```toml
+[dependencies]
+qubit-task = "0.5"
+qubit-id = "0.6"
+```
+
 `TaskExecutionService` accepts a caller-provided task ID, runs a synchronous
 callable on a thread pool, and keeps an in-memory status for lookup and
 pre-start cancellation. The returned `TaskHandle` owns the typed result.
@@ -42,6 +52,13 @@ and retained records, not all tasks ever submitted.
 `wait_for_idle()` and `wait_for_current_tasks()` wait for registry
 transitions. A result may still be publishing to its handle when they return;
 use `TaskHandle::get()` or await the handle when the result is required.
+
+## Learn More
+
+- [User guide](docs/user-guide.md)
+- [Design notes](docs/design.md)
+- [API documentation](https://docs.rs/qubit-task)
+- [中文用户指南](docs/user-guide.zh_CN.md)
 
 ## Testing
 

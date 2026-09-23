@@ -9,6 +9,16 @@
 
 `qubit-task` 在 `qubit-executor` 和 `qubit-thread-pool` 之上提供面向任务的执行服务。
 
+## 安装
+
+README 示例还会直接使用任务 ID 类型，请在 `Cargo.toml` 中添加：
+
+```toml
+[dependencies]
+qubit-task = "0.5"
+qubit-id = "0.6"
+```
+
 `TaskExecutionService` 接收调用方提供的任务 ID，在线程池中运行同步 callable，并在内存中保留状态以便查询和执行前取消。返回的 `TaskHandle` 负责保存类型化结果。
 
 ```rust
@@ -32,6 +42,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 服务默认保留最近 1024 个终态。设置 `completed_history_capacity(0)` 可不保留终态。历史记录有界且不是持久化存储：记录被淘汰后，`status(id)` 返回 `None`。任务完成后可以复用任务 ID，新提交会替换该 ID 的旧状态。`stats().total` 统计当前可见的已接受任务和保留终态，而不是所有历史提交次数。
 
 `wait_for_idle()` 和 `wait_for_current_tasks()` 等待注册表状态转换。它们返回时，结果可能仍在发布到句柄；需要结果时请调用 `TaskHandle::get()` 或等待该句柄。
+
+## 延伸阅读
+
+- [用户指南](docs/user-guide.zh_CN.md)
+- [设计说明](docs/design.zh_CN.md)
+- [API 文档](https://docs.rs/qubit-task)
+- [English user guide](docs/user-guide.md)
 
 ## 测试
 
@@ -59,7 +76,7 @@ Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
 ## 贡献
 
 欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试，并在提交
-Pull Request 前运行 `./align-ci.sh`格式化代码，运行`./ci-check.sh`对齐CI要求。
+Pull Request 前运行 `./align-ci.sh` 格式化代码，运行 `./ci-check.sh` 对齐 CI 要求。
 
 ## 作者
 

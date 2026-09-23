@@ -35,6 +35,7 @@ Id 由调用方提供。任务处于活动状态或正在被接受时，不能�
 ~~~toml
 [dependencies]
 qubit-task = "0.5"
+qubit-id = "0.6"
 ~~~
 
 默认构造函数使用 qubit-thread-pool 的默认配置。如果需要自定义线程池或限制终态历史容量，可以使用 builder：
@@ -77,6 +78,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 配置底层线程池
 
 可以传入 qubit-thread-pool 提供的 ThreadPoolBuilder，调整线程池支持的属性：
+
+使用此选项时，也要将线程池 crate 声明为直接依赖：
+
+~~~toml
+[dependencies]
+qubit-thread-pool = "0.10"
+~~~
 
 ~~~rust
 use qubit_task::service::TaskExecutionService;
