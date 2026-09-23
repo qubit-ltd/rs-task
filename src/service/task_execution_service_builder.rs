@@ -135,9 +135,6 @@ impl TaskExecutionServiceBuilder {
     /// [`ExecutorServiceBuilderError`].
     pub fn build(self) -> Result<TaskExecutionService, ExecutorServiceBuilderError> {
         let pool = self.pool_builder.build()?;
-        Ok(TaskExecutionService::from_thread_pool(
-            pool,
-            self.history_capacity,
-        ))
+        Ok(TaskExecutionService::from_thread_pool(pool, self.history_capacity))
     }
 }

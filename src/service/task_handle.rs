@@ -54,7 +54,6 @@ impl<R, E> TaskHandle<R, E> {
     ///
     /// The identifier is copied from the submission and does not perform any
     /// registry lookup.
-    #[must_use]
     #[inline]
     pub fn task_id(&self) -> Id {
         self.task_id
