@@ -401,6 +401,25 @@ fn test_task_execution_service_removes_record_when_pool_rejects() {
 }
 
 #[test]
+fn test_task_execution_service_preserves_terminal_status_when_reused_id_is_rejected() {
+    let service = TaskExecutionService::new().expect("service should be created");
+    let id = Id::new(1);
+    service
+        .submit(id, successful_unit_task as fn() -> Result<(), io::Error>)
+        .expect("first task should be accepted")
+        .get()
+        .expect("first task should complete");
+
+    service.shutdown();
+    let rejected = service.submit(id, successful_unit_task as fn() -> Result<(), io::Error>);
+
+    assert!(matches!(rejected, Err(TaskExecutionServiceError::Rejected(_))));
+    assert_eq!(service.status(id), Some(TaskStatus::Succeeded));
+    assert_eq!(service.stats().succeeded, 1);
+    service.wait_termination();
+}
+
+#[test]
 fn test_task_execution_service_cancels_queued_task() {
     let service = create_single_worker_service();
     let (started_tx, started_rx) = mpsc::channel();

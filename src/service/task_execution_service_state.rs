@@ -77,7 +77,7 @@ impl TaskExecutionServiceState {
         if inner.active.contains_key(&task_id) {
             return Err(TaskExecutionServiceError::DuplicateTask(task_id));
         }
-        inner.completed.remove(&task_id);
+        let previous_completed = inner.completed.remove(&task_id);
         let token = SubmissionToken(Arc::new(()));
         inner.active.insert(
             task_id,
@@ -85,6 +85,7 @@ impl TaskExecutionServiceState {
                 token: token.clone(),
                 phase: ActivePhase::Submitting,
                 cancel,
+                previous_completed,
             },
         );
         Ok(token)
@@ -106,6 +107,7 @@ impl TaskExecutionServiceState {
             return false;
         }
         record.phase = ActivePhase::Submitted;
+        record.previous_completed = None;
         true
     }
 
@@ -162,7 +164,19 @@ impl TaskExecutionServiceState {
     pub(super) fn discard(&self, task_id: Id, token: &SubmissionToken) -> bool {
         let mut inner = self.lock_inner();
         if inner.matches_active(task_id, token) {
-            inner.active.remove(&task_id);
+            let record = inner
+                .active
+                .remove(&task_id)
+                .expect("matching active submission should exist");
+            if let Some(previous_completed) = record.previous_completed {
+                let previous_is_retained = inner
+                    .completed_order
+                    .iter()
+                    .any(|(completed_id, token)| *completed_id == task_id && token.same_as(&previous_completed.token));
+                if previous_is_retained {
+                    inner.completed.insert(task_id, previous_completed);
+                }
+            }
             self.idle.notify_all();
             return true;
         }
@@ -356,6 +370,8 @@ struct ActiveRecord {
     phase: ActivePhase,
     /// Endpoint used to cancel the task before execution starts.
     cancel: CancelFn,
+    /// Previous terminal status restored if the pool rejects this submission.
+    previous_completed: Option<CompletedRecord>,
 }
 
 /// Lightweight terminal status retained for a bounded interval.
@@ -434,6 +450,28 @@ mod tests {
         let inner = state.lock_inner();
         assert_eq!(inner.completed.len(), 2);
         assert_eq!(inner.completed_order.len(), 2);
+    }
+
+    #[test]
+    fn test_rejected_reused_id_does_not_restore_evicted_terminal_record() {
+        let state = TaskExecutionServiceState::new(1);
+        let first = state.reserve(Id::new(1), inert_cancel()).expect("ID should be free");
+        assert!(state.accept(Id::new(1), &first));
+        assert!(state.finish(Id::new(1), &first, TaskStatus::Succeeded));
+
+        let retry = state
+            .reserve(Id::new(1), inert_cancel())
+            .expect("terminal ID should be reusable");
+        let second = state
+            .reserve(Id::new(2), inert_cancel())
+            .expect("second ID should be free");
+        assert!(state.accept(Id::new(2), &second));
+        assert!(state.finish(Id::new(2), &second, TaskStatus::Failed));
+
+        assert!(state.discard(Id::new(1), &retry));
+        assert_eq!(state.status(Id::new(1)), None);
+        assert_eq!(state.status(Id::new(2)), Some(TaskStatus::Failed));
+        assert_eq!(state.stats().total, 1);
     }
 
     #[test]
