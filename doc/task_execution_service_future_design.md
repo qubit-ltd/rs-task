@@ -3,7 +3,7 @@
 ## 背景
 
 `TaskExecutionService` 最初位于并发基础设施中，用于在 `ThreadPool`
-之上提供带 `TaskId` 的任务提交、取消、状态跟踪和 idle 等待能力。随着后续计划
+之上提供带 `Id` 的任务提交、取消、状态跟踪和等待空闲能力。随着后续计划
 对齐 Java 版任务服务语义，它会逐渐承担业务任务状态流转、外部可见状态更新、
 任务信息持久化、事件通知等职责。
 
@@ -15,7 +15,7 @@
 
 当前版本的 `rs-task::service::TaskExecutionService` 仍然是执行层服务：
 
-- 接收调用方提供的 `TaskId`，并在任务活跃期间保持唯一。
+- 接收调用方提供的 `qubit_id::Id`，并在任务活跃期间保持唯一。
 - 使用 `qubit-thread-pool` 的 `ThreadPool` 执行任务。
 - 维护进程内任务状态：
   - `Submitted`
@@ -30,7 +30,7 @@
 - 支持提交前取消、立即关闭时取消队列任务、等待 idle。
 
 当前版本的 `stats().total` 是当前可查询的活跃任务与保留终态之和，不是累计提交次数。
-`await_idle()` 等待注册表无活跃任务，但不能代替 `TaskHandle` 等待结果发布。
+`wait_for_idle()` 等待注册表无活跃任务，但不能代替 `TaskHandle` 等待结果发布。
 
 当前版本不负责：
 
