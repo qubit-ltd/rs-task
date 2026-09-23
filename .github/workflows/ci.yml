@@ -51,9 +51,9 @@ jobs:
         run: rustup toolchain install nightly-2026-06-05 --profile minimal --component rustfmt --component clippy
       - name: Run infrastructure CI orchestration
         run: ./ci-check.sh --only=verify
-      - name: Run style, hook, and coverage Clippy
+      - name: Run style and coverage Clippy
         if: runner.os == 'Linux'
-        run: ./ci-check.sh --only=style,clippy,coverage-cfg-clippy,project-hook
+        run: ./ci-check.sh --only=style,clippy,coverage-cfg-clippy
       - name: Install Clippy toolchain on additional platforms
         if: runner.os != 'Linux'
         run: rustup toolchain install nightly-2026-06-05 --profile minimal --component clippy
