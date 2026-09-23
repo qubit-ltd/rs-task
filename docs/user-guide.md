@@ -35,6 +35,7 @@ Add the crate to Cargo.toml:
 ~~~toml
 [dependencies]
 qubit-task = "0.5"
+qubit-id = "0.6"
 ~~~
 
 The default constructor uses the default qubit-thread-pool settings. Use the builder when the application needs a custom pool or bounded history:
@@ -77,6 +78,13 @@ submit is the convenience form for a runnable that returns Result<(), E>. TaskHa
 ### Configure the backing pool
 
 Pass a ThreadPoolBuilder to tune pool properties supported by qubit-thread-pool:
+
+Add the pool crate as a direct dependency when using this option:
+
+~~~toml
+[dependencies]
+qubit-thread-pool = "0.10"
+~~~
 
 ~~~rust
 use qubit_task::service::TaskExecutionService;
