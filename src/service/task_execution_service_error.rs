@@ -26,6 +26,7 @@ use thiserror::Error;
 /// assert_eq!(error.to_string(), "task 7 already exists");
 /// ```
 #[derive(Debug, Error)]
+#[must_use = "submission errors should be handled or explicitly discarded"]
 pub enum TaskExecutionServiceError {
     /// Another active task or pending submission already uses this task ID.
     #[error("task {0} already exists")]

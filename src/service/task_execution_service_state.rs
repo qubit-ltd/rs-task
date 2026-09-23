@@ -69,11 +69,7 @@ impl TaskExecutionServiceState {
     /// # Returns
     ///
     /// A submission token on success, or the specific rejection error.
-    pub(super) fn reserve(
-        &self,
-        task_id: Id,
-        cancel: CancelFn,
-    ) -> Result<SubmissionToken, TaskExecutionServiceError> {
+    pub(super) fn reserve(&self, task_id: Id, cancel: CancelFn) -> Result<SubmissionToken, TaskExecutionServiceError> {
         let mut inner = self.lock_inner();
         if inner.suspended {
             return Err(TaskExecutionServiceError::Suspended);
@@ -194,8 +190,7 @@ impl TaskExecutionServiceState {
     pub(super) fn cancel_candidate(&self, task_id: Id) -> Option<(SubmissionToken, CancelFn)> {
         let inner = self.lock_inner();
         let record = inner.active.get(&task_id)?;
-        (record.phase == ActivePhase::Submitted)
-            .then(|| (record.token.clone(), Arc::clone(&record.cancel)))
+        (record.phase == ActivePhase::Submitted).then(|| (record.token.clone(), Arc::clone(&record.cancel)))
     }
 
     /// Returns the visible status of the latest retained submission.
@@ -223,7 +218,6 @@ impl TaskExecutionServiceState {
     /// # Returns
     ///
     /// A snapshot of all visible registry records.
-    #[must_use]
     pub(super) fn stats(&self) -> TaskExecutionStats {
         let inner = self.lock_inner();
         let mut stats = TaskExecutionStats::default();
@@ -276,10 +270,7 @@ impl TaskExecutionServiceState {
     }
 
     /// Waits for a registry transition and reacquires its lock.
-    fn wait_for_idle_notification<'a>(
-        &self,
-        inner: MutexGuard<'a, Inner>,
-    ) -> MutexGuard<'a, Inner> {
+    fn wait_for_idle_notification<'a>(&self, inner: MutexGuard<'a, Inner>) -> MutexGuard<'a, Inner> {
         self.idle
             .wait(inner)
             .expect("task execution service state lock should not be poisoned")
@@ -397,9 +388,7 @@ mod tests {
     fn test_state_releases_terminal_records_without_reference_cycle() {
         let state = Arc::new(TaskExecutionServiceState::new(1));
         let weak = Arc::downgrade(&state);
-        let token = state
-            .reserve(Id::new(7), inert_cancel())
-            .expect("ID should be free");
+        let token = state.reserve(Id::new(7), inert_cancel()).expect("ID should be free");
         assert!(state.accept(Id::new(7), &token));
         assert!(state.finish(Id::new(7), &token, TaskStatus::Succeeded));
         drop(state);
@@ -409,9 +398,7 @@ mod tests {
     #[test]
     fn test_history_capacity_and_reused_id_do_not_retain_stale_entries() {
         let state = TaskExecutionServiceState::new(1);
-        let first = state
-            .reserve(Id::new(7), inert_cancel())
-            .expect("ID should be free");
+        let first = state.reserve(Id::new(7), inert_cancel()).expect("ID should be free");
         assert!(state.accept(Id::new(7), &first));
         assert!(state.finish(Id::new(7), &first, TaskStatus::Succeeded));
         assert_eq!(state.status(Id::new(7)), Some(TaskStatus::Succeeded));
@@ -422,9 +409,7 @@ mod tests {
         assert!(state.accept(Id::new(7), &second));
         assert!(state.finish(Id::new(7), &second, TaskStatus::Failed));
         assert_eq!(state.status(Id::new(7)), Some(TaskStatus::Failed));
-        let third = state
-            .reserve(Id::new(8), inert_cancel())
-            .expect("ID should be free");
+        let third = state.reserve(Id::new(8), inert_cancel()).expect("ID should be free");
         assert!(state.accept(Id::new(8), &third));
         assert!(state.finish(Id::new(8), &third, TaskStatus::Cancelled));
         assert_eq!(state.status(Id::new(7)), None);
@@ -438,9 +423,7 @@ mod tests {
     fn test_history_capacity_two_keeps_two_newest_completions() {
         let state = TaskExecutionServiceState::new(2);
         for id in 1..=3 {
-            let token = state
-                .reserve(Id::new(id), inert_cancel())
-                .expect("ID should be free");
+            let token = state.reserve(Id::new(id), inert_cancel()).expect("ID should be free");
             assert!(state.accept(Id::new(id), &token));
             assert!(state.finish(Id::new(id), &token, TaskStatus::Succeeded));
         }
@@ -456,12 +439,9 @@ mod tests {
     #[test]
     fn test_zero_history_and_stale_callbacks_do_not_change_new_submission() {
         let state = TaskExecutionServiceState::new(0);
-        let first = state
-            .reserve(Id::new(7), Arc::new(|| true))
-            .expect("ID should be free");
+        let first = state.reserve(Id::new(7), Arc::new(|| true)).expect("ID should be free");
         assert!(state.accept(Id::new(7), &first));
-        let (stale_token, stale_cancel) =
-            state.cancel_candidate(Id::new(7)).expect("accepted task");
+        let (stale_token, stale_cancel) = state.cancel_candidate(Id::new(7)).expect("accepted task");
         assert!(state.discard(Id::new(7), &first));
         let second = state
             .reserve(Id::new(7), inert_cancel())
@@ -479,9 +459,7 @@ mod tests {
     #[test]
     fn test_reservation_is_hidden_but_waited_for() {
         let state = Arc::new(TaskExecutionServiceState::new(2));
-        let token = state
-            .reserve(Id::new(7), inert_cancel())
-            .expect("ID should be free");
+        let token = state.reserve(Id::new(7), inert_cancel()).expect("ID should be free");
         assert_eq!(state.status(Id::new(7)), None);
         assert_eq!(state.stats().total, 0);
         assert!(state.cancel_candidate(Id::new(7)).is_none());

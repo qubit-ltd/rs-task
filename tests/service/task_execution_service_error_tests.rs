@@ -37,10 +37,7 @@ fn test_task_execution_service_error_reports_rejected_submission() {
     let service = TaskExecutionService::new().expect("service should be created");
     service.shutdown();
 
-    let error = match service.submit(
-        Id::new(1),
-        successful_unit_task as fn() -> Result<(), io::Error>,
-    ) {
+    let error = match service.submit(Id::new(1), successful_unit_task as fn() -> Result<(), io::Error>) {
         Ok(_) => panic!("shutdown service should reject new tasks"),
         Err(error) => error,
     };

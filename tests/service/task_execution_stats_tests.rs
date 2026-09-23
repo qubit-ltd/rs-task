@@ -72,12 +72,7 @@ fn test_task_execution_stats_count_only_retained_records() {
     assert_eq!(stats.succeeded, 1);
     assert_eq!(
         stats.total,
-        stats.submitted
-            + stats.running
-            + stats.succeeded
-            + stats.failed
-            + stats.panicked
-            + stats.cancelled
+        stats.submitted + stats.running + stats.succeeded + stats.failed + stats.panicked + stats.cancelled
     );
     assert_eq!(service.status(Id::new(1)), None);
     assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Succeeded));

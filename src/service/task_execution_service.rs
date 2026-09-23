@@ -209,11 +209,7 @@ impl TaskExecutionService {
     /// [`TaskExecutionServiceError`] when the ID is duplicated, the service is
     /// suspended, or the backing pool rejects the task.
     #[inline]
-    pub fn submit<T, E>(
-        &self,
-        task_id: Id,
-        mut task: T,
-    ) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
+    pub fn submit<T, E>(&self, task_id: Id, mut task: T) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
     where
         T: Runnable<E> + Send + 'static,
         E: Send + 'static,
@@ -254,11 +250,7 @@ impl TaskExecutionService {
     /// * `C` - Callable task type.
     /// * `R` - Successful result type.
     /// * `E` - Error type returned by the callable.
-    pub fn submit_callable<C, R, E>(
-        &self,
-        task_id: Id,
-        task: C,
-    ) -> Result<TaskHandle<R, E>, TaskExecutionServiceError>
+    pub fn submit_callable<C, R, E>(&self, task_id: Id, task: C) -> Result<TaskHandle<R, E>, TaskExecutionServiceError>
     where
         C: Callable<R, E> + Send + 'static,
         R: Send + 'static,
@@ -417,7 +409,6 @@ impl TaskExecutionService {
     /// A snapshot of accepted active and retained terminal tasks grouped by
     /// status. `total` is the sum of these visible records, not a lifetime
     /// submission counter; unaccepted reservations are excluded.
-    #[must_use]
     #[inline]
     pub fn stats(&self) -> TaskExecutionStats {
         self.state.stats()
@@ -658,21 +649,15 @@ where
         let _ = self.state.start(self.task_id, &self.token);
         match catch_unwind(AssertUnwindSafe(|| self.task.call())) {
             Ok(Ok(value)) => {
-                let _ = self
-                    .state
-                    .finish(self.task_id, &self.token, TaskStatus::Succeeded);
+                let _ = self.state.finish(self.task_id, &self.token, TaskStatus::Succeeded);
                 Ok(value)
             }
             Ok(Err(error)) => {
-                let _ = self
-                    .state
-                    .finish(self.task_id, &self.token, TaskStatus::Failed);
+                let _ = self.state.finish(self.task_id, &self.token, TaskStatus::Failed);
                 Err(error)
             }
             Err(payload) => {
-                let _ = self
-                    .state
-                    .finish(self.task_id, &self.token, TaskStatus::Panicked);
+                let _ = self.state.finish(self.task_id, &self.token, TaskStatus::Panicked);
                 resume_unwind(payload);
             }
         }
