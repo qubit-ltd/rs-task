@@ -98,7 +98,16 @@ let service = TaskExecutionService::builder()
 
 ### 暂停接收与取消排队任务
 
-调用 suspend 后，新提交会返回 TaskExecutionServiceError::Suspended，已经接受的任务不受影响；恢复接收时调用 resume。cancel(id) 只有在 worker 尚未开始执行任务时才返回 true。它与线程池启动任务之间存在竞态，因此运行中的任务会返回 false。
+调用 suspend 后，新提交会返回 TaskExecutionServiceError::Suspended，已经接受的任务不受影响；恢复接收时调用 resume。cancel(id) 只有在 worker 尚未开始执行任务时才返回 true。它与线程池启动任务之间存在竞态，因此运行中的任务会返回 false。取消成功返回前，动态线程池会移除排队 job 并释放它捕获的值，因此该队列位置可立即用于后续提交。
+
+服务不会暴露可直接向底层线程池提交任务的引用。需要查看池指标时，读取一次快照即可：
+
+~~~rust
+let pool_snapshot = service.thread_pool_stats();
+println!("当前排队任务数：{}", pool_snapshot.queued_tasks);
+~~~
+
+`ThreadPoolStats` 仅用于观测，返回时可能已经过时，也不是同步原语。不同计数可能来自相邻时刻；需要协调任务时，应使用任务句柄或服务的等待方法。
 
 ### 等待任务
 
@@ -111,7 +120,7 @@ wait_for_current_tasks 等待调用时观察到的活动 ID 快照。wait_for_id
 - submit 和 submit_callable 返回提交错误，可能是 DuplicateTask、Suspended、Rejected 或 AcceptancePanicked。
 - 已接受任务的结果由句柄返回。callable 自己返回的 Err(E) 表示任务失败；任务 panic 时，executor 的结果类型会报告 panic。
 
-单个任务使用 status(id)，整体快照使用 stats()。TaskExecutionStats 只统计当前可见的活动任务和仍保留的终态记录，不是累计提交次数。终态记录被淘汰后，status(id) 会返回 None。
+单个任务使用 status(id)，整体快照使用 stats()。TaskExecutionStats 统计当前可见的活动任务和保留的终态 ID，不是累计提交次数。复用 ID 会替换原终态，不会多占一个历史名额；终态记录被淘汰后，status(id) 会返回 None。
 
 ## 排障
 
