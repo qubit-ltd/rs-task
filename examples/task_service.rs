@@ -31,7 +31,11 @@ impl TaskHandler for EchoV1 {
         }
     }
 
-    fn run<'a>(&'a self, payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        payload: &'a [u8],
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             Ok(TaskRunOutcome::Succeeded(TaskOutput {
                 summary: format!("echoed {} bytes", payload.len()).into_bytes(),
@@ -41,7 +45,8 @@ impl TaskHandler for EchoV1 {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    futures::executor::block_on(async {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
+    runtime.block_on(async {
         let service = TaskExecutionServiceBuilder::in_memory()
             .register_handler(Arc::new(EchoV1))?
             .build()
@@ -82,7 +87,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let accepted = service.submit(request).await?;
         let finished = service.wait(accepted.id).await?;
         assert!(matches!(finished.state, qubit_task::model::TaskState::Succeeded));
-        assert_eq!(finished.output.expect("summary is persisted").summary, b"echoed 14 bytes");
+        assert_eq!(
+            finished.output.expect("summary is persisted").summary,
+            b"echoed 14 bytes"
+        );
 
         service.shutdown().await?;
         Ok::<(), Box<dyn std::error::Error>>(())

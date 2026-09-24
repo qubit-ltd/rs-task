@@ -44,9 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 可选的生命周期通知使用有界队列，默认容量为 256；队列满时会丢弃新通知，关闭服务时通常会排空已入队通知，发布线程 panic 时队列中剩余通知可能丢失。同步事件总线 provider 可能阻塞专用发布线程，因此 provider 一直不返回时，服务关闭也可能一直等待。更多通知配置和统计说明见[用户指南](doc/user-guide.zh_CN.md)。
 
-`LocalTaskHandle<R, E>` 返回仅存在于当前进程的完整值或业务错误。只有处理器返回
-`LocalTaskOutcome::Cancelled` 并确认取消后，句柄才会以
-`LocalTaskResultError::Cancelled` 报告取消；`cancel_requested` 只是请求。可恢复任务使用带版本的
+`LocalTaskHandle<R, E>` 返回仅存在于当前进程的完整值或业务错误。对于运行中任务，
+只有处理器返回 `LocalTaskOutcome::Cancelled` 确认取消后，句柄才会以
+`LocalTaskResultError::Cancelled` 报告取消；`cancel_requested` 只是请求。尚未开始执行的排队任务
+由服务直接完成取消。可恢复任务使用带版本的
 `TaskRequest`，其 `TaskRecord.output` 只保存摘要或引用，不保存完整结果。
 第三方 `TaskStore` provider 必须实现 `count_states()`，一次聚合统计所有保留记录。
 `stats()` 调用该聚合一次，再读取引擎资源，因此两部分是相邻但非原子的快照。

@@ -55,11 +55,12 @@ event-bus provider can block the dedicated publisher thread, so shutdown can
 wait indefinitely on such a provider.
 
 `LocalTaskHandle<R, E>` returns the full process-local value or application
-error. Its cancellation result is `LocalTaskResultError::Cancelled`, which is
-sent only after the handler acknowledges cancellation with
-`LocalTaskOutcome::Cancelled`; `cancel_requested` alone is only a request.
-Durable work instead uses a versioned `TaskRequest`, and its small persisted
-`TaskRecord.output` is a summary or reference rather than the full result.
+error. For running work, `LocalTaskResultError::Cancelled` is delivered only
+after the handler acknowledges cancellation with `LocalTaskOutcome::Cancelled`;
+`cancel_requested` alone is only a request. Queued tasks cancelled before
+execution are finalized directly by the service. Durable work instead uses a
+versioned `TaskRequest`, and its small persisted `TaskRecord.output` is a
+summary or reference rather than the full result.
 Custom `TaskStore` providers must implement `count_states()` as one aggregate
 over retained records. `stats()` uses that aggregate once and then reads engine
 resources; these are adjacent snapshots, not one atomic snapshot.

@@ -18,9 +18,9 @@ use tokio::sync::oneshot;
 
 use super::admission_gate::AdmissionGate;
 use super::local_task_handle::LocalTaskHandle;
-use super::local_task_handle::LocalTaskOutcome;
-use super::local_task_handle::LocalTaskResultError;
-use super::local_task_handle::adapt_local_outcome;
+use super::local_task_outcome::LocalTaskOutcome;
+use super::local_task_outcome::adapt_local_outcome;
+use super::local_task_result_error::LocalTaskResultError;
 #[cfg(feature = "event-bus")]
 use super::task_event_notification_stats::TaskEventNotificationStats;
 #[cfg(feature = "event-bus")]
@@ -346,7 +346,12 @@ impl TaskExecutionService {
 
     /// Counts visible task states and reports current resource use.
     pub async fn stats(&self) -> Result<TaskStats, TaskServiceError> {
-        let TaskStateCounts { queued, running, blocked, terminal } = self.core.store.count_states().await?;
+        let TaskStateCounts {
+            queued,
+            running,
+            blocked,
+            terminal,
+        } = self.core.store.count_states().await?;
         let resources = self.core.engine.capacity();
         Ok(TaskStats {
             queued,
