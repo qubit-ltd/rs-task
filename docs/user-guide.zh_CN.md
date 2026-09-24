@@ -128,7 +128,7 @@ wait_for_current_tasks 等待调用时观察到的活动 ID 快照。wait_for_id
 | --- | --- |
 | 提交返回 DuplicateTask | 等待原任务进入终态，或换用其他 Id。 |
 | 提交返回 Suspended | 检查 is_suspended()，允许接收时调用 resume()。 |
-| cancel 返回 false | ID 可能不存在、已进入终态，或已被 worker 领取并即将执行；检查 status(id)。 |
+| cancel 返回 false | ID 可能不存在、已进入终态，或已被 worker 领取（callable 可能尚未开始）；检查 status(id)。 |
 | 成功后 status(id) 返回 None | 任务可能未被接受，或记录已被有限历史淘汰。 |
 | 关闭服务后句柄还没有结果 | 调用 TaskHandle::get 取得结果，再用 wait_termination 等待 worker 退出。 |
 
