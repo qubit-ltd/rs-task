@@ -24,13 +24,17 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```rust,no_run
 use qubit_task::TaskExecutionService;
 use qubit_task::model::TaskOutput;
+use qubit_task::service::LocalTaskOutcome;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionService::in_memory().await?;
-    let id = service.submit_local(|_| Ok(TaskOutput { summary: b"完成".to_vec() })).await?;
-    let record = service.wait(id).await?;
-    assert!(record.state.is_terminal());
+    let handle = service.submit_local(|_| LocalTaskOutcome::<String, std::io::Error>::Succeeded {
+        value: "完成".to_owned(),
+        summary: TaskOutput { summary: b"完成".to_vec() },
+    }).await?;
+    let value = handle.result().await??;
+    assert_eq!(value, "完成");
     service.shutdown().await?;
     Ok(())
 }
@@ -39,6 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 需要重启后恢复任务时，启用 `sqlite` feature，并使用 `TaskExecutionServiceBuilder::recoverable_sqlite(path)`。构建服务前，为每个已保存的 `(task_type, handler_version)` 注册对应处理器。
 
 可选的生命周期通知使用有界队列，默认容量为 256；队列满时会丢弃新通知，关闭服务时通常会排空已入队通知，发布线程 panic 时队列中剩余通知可能丢失。同步事件总线 provider 可能阻塞专用发布线程，因此 provider 一直不返回时，服务关闭也可能一直等待。更多通知配置和统计说明见[用户指南](doc/user-guide.zh_CN.md)。
+
+`LocalTaskHandle<R, E>` 返回仅存在于当前进程的完整值或业务错误。只有处理器返回
+`LocalTaskOutcome::Cancelled` 并确认取消后，句柄才会以
+`LocalTaskResultError::Cancelled` 报告取消；`cancel_requested` 只是请求。可恢复任务使用带版本的
+`TaskRequest`，其 `TaskRecord.output` 只保存摘要或引用，不保存完整结果。
+第三方 `TaskStore` provider 必须实现 `count_states()`，一次聚合统计所有保留记录。
+`stats()` 调用该聚合一次，再读取引擎资源，因此两部分是相邻但非原子的快照。
 
 ## 项目文档
 

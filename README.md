@@ -28,13 +28,17 @@ process exits; completed history is bounded to 1024 records.
 ```rust,no_run
 use qubit_task::TaskExecutionService;
 use qubit_task::model::TaskOutput;
+use qubit_task::service::LocalTaskOutcome;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionService::in_memory().await?;
-    let id = service.submit_local(|_| Ok(TaskOutput { summary: b"finished".to_vec() })).await?;
-    let record = service.wait(id).await?;
-    assert!(record.state.is_terminal());
+    let handle = service.submit_local(|_| LocalTaskOutcome::<String, std::io::Error>::Succeeded {
+        value: "finished".to_owned(),
+        summary: TaskOutput { summary: b"finished".to_vec() },
+    }).await?;
+    let value = handle.result().await??;
+    assert_eq!(value, "finished");
     service.shutdown().await?;
     Ok(())
 }
@@ -49,6 +53,16 @@ and event notifications. Optional lifecycle notifications use a bounded queue
 drains queued notifications unless the publisher worker panics. A synchronous
 event-bus provider can block the dedicated publisher thread, so shutdown can
 wait indefinitely on such a provider.
+
+`LocalTaskHandle<R, E>` returns the full process-local value or application
+error. Its cancellation result is `LocalTaskResultError::Cancelled`, which is
+sent only after the handler acknowledges cancellation with
+`LocalTaskOutcome::Cancelled`; `cancel_requested` alone is only a request.
+Durable work instead uses a versioned `TaskRequest`, and its small persisted
+`TaskRecord.output` is a summary or reference rather than the full result.
+Custom `TaskStore` providers must implement `count_states()` as one aggregate
+over retained records. `stats()` uses that aggregate once and then reads engine
+resources; these are adjacent snapshots, not one atomic snapshot.
 
 ## Project documents
 

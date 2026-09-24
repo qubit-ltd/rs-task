@@ -29,7 +29,7 @@
 - `TaskId` 标识一次提交，由服务生成，提交后保持稳定；业务自己的标识放在 `correlation_key` 中。可选 `idempotency_key` 用于受理去重。同一去重键与相同任务描述重复提交时返回原 `TaskId`；内容不同则拒绝。去重键的有效期与存储保留期一致，过期后不保证去重。
 - `TaskRequest` 包含 `task_type`、`handler_version`、有大小上限的 `payload`、资源需求和可选业务关联字段。它不包含进程地址、闭包或持久化后无法重建的对象。
 - 处理器通过 `TaskHandlerRegistry` 在服务启动时按 `(task_type, handler_version)` 注册。注册表可由 `rs-spi` 发现的处理器 provider 构建，也允许应用显式注入实例。服务恢复旧任务前检查处理器是否存在；缺失时将任务置为 `Blocked` 并报告不可运行原因，不把它当作业务执行失败，也不静默丢弃。当前没有 payload 预检接口，解码失败由处理器返回为执行错误。
-- `submit` 接受可重建的 `TaskRequest` 并返回受理时的 `TaskRecord`。`submit_local` 接受本地闭包并返回 `TaskId`，可通过同一门面的查询和等待接口跟踪；仅在不承诺重启恢复的存储上可用，使用可恢复存储时明确拒绝。两种提交方式始终通过同一个服务门面。
+- `submit` 接受可重建的 `TaskRequest` 并返回受理时的 `TaskRecord`。`submit_local` 接受本地闭包并返回 `LocalTaskHandle<R, E>`：句柄提供仅存在于当前进程的完整结果值或原始业务错误，同时 `TaskRecord.output` 仅保存小型摘要或引用。该方法仅在不承诺重启恢复的存储上可用，使用可恢复存储时明确拒绝。两种提交方式始终通过同一个服务门面。
 - `TaskContext` 向处理器提供 `TaskId`、尝试次数、取消信号和实际分配的资源标识。大结果由业务写入外部存储；任务记录只保存有大小上限的结果摘要或引用、错误类别和诊断信息。
 
 ### 3.2 资源模型
@@ -44,9 +44,9 @@
 
 公开状态为 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked`、`Cancelled`；`Queued` 包含已受理但尚未获资源的任务，`Blocked` 表示需要运维或业务方修复后才能重新入队。受理中的临时状态和终态提交中的内部状态不向业务方承诺。每条 `TaskRecord` 包含 `TaskId`、业务关联、受理/启动/结束时间、尝试次数、当前状态、资源请求及分配结果、失败摘要和单调递增的状态版本。
 
-基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；只有处理器实际退出且确认取消才进入 `Cancelled`。已经产生成功或失败的结果不能被迟到的取消请求覆盖。恢复时，上一进程遗留的 `Running` 记录转回 `Queued`，随后由下一次启动将尝试号递增；对外可查询到它在等待重试及其原因。
+基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；`cancel_requested` 只表示发起了请求。只有处理器实际退出并返回 `TaskRunOutcome::Cancelled` 才进入 `Cancelled`；返回成功或失败时保留该业务结果。`LocalTaskHandle::result()` 等待权威终态写入后，才返回类型化结果、业务错误或明确的取消错误。恢复时，上一进程遗留的 `Running` 记录转回 `Queued`，随后由下一次启动将尝试号递增；对外可查询到它在等待重试及其原因。
 
-提供按 `TaskId` 查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。当前分页游标按 `TaskId` 排序，不提供受理时间范围过滤。等待中的任务进入 `Blocked` 时，等待接口返回需要干预的结果，不能无限等待。`get` 对不存在或已过期的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储仅限制终态历史数量；SQLite 当前不清理持久历史。持久化后端通过分页查询读取历史，不要求将全量历史载入内存。
+提供按 `TaskId` 查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。`stats()` 通过一次 `TaskStore::count_states()` 聚合查询得到所有保留状态计数，再读取执行引擎资源快照；二者相邻读取但不是同一事务中的原子快照。存储统计失败向调用方传播，查询成本不随历史页数增长。当前 `list()` 游标按 `TaskId` 排序，不提供受理时间范围过滤。等待中的任务进入 `Blocked` 时，等待接口返回需要干预的结果，不能无限等待。`get` 对不存在或已过期的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储仅限制终态历史数量；SQLite 当前不清理持久历史。持久化后端分页读取明细历史，不要求将全量历史载入内存。
 
 ## 4. 服务接口与职责划分
 
@@ -81,7 +81,7 @@
 TaskExecutionService
   capabilities() -> ServiceCapabilities
   submit(TaskRequest) -> TaskRecord
-  submit_local(local_task) -> TaskId | UnsupportedCapability
+  submit_local(local_task) -> LocalTaskHandle<R, E> | UnsupportedCapability
   get(TaskId) -> TaskRecord | NotFound | Error
   list(TaskQuery) -> Page<TaskRecord>
   cancel(TaskId) -> CancelOutcome
@@ -91,7 +91,7 @@ TaskExecutionService
   shutdown() -> Result
 ```
 
-`TaskExecutionService` 是一个门面类型，而不是为不同存储能力实现多套公共 trait。构建时由装配的 `TaskStore` 决定是否启动恢复流程，并可配置 `require_recovery`：要求恢复但所选存储不支持时，构建失败。`capabilities()` 返回存储能力及本地闭包支持情况。当前 `submit_local` 返回 `TaskId`，随后通过 `get`、`wait` 查询结果；若存储声明重启恢复，则返回 `UnsupportedCapability`，防止不可重建闭包被当作可恢复任务。提交返回 `Ok` 只代表受理：不可恢复存储已保存于本机队列；可恢复存储已完成持久化受理。它不代表任务已启动或成功。
+`TaskExecutionService` 是一个门面类型，而不是为不同存储能力实现多套公共 trait。构建时由装配的 `TaskStore` 决定是否启动恢复流程，并可配置 `require_recovery`：要求恢复但所选存储不支持时，构建失败。`capabilities()` 返回存储能力及本地闭包支持情况。`submit_local` 返回 `LocalTaskHandle<R, E>`，可等待类型化业务值/错误或取消、阻塞、存储故障等明确终态结果；稳定 ID 仍可通过 `task_id()` 获取，`TaskRecord.output` 只用于查询持久摘要。若存储声明重启恢复，则返回 `UnsupportedCapability`，防止不可重建闭包被当作可恢复任务。提交返回 `Ok` 只代表受理：不可恢复存储已保存于本机队列；可恢复存储已完成持久化受理。它不代表任务已启动或成功。
 
 `TaskScheduler` 使用 `SchedulingPolicy` 从待执行任务中选择候选项，再向 `TaskExecutionEngine` 请求原子分配和启动。资源账本归执行引擎所有，避免调度器与执行器对剩余资源有不同认识。本期 `LocalTaskExecutionEngine` 在服务所在机器执行；今后替换为分布式实现时，提交与查询模型不必重写。`TaskStore` 是状态依据；不得由协调器或执行引擎另建一套相互竞争的权威状态。
 
@@ -132,7 +132,7 @@ TaskExecutionService
 
 | 接口 | 必要操作 | 不负责的事 |
 | --- | --- | --- |
-| `TaskStore` | 报告能力；原子受理或返回已存在的幂等任务；按版本条件转换状态；查询与分页；按能力恢复未完成任务 | 启动处理器、判断本机 GPU 是否空闲 |
+| `TaskStore` | 报告能力；原子受理或返回已存在的幂等任务；按版本条件转换状态；查询与分页；单次聚合统计保留状态；按能力恢复未完成任务 | 启动处理器、判断本机 GPU 是否空闲 |
 | `SchedulingPolicy` | 根据待执行任务的有界快照、资源快照及等待信息，返回候选任务顺序 | 更改权威状态、预约资源、执行用户代码 |
 | `TaskExecutionEngine` | 报告可用容量；尝试完整预约任务资源；启动一次任务尝试；报告退出并释放预约 | 决定任务状态、持久化历史、向业务发布事件 |
 | `TaskHandler` | 声明稳定的任务类型与版本；校验和解码自己的 payload；使用 `TaskContext` 执行业务逻辑 | 修改队列或服务级状态 |
@@ -156,6 +156,8 @@ TaskExecutionService
 
 存储契约包含受理、条件状态转换、按 ID 查询、分页列举、保留策略，以及恢复相关操作。没有恢复能力的实现可对恢复操作返回 `UnsupportedCapability`；服务仅在能力声明支持时调用，构建时检查能力声明与配置，具体行为由契约测试和运行时错误保证。`PersistentHistory` 类型的实现可以在内存中保持活跃队列，并将终态写入外部存储；历史写入失败不能改写已经发生的业务结果，但必须在健康状态中暴露，并在历史查询依赖该存储时返回错误，不能伪装为 `NotFound`。
 
+`count_states()` 是 `TaskStore` 的必需操作：在一个 store 一致性边界内聚合所有当前保留记录，分别返回 `Queued`、`Running`、`Blocked` 与终态数量；已淘汰的终态不计入。实现不应通过多页 `list()` 逐条计数。SQLite 使用单个分组聚合查询，内存实现遍历其受保护的记录集合。第三方 provider 必须实现此方法并随 API 破坏性升级编译迁移。
+
 当 `restart_recovery = true` 时，同一个 `TaskStore` 必须额外满足以下原子语义：
 
 1. 受理时写入任务描述、初始状态和去重键，成功提交后才能向调用方返回 `Ok`。
@@ -165,7 +167,7 @@ TaskExecutionService
 
 存储后端可以使用事务、条件写、日志加锁等方式满足契约；仅暴露普通 `save/get` 的后端不能声明重启恢复能力。独占所有权必须能阻止旧实例继续提交状态变更；服务失去所有权时停止受理和启动新任务。在无法证明旧实例已经退出或被隔离时，新实例不得自动接管。即使状态写入有代际保护，已经运行的旧处理器仍可能继续产生外部副作用，不能将存储代际误称为业务层的恰好一次保证。单节点本期只承诺服务进程重启后的恢复，不承诺多个节点同时竞争任务。具体 SQL、Redis、MongoDB 或文件后端可由业务系统通过 SPI 提供；库内用能力对应的契约测试验证实现，不因某个 provider 自称支持恢复就直接信任它。
 
-恢复规则：`Queued` 任务重新入队；遗留的 `Running` 任务重新入队等待下一次尝试。由于进程可能在业务副作用发生之后、终态持久化之前退出，可恢复模式只能保证**至少一次执行**，不能保证恰好一次。业务处理器应使用 `TaskId` 或自身业务键做幂等。超过恢复/重试次数上限、处理器版本缺失或任务描述无法解码时，记录进入 `Blocked` 并保留诊断信息，不自动启动，也不当作正常成功。优雅关闭时停止受理，等待运行任务退出；超时退出后的恢复仍按上述规则处理。
+恢复规则：`Queued` 任务重新入队；遗留的 `Running` 任务重新入队等待下一次尝试。由于进程可能在业务副作用发生之后、终态持久化之前退出，可恢复模式只能保证**至少一次执行**，不能保证恰好一次。业务处理器应使用 `TaskId` 或自身业务键做幂等。超过恢复/重试次数上限、处理器版本缺失或任务描述无法解码时，记录进入 `Blocked` 并保留诊断信息，不自动启动，也不当作正常成功。优雅关闭先关闭新受理，再等待已进入受理流程的提交完成持久化或失败，然后等待已受理任务退出；超时退出后的恢复仍按上述规则处理。
 
 可恢复存储操作失败时，服务停止新任务受理和后续调度，并通过 `last_store_error()` 暴露诊断。若执行已结束但终态没有提交，持久记录仍为 `Running`，服务不对外报告成功；进程重启后该任务可能再次执行。当前实现不在同一进程内重试失败的状态写入，也不对 SQLite 记录实施自动历史清理。
 
@@ -184,10 +186,10 @@ TaskExecutionService
 ## 7. 关键操作顺序与不变量
 
 ```text
-提交：验证描述和资源 -> 检查容量/去重 -> 写入权威存储 -> 返回 TaskId -> 唤醒调度
+提交：验证描述和资源 -> 检查容量/去重 -> 写入权威存储 -> 返回 TaskRecord 或 LocalTaskHandle -> 唤醒调度
 启动：选择候选任务 -> 执行引擎 prepare 并预约全部资源 -> TaskStore 提交 Running -> 执行引擎 activate -> 调用处理器
 结束：取得处理器结果 -> 提交终态 -> 释放资源 -> 唤醒调度 -> 锁外通知
-取消：已排队则原子移出并提交 Cancelled；运行中则记录请求并通知处理器
+取消：已排队则原子移出并提交 Cancelled；运行中则记录请求并通知处理器，处理器返回 Cancelled 才确认
 恢复：取得独占所有权 -> 检查处理器版本 -> 装载未完成记录 -> 重建队列 -> 开始调度
 ```
 
@@ -195,6 +197,6 @@ TaskExecutionService
 
 ## 8. 验证与迁移
 
-核心验证包括：资源不足排队、GPU 设备分配、非法资源请求、队列满拒绝、越过次数后的防饥饿、取消与启动竞态、panic 后资源归还、重复提交、历史存储故障、事件故障、持久受理失败、终态写入失败、重启恢复，以及旧实例回调被版本/代际拒绝。还要验证 `in_memory()` 无 SPI 装配可执行本地任务、通用 builder 未选存储时拒绝构建、默认容量可覆盖、SQLite 便捷入口完成恢复后才返回，以及链接第三方 provider 不改变默认行为。SPI 场景要验证跨 crate 自动发现、未链接 provider 不会被发现、重复处理器键报错、运行时配置注入、`StoreCapabilities` 与实际操作一致、`require_recovery` 失败而不降级，以及旧处理器版本恢复。`TaskStore` 提供按能力分组的可复用契约测试套件，让外部后端检验原子受理、条件更新、恢复扫描和独占所有权。
+核心验证包括：资源不足排队、GPU 设备分配、非法资源请求、队列满拒绝、越过次数后的防饥饿、取消与启动竞态、panic 后资源归还、重复提交、历史存储故障、事件故障、持久受理失败、终态写入失败、重启恢复，以及旧实例回调被版本/代际拒绝。还要验证 `in_memory()` 无 SPI 装配可执行本地任务、通用 builder 未选存储时拒绝构建、默认容量可覆盖、SQLite 便捷入口完成恢复后才返回，以及链接第三方 provider 不改变默认行为。SPI 场景要验证跨 crate 自动发现、未链接 provider 不会被发现、重复处理器键报错、运行时配置注入、`StoreCapabilities` 与实际操作一致、`require_recovery` 失败而不降级，以及旧处理器版本恢复。`TaskStore` 提供按能力分组的可复用契约测试套件，让外部后端检验原子受理、条件更新、恢复扫描、独占所有权和单次状态聚合；`stats()` 在服务层由拒绝 `list()` 的测试存储验证只执行一次 `count_states()`。
 
-实施分三步：先交付统一门面、内存 `TaskStore`、默认调度策略、本机执行引擎和 SPI 服务族；再完成可恢复 `TaskStore`、SQLite provider 和重启场景；最后直接接入可选的 `rs-event-bus` 事件通知。新版将破坏旧公开 API，使用 `in_memory()` 代替含糊的无参数构造，使用 `submit_local` 或版本化 `TaskRequest` 代替旧闭包提交，并用服务生成且不复用的 `TaskId`。README、用户指南、概览和 Cargo 打包清单均已更新。
+实施分三步：先交付统一门面、内存 `TaskStore`、默认调度策略、本机执行引擎和 SPI 服务族；再完成可恢复 `TaskStore`、SQLite provider 和重启场景；最后直接接入可选的 `rs-event-bus` 事件通知。新版将破坏旧公开 API：使用 `in_memory()` 代替含糊的无参数构造，使用版本化 `TaskRequest` 或只适用于本地闭包的 `LocalTaskHandle<R, E>`，并用服务生成且不复用的 `TaskId`。`submit_local` 不再返回旧的通用 `TaskHandle<R, E>`；第三方 `TaskStore` 还必须实现 `count_states()`，以一次查询返回所有保留状态的计数。迁移调用代码、provider 实现和测试，不要求保留兼容层。检查当前 `rust-common` 工作区与相关 `rs-*` 仓库后，没有发现直接依赖 `rs-task` 的实际下游，因此当前没有需要同步迁移的兄弟 crate。

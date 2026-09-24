@@ -26,27 +26,35 @@ qubit-task = "0.6"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ~~~
 
-`in_memory()` 会在调用位置明确表示易失语义。它使用本机执行引擎、系统可用 CPU 并行度（无法获取时为 1）、最多 1024 个等待任务，以及最多 1024 条终态历史。它不会探测 GPU。`submit_local` 接收进程内闭包并返回 `TaskId`；闭包在 Tokio 阻塞线程池运行，可以用该 ID 查询或等待任务状态和结果摘要。自定义异步处理器应自行把长时间 CPU 运算或阻塞 I/O 移出异步工作线程。
+`in_memory()` 会在调用位置明确表示易失语义。它使用本机执行引擎、系统可用 CPU 并行度（无法获取时为 1）、最多 1024 个等待任务，以及最多 1024 条终态历史。它不会探测 GPU。`submit_local` 接收进程内闭包并返回类型化的 `LocalTaskHandle<R, E>`；闭包在 Tokio 阻塞线程池运行。句柄提供闭包的进程内返回值或原始错误，而 `TaskRecord.output` 只保留较小的 `TaskOutput` 摘要。自定义异步处理器应自行把长时间 CPU 运算或阻塞 I/O 移出异步工作线程。
 
 ~~~rust,no_run
 use qubit_task::TaskExecutionService;
 use qubit_task::model::TaskOutput;
+use qubit_task::service::LocalTaskOutcome;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionService::in_memory().await?;
-    let id = service.submit_local(|context| {
+    let handle = service.submit_local(|context| {
         assert_eq!(context.attempt(), 1);
-        Ok(TaskOutput { summary: b"已导入 21 行".to_vec() })
+        LocalTaskOutcome::<usize, std::io::Error>::Succeeded {
+            value: 21_usize,
+            summary: TaskOutput { summary: b"已导入 21 行".to_vec() },
+        }
     }).await?;
-    let record = service.wait(id).await?;
-    println!("{}: {:?}", record.id, record.state);
+    let imported_rows = handle.result().await??;
+    assert_eq!(imported_rows, 21);
     service.shutdown().await?;
     Ok(())
 }
 ~~~
 
 如果存储声明支持重启恢复，`submit_local` 会拒绝闭包提交，因为闭包无法在进程退出后从数据库重建。
+需要协作取消时，处理器观察 `TaskContext::is_cancelled()` 后返回
+`LocalTaskOutcome::Cancelled`；随后 `handle.result()` 返回
+`LocalTaskResultError::Cancelled`。成功的 `TaskRunOutcome` 或 `TaskRecord.output`
+不会被迟到的取消请求覆盖。
 
 ## 注册版本化处理器
 
@@ -57,8 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ~~~rust,no_run
 use std::sync::Arc;
 use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::handler::{TaskContext, TaskHandler, TaskHandlerDescriptor};
-use qubit_task::model::{TaskOutput, TaskRequest, TaskRunError};
+use qubit_task::handler::{TaskContext, TaskHandler, TaskHandlerDescriptor, TaskRunOutcome, TaskRunResult};
+use qubit_task::model::{TaskOutput, TaskRequest};
 use qubit_task::store::TaskFuture;
 
 struct ImportV1;
@@ -68,10 +76,12 @@ impl TaskHandler for ImportV1 {
     }
 
     fn run<'a>(&'a self, payload: &'a [u8], _context: TaskContext)
-        -> TaskFuture<'a, Result<TaskOutput, TaskRunError>>
+        -> TaskFuture<'a, TaskRunResult>
     {
         Box::pin(async move {
-            Ok(TaskOutput { summary: format!("接收了 {} 字节", payload.len()).into_bytes() })
+            Ok(TaskRunOutcome::Succeeded(TaskOutput {
+                summary: format!("接收了 {} 字节", payload.len()).into_bytes(),
+            }))
         })
     }
 }
@@ -90,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ~~~
 
 `TaskOutput` 用于保存小型摘要或引用。较大的结果应由业务系统保存在自己的数据存储中，再返回有大小上限的引用。
+需要重启后重建的任务应使用带精确处理器版本的 `TaskRequest`；现有 SQLite 重启恢复测试覆盖了公共服务门面上的该流程。
 
 ## 调度 CPU、GPU 和业务自定义资源
 
@@ -111,7 +122,7 @@ let capacity = ResourceCapacity {
 let builder = TaskExecutionServiceBuilder::in_memory().capacity(capacity);
 ~~~
 
-服务会根据执行引擎公布的容量校验每个请求。超出已配置容量的请求会被拒绝；当前资源不足但以后可能满足的请求会继续排队。默认公平 FIFO 策略允许符合当前资源条件的任务越过队首，并在队首任务多次被越过后为其保留执行机会。等待队列有容量限制；队列满时返回 `QueueFull`，由调用方施加背压。
+服务会根据执行引擎公布的容量校验每个请求。超出已配置容量的请求会被拒绝；当前资源不足但以后可能满足的请求会继续排队。默认公平 FIFO 策略允许符合当前资源条件的任务越过队首，并在队首任务多次被越过后为其保留执行机会。等待队列有容量限制；队列满时返回 `QueueFull`，由调用方施加背压。自动重试遇到满队列时，任务会记录为 `Blocked`，等待容量恢复后可显式重试，不会突破队列上限。
 
 ## 使用 SQLite 在重启后恢复
 
@@ -131,7 +142,7 @@ let service = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sql
 
 SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁确保同一数据库不会同时由多个服务进程执行。构建器取得所有权并扫描未完成任务后才返回。数据库被占用或所选能力不支持恢复时，服务启动失败，不会自动回退到内存。找不到历史任务对应的处理器时，任务保留在存储中并置为 `Blocked`，构建仍可成功。
 
-`capabilities()` 会报告实际装配的存储能力 `persistent_history` 和 `restart_recovery`。第三方存储也可以持久化历史，但不支持恢复任务。
+`capabilities()` 会报告实际装配的存储能力 `persistent_history` 和 `restart_recovery`。第三方存储也可以持久化历史，但不支持恢复任务。每个 `TaskStore` 实现都必须提供 `count_states()`，在一次聚合中统计所有保留记录。`stats()` 只调用一次该方法，并向调用者传播统计失败。状态计数和执行引擎资源快照先后读取，因此是时间相邻但非原子的两个快照。统计成本是一次聚合查询，不随历史分页数增长。
 
 ## 通过 `qubit-spi` 装配组件
 
@@ -159,17 +170,17 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 这些值表示队列接纳、provider 回执或线程状态，不代表订阅者 handler 已处理完成。
 计数单调递增并在 `u64::MAX` 饱和；同一快照的各字段不保证来自完全相同的时刻。
 
-调用 `shutdown()` 时，服务先等待已受理任务结束，再关闭通知入队并排空队列中的事件，然后返回。它不会关闭由应用持有的事件总线。同步 provider 在专用操作系统线程上运行，不会占用 Tokio runtime worker；但如果 provider 永不返回，该线程就无法完成发布，`shutdown()` 也可能无限等待。不调用 `shutdown()` 而直接丢弃服务时，发送端关闭后发布线程仍会排空已入队通知再退出，同样受 provider 是否返回的影响。若发布线程发生 panic，`worker_panicked` 会记录此情况，shutdown 仍可观察到线程退出，但队列中尚未处理的通知可能丢失。
+调用 `shutdown()` 时，服务先停止新的受理并等待进行中的提交完成受理，再等待已受理任务结束；随后关闭通知入队并排空队列中的事件，然后返回。它不会关闭由应用持有的事件总线。同步 provider 在专用操作系统线程上运行，不会占用 Tokio runtime worker；但如果 provider 永不返回，该线程就无法完成发布，`shutdown()` 也可能无限等待。不调用 `shutdown()` 而直接丢弃服务时，发送端关闭后发布线程仍会排空已入队通知再退出，同样受 provider 是否返回的影响。若发布线程发生 panic，`worker_panicked` 会记录此情况，shutdown 仍可观察到线程退出，但队列中尚未处理的通知可能丢失。
 
 ## 查询、取消和重试
 
-使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它只会在 `TaskContext` 中设置协作取消信号；处理器必须观察信号并退出后，执行引擎才会释放资源。
+使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它会持久化 `cancel_requested` 并在 `TaskContext` 中设置协作取消信号；这只是取消请求。处理器必须返回 `TaskRunOutcome::Cancelled`，服务才会以 `TaskState::Cancelled` 确认取消。如果处理器返回成功或失败，那个结果仍是权威结果。协作取消集成测试覆盖了这一契约。
 
 处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`，panic 进入 `Panicked`。可重试错误最多自动尝试三次（可通过构建器调整）；如果重试时有界等待队列已满，任务会因队列容量进入 `Blocked`，不会突破队列上限。队列有空位后调用 `retry_blocked` 可再次入队。
 
 ## 从旧版 API 迁移
 
-本次重设计有意移除调用方提供的 ID、`submit` 闭包、线程池专属 builder 选项和旧的 `TaskHandle<R, E>`。请改用服务生成的 `TaskId`、配合版本化处理器的可恢复 `TaskRequest`，或只适用于进程内任务的 `submit_local`。不要再依赖终态后复用 ID 的行为。
+本次重设计移除调用方提供的 ID、`submit` 闭包、线程池专属 builder 选项和旧的 `TaskHandle<R, E>`。这里没有通用的持久化句柄：`submit_local` 现在为进程内闭包返回 `LocalTaskHandle<R, E>`；需要重建的任务仍使用 `TaskRequest` 和服务生成的 `TaskId`。第三方 `TaskStore` 需要新增 `count_states()`，一次聚合返回所有保留状态的计数。这些是有意的源码破坏性变更，下游实现和调用点应一起迁移。当前工作区中没有 `rs-*` crate 直接依赖 `rs-task`。
 
 ## 运行限制
 
