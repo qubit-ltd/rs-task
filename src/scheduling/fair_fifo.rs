@@ -7,6 +7,7 @@
 // =============================================================================
 use super::QueueSnapshot;
 use super::SchedulingPolicy;
+use crate::model::ResourceCapacity;
 use crate::model::ResourceSnapshot;
 use crate::model::TaskId;
 use crate::model::TaskRequest;
@@ -54,11 +55,26 @@ impl SchedulingPolicy for FairFifoPolicy {
         result.extend(
             candidates
                 .iter()
-                .filter(|task| likely_fits(task, resources))
+                .filter(|task| likely_fits(task, resources) || !can_fit_capacity(task, &resources.capacity))
                 .map(|task| task.id),
         );
         result
     }
+}
+
+fn can_fit_capacity(task: &QueuedTask, capacity: &ResourceCapacity) -> bool {
+    let request = &task.request.resources;
+    request.cpu_slots <= capacity.cpu_slots
+        && capacity
+            .gpus
+            .values()
+            .filter(|labels| request.gpu_labels.iter().all(|label| labels.contains(label)))
+            .count()
+            >= request.gpu_count as usize
+        && request
+            .custom
+            .iter()
+            .all(|(name, amount)| capacity.custom.get(name).is_some_and(|limit| amount <= limit))
 }
 
 fn likely_fits(task: &QueuedTask, resources: &ResourceSnapshot) -> bool {

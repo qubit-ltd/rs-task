@@ -414,3 +414,56 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
         "the protected large task starts first"
     );
 }
+
+#[tokio::test]
+async fn permanently_unavailable_request_is_classified_without_bypass_counting() {
+    let (observed, mut observations) = mpsc::unbounded_channel();
+    let policy = Arc::new(ObservingFairPolicy {
+        inner: FairFifoPolicy::default(),
+        observed,
+    });
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .capacity(ResourceCapacity {
+            cpu_slots: 0,
+            ..ResourceCapacity::default()
+        })
+        .policy(policy)
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<(), Infallible>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("unsatisfiable task is accepted for reporting");
+    let task_id = handle.task_id();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(3), handle.result()).await;
+    let record = service
+        .get(task_id)
+        .await
+        .expect("task record query succeeds")
+        .expect("accepted task record remains stored");
+    assert!(matches!(
+        record.state,
+        qubit_task::model::TaskState::Blocked { ref reason } if reason.contains("unsatisfiable")
+    ));
+    assert!(
+        matches!(
+            outcome,
+            Ok(Err(qubit_task::service::LocalTaskResultError::Blocked(ref reason))) if reason.contains("unsatisfiable")
+        ),
+        "unsatisfiable task should finalize Blocked; result={outcome:?}, stored state={:?}",
+        record.state
+    );
+    let snapshot = observe_until(&mut observations, |snapshot| {
+        snapshot.iter().any(|(id, _)| *id == task_id)
+    })
+    .await;
+    assert_eq!(
+        snapshot.iter().find(|(id, _)| *id == task_id).map(|(_, count)| *count),
+        Some(0)
+    );
+}
