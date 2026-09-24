@@ -16,6 +16,7 @@ use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::service::LocalTaskOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
@@ -208,12 +209,14 @@ async fn test_success_after_cancellation_request_stays_succeeded() {
                 context.is_cancelled(),
                 "handler observes persisted cancellation request"
             );
-            Ok(TaskRunOutcome::Succeeded(TaskOutput {
-                summary: b"completed".to_vec(),
-            }))
+            LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+                value: (),
+                summary: TaskOutput { summary: b"completed".to_vec() },
+            }
         })
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     let signal = started_rx.await.expect("handler started");
     assert_eq!(
         service.cancel(id).await.expect("request succeeds"),
@@ -251,10 +254,11 @@ async fn test_handler_explicitly_confirms_cancellation() {
                 .expect("test receives cancellation signal");
             release_rx.recv().expect("test releases handler");
             assert!(context.is_cancelled());
-            Ok(TaskRunOutcome::Cancelled)
+            LocalTaskOutcome::<(), std::io::Error>::Cancelled
         })
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     let signal = started_rx.await.expect("handler started");
     assert_eq!(
         service.cancel(id).await.expect("request succeeds"),
@@ -285,9 +289,10 @@ async fn test_handler_result_racing_cancellation_commits_one_terminal_state() {
         .await
         .expect("service builds");
     let id = service
-        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), store.entered.notified())
         .await
         .expect("handler result reached terminal write");

@@ -19,6 +19,8 @@ use qubit_task::engine::LocalTaskExecutionEngine;
 use qubit_task::engine::PreparedExecution;
 use qubit_task::engine::TaskExecutionEngine;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::service::LocalTaskOutcome;
+use qubit_task::service::LocalTaskResultError;
 use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
@@ -298,7 +300,7 @@ async fn test_shutdown_waits_for_inflight_acceptance_and_rejects_new_admission()
     let submitting_service = service.clone();
     let submission = tokio::spawn(async move {
         submitting_service
-            .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+            .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
             .await
     });
     tokio::time::timeout(Duration::from_secs(2), entered_rx)
@@ -325,7 +327,7 @@ async fn test_shutdown_waits_for_inflight_acceptance_and_rejects_new_admission()
         Err(TaskServiceError::ShuttingDown)
     ));
     assert!(matches!(
-        service.submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))).await,
+        service.submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }).await,
         Err(TaskServiceError::ShuttingDown)
     ));
     assert!(!closing.is_finished(), "shutdown must wait for the in-flight acceptance");
@@ -335,7 +337,8 @@ async fn test_shutdown_waits_for_inflight_acceptance_and_rejects_new_admission()
         .await
         .expect("old submission completes")
         .expect("submission task joins")
-        .expect("old submission is accepted");
+        .expect("old submission is accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), closing)
         .await
         .expect("shutdown completes after accepted work")
@@ -378,7 +381,7 @@ async fn test_shutdown_continues_after_first_caller_is_cancelled() {
     let submitting_service = service.clone();
     let submission = tokio::spawn(async move {
         submitting_service
-            .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+            .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
             .await
     });
     tokio::time::timeout(Duration::from_secs(2), entered_rx)
@@ -407,7 +410,8 @@ async fn test_shutdown_continues_after_first_caller_is_cancelled() {
         .await
         .expect("submission finishes")
         .expect("submission task joins")
-        .expect("old task remains accepted");
+        .expect("old task remains accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), service.shutdown())
         .await
         .expect("another shutdown caller observes completed coordination")
@@ -434,7 +438,7 @@ async fn test_aborted_submission_keeps_permit_until_detached_store_accept_finish
     let submitting_service = service.clone();
     let submission = tokio::spawn(async move {
         submitting_service
-            .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+            .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
             .await
     });
     tokio::time::timeout(Duration::from_secs(2), entered_rx)
@@ -520,9 +524,10 @@ async fn test_store_fault_wakes_waiter_with_diagnostic() {
         .await
         .expect("service builds");
     let id = service
-        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), async {
         while service.last_store_error().is_none() {
             tokio::task::yield_now().await;
@@ -589,10 +594,11 @@ async fn test_failed_post_activation_get_pauses_service() {
     let id = service
         .submit_local(move |_| {
             resume_rx.recv().expect("test handler is released");
-            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }
         })
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), failed_rx)
         .await
         .expect("post-activation get is attempted")
@@ -620,9 +626,10 @@ async fn test_evicted_cancelled_task_does_not_pause_scheduler() {
         .await
         .expect("service builds");
     let cancelled_id = service
-        .submit_local(|_| panic!("cancelled task must not run"))
+        .submit_local::<_, (), std::io::Error>(|_| panic!("cancelled task must not run"))
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), get_entered_rx)
         .await
         .expect("scheduler enters its first get")
@@ -637,7 +644,7 @@ async fn test_evicted_cancelled_task_does_not_pause_scheduler() {
     service
         .submit_local(move |_| {
             let _ = started_tx.send(());
-            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }
         })
         .await
         .expect("service still admits work after terminal record eviction");
@@ -680,7 +687,7 @@ async fn test_evicted_cancel_racing_blocked_transition_does_not_pause_service() 
     service
         .submit_local(move |_| {
             let _ = started_tx.send(());
-            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }
         })
         .await
         .expect("service remains open after the normal version conflict");
@@ -707,9 +714,10 @@ async fn test_evicted_cancel_racing_running_transition_does_not_pause_service() 
         .await
         .expect("service builds");
     let cancelled_id = service
-        .submit_local(|_| panic!("cancelled task must not run"))
+        .submit_local::<_, (), std::io::Error>(|_| panic!("cancelled task must not run"))
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), entered_rx)
         .await
         .expect("scheduler begins Running transition")
@@ -724,7 +732,7 @@ async fn test_evicted_cancel_racing_running_transition_does_not_pause_service() 
     service
         .submit_local(move |_| {
             let _ = started_tx.send(());
-            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }
         })
         .await
         .expect("service remains open after evicted cancellation");
@@ -756,9 +764,10 @@ async fn test_activation_failure_retries_blocked_transition_after_cancel_conflic
         .await
         .expect("service builds");
     let id = service
-        .submit_local(|_| panic!("activation failure prevents handler execution"))
+        .submit_local::<_, (), std::io::Error>(|_| panic!("activation failure prevents handler execution"))
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), entered_rx)
         .await
         .expect("scheduler begins activation-failure block")
@@ -796,7 +805,7 @@ async fn test_zero_history_fast_handler_completion_keeps_service_healthy() {
     service
         .submit_local(move |_| {
             let _ = ran_tx.send(());
-            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }
         })
         .await
         .expect("task accepted");
@@ -822,7 +831,7 @@ async fn test_store_fault_shutdown_waits_for_inflight_accept_side_effects() {
         .await
         .expect("service builds");
     service
-        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
         .await
         .expect("first task accepted");
     tokio::time::timeout(Duration::from_secs(2), get_entered_rx)
@@ -835,7 +844,7 @@ async fn test_store_fault_shutdown_waits_for_inflight_accept_side_effects() {
     let submitting_service = service.clone();
     let submission = tokio::spawn(async move {
         submitting_service
-            .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+            .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
             .await
     });
     tokio::time::timeout(Duration::from_secs(2), accept_entered_rx)
@@ -856,17 +865,24 @@ async fn test_store_fault_shutdown_waits_for_inflight_accept_side_effects() {
     tokio::pin!(closing);
     assert!(matches!(futures::poll!(closing.as_mut()), std::task::Poll::Pending));
     store.accept_release.add_permits(1);
-    let accepted_id = tokio::time::timeout(Duration::from_secs(2), submission)
+    let accepted_handle = tokio::time::timeout(Duration::from_secs(2), submission)
         .await
         .expect("second submission finishes")
         .expect("submission task joins")
         .expect("second task accepted");
+    let accepted_id = accepted_handle.task_id();
     let error = tokio::time::timeout(Duration::from_secs(2), closing)
         .await
         .expect("fault shutdown finishes after acceptance")
         .expect_err("fault is reported");
     assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected scheduler get failure")));
     assert!(service.get(accepted_id).await.expect("accepted record loads").is_some());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), accepted_handle.result())
+            .await
+            .expect("late accepted handle finalizes after store fault"),
+        Err(LocalTaskResultError::StoreUnavailable(message)) if message.contains("injected scheduler get failure")
+    ));
 }
 
 #[tokio::test]
@@ -905,10 +921,11 @@ async fn test_shutdown_statistics_failure_wakes_waiter_with_store_diagnostic() {
         .submit_local(move |_| {
             let _ = started_tx.send(());
             resume_rx.recv().expect("test handler is released");
-            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }
         })
         .await
-        .expect("task accepted");
+        .expect("task accepted")
+        .task_id();
     tokio::time::timeout(Duration::from_secs(2), started_rx)
         .await
         .expect("handler starts")

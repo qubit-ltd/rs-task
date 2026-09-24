@@ -1,0 +1,301 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::time::Duration;
+
+use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskState;
+use qubit_task::service::CancelOutcome;
+use qubit_task::service::LocalTaskOutcome;
+use qubit_task::service::LocalTaskResultError;
+use qubit_task::service::TaskServiceError;
+use qubit_task::store::MemoryTaskStore;
+
+const WAIT_LIMIT: Duration = Duration::from_secs(3);
+
+struct NonCloneValue(String);
+
+#[derive(Debug, PartialEq, Eq)]
+enum DomainError {
+    InvalidInput,
+}
+
+impl fmt::Display for DomainError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid input")
+    }
+}
+
+#[tokio::test]
+async fn test_local_handle_delivers_non_clone_value_after_summary_is_persisted() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<NonCloneValue, DomainError>::Succeeded {
+            value: NonCloneValue("full in-process value".into()),
+            summary: TaskOutput {
+                summary: b"small persisted summary".to_vec(),
+            },
+        })
+        .await
+        .expect("local task accepted");
+    let task_id = handle.task_id();
+    let NonCloneValue(value) = tokio::time::timeout(WAIT_LIMIT, handle.result())
+        .await
+        .expect("handle result arrives")
+        .expect("task succeeded")
+        .expect("typed result succeeded");
+    assert_eq!(value, "full in-process value");
+    let record = service.get(task_id).await.expect("record query succeeds").expect("record retained");
+    assert_eq!(record.state, TaskState::Succeeded);
+    assert_eq!(record.output.expect("summary persisted").summary, b"small persisted summary");
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_local_handle_preserves_domain_error_type() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<(), DomainError>::Failed(DomainError::InvalidInput))
+        .await
+        .expect("local task accepted");
+    let id = handle.task_id();
+    let error: DomainError = tokio::time::timeout(WAIT_LIMIT, handle.result())
+        .await
+        .expect("handle result arrives")
+        .expect("task finalizes")
+        .expect_err("domain failure is retained");
+    assert_eq!(error, DomainError::InvalidInput);
+    let record = service.get(id).await.expect("record query succeeds").expect("record retained");
+    assert!(matches!(record.state, TaskState::Failed { .. }));
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_queued_local_handle_reports_cancelled_without_running_handler() {
+    let (started, started_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = mpsc::channel();
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .capacity(qubit_task::model::ResourceCapacity {
+            cpu_slots: 1,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("service builds");
+    let holding = service
+        .submit_local(move |_| {
+            let _ = started.send(());
+            release_rx.recv_timeout(WAIT_LIMIT).expect("holding task released");
+            LocalTaskOutcome::<(), DomainError>::Succeeded {
+                value: (),
+                summary: TaskOutput::default(),
+            }
+        })
+        .await
+        .expect("holding task accepted");
+    tokio::time::timeout(WAIT_LIMIT, started_rx)
+        .await
+        .expect("holding task starts")
+        .expect("start signal received");
+
+    let ran = Arc::new(AtomicBool::new(false));
+    let handler_ran = Arc::clone(&ran);
+    let queued = service
+        .submit_local(move |_| {
+            handler_ran.store(true, Ordering::Release);
+            LocalTaskOutcome::<(), DomainError>::Succeeded {
+                value: (),
+                summary: TaskOutput::default(),
+            }
+        })
+        .await
+        .expect("second task queued");
+    assert_eq!(
+        service.cancel(queued.task_id()).await.expect("queued task cancels"),
+        CancelOutcome::CancelledBeforeStart
+    );
+    assert!(matches!(
+        tokio::time::timeout(WAIT_LIMIT, queued.result())
+            .await
+            .expect("queued handle finalizes"),
+        Err(LocalTaskResultError::Cancelled)
+    ));
+    assert!(!ran.load(Ordering::Acquire), "cancelled queued handler must not run");
+    release.send(()).expect("release holding task");
+    holding.result().await.expect("holding task finalizes").expect("holding task succeeds");
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_handler_initiated_cancellation_has_distinct_handle_result() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<(), DomainError>::Cancelled)
+        .await
+        .expect("local task accepted");
+    let id = handle.task_id();
+    assert!(matches!(
+        tokio::time::timeout(WAIT_LIMIT, handle.result())
+            .await
+            .expect("cancelled handle finalizes"),
+        Err(LocalTaskResultError::Cancelled)
+    ));
+    assert_eq!(
+        service.get(id).await.expect("record query succeeds").expect("record retained").state,
+        TaskState::Cancelled
+    );
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_unsatisfiable_local_task_reports_blocked_without_running_handler() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .capacity(qubit_task::model::ResourceCapacity {
+            cpu_slots: 0,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("service builds");
+    let ran = Arc::new(AtomicBool::new(false));
+    let handler_ran = Arc::clone(&ran);
+    let handle = service
+        .submit_local(move |_| {
+            handler_ran.store(true, Ordering::Release);
+            LocalTaskOutcome::<(), DomainError>::Succeeded {
+                value: (),
+                summary: TaskOutput::default(),
+            }
+        })
+        .await
+        .expect("local task accepted");
+    let id = handle.task_id();
+    assert!(matches!(
+        tokio::time::timeout(WAIT_LIMIT, handle.result())
+            .await
+            .expect("blocked handle finalizes"),
+        Err(LocalTaskResultError::Blocked(reason)) if reason.contains("unsatisfiable")
+    ));
+    assert!(!ran.load(Ordering::Acquire));
+    assert!(matches!(
+        service.get(id).await.expect("record query succeeds").expect("record retained").state,
+        TaskState::Blocked { .. }
+    ));
+    service.shutdown().await.expect("blocked task permits shutdown");
+}
+
+#[tokio::test]
+async fn test_panicking_local_handler_reports_panic_without_typed_result() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local::<_, (), DomainError>(|_| panic!("local handle panic marker"))
+        .await
+        .expect("local task accepted");
+    let id = handle.task_id();
+    let result = tokio::time::timeout(WAIT_LIMIT, handle.result())
+        .await
+        .expect("panicking handle finalizes");
+    assert!(matches!(result, Err(LocalTaskResultError::Panicked(message)) if message.contains("local handle panic marker")));
+    assert!(matches!(
+        service.get(id).await.expect("record query succeeds").expect("record retained").state,
+        TaskState::Panicked { .. }
+    ));
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_dropping_local_handle_does_not_cancel_accepted_task() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<(), DomainError>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("local task accepted");
+    let id = handle.task_id();
+    drop(handle);
+    let record = tokio::time::timeout(WAIT_LIMIT, service.wait(id))
+        .await
+        .expect("accepted task finishes")
+        .expect("wait succeeds");
+    assert_eq!(record.state, TaskState::Succeeded);
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_local_handle_result_survives_zero_history_retention() {
+    let service = TaskExecutionServiceBuilder::default()
+        .store(Arc::new(MemoryTaskStore::new(0)))
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<NonCloneValue, DomainError>::Succeeded {
+            value: NonCloneValue("retained by handle".into()),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("local task accepted");
+    let id = handle.task_id();
+    let NonCloneValue(value) = tokio::time::timeout(WAIT_LIMIT, handle.result())
+        .await
+        .expect("handle result arrives")
+        .expect("task finalized")
+        .expect("task succeeded");
+    assert_eq!(value, "retained by handle");
+    assert!(service.get(id).await.expect("history query succeeds").is_none());
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_recoverable_store_rejects_typed_local_submission() {
+    let path = std::env::temp_dir().join(format!("qubit-task-typed-handle-{}.sqlite", qubit_task::TaskId::generate()));
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .expect("SQLite builder created")
+        .build()
+        .await
+        .expect("service builds");
+    let result = service
+        .submit_local(|_| LocalTaskOutcome::<(), DomainError>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await;
+    assert!(matches!(result, Err(TaskServiceError::UnsupportedCapability)));
+    service.shutdown().await.expect("empty service shuts down");
+    for suffix in ["", "-wal", "-shm", ".owner.lock"] {
+        let file = if suffix == ".owner.lock" {
+            path.with_extension("owner.lock")
+        } else {
+            std::path::PathBuf::from(format!("{}{suffix}", path.display()))
+        };
+        let _ = std::fs::remove_file(file);
+    }
+}
