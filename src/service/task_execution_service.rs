@@ -64,9 +64,9 @@ use super::task_status::TaskStatus;
 ///
 /// # Cancel
 ///
-/// [`Self::cancel`] may succeed only **before** the task starts running; once
-/// running, cancellation behavior follows [`TaskHandle`] and the internal
-/// completion protocol.
+/// [`Self::cancel`] may succeed only before a worker claims the queued job.
+/// After the claim, cancellation returns `false`, even if the callable has not
+/// started yet.
 ///
 /// # Shutdown
 ///
@@ -325,7 +325,7 @@ impl TaskExecutionService {
 
     /// Attempts to cancel a submitted task by ID.
     ///
-    /// Cancellation succeeds only before the task starts running.
+    /// Cancellation succeeds only before a worker claims the queued job.
     ///
     /// # Example
     ///
@@ -338,7 +338,7 @@ impl TaskExecutionService {
     ///     let service = TaskExecutionService::new()?;
     ///     let id: Id = Id::new(1);
     ///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
-    ///     // `true` only if cancelled before a worker starts the task (race with the pool).
+    ///     // `true` only before a worker claims the queued job (race with the pool).
     ///     let _cancelled = service.cancel(id);
     ///     match handle.get() {
     ///         Ok(()) => {}
@@ -355,8 +355,8 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// `true` if the task was cancelled before start, or `false` if no active
-    /// task with this ID can be cancelled.
+    /// `true` if the task was cancelled before a worker claimed it, or `false`
+    /// if no active task with this ID can be cancelled.
     #[must_use]
     pub fn cancel(&self, task_id: Id) -> bool {
         let Some((_token, cancel)) = self.state.cancel_candidate(task_id) else {
