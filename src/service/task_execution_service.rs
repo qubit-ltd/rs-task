@@ -272,7 +272,14 @@ impl TaskExecutionService {
             idempotency_key: None,
             metadata: Default::default(),
         };
-        self.core.local_finalizations.lock().insert(id, final_sender);
+        {
+            let fault = self.core.store_fault.lock();
+            if let Some(error) = fault.as_ref() {
+                self.release_queue_slot();
+                return Err(TaskServiceError::StoreUnavailable(error.clone()));
+            }
+            self.core.local_finalizations.lock().insert(id, final_sender);
+        }
         match self.core.store.accept(id, request.clone()).await {
             Ok(AcceptOutcome::Accepted(record)) => {
                 let finalizations = self.core.local_finalizations.lock();
@@ -287,9 +294,6 @@ impl TaskExecutionService {
                     bypasses: 0,
                 });
                 drop(finalizations);
-                if let Some(error) = self.last_store_error() {
-                    finalize_local(&self.core, id, Err(LocalTaskResultError::StoreUnavailable(error)));
-                }
                 self.core.changed.notify_one();
                 publish_record(&self.core, &record);
                 Ok(LocalTaskHandle::new(record.id, typed_receiver, final_receiver))
@@ -600,11 +604,6 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 Ok(None) => {
                     release_core_queue_slot(&core);
                     core.local_handlers.lock().remove(&id);
-                    finalize_local(
-                        &core,
-                        id,
-                        Err(LocalTaskResultError::Infrastructure("queued task record disappeared".into())),
-                    );
                     continue;
                 }
                 Err(error) => {
@@ -895,8 +894,12 @@ fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
 
 /// Records the first storage failure and closes admission for all waiters.
 fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
-    let diagnostic = core.store_fault.lock().get_or_insert(diagnostic).clone();
-    let finalizations = core.local_finalizations.lock().drain().map(|(_, sender)| sender).collect::<Vec<_>>();
+    let (diagnostic, finalizations) = {
+        let mut fault = core.store_fault.lock();
+        let diagnostic = fault.get_or_insert(diagnostic).clone();
+        let finalizations = core.local_finalizations.lock().drain().map(|(_, sender)| sender).collect::<Vec<_>>();
+        (diagnostic, finalizations)
+    };
     core.local_handlers.lock().clear();
     for sender in finalizations {
         let _ = sender.send(Err(LocalTaskResultError::StoreUnavailable(diagnostic.clone())));

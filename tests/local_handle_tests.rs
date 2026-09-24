@@ -59,6 +59,75 @@ struct PauseAfterAcceptStore {
     release: Semaphore,
 }
 
+struct PauseEvictedGetStore {
+    inner: MemoryTaskStore,
+    pause_first_get: AtomicBool,
+    get_entered: Mutex<Option<oneshot::Sender<()>>>,
+    get_release: Semaphore,
+    cancel_persisted: Mutex<Option<oneshot::Sender<()>>>,
+    cancel_release: Semaphore,
+}
+
+impl TaskStore for PauseEvictedGetStore {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
+        self.inner.accept(id, request)
+    }
+
+    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        self.inner.find_idempotent(request)
+    }
+
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+        Box::pin(async move {
+            let cancel = matches!(command.state, TaskState::Cancelled);
+            let updated = self.inner.transition(command).await?;
+            if cancel {
+                if let Some(sender) = self.cancel_persisted.lock().take() {
+                    let _ = sender.send(());
+                }
+                self.cancel_release.acquire().await.expect("cancel transition released").forget();
+            }
+            Ok(updated)
+        })
+    }
+
+    fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        Box::pin(async move {
+            if self.pause_first_get.swap(false, Ordering::AcqRel) {
+                if let Some(sender) = self.get_entered.lock().take() {
+                    let _ = sender.send(());
+                }
+                self.get_release.acquire().await.expect("scheduler get released").forget();
+            }
+            self.inner.get(id).await
+        })
+    }
+
+    fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        self.inner.list(query)
+    }
+
+    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
+        self.inner.count_states()
+    }
+
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
+        self.inner.acquire_owner()
+    }
+
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+        self.inner.scan_unfinished(cursor)
+    }
+
+    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.inner.release_owner(epoch)
+    }
+}
+
 impl TaskStore for PauseAfterAcceptStore {
     fn capabilities(&self) -> StoreCapabilities {
         self.inner.capabilities()
@@ -183,6 +252,81 @@ async fn test_cancel_persisted_local_task_before_accept_returns() {
 #[tokio::test]
 async fn test_cancel_persisted_local_task_before_accept_returns_with_zero_history() {
     cancel_during_accept(0).await;
+}
+
+#[tokio::test]
+async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
+    let (get_entered_tx, get_entered_rx) = oneshot::channel();
+    let (cancel_persisted_tx, cancel_persisted_rx) = oneshot::channel();
+    let store = Arc::new(PauseEvictedGetStore {
+        inner: MemoryTaskStore::new(0),
+        pause_first_get: AtomicBool::new(true),
+        get_entered: Mutex::new(Some(get_entered_tx)),
+        get_release: Semaphore::new(0),
+        cancel_persisted: Mutex::new(Some(cancel_persisted_tx)),
+        cancel_release: Semaphore::new(0),
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .queue_capacity(1)
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| -> LocalTaskOutcome<(), DomainError> {
+            panic!("cancelled handler must not run")
+        })
+        .await
+        .expect("first task accepted");
+    let id = handle.task_id();
+    tokio::time::timeout(WAIT_LIMIT, get_entered_rx)
+        .await
+        .expect("scheduler entered first get")
+        .expect("scheduler get signal received");
+    let cancelling_service = service.clone();
+    let cancellation = tokio::spawn(async move { cancelling_service.cancel(id).await });
+    tokio::time::timeout(WAIT_LIMIT, cancel_persisted_rx)
+        .await
+        .expect("Cancelled was persisted and evicted")
+        .expect("cancel persistence signal received");
+    store.get_release.add_permits(1);
+    let replacement = tokio::time::timeout(WAIT_LIMIT, async {
+        loop {
+            match service
+                .submit_local(|_| LocalTaskOutcome::<(), DomainError>::Succeeded {
+                    value: (),
+                    summary: TaskOutput::default(),
+                })
+                .await
+            {
+                Ok(handle) => break handle,
+                Err(TaskServiceError::QueueFull) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected replacement submission error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("scheduler releases first queue slot after get(None)");
+
+    let mut result = Box::pin(handle.result());
+    assert!(matches!(futures::poll!(result.as_mut()), std::task::Poll::Pending));
+    store.cancel_release.add_permits(1);
+    assert_eq!(
+        tokio::time::timeout(WAIT_LIMIT, cancellation)
+            .await
+            .expect("cancel finishes")
+            .expect("cancel task joins")
+            .expect("cancel succeeds"),
+        CancelOutcome::CancelledBeforeStart
+    );
+    assert!(matches!(
+        tokio::time::timeout(WAIT_LIMIT, result)
+            .await
+            .expect("authoritative cancellation reaches handle"),
+        Err(LocalTaskResultError::Cancelled)
+    ));
+    replacement.result().await.expect("replacement finalizes").expect("replacement succeeds");
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio::test]
