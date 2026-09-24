@@ -114,13 +114,19 @@ pub(crate) struct ServiceCore {
     pub(crate) queue: Mutex<VecDeque<QueuedTask>>,
     pub(crate) queue_count: AtomicUsize,
     pub(crate) local_handlers: Mutex<HashMap<TaskId, Arc<dyn TaskHandler>>>,
-    pub(crate) cancellations: Mutex<HashMap<TaskId, Arc<AtomicBool>>>,
+    pub(crate) cancellations: Mutex<HashMap<TaskId, RunningCancellation>>,
     pub(crate) changed: Notify,
     pub(crate) accepting: AtomicBool,
     pub(crate) owner: Option<OwnerEpoch>,
     pub(crate) store_fault: Mutex<Option<String>>,
     #[cfg(feature = "event-bus")]
     pub(super) event_bus: Option<TaskEventPublisher>,
+}
+
+/// Signal belonging to one specific execution attempt of a task.
+pub(crate) struct RunningCancellation {
+    attempt: u32,
+    signal: Arc<AtomicBool>,
 }
 
 /// Single service facade over volatile or restart-recoverable components.
@@ -366,8 +372,10 @@ impl TaskExecutionService {
                     }
                     if queued || blocked {
                         self.core.local_handlers.lock().remove(&id);
-                    } else if let Some(signal) = self.core.cancellations.lock().get(&id) {
-                        signal.store(true, Ordering::Release);
+                    } else if let Some(current) = self.core.cancellations.lock().get(&id)
+                        && current.attempt == updated.attempt
+                    {
+                        current.signal.store(true, Ordering::Release);
                     }
                     self.core.changed.notify_waiters();
                     publish_record(&self.core, &updated);
@@ -571,15 +579,18 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 .await
             {
                 Ok(handle) => {
-                    core.cancellations.lock().insert(id, handle.cancelled.clone());
-                    if core
-                        .store
-                        .get(id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some_and(|record| record.cancel_requested)
-                    {
+                    core.cancellations.lock().insert(
+                        id,
+                        RunningCancellation {
+                            attempt: running.attempt,
+                            signal: handle.cancelled.clone(),
+                        },
+                    );
+                    if core.store.get(id).await.ok().flatten().is_some_and(|record| {
+                        record.attempt == running.attempt
+                            && matches!(record.state, TaskState::Running)
+                            && record.cancel_requested
+                    }) {
                         handle.cancelled.store(true, Ordering::Release);
                     }
                     let weak = Arc::downgrade(&core);
@@ -629,7 +640,15 @@ async fn finish_attempt(
     let Some(core) = core_ref.upgrade() else {
         return;
     };
-    core.cancellations.lock().remove(&running.id);
+    {
+        let mut cancellations = core.cancellations.lock();
+        if cancellations
+            .get(&running.id)
+            .is_some_and(|current| current.attempt == running.attempt)
+        {
+            cancellations.remove(&running.id);
+        }
+    }
     let state = match &result {
         Ok(TaskRunOutcome::Succeeded(_)) => TaskState::Succeeded,
         Ok(TaskRunOutcome::Cancelled) => TaskState::Cancelled,

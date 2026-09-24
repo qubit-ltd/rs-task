@@ -12,7 +12,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::handler::TaskContext;
+use qubit_task::handler::TaskHandler;
+use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::StoreCapabilities;
@@ -23,6 +27,7 @@ use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::CancelOutcome;
@@ -39,6 +44,10 @@ struct HoldTerminalStore {
     entered: Notify,
     release: Notify,
     terminal_writes: AtomicUsize,
+    hold_cancel_return: AtomicBool,
+    cancel_persisted: Notify,
+    release_cancel: Notify,
+    second_registered: Notify,
 }
 
 impl HoldTerminalStore {
@@ -50,7 +59,19 @@ impl HoldTerminalStore {
             entered: Notify::new(),
             release: Notify::new(),
             terminal_writes: AtomicUsize::new(0),
+            hold_cancel_return: AtomicBool::new(false),
+            cancel_persisted: Notify::new(),
+            release_cancel: Notify::new(),
+            second_registered: Notify::new(),
         }
+    }
+
+    fn for_late_cancel_return() -> Self {
+        let store = Self::new();
+        store.hold_once.store(false, Ordering::Release);
+        store.conflict_cancel_once.store(false, Ordering::Release);
+        store.hold_cancel_return.store(true, Ordering::Release);
+        store
     }
 }
 
@@ -78,6 +99,15 @@ impl TaskStore for HoldTerminalStore {
                     .expect("competing revision advances");
                 return Err(StoreError::Conflict);
             }
+            if matches!(command.state, TaskState::Running)
+                && command.cancel_requested
+                && self.hold_cancel_return.swap(false, Ordering::AcqRel)
+            {
+                let updated = self.inner.transition(command).await?;
+                self.cancel_persisted.notify_one();
+                self.release_cancel.notified().await;
+                return Ok(updated);
+            }
             if command.state.is_terminal() && self.hold_once.swap(false, Ordering::AcqRel) {
                 self.entered.notify_one();
                 self.release.notified().await;
@@ -91,7 +121,16 @@ impl TaskStore for HoldTerminalStore {
         })
     }
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
-        self.inner.get(id)
+        Box::pin(async move {
+            let record = self.inner.get(id).await?;
+            if record
+                .as_ref()
+                .is_some_and(|value| value.attempt == 2 && matches!(value.state, TaskState::Running))
+            {
+                self.second_registered.notify_one();
+            }
+            Ok(record)
+        })
     }
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.inner.list(query)
@@ -104,6 +143,46 @@ impl TaskStore for HoldTerminalStore {
     }
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         self.inner.release_owner(epoch)
+    }
+}
+
+struct RetryOnceHandler {
+    first_started: Notify,
+    release_first: Notify,
+    release_second: Notify,
+    second_signal: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Arc<AtomicBool>>>>,
+}
+
+impl TaskHandler for RetryOnceHandler {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
+            task_type: "retry-once".into(),
+            version: "1".into(),
+        }
+    }
+
+    fn run<'a>(&'a self, _payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        Box::pin(async move {
+            if context.attempt() == 1 {
+                self.first_started.notify_one();
+                self.release_first.notified().await;
+                Err(TaskRunError {
+                    category: "temporary".into(),
+                    message: "retry requested".into(),
+                    retryable: true,
+                })
+            } else {
+                self.second_signal
+                    .lock()
+                    .expect("signal sender lock")
+                    .take()
+                    .expect("second attempt sender")
+                    .send(context.cancellation_signal())
+                    .expect("test receives second attempt signal");
+                self.release_second.notified().await;
+                Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            }
+        })
     }
 }
 
@@ -258,5 +337,61 @@ async fn test_blocked_task_can_be_cancelled_directly() {
         service.wait(accepted.id).await.expect("cancelled task settles").state,
         TaskState::Cancelled
     );
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_late_cancel_response_does_not_signal_next_attempt() {
+    let store = Arc::new(HoldTerminalStore::for_late_cancel_return());
+    let (second_signal_tx, second_signal_rx) = tokio::sync::oneshot::channel();
+    let handler = Arc::new(RetryOnceHandler {
+        first_started: Notify::new(),
+        release_first: Notify::new(),
+        release_second: Notify::new(),
+        second_signal: std::sync::Mutex::new(Some(second_signal_tx)),
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .register_handler(handler.clone())
+        .expect("handler registers")
+        .build()
+        .await
+        .expect("service builds");
+    let accepted = service
+        .submit(TaskRequest::new("retry-once", "1", Vec::new()))
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), handler.first_started.notified())
+        .await
+        .expect("first attempt starts");
+    let cancel_service = service.clone();
+    let cancel = tokio::spawn(async move { cancel_service.cancel(accepted.id).await });
+    tokio::time::timeout(Duration::from_secs(2), store.cancel_persisted.notified())
+        .await
+        .expect("first attempt cancellation request persisted");
+    handler.release_first.notify_one();
+    let second_signal = tokio::time::timeout(Duration::from_secs(2), second_signal_rx)
+        .await
+        .expect("second attempt starts")
+        .expect("signal received");
+    tokio::time::timeout(Duration::from_secs(2), store.second_registered.notified())
+        .await
+        .expect("second attempt signal is registered before stale response");
+    store.release_cancel.notify_one();
+    assert_eq!(
+        cancel.await.expect("cancel call completes").expect("cancel succeeds"),
+        CancelOutcome::CancellationRequested
+    );
+    assert!(
+        !second_signal.load(Ordering::Acquire),
+        "attempt two must not receive attempt one's stale signal"
+    );
+    handler.release_second.notify_one();
+    let final_record = tokio::time::timeout(Duration::from_secs(2), service.wait(accepted.id))
+        .await
+        .expect("task settles")
+        .expect("wait succeeds");
+    assert_eq!(final_record.state, TaskState::Succeeded);
+    assert_eq!(final_record.attempt, 2);
     service.shutdown().await.expect("service shuts down");
 }
