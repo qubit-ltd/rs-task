@@ -15,6 +15,10 @@ use std::sync::atomic::Ordering;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
+#[cfg(feature = "event-bus")]
+use super::task_event_notification_stats::TaskEventNotificationStats;
+#[cfg(feature = "event-bus")]
+use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
 use crate::engine::EngineError;
 use crate::engine::TaskExecutionEngine;
@@ -115,7 +119,7 @@ pub(crate) struct ServiceCore {
     pub(crate) owner: Option<OwnerEpoch>,
     pub(crate) store_fault: Mutex<Option<String>>,
     #[cfg(feature = "event-bus")]
-    pub(crate) event_bus: Option<qubit_event_bus::EventBus>,
+    pub(super) event_bus: Option<TaskEventPublisher>,
 }
 
 /// Single service facade over volatile or restart-recoverable components.
@@ -145,6 +149,14 @@ impl TaskExecutionService {
     #[must_use]
     pub fn last_store_error(&self) -> Option<String> {
         self.core.store_fault.lock().clone()
+    }
+
+    /// Returns lifecycle notification admission counters when a bus is
+    /// configured.
+    #[cfg(feature = "event-bus")]
+    #[must_use]
+    pub fn notification_stats(&self) -> Option<TaskEventNotificationStats> {
+        self.core.event_bus.as_ref().map(TaskEventPublisher::stats)
     }
 
     /// Accepts a reconstructable request and returns its stable task record.
@@ -406,6 +418,10 @@ impl TaskExecutionService {
         if let Some(epoch) = self.core.owner {
             self.core.store.release_owner(epoch).await?;
         }
+        #[cfg(feature = "event-bus")]
+        if let Some(publisher) = &self.core.event_bus {
+            publisher.close().await;
+        }
         Ok(())
     }
 
@@ -659,16 +675,7 @@ fn pause_on_store_fault(core: &ServiceCore, error: StoreError) {
 fn publish_record(core: &ServiceCore, record: &TaskRecord) {
     #[cfg(feature = "event-bus")]
     if let Some(bus) = &core.event_bus {
-        use qubit_event_bus::model::PublishRequest;
-        use qubit_event_bus::model::Topic;
-        if let Ok(topic) = Topic::<crate::event::TaskEvent>::new("task.lifecycle")
-            && let Ok(request) = PublishRequest::new(topic, crate::event::TaskEvent::from(record))
-        {
-            let event = bus.clone();
-            runtime().spawn(async move {
-                let _ = event.publish(request);
-            });
-        }
+        bus.enqueue(crate::event::TaskEvent::from(record));
     }
     #[cfg(not(feature = "event-bus"))]
     let _ = (core, record);
@@ -739,7 +746,7 @@ fn release_core_queue_slot(core: &ServiceCore) {
         });
 }
 
-fn runtime() -> &'static tokio::runtime::Runtime {
+pub(super) fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
