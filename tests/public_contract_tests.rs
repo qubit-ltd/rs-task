@@ -50,10 +50,7 @@ async fn sqlite_find_idempotent_handles_missing_matching_and_conflicting_request
     use qubit_task::store::SqliteTaskStore;
     use qubit_task::store::TaskStore;
 
-    let path = std::env::temp_dir().join(format!(
-        "qubit-task-find-idempotent-{}.sqlite",
-        TaskId::generate()
-    ));
+    let path = std::env::temp_dir().join(format!("qubit-task-find-idempotent-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
 
     let without_key = TaskRequest::new("thumbnail", "v3", b"source".to_vec());
