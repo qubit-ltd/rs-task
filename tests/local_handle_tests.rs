@@ -307,6 +307,7 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
     })
     .await
     .expect("scheduler releases first queue slot after get(None)");
+    replacement.result().await.expect("replacement finalizes").expect("replacement succeeds");
 
     let mut result = Box::pin(handle.result());
     assert!(matches!(futures::poll!(result.as_mut()), std::task::Poll::Pending));
@@ -325,7 +326,6 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
             .expect("authoritative cancellation reaches handle"),
         Err(LocalTaskResultError::Cancelled)
     ));
-    replacement.result().await.expect("replacement finalizes").expect("replacement succeeds");
     service.shutdown().await.expect("service shuts down");
 }
 
