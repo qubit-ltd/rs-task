@@ -204,8 +204,8 @@ impl TaskExecutionServiceState {
 
     /// Returns the cancellation endpoint of an accepted, unstarted task.
     ///
-    /// The caller must invoke it after releasing the registry lock and pass
-    /// the returned token to `finish` if cancellation wins.
+    /// The caller must invoke it after releasing the registry lock. The
+    /// cancellation endpoint owns publishing the terminal state if it wins.
     ///
     /// # Returns
     ///
