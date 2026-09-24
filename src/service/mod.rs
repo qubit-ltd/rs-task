@@ -7,6 +7,7 @@
 // =============================================================================
 //! Unified task submission, status, scheduling, and lifecycle facade.
 
+mod admission_gate;
 #[cfg(feature = "event-bus")]
 mod task_event_notification_stats;
 #[cfg(feature = "event-bus")]

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service::ServiceCore;
 use super::task_execution_service::TaskExecutionService;
+use super::admission_gate::AdmissionGate;
 use crate::engine::LocalTaskExecutionEngine;
 use crate::engine::TaskExecutionEngine;
 use crate::handler::TaskHandler;
@@ -274,7 +275,7 @@ impl TaskExecutionServiceBuilder {
             local_handlers: parking_lot::Mutex::new(Default::default()),
             cancellations: parking_lot::Mutex::new(Default::default()),
             changed: tokio::sync::Notify::new(),
-            accepting: std::sync::atomic::AtomicBool::new(true),
+            admission: AdmissionGate::new(),
             owner,
             store_fault: parking_lot::Mutex::new(None),
             #[cfg(feature = "event-bus")]
