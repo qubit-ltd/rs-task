@@ -21,9 +21,15 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use qubit_task::TaskExecutionServiceBuilder;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 struct FailListStore {
-    inner: MemoryTaskStore,
+    inner: Arc<dyn TaskStore>,
+    list_calls: AtomicUsize,
+    count_calls: AtomicUsize,
 }
 
 impl TaskStore for FailListStore {
@@ -48,10 +54,12 @@ impl TaskStore for FailListStore {
     }
 
     fn list<'a>(&'a self, _query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        self.list_calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Err(StoreError::Failure("injected list failure".into())) })
     }
 
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
+        self.count_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.count_states()
     }
 
@@ -193,7 +201,9 @@ async fn test_memory_store_counts_only_retained_terminal_records() {
 #[tokio::test]
 async fn test_store_count_works_when_list_fails() {
     let store = FailListStore {
-        inner: MemoryTaskStore::new(8),
+        inner: Arc::new(MemoryTaskStore::new(8)),
+        list_calls: AtomicUsize::new(0),
+        count_calls: AtomicUsize::new(0),
     };
     accept(&store).await;
     assert!(matches!(store.list(TaskQuery::default()).await, Err(StoreError::Failure(_))));
@@ -206,6 +216,32 @@ async fn test_store_count_works_when_list_fails() {
     );
 }
 
+#[tokio::test]
+async fn test_service_stats_uses_one_aggregate_without_listing_history() {
+    let store = Arc::new(FailListStore {
+        inner: Arc::new(MemoryTaskStore::new(8)),
+        list_calls: AtomicUsize::new(0),
+        count_calls: AtomicUsize::new(0),
+    });
+    let queued = accept(store.as_ref()).await;
+    transition(store.as_ref(), &queued, TaskState::Cancelled).await;
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+
+    let stats = service.stats().await.expect("stats use store aggregation");
+    assert_eq!(stats.queued, 0);
+    assert_eq!(stats.running, 0);
+    assert_eq!(stats.blocked, 0);
+    assert_eq!(stats.terminal, 1);
+    assert_eq!(store.count_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.list_calls.load(Ordering::Relaxed), 0);
+
+    service.shutdown().await.expect("service shuts down");
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_store_counts_all_state_categories() {
@@ -215,6 +251,42 @@ async fn test_sqlite_store_counts_all_state_categories() {
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     check_all_state_categories(&store).await;
     drop(store);
+    for file in [&path, &path.with_extension("owner.lock"), &path.with_extension("sqlite-wal"), &path.with_extension("sqlite-shm")] {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_service_stats_uses_one_sqlite_aggregate_for_large_history() {
+    use qubit_task::store::SqliteTaskStore;
+
+    let path = std::env::temp_dir().join(format!("qubit-task-stats-large-{}.sqlite", TaskId::generate()));
+    let sqlite = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    let store = Arc::new(FailListStore {
+        inner: sqlite.clone(),
+        list_calls: AtomicUsize::new(0),
+        count_calls: AtomicUsize::new(0),
+    });
+    for _ in 0..520 {
+        let accepted = accept(store.as_ref()).await;
+        transition(store.as_ref(), &accepted, TaskState::Cancelled).await;
+    }
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service recovers with the selected SQLite store");
+
+    let stats = service.stats().await.expect("stats use one aggregate query");
+    assert_eq!(stats.terminal, 520);
+    assert_eq!(store.count_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.list_calls.load(Ordering::Relaxed), 0);
+
+    service.shutdown().await.expect("service releases SQLite ownership");
+    drop(service);
+    drop(store);
+    drop(sqlite);
     for file in [&path, &path.with_extension("owner.lock"), &path.with_extension("sqlite-wal"), &path.with_extension("sqlite-shm")] {
         let _ = std::fs::remove_file(file);
     }

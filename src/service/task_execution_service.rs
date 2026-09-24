@@ -44,6 +44,7 @@ use crate::model::TaskQuery;
 use crate::model::TaskRecord;
 use crate::model::TaskRequest;
 use crate::model::TaskState;
+use crate::model::TaskStateCounts;
 use crate::model::TaskStats;
 use crate::model::TransitionCommand;
 use crate::scheduling::QueueSnapshot;
@@ -345,36 +346,15 @@ impl TaskExecutionService {
 
     /// Counts visible task states and reports current resource use.
     pub async fn stats(&self) -> Result<TaskStats, TaskServiceError> {
-        let mut stats = TaskStats {
-            resources: self.core.engine.capacity(),
-            ..TaskStats::default()
-        };
-        let mut after = None;
-        loop {
-            let page = self
-                .core
-                .store
-                .list(TaskQuery {
-                    limit: 512,
-                    after,
-                    ..TaskQuery::default()
-                })
-                .await?;
-            for record in page.records {
-                match record.state {
-                    TaskState::Queued => stats.queued += 1,
-                    TaskState::Running => stats.running += 1,
-                    TaskState::Blocked { .. } => stats.blocked += 1,
-                    state if state.is_terminal() => stats.terminal += 1,
-                    _ => {}
-                }
-            }
-            after = page.next;
-            if after.is_none() {
-                break;
-            }
-        }
-        Ok(stats)
+        let TaskStateCounts { queued, running, blocked, terminal } = self.core.store.count_states().await?;
+        let resources = self.core.engine.capacity();
+        Ok(TaskStats {
+            queued,
+            running,
+            blocked,
+            terminal,
+            resources,
+        })
     }
 
     /// Cancels queued or blocked work, or persists a cooperative cancellation
