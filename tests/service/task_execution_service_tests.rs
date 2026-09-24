@@ -12,15 +12,15 @@ use std::future::IntoFuture;
 use std::io;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
+use std::sync::Arc;
+use std::sync::Barrier;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Wake;
 use std::task::Waker;
-use std::sync::Arc;
-use std::sync::Barrier;
-use std::sync::mpsc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
@@ -479,20 +479,26 @@ fn test_task_execution_service_cancel_releases_capture_and_queue_capacity() {
         .expect("service should build");
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let running = service.submit(Id::new(1), move || {
-        started_tx.send(()).expect("worker start should send");
-        release_rx.recv().expect("worker should be released");
-        Ok::<(), io::Error>(())
-    }).expect("blocking task should be accepted");
+    let running = service
+        .submit(Id::new(1), move || {
+            started_tx.send(()).expect("worker start should send");
+            release_rx.recv().expect("worker should be released");
+            Ok::<(), io::Error>(())
+        })
+        .expect("blocking task should be accepted");
     wait_started(started_rx);
     let drops = Arc::new(AtomicUsize::new(0));
     let probe = DropProbe(Arc::clone(&drops));
-    let queued = service.submit(Id::new(2), move || {
-        let _probe = &probe;
-        Ok::<(), io::Error>(())
-    }).expect("queued task should be accepted");
-    assert!(matches!(service.submit(Id::new(3), successful_unit_task as fn() -> Result<(), io::Error>),
-        Err(TaskExecutionServiceError::Rejected(SubmissionError::Saturated))));
+    let queued = service
+        .submit(Id::new(2), move || {
+            let _probe = &probe;
+            Ok::<(), io::Error>(())
+        })
+        .expect("queued task should be accepted");
+    assert!(matches!(
+        service.submit(Id::new(3), successful_unit_task as fn() -> Result<(), io::Error>),
+        Err(TaskExecutionServiceError::Rejected(SubmissionError::Saturated))
+    ));
 
     let cancelled = service.cancel(Id::new(2));
     let released_before_return = drops.load(Ordering::SeqCst);
@@ -503,9 +509,15 @@ fn test_task_execution_service_cancel_releases_capture_and_queue_capacity() {
     running.get().expect("blocking task should finish");
     assert!(cancelled);
     assert!(matches!(queued.get(), Err(TaskExecutionError::Cancelled)));
-    assert_eq!(released_before_return, 1, "cancel must release the callable before returning");
+    assert_eq!(
+        released_before_return, 1,
+        "cancel must release the callable before returning"
+    );
     assert_eq!(queued_after_cancel, 0, "cancel must remove its queue entry");
-    replacement.expect("cancel must free queue capacity").get().expect("replacement should run");
+    replacement
+        .expect("cancel must free queue capacity")
+        .get()
+        .expect("replacement should run");
     assert!(!service.cancel(Id::new(2)));
     service.shutdown();
     service.wait_termination();
@@ -522,18 +534,22 @@ fn test_task_execution_service_cancel_and_start_choose_one_terminal_result() {
         let gate = Arc::new(Barrier::new(2));
         let worker_gate = Arc::clone(&gate);
         let (started_tx, started_rx) = mpsc::channel();
-        let running = service.submit(Id::new(1), move || {
-            started_tx.send(()).expect("worker start should send");
-            worker_gate.wait();
-            Ok::<(), io::Error>(())
-        }).expect("blocking task should be accepted");
+        let running = service
+            .submit(Id::new(1), move || {
+                started_tx.send(()).expect("worker start should send");
+                worker_gate.wait();
+                Ok::<(), io::Error>(())
+            })
+            .expect("blocking task should be accepted");
         wait_started(started_rx);
         let calls = Arc::new(AtomicUsize::new(0));
         let task_calls = Arc::clone(&calls);
-        let queued = service.submit(Id::new(2), move || {
-            task_calls.fetch_add(1, Ordering::SeqCst);
-            Ok::<(), io::Error>(())
-        }).expect("queued task should be accepted");
+        let queued = service
+            .submit(Id::new(2), move || {
+                task_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), io::Error>(())
+            })
+            .expect("queued task should be accepted");
         gate.wait();
         let cancelled = service.cancel(Id::new(2));
         running.get().expect("blocking task should finish");
@@ -571,13 +587,16 @@ fn test_task_execution_service_cancel_publishing_panic_finishes_registry() {
     let service = create_single_worker_service();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let running = service.submit(Id::new(1), move || {
-        started_tx.send(()).expect("worker start should send");
-        release_rx.recv().expect("worker should be released");
-        Ok::<(), io::Error>(())
-    }).expect("blocking task should be accepted");
+    let running = service
+        .submit(Id::new(1), move || {
+            started_tx.send(()).expect("worker start should send");
+            release_rx.recv().expect("worker should be released");
+            Ok::<(), io::Error>(())
+        })
+        .expect("blocking task should be accepted");
     wait_started(started_rx);
-    let queued = service.submit(Id::new(2), successful_unit_task as fn() -> Result<(), io::Error>)
+    let queued = service
+        .submit(Id::new(2), successful_unit_task as fn() -> Result<(), io::Error>)
         .expect("queued task should be accepted");
     let mut future = std::pin::pin!(queued.into_future());
     let waker = Waker::from(Arc::new(PanickingWake));
@@ -590,7 +609,10 @@ fn test_task_execution_service_cancel_publishing_panic_finishes_registry() {
     running.get().expect("blocking task should finish");
     assert!(cancelled.expect("cancellation callback panic should be contained"));
     assert_eq!(status, Some(TaskStatus::Cancelled));
-    assert!(matches!(future.as_mut().poll(&mut context), Poll::Ready(Err(TaskExecutionError::Cancelled))));
+    assert!(matches!(
+        future.as_mut().poll(&mut context),
+        Poll::Ready(Err(TaskExecutionError::Cancelled))
+    ));
     service.wait_for_idle();
     service.shutdown();
     service.wait_termination();
@@ -615,19 +637,26 @@ fn test_task_execution_service_reused_id_survives_old_cancel_return() {
     let service = Arc::new(create_single_worker_service());
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let running = service.submit(Id::new(1), move || {
-        started_tx.send(()).expect("worker start should send");
-        release_rx.recv().expect("worker should be released");
-        Ok::<(), io::Error>(())
-    }).expect("blocking task should be accepted");
+    let running = service
+        .submit(Id::new(1), move || {
+            started_tx.send(()).expect("worker start should send");
+            release_rx.recv().expect("worker should be released");
+            Ok::<(), io::Error>(())
+        })
+        .expect("blocking task should be accepted");
     wait_started(started_rx);
     let (drop_started_tx, drop_started_rx) = mpsc::channel();
     let (drop_release_tx, drop_release_rx) = mpsc::channel();
-    let probe = BlockingDrop { started: drop_started_tx, release: drop_release_rx };
-    let old = service.submit(Id::new(2), move || {
-        let _probe = &probe;
-        Ok::<(), io::Error>(())
-    }).expect("old task should be accepted");
+    let probe = BlockingDrop {
+        started: drop_started_tx,
+        release: drop_release_rx,
+    };
+    let old = service
+        .submit(Id::new(2), move || {
+            let _probe = &probe;
+            Ok::<(), io::Error>(())
+        })
+        .expect("old task should be accepted");
     let cancelling_service = Arc::clone(&service);
     let cancellation = thread::spawn(move || cancelling_service.cancel(Id::new(2)));
     let drop_started = drop_started_rx.recv_timeout(Duration::from_secs(1));
@@ -642,7 +671,8 @@ fn test_task_execution_service_reused_id_survives_old_cancel_return() {
     assert!(old.is_done());
     assert!(matches!(old.get(), Err(TaskExecutionError::Cancelled)));
     assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Cancelled));
-    let replacement = service.submit_callable(Id::new(2), successful_usize_task as fn() -> Result<usize, io::Error>)
+    let replacement = service
+        .submit_callable(Id::new(2), successful_usize_task as fn() -> Result<usize, io::Error>)
         .expect("terminal ID should be reusable during old cancellation cleanup");
     assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Submitted));
     drop_release_tx.send(()).expect("drop should be released");
