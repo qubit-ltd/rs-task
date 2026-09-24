@@ -164,7 +164,9 @@ impl TaskStore for ControlledStore {
     }
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
-        if matches!(command.state, TaskState::Cancelled) && self.fail_next_cancel_transition.swap(false, Ordering::AcqRel) {
+        if matches!(command.state, TaskState::Cancelled)
+            && self.fail_next_cancel_transition.swap(false, Ordering::AcqRel)
+        {
             Box::pin(async { Err(StoreError::Failure("injected cancellation transition failure".into())) })
         } else if matches!(command.state, TaskState::Queued)
             && self.fail_next_retry_transition.swap(false, Ordering::AcqRel)
@@ -386,28 +388,37 @@ async fn test_public_read_failure_pauses_service() {
             "get" => {
                 store.fail_next_get.store(true, Ordering::Release);
                 (
-                    service.get(TaskId::generate()).await.err().expect("get returns store failure"),
+                    service
+                        .get(TaskId::generate())
+                        .await
+                        .expect_err("get returns store failure"),
                     "injected scheduler get failure",
                 )
             }
             "list" => {
                 store.fail_next_statistics.store(true, Ordering::Release);
                 (
-                    service.list(TaskQuery::default()).await.err().expect("list returns store failure"),
+                    service
+                        .list(TaskQuery::default())
+                        .await
+                        .expect_err("list returns store failure"),
                     "injected statistics failure",
                 )
             }
             "stats" => {
                 store.fail_next_statistics.store(true, Ordering::Release);
                 (
-                    service.stats().await.err().expect("stats returns store failure"),
+                    service.stats().await.expect_err("stats returns store failure"),
                     "injected statistics failure",
                 )
             }
             "wait" => {
                 store.fail_next_get.store(true, Ordering::Release);
                 (
-                    service.wait(TaskId::generate()).await.err().expect("wait returns store failure"),
+                    service
+                        .wait(TaskId::generate())
+                        .await
+                        .expect_err("wait returns store failure"),
                     "injected scheduler get failure",
                 )
             }
