@@ -427,6 +427,98 @@ async fn test_running_task_cancellation_is_cooperative_and_terminal() {
     service.shutdown().await.expect("service shuts down");
 }
 
+#[derive(Default)]
+struct TwoRoundPolicyGate {
+    state: std::sync::Mutex<TwoRoundPolicyState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct TwoRoundPolicyState {
+    entered: usize,
+    released: usize,
+    snapshot: Vec<TaskId>,
+}
+
+impl TwoRoundPolicyGate {
+    fn wait_for_round(&self, round: usize) -> Vec<TaskId> {
+        let state = self.state.lock().expect("policy gate lock");
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| {
+                state.entered < round
+            })
+            .expect("policy gate wait");
+        assert!(
+            !timeout.timed_out(),
+            "scheduler did not reach policy round {round}"
+        );
+        state.snapshot.clone()
+    }
+
+    fn release(&self, round: usize) {
+        let mut state = self.state.lock().expect("policy gate lock");
+        state.released = round;
+        self.changed.notify_all();
+    }
+}
+
+struct TwoRoundBlockingPolicy {
+    gate: Arc<TwoRoundPolicyGate>,
+}
+
+impl SchedulingPolicy for TwoRoundBlockingPolicy {
+    fn order(&self, queue: &QueueSnapshot, _: &ResourceSnapshot) -> Vec<TaskId> {
+        let ids: Vec<_> = queue.tasks.iter().map(|task| task.id).collect();
+        let mut state = self.gate.state.lock().expect("policy gate lock");
+        state.entered += 1;
+        let round = state.entered;
+        if round <= 2 {
+            state.snapshot = ids.clone();
+            self.gate.changed.notify_all();
+            while state.released < round {
+                state = self.gate.changed.wait(state).expect("policy gate wait");
+            }
+        }
+        ids
+    }
+}
+
+#[tokio::test]
+async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
+    let gate = Arc::new(TwoRoundPolicyGate::default());
+    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+        .register_handler(Arc::new(EchoHandler))
+        .expect("handler registration succeeds")
+        .policy(Arc::new(TwoRoundBlockingPolicy { gate: gate.clone() }))
+        .queue_capacity(3)
+        .build()
+        .await
+        .expect("service builds");
+    let request = || TaskRequest::new("echo", "1", Vec::new());
+    let a = service.submit(request()).await.expect("A accepted");
+    assert_eq!(gate.wait_for_round(1), vec![a.id]);
+    let b = service.submit(request()).await.expect("B accepted");
+    let c = service.submit(request()).await.expect("C accepted");
+    assert_eq!(
+        service.cancel(a.id).await.expect("A cancelled"),
+        qubit_task::service::CancelOutcome::CancelledBeforeStart
+    );
+    gate.release(1);
+    assert_eq!(gate.wait_for_round(2), vec![b.id, c.id]);
+    service
+        .submit(request())
+        .await
+        .expect("D fills the sole free slot");
+    let e = service.submit(request()).await;
+    gate.release(2);
+    service.shutdown().await.expect("remaining tasks drain");
+    assert!(matches!(
+        e,
+        Err(qubit_task::service::TaskServiceError::QueueFull)
+    ));
+}
+
 #[tokio::test]
 async fn test_memory_store_is_idempotent_and_rejects_illegal_transitions() {
     let store = MemoryTaskStore::new(8);
