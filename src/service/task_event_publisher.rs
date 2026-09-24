@@ -174,12 +174,15 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use qubit_event_bus::EventBus;
+    use qubit_event_bus::SubscribeError;
     use qubit_event_bus::error::SpiError;
     use qubit_event_bus::model::AdmissionStatus;
     use qubit_event_bus::model::DestinationAdmission;
     use qubit_event_bus::model::ProviderId;
     use qubit_event_bus::model::PublishAcknowledgement;
     use qubit_event_bus::model::SubscriberId;
+    use qubit_event_bus::model::SubscribeRequest;
+    use qubit_event_bus::model::Topic;
     use qubit_event_bus::spi::DelayedDeliveryCapability;
     use qubit_event_bus::spi::DurabilityCapability;
     use qubit_event_bus::spi::EventBusCapabilities;
@@ -304,7 +307,14 @@ mod tests {
         }
 
         fn subscribe(&self, _: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
-            unreachable!("subscribe not used")
+            Err(SpiError::Operation {
+                provider_id: "fake".into(),
+                operation: "subscribe",
+                resource: None,
+                kind: "unsupported",
+                retryable: Some(false),
+                source: Box::new(std::io::Error::other("subscriptions are unsupported")),
+            })
         }
         fn shutdown(&self, _: ShutdownMode) -> Result<ShutdownOutcome, SpiError> {
             Ok(ShutdownOutcome::Complete)
@@ -323,6 +333,38 @@ mod tests {
     fn publisher(spi: Arc<FakeSpi>, capacity: usize) -> TaskEventPublisher {
         let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
         TaskEventPublisher::new(bus, NonZeroUsize::new(capacity).expect("nonzero capacity")).expect("publisher starts")
+    }
+
+    #[test]
+    fn test_task_event_publisher_fake_spi_unsupported_subscription_is_reported() {
+        let spi = FakeSpi::new(false, Outcome::Opaque);
+        let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
+        let request = SubscribeRequest::new(
+            SubscriberId::new("task-observer").expect("subscriber ID"),
+            Topic::<TaskEvent>::new("task.lifecycle").expect("task lifecycle topic"),
+        );
+
+        let error = match bus.subscribe(request, |_| ()) {
+            Ok(_) => panic!("fake SPI does not support subscriptions"),
+            Err(error) => error,
+        };
+        let SubscribeError::Spi(error) = error else {
+            panic!("expected provider SPI error");
+        };
+        assert_eq!(error.provider_id(), "fake");
+        assert_eq!(error.operation(), "subscribe");
+        assert_eq!(error.kind(), "unsupported");
+        assert_eq!(error.retryable(), Some(false));
+    }
+
+    #[test]
+    fn test_task_event_publisher_fake_spi_shutdown_is_complete() {
+        let spi = FakeSpi::new(false, Outcome::Opaque);
+        let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
+
+        let outcome = bus.shutdown(ShutdownMode::Immediate).expect("bus shutdown");
+
+        assert!(matches!(outcome, ShutdownOutcome::Complete));
     }
 
     #[tokio::test]
