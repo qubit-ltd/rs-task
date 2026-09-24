@@ -819,6 +819,13 @@ async fn test_zero_history_fast_handler_completion_keeps_service_healthy() {
 
 #[tokio::test]
 async fn test_store_fault_shutdown_waits_for_inflight_accept_side_effects() {
+    struct DropProbe(Arc<AtomicBool>);
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
     let (get_entered_tx, get_entered_rx) = oneshot::channel();
     let store = Arc::new(ControlledStore {
         get_entered: Mutex::new(Some(get_entered_tx)),
@@ -841,10 +848,18 @@ async fn test_store_fault_shutdown_waits_for_inflight_accept_side_effects() {
 
     let (accept_entered_tx, accept_entered_rx) = oneshot::channel();
     *store.accept_entered.lock() = Some(accept_entered_tx);
+    let handler_dropped = Arc::new(AtomicBool::new(false));
+    let handler_ran = Arc::new(AtomicBool::new(false));
+    let drop_probe = DropProbe(handler_dropped.clone());
+    let ran = handler_ran.clone();
     let submitting_service = service.clone();
     let submission = tokio::spawn(async move {
         submitting_service
-            .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+            .submit_local(move |_| {
+                let _probe = drop_probe;
+                ran.store(true, Ordering::Release);
+                LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }
+            })
             .await
     });
     tokio::time::timeout(Duration::from_secs(2), accept_entered_rx)
@@ -883,6 +898,8 @@ async fn test_store_fault_shutdown_waits_for_inflight_accept_side_effects() {
             .expect("late accepted handle finalizes after store fault"),
         Err(LocalTaskResultError::StoreUnavailable(message)) if message.contains("injected scheduler get failure")
     ));
+    assert!(handler_dropped.load(Ordering::Acquire), "faulted admission releases the local closure");
+    assert!(!handler_ran.load(Ordering::Acquire), "faulted admission never runs the local closure");
 }
 
 #[tokio::test]
