@@ -366,7 +366,9 @@ mod tests {
             publisher.close().await;
             let stats = publisher.stats();
             match outcome {
-                Outcome::AllRejected | Outcome::Empty | Outcome::Dropped => assert_eq!(stats.unaccepted, 1),
+                Outcome::AllRejected | Outcome::Empty | Outcome::Dropped => {
+                    assert_eq!(stats.unaccepted, 1)
+                }
                 Outcome::Partial => {
                     assert_eq!(stats.accepted, 1);
                     assert_eq!(stats.partial_rejection, 1);

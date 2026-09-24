@@ -46,25 +46,15 @@ impl TaskStore for FailFirstGetStore {
         self.inner.capabilities()
     }
 
-    fn accept<'a>(
-        &'a self,
-        id: TaskId,
-        request: TaskRequest,
-    ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
+    fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         self.inner.accept(id, request)
     }
 
-    fn find_idempotent<'a>(
-        &'a self,
-        request: TaskRequest,
-    ) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         self.inner.find_idempotent(request)
     }
 
-    fn transition<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
         self.inner.transition(command)
     }
 
@@ -84,10 +74,7 @@ impl TaskStore for FailFirstGetStore {
         self.inner.acquire_owner()
     }
 
-    fn scan_unfinished<'a>(
-        &'a self,
-        cursor: Option<TaskId>,
-    ) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         self.inner.scan_unfinished(cursor)
     }
 
@@ -129,10 +116,7 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
         .await
         .expect_err("service rejects submissions after a store failure");
     assert!(matches!(error, TaskServiceError::StoreUnavailable(_)));
-    assert!(
-        !ran.load(Ordering::Acquire),
-        "failed task handler must not run"
-    );
+    assert!(!ran.load(Ordering::Acquire), "failed task handler must not run");
     assert!(matches!(
         service.shutdown().await,
         Err(TaskServiceError::StoreUnavailable(_))
@@ -142,10 +126,7 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_recoverable_sqlite_store_rejects_local_closure_without_accepting_it() {
-    let path = std::env::temp_dir().join(format!(
-        "qubit-task-local-submit-{}.sqlite",
-        TaskId::generate()
-    ));
+    let path = std::env::temp_dir().join(format!("qubit-task-local-submit-{}.sqlite", TaskId::generate()));
     let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
         .expect("SQLite service builds")
         .build()
@@ -164,10 +145,7 @@ async fn test_recoverable_sqlite_store_rejects_local_closure_without_accepting_i
         })
         .await
         .expect("history query succeeds");
-    assert!(
-        page.records.is_empty(),
-        "rejected closure must not be stored"
-    );
+    assert!(page.records.is_empty(), "rejected closure must not be stored");
     service.shutdown().await.expect("empty service shuts down");
 
     for suffix in ["", "-wal", "-shm", ".owner.lock"] {

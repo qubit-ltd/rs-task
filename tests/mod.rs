@@ -445,14 +445,9 @@ impl TwoRoundPolicyGate {
         let state = self.state.lock().expect("policy gate lock");
         let (state, timeout) = self
             .changed
-            .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| {
-                state.entered < round
-            })
+            .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| state.entered < round)
             .expect("policy gate wait");
-        assert!(
-            !timeout.timed_out(),
-            "scheduler did not reach policy round {round}"
-        );
+        assert!(!timeout.timed_out(), "scheduler did not reach policy round {round}");
         state.snapshot.clone()
     }
 
@@ -506,17 +501,11 @@ async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
     );
     gate.release(1);
     assert_eq!(gate.wait_for_round(2), vec![b.id, c.id]);
-    service
-        .submit(request())
-        .await
-        .expect("D fills the sole free slot");
+    service.submit(request()).await.expect("D fills the sole free slot");
     let e = service.submit(request()).await;
     gate.release(2);
     service.shutdown().await.expect("remaining tasks drain");
-    assert!(matches!(
-        e,
-        Err(qubit_task::service::TaskServiceError::QueueFull)
-    ));
+    assert!(matches!(e, Err(qubit_task::service::TaskServiceError::QueueFull)));
 }
 
 #[tokio::test]
