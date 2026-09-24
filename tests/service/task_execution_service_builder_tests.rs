@@ -23,7 +23,7 @@ fn test_task_execution_service_builder_builds_default_service() {
         .expect("default builder should create service");
 
     assert!(!service.is_not_running());
-    assert!(service.thread_pool().maximum_pool_size() > 0);
+    assert!(service.thread_pool_stats().maximum_pool_size > 0);
     service.shutdown();
     service.wait_termination();
 }
@@ -40,8 +40,8 @@ fn test_task_execution_service_builder_applies_thread_pool_builder() {
         .build()
         .expect("custom pool builder should create service");
 
-    assert_eq!(service.thread_pool().maximum_pool_size(), 2);
-    assert_eq!(service.thread_pool().stats().queued_tasks, 0);
+    assert_eq!(service.thread_pool_stats().maximum_pool_size, 2);
+    assert_eq!(service.thread_pool_stats().queued_tasks, 0);
     service.shutdown();
     service.wait_termination();
 }

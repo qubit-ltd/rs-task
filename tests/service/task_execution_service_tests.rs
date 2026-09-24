@@ -265,7 +265,7 @@ fn test_task_execution_service_waits_for_snapshot_and_idle() {
     let stats = service.stats();
     assert_eq!(stats.running, 1);
     assert_eq!(stats.submitted, 1);
-    assert_eq!(service.thread_pool().stats().queued_tasks, 1);
+    assert_eq!(service.thread_pool_stats().queued_tasks, 1);
 
     let (snapshot_done_tx, snapshot_done_rx) = mpsc::channel();
     let snapshot_service = Arc::clone(&service);
@@ -383,7 +383,7 @@ fn test_task_execution_service_cancel_and_stop_race_keeps_terminal_status() {
     let cancelled = cancel_thread.join().expect("cancel thread should not panic");
     let report = stop_thread.join().expect("stop thread should not panic");
     assert_eq!(usize::from(cancelled) + report.queued, 1);
-    assert_eq!(service.thread_pool().stats().cancelled_tasks, 1);
+    assert_eq!(service.thread_pool_stats().cancelled_tasks, 1);
 
     assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Cancelled));
     assert!(matches!(queued.get(), Err(TaskExecutionError::Cancelled)));
@@ -496,7 +496,7 @@ fn test_task_execution_service_cancel_releases_capture_and_queue_capacity() {
 
     let cancelled = service.cancel(Id::new(2));
     let released_before_return = drops.load(Ordering::SeqCst);
-    let queued_after_cancel = service.thread_pool().stats().queued_tasks;
+    let queued_after_cancel = service.thread_pool_stats().queued_tasks;
     let replacement = service.submit(Id::new(3), successful_unit_task as fn() -> Result<(), io::Error>);
     // Release the worker before asserting so a regression cannot strand it.
     release_tx.send(()).expect("worker should be released");
@@ -509,7 +509,7 @@ fn test_task_execution_service_cancel_releases_capture_and_queue_capacity() {
     assert!(!service.cancel(Id::new(2)));
     service.shutdown();
     service.wait_termination();
-    let pool_stats = service.thread_pool().stats();
+    let pool_stats = service.thread_pool_stats();
     assert_eq!(pool_stats.cancelled_tasks, 1);
     assert_eq!(pool_stats.completed_tasks, 2);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -550,7 +550,7 @@ fn test_task_execution_service_cancel_and_start_choose_one_terminal_result() {
             assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
         assert!(!service.cancel(Id::new(2)));
-        let stats = service.thread_pool().stats();
+        let stats = service.thread_pool_stats();
         assert_eq!(stats.cancelled_tasks, usize::from(cancelled));
         assert_eq!(stats.completed_tasks + stats.cancelled_tasks, 2);
         assert_eq!(stats.running_tasks + stats.queued_tasks, 0);
@@ -594,7 +594,7 @@ fn test_task_execution_service_cancel_publishing_panic_finishes_registry() {
     service.wait_for_idle();
     service.shutdown();
     service.wait_termination();
-    assert_eq!(service.thread_pool().stats().cancelled_tasks, 1);
+    assert_eq!(service.thread_pool_stats().cancelled_tasks, 1);
 }
 
 /// Holds cancellation in captured-value destruction after terminal publication.
@@ -654,7 +654,7 @@ fn test_task_execution_service_reused_id_survives_old_cancel_return() {
     service.shutdown();
     service.wait_termination();
     assert_eq!(service.status(Id::new(2)), Some(TaskStatus::Succeeded));
-    let stats = service.thread_pool().stats();
+    let stats = service.thread_pool_stats();
     assert_eq!(stats.cancelled_tasks, 1);
     assert_eq!(stats.completed_tasks, 2);
 }

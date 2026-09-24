@@ -22,6 +22,7 @@ use qubit_function::Runnable;
 use qubit_id::Id;
 use qubit_thread_pool::PoolJobTicket;
 use qubit_thread_pool::ThreadPool;
+use qubit_thread_pool::ThreadPoolStats;
 
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
 use super::task_execution_service_error::TaskExecutionServiceError;
@@ -608,29 +609,14 @@ impl TaskExecutionService {
         self.pool.wait_termination();
     }
 
-    /// Returns the backing thread pool.
+    /// Returns a snapshot of the backing thread pool's statistics.
     ///
-    /// # Example
-    ///
-    /// ```
-    /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let pool = service.thread_pool();
-    ///     assert!(pool.maximum_pool_size() > 0);
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Returns
-    ///
-    /// A shared reference for low-level inspection such as pool statistics.
+    /// The values are sampled together but may no longer describe the pool's
+    /// state by the time this method returns.
     #[must_use]
     #[inline]
-    pub fn thread_pool(&self) -> &ThreadPool {
-        &self.pool
+    pub fn thread_pool_stats(&self) -> ThreadPoolStats {
+        self.pool.stats()
     }
 }
 
