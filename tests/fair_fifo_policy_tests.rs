@@ -44,6 +44,7 @@ fn test_fair_fifo_policy_protects_head_when_max_bypasses_is_zero() {
 fn test_fair_fifo_policy_respects_scan_budget() {
     let mut blocked = queued_task("blocked");
     blocked.request.resources.cpu_slots = 2;
+    let blocked_id = blocked.id;
     let available = queued_task("available");
     let resources = ResourceSnapshot {
         capacity: ResourceCapacity {
@@ -56,8 +57,8 @@ fn test_fair_fifo_policy_respects_scan_budget() {
     let truncated = FairFifoPolicy::new(8).order(&queue(vec![blocked.clone(), available.clone()], 1), &resources);
     let within_budget = FairFifoPolicy::new(8).order(&queue(vec![blocked, available.clone()], 2), &resources);
 
-    assert!(truncated.is_empty());
-    assert_eq!(within_budget, vec![available.id]);
+    assert_eq!(truncated, vec![blocked_id]);
+    assert_eq!(within_budget, vec![blocked_id, available.id]);
 }
 
 #[test]
@@ -122,4 +123,32 @@ fn test_fair_fifo_policy_checks_gpu_labels_and_custom_resources() {
     let mut insufficient_custom = resources;
     insufficient_custom.capacity.custom.insert("license".to_owned(), 2);
     assert!(FairFifoPolicy::new(8).order(&snapshot, &insufficient_custom).is_empty());
+}
+
+#[test]
+fn test_fair_fifo_policy_surfaces_requests_that_exceed_total_capacity() {
+    let mut too_many_gpus = queued_task("too-many-gpus");
+    too_many_gpus.request.resources.gpu_count = 2;
+    let mut unknown_gpu_label = queued_task("unknown-gpu-label");
+    unknown_gpu_label.request.resources.gpu_count = 1;
+    unknown_gpu_label.request.resources.gpu_labels = vec!["rocm".into()];
+    let mut too_much_custom = queued_task("too-much-custom");
+    too_much_custom.request.resources.custom.insert("license".into(), 2);
+    let snapshot = queue(
+        vec![too_many_gpus.clone(), unknown_gpu_label.clone(), too_much_custom.clone()],
+        8,
+    );
+    let resources = ResourceSnapshot {
+        capacity: ResourceCapacity {
+            cpu_slots: 4,
+            gpus: BTreeMap::from([("gpu0".into(), vec!["cuda".into()])]),
+            custom: BTreeMap::from([("license".into(), 1)]),
+        },
+        ..ResourceSnapshot::default()
+    };
+
+    assert_eq!(
+        FairFifoPolicy::new(8).order(&snapshot, &resources),
+        vec![too_many_gpus.id, unknown_gpu_label.id, too_much_custom.id]
+    );
 }
