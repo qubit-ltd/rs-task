@@ -107,7 +107,10 @@ impl TaskExecutionServiceState {
             return false;
         }
         record.phase = ActivePhase::Submitted;
-        record.previous_completed = None;
+        let previous_completed = record.previous_completed.take();
+        if let Some(previous_completed) = previous_completed {
+            inner.remove_order_marker(task_id, &previous_completed.token);
+        }
         true
     }
 
@@ -175,6 +178,7 @@ impl TaskExecutionServiceState {
                     .any(|(completed_id, token)| *completed_id == task_id && token.same_as(&previous_completed.token));
                 if previous_is_retained {
                     inner.completed.insert(task_id, previous_completed);
+                    inner.evict_to_capacity();
                 }
             }
             self.idle.notify_all();
@@ -186,6 +190,7 @@ impl TaskExecutionServiceState {
             .is_some_and(|record| record.token.same_as(token))
         {
             inner.completed.remove(&task_id);
+            inner.remove_order_marker(task_id, token);
             return true;
         }
         false
@@ -325,6 +330,35 @@ impl Inner {
             .is_some_and(|record| record.token.same_as(token))
     }
 
+    /// Removes the order marker owned by one submission.
+    fn remove_order_marker(&mut self, task_id: Id, token: &SubmissionToken) {
+        self.completed_order
+            .retain(|(id, marker)| *id != task_id || !marker.same_as(token));
+    }
+
+    /// Drops oldest effective records until the configured capacity is met.
+    fn evict_to_capacity(&mut self) {
+        while self.completed.len() > self.history_capacity {
+            let Some((old_id, old_token)) = self.completed_order.pop_front() else {
+                break;
+            };
+            if self
+                .completed
+                .get(&old_id)
+                .is_some_and(|record| record.token.same_as(&old_token))
+            {
+                self.completed.remove(&old_id);
+            } else if let Some(active) = self.active.get_mut(&old_id)
+                && active
+                    .previous_completed
+                    .as_ref()
+                    .is_some_and(|record| record.token.same_as(&old_token))
+            {
+                active.previous_completed = None;
+            }
+        }
+    }
+
     /// Keeps one terminal status, evicting the oldest completion if needed.
     fn remember(&mut self, task_id: Id, token: SubmissionToken, status: TaskStatus) {
         if self.history_capacity == 0 {
@@ -338,16 +372,7 @@ impl Inner {
             },
         );
         self.completed_order.push_back((task_id, token));
-        while self.completed_order.len() > self.history_capacity {
-            if let Some((old_id, old_token)) = self.completed_order.pop_front()
-                && self
-                    .completed
-                    .get(&old_id)
-                    .is_some_and(|record| record.token.same_as(&old_token))
-            {
-                self.completed.remove(&old_id);
-            }
-        }
+        self.evict_to_capacity();
     }
 }
 
@@ -450,6 +475,83 @@ mod tests {
         let inner = state.lock_inner();
         assert_eq!(inner.completed.len(), 2);
         assert_eq!(inner.completed_order.len(), 2);
+    }
+
+    #[test]
+    fn test_history_capacity_two_counts_reused_completion_once() {
+        let state = TaskExecutionServiceState::new(2);
+        let first = state.reserve(Id::new(1), inert_cancel()).expect("ID should be free");
+        assert!(state.accept(Id::new(1), &first));
+        assert!(state.finish(Id::new(1), &first, TaskStatus::Succeeded));
+        let second = state.reserve(Id::new(2), inert_cancel()).expect("ID should be free");
+        assert!(state.accept(Id::new(2), &second));
+        assert!(state.finish(Id::new(2), &second, TaskStatus::Succeeded));
+
+        let reused = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
+        assert!(state.accept(Id::new(2), &reused));
+        assert!(state.finish(Id::new(2), &reused, TaskStatus::Failed));
+
+        assert_eq!(state.status(Id::new(1)), Some(TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(2)), Some(TaskStatus::Failed));
+        assert_eq!(state.stats().total, 2);
+        let inner = state.lock_inner();
+        assert_eq!(inner.completed_order.len(), inner.completed.len());
+        assert_eq!(inner.completed.len(), 2);
+    }
+
+    #[test]
+    fn test_rejected_reused_id_restores_original_history_position() {
+        let state = TaskExecutionServiceState::new(2);
+        for (id, status) in [(1, TaskStatus::Succeeded), (2, TaskStatus::Succeeded)] {
+            let token = state.reserve(Id::new(id), inert_cancel()).expect("ID should be free");
+            assert!(state.accept(Id::new(id), &token));
+            assert!(state.finish(Id::new(id), &token, status));
+        }
+        let retry = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
+        assert_eq!(state.status(Id::new(2)), None);
+        assert!(state.discard(Id::new(2), &retry));
+        assert_eq!(state.status(Id::new(1)), Some(TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(2)), Some(TaskStatus::Succeeded));
+        {
+            let inner = state.lock_inner();
+            assert_eq!(
+                inner.completed_order.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                [Id::new(1), Id::new(2)]
+            );
+            assert_eq!(inner.completed_order.len(), inner.completed.len());
+        }
+
+        let third = state.reserve(Id::new(3), inert_cancel()).expect("ID should be free");
+        assert!(state.accept(Id::new(3), &third));
+        assert!(state.finish(Id::new(3), &third, TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(1)), None);
+        assert_eq!(state.status(Id::new(2)), Some(TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(3)), Some(TaskStatus::Succeeded));
+    }
+
+    #[test]
+    fn test_rejected_reused_id_is_not_restored_after_history_eviction() {
+        let state = TaskExecutionServiceState::new(2);
+        for id in 1..=2 {
+            let token = state.reserve(Id::new(id), inert_cancel()).expect("ID should be free");
+            assert!(state.accept(Id::new(id), &token));
+            assert!(state.finish(Id::new(id), &token, TaskStatus::Succeeded));
+        }
+        let retry = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
+
+        for id in 3..=4 {
+            let token = state.reserve(Id::new(id), inert_cancel()).expect("ID should be free");
+            assert!(state.accept(Id::new(id), &token));
+            assert!(state.finish(Id::new(id), &token, TaskStatus::Succeeded));
+        }
+        assert!(state.discard(Id::new(2), &retry));
+        assert_eq!(state.status(Id::new(1)), None);
+        assert_eq!(state.status(Id::new(2)), None);
+        assert_eq!(state.status(Id::new(3)), Some(TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(4)), Some(TaskStatus::Succeeded));
+        assert_eq!(state.stats().total, 2);
+        let inner = state.lock_inner();
+        assert_eq!(inner.completed_order.len(), inner.completed.len());
     }
 
     #[test]
