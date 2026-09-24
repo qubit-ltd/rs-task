@@ -273,6 +273,7 @@ impl TaskExecutionServiceBuilder {
             queue: parking_lot::Mutex::new(queue),
             queue_count: std::sync::atomic::AtomicUsize::new(queue_count),
             local_handlers: parking_lot::Mutex::new(Default::default()),
+            local_finalizations: parking_lot::Mutex::new(Default::default()),
             cancellations: parking_lot::Mutex::new(Default::default()),
             changed: tokio::sync::Notify::new(),
             admission: AdmissionGate::new(),

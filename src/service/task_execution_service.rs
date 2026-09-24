@@ -14,8 +14,13 @@ use std::sync::atomic::Ordering;
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
+use tokio::sync::oneshot;
 
 use super::admission_gate::AdmissionGate;
+use super::local_task_handle::LocalTaskHandle;
+use super::local_task_handle::LocalTaskOutcome;
+use super::local_task_handle::LocalTaskResultError;
+use super::local_task_handle::adapt_local_outcome;
 #[cfg(feature = "event-bus")]
 use super::task_event_notification_stats::TaskEventNotificationStats;
 #[cfg(feature = "event-bus")]
@@ -115,6 +120,7 @@ pub(crate) struct ServiceCore {
     pub(crate) queue: Mutex<VecDeque<QueuedTask>>,
     pub(crate) queue_count: AtomicUsize,
     pub(crate) local_handlers: Mutex<HashMap<TaskId, Arc<dyn TaskHandler>>>,
+    pub(crate) local_finalizations: Mutex<HashMap<TaskId, oneshot::Sender<Result<TaskState, LocalTaskResultError>>>>,
     pub(crate) cancellations: Mutex<HashMap<TaskId, RunningCancellation>>,
     pub(crate) changed: Notify,
     pub(super) admission: AdmissionGate,
@@ -218,18 +224,22 @@ impl TaskExecutionService {
 
     /// Submits a process-local closure when the selected store cannot promise
     /// restart recovery.
-    pub async fn submit_local<F>(&self, task: F) -> Result<TaskId, TaskServiceError>
+    pub async fn submit_local<F, R, E>(&self, task: F) -> Result<LocalTaskHandle<R, E>, TaskServiceError>
     where
-        F: FnOnce(TaskContext) -> crate::handler::TaskRunResult + Send + 'static,
+        F: FnOnce(TaskContext) -> LocalTaskOutcome<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: std::fmt::Display + Send + 'static,
     {
         let service = self.clone();
         await_admission(runtime().spawn(async move { service.submit_local_admitted(task).await })).await
     }
 
     /// Retains a local handler through acceptance and queue publication.
-    async fn submit_local_admitted<F>(&self, task: F) -> Result<TaskId, TaskServiceError>
+    async fn submit_local_admitted<F, R, E>(&self, task: F) -> Result<LocalTaskHandle<R, E>, TaskServiceError>
     where
-        F: FnOnce(TaskContext) -> crate::handler::TaskRunResult + Send + 'static,
+        F: FnOnce(TaskContext) -> LocalTaskOutcome<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: std::fmt::Display + Send + 'static,
     {
         if self.core.store.capabilities().restart_recovery {
             return Err(TaskServiceError::UnsupportedCapability);
@@ -244,7 +254,12 @@ impl TaskExecutionService {
             task_type: format!("local:{id}"),
             version: "1".into(),
         };
-        let handler: Arc<dyn TaskHandler> = Arc::new(LocalTaskHandler::new(descriptor.clone(), task));
+        let (typed_sender, typed_receiver) = oneshot::channel();
+        let (final_sender, final_receiver) = oneshot::channel();
+        let handler: Arc<dyn TaskHandler> = Arc::new(LocalTaskHandler::new(
+            descriptor.clone(),
+            adapt_local_outcome(task, typed_sender),
+        ));
         let request = TaskRequest {
             task_type: descriptor.task_type,
             handler_version: descriptor.version,
@@ -260,6 +275,10 @@ impl TaskExecutionService {
         match self.core.store.accept(id, request.clone()).await {
             Ok(AcceptOutcome::Accepted(record)) => {
                 self.core.local_handlers.lock().insert(id, handler);
+                self.core.local_finalizations.lock().insert(id, final_sender);
+                if let Some(error) = self.last_store_error() {
+                    finalize_local(&self.core, id, Err(LocalTaskResultError::StoreUnavailable(error)));
+                }
                 self.core.queue.lock().push_back(QueuedTask {
                     id,
                     request,
@@ -267,11 +286,14 @@ impl TaskExecutionService {
                 });
                 self.core.changed.notify_one();
                 publish_record(&self.core, &record);
-                Ok(record.id)
+                Ok(LocalTaskHandle::new(record.id, typed_receiver, final_receiver))
             }
             Ok(AcceptOutcome::Existing(record)) => {
                 self.release_queue_slot();
-                Ok(record.id)
+                Err(TaskServiceError::InvalidRequest(format!(
+                    "local task id {} was already accepted",
+                    record.id
+                )))
             }
             Err(error) => {
                 self.release_queue_slot();
@@ -391,6 +413,9 @@ impl TaskExecutionService {
                     }
                     self.core.changed.notify_waiters();
                     publish_record(&self.core, &updated);
+                    if queued || blocked {
+                        finalize_local(&self.core, id, Ok(TaskState::Cancelled));
+                    }
                     return Ok(if queued || blocked {
                         CancelOutcome::CancelledBeforeStart
                     } else {
@@ -809,6 +834,9 @@ async fn finish_attempt(
                 }
                 core.changed.notify_waiters();
                 publish_record(&core, &updated);
+                if !matches!(updated.state, TaskState::Queued | TaskState::Running) {
+                    finalize_local(&core, updated.id, Ok(updated.state));
+                }
                 return;
             }
             Err(StoreError::Conflict) => continue,
@@ -827,7 +855,15 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -
     let updated = transition(core, record, TaskState::Blocked { reason }, None, Vec::new(), record.cancel_requested).await?;
     core.changed.notify_waiters();
     publish_record(core, &updated);
+    finalize_local(core, updated.id, Ok(updated.state));
     Ok(())
+}
+
+fn finalize_local(core: &ServiceCore, id: TaskId, result: Result<TaskState, LocalTaskResultError>) {
+    let sender = core.local_finalizations.lock().remove(&id);
+    if let Some(sender) = sender {
+        let _ = sender.send(result);
+    }
 }
 
 fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
@@ -837,6 +873,10 @@ fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
 /// Records the first storage failure and closes admission for all waiters.
 fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
     let diagnostic = core.store_fault.lock().get_or_insert(diagnostic).clone();
+    let finalizations = core.local_finalizations.lock().drain().map(|(_, sender)| sender).collect::<Vec<_>>();
+    for sender in finalizations {
+        let _ = sender.send(Err(LocalTaskResultError::StoreUnavailable(diagnostic.clone())));
+    }
     if core.admission.close() {
         let core = Arc::clone(core);
         runtime().spawn(async move {

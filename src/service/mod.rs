@@ -8,6 +8,7 @@
 //! Unified task submission, status, scheduling, and lifecycle facade.
 
 mod admission_gate;
+mod local_task_handle;
 #[cfg(feature = "event-bus")]
 mod task_event_notification_stats;
 #[cfg(feature = "event-bus")]
@@ -23,3 +24,6 @@ pub use task_execution_service::TaskServiceCapabilities;
 pub use task_execution_service::TaskServiceError;
 pub use task_execution_service_builder::TaskExecutionServiceBuilder;
 pub use task_execution_service_builder::TaskServiceBuildError;
+pub use local_task_handle::LocalTaskHandle;
+pub use local_task_handle::LocalTaskOutcome;
+pub use local_task_handle::LocalTaskResultError;
