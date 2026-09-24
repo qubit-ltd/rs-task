@@ -2,7 +2,7 @@
 
 [English version](user-guide.md)
 
-本指南面向使用线程池执行任务，并且需要业务侧任务 ID、类型化结果和可查询生命周期状态的 Rust 应用。内容适用于 qubit-task 0.5.x，要求 Rust 1.94 或更高版本。
+本指南面向使用线程池执行任务，并且需要业务侧任务 ID、类型化结果和可查询生命周期状态的 Rust 应用。内容适用于 qubit-task 0.6.x，要求 Rust 1.94 或更高版本。
 
 ## 手册目标与读者
 
@@ -34,7 +34,7 @@ Id 由调用方提供。任务处于活动状态或正在被接受时，不能�
 
 ~~~toml
 [dependencies]
-qubit-task = "0.5"
+qubit-task = "0.6"
 qubit-id = "0.6"
 ~~~
 
@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ~~~toml
 [dependencies]
-qubit-thread-pool = "0.10"
+qubit-thread-pool = "0.11"
 ~~~
 
 ~~~rust
@@ -98,7 +98,7 @@ let service = TaskExecutionService::builder()
 
 ### 暂停接收与取消排队任务
 
-调用 suspend 后，新提交会返回 TaskExecutionServiceError::Suspended，已经接受的任务不受影响；恢复接收时调用 resume。cancel(id) 只有在 worker 尚未开始执行任务时才返回 true。它与线程池启动任务之间存在竞态，因此运行中的任务会返回 false。取消成功返回前，动态线程池会移除排队 job 并释放它捕获的值，因此该队列位置可立即用于后续提交。
+调用 suspend 后，新提交会返回 TaskExecutionServiceError::Suspended，已经接受的任务不受影响；恢复接收时调用 resume。cancel(id) 只有在 worker 领取排队 job 之前才返回 true；领取后即使 callable 尚未开始执行也会返回 false。取消成功返回前，动态线程池会移除排队 job 并释放它捕获的值，因此该队列位置可立即用于后续提交。
 
 服务不会暴露可直接向底层线程池提交任务的引用。需要查看池指标时，读取一次快照即可：
 

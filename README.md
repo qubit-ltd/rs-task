@@ -16,7 +16,7 @@ Add `qubit-task` and the task ID crate used by the examples to `Cargo.toml`:
 
 ```toml
 [dependencies]
-qubit-task = "0.5"
+qubit-task = "0.6"
 qubit-id = "0.6"
 ```
 
@@ -24,7 +24,8 @@ qubit-id = "0.6"
 callable on a thread pool, and keeps an in-memory status for lookup and
 pre-start cancellation. A successful cancellation removes queued work and
 releases its captured values before returning; cancellation after a worker has
-started the callable returns `false`. The returned `TaskHandle` owns the typed
+claimed the job returns `false`, even if the callable has not started yet. The
+returned `TaskHandle` owns the typed
 result.
 
 ```rust

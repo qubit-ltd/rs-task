@@ -15,11 +15,11 @@ README 示例还会直接使用任务 ID 类型，请在 `Cargo.toml` 中添加�
 
 ```toml
 [dependencies]
-qubit-task = "0.5"
+qubit-task = "0.6"
 qubit-id = "0.6"
 ```
 
-`TaskExecutionService` 接收调用方提供的任务 ID，在线程池中运行同步 callable，并在内存中保留状态以便查询和执行前取消。取消排队任务成功返回时，任务已从队列移除且其捕获值已释放；worker 已开始执行 callable 后再取消会返回 `false`。返回的 `TaskHandle` 负责保存类型化结果。
+`TaskExecutionService` 接收调用方提供的任务 ID，在线程池中运行同步 callable，并在内存中保留状态以便查询和执行前取消。取消排队任务成功返回时，任务已从队列移除且其捕获值已释放；worker 领取任务后再取消会返回 `false`，即使 callable 尚未开始执行也是如此。返回的 `TaskHandle` 负责保存类型化结果。
 
 ```rust
 use qubit_id::Id;

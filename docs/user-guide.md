@@ -2,7 +2,7 @@
 
 [中文版本](user-guide.zh_CN.md)
 
-This guide targets Rust applications that submit work to a thread pool and need a caller-owned task ID, a typed result, and an inspectable lifecycle status. It describes qubit-task 0.5.x and requires Rust 1.94 or later.
+This guide targets Rust applications that submit work to a thread pool and need a caller-owned task ID, a typed result, and an inspectable lifecycle status. It describes qubit-task 0.6.x and requires Rust 1.94 or later.
 
 ## Purpose and Audience
 
@@ -34,7 +34,7 @@ Add the crate to Cargo.toml:
 
 ~~~toml
 [dependencies]
-qubit-task = "0.5"
+qubit-task = "0.6"
 qubit-id = "0.6"
 ~~~
 
@@ -83,7 +83,7 @@ Add the pool crate as a direct dependency when using this option:
 
 ~~~toml
 [dependencies]
-qubit-thread-pool = "0.10"
+qubit-thread-pool = "0.11"
 ~~~
 
 ~~~rust
@@ -98,7 +98,7 @@ let service = TaskExecutionService::builder()
 
 ### Pause intake and cancel queued work
 
-suspend rejects new submissions with TaskExecutionServiceError::Suspended, while accepted work continues. Call resume to accept new submissions again. cancel(id) returns true only when the task is cancelled before a worker starts it; cancellation races with the thread pool, so a running task returns false. When cancellation succeeds, the dynamic pool removes the queued job and drops its captured values before cancel returns. This immediately releases that queue position for another submission.
+suspend rejects new submissions with TaskExecutionServiceError::Suspended, while accepted work continues. Call resume to accept new submissions again. cancel(id) returns true only before a worker claims the queued job. Once claimed, it returns false even if the callable has not started yet. When cancellation succeeds, the dynamic pool removes the queued job and drops its captured values before cancel returns. This immediately releases that queue position for another submission.
 
 The service does not expose a reference that can submit work directly to its backing pool. Read pool metrics through a snapshot instead:
 
