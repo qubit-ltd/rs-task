@@ -9,11 +9,11 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use super::admission_gate::AdmissionGate;
 #[cfg(feature = "event-bus")]
 use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service::ServiceCore;
 use super::task_execution_service::TaskExecutionService;
-use super::admission_gate::AdmissionGate;
 use crate::engine::LocalTaskExecutionEngine;
 use crate::engine::TaskExecutionEngine;
 use crate::handler::TaskHandler;

@@ -1,19 +1,29 @@
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::engine::{
-    EngineError, ExecutionHandle, LocalTaskExecutionEngine, PreparedExecution, TaskExecutionEngine,
-};
-use qubit_task::handler::{
-    TaskContext, TaskHandler, TaskHandlerDescriptor, TaskRunOutcome, TaskRunResult,
-};
-use qubit_task::model::{
-    ResourceCapacity, ResourceRequest, ResourceSnapshot, TaskId, TaskOutput, TaskRequest,
-};
-use qubit_task::scheduling::{FairFifoPolicy, QueueSnapshot, SchedulingPolicy};
+use qubit_task::engine::EngineError;
+use qubit_task::engine::ExecutionHandle;
+use qubit_task::engine::LocalTaskExecutionEngine;
+use qubit_task::engine::PreparedExecution;
+use qubit_task::engine::TaskExecutionEngine;
+use qubit_task::handler::TaskContext;
+use qubit_task::handler::TaskHandler;
+use qubit_task::handler::TaskHandlerDescriptor;
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
+use qubit_task::model::ResourceCapacity;
+use qubit_task::model::ResourceRequest;
+use qubit_task::model::ResourceSnapshot;
+use qubit_task::model::TaskId;
+use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskRequest;
+use qubit_task::scheduling::FairFifoPolicy;
+use qubit_task::scheduling::QueueSnapshot;
+use qubit_task::scheduling::SchedulingPolicy;
 use qubit_task::service::LocalTaskOutcome;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
@@ -25,19 +35,11 @@ struct ObservePolicy {
 
 impl SchedulingPolicy for ObservePolicy {
     fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> Vec<TaskId> {
-        let _ = self.observed.send(
-            queue
-                .tasks
-                .iter()
-                .map(|task| (task.id, task.bypasses))
-                .collect(),
-        );
+        let _ = self
+            .observed
+            .send(queue.tasks.iter().map(|task| (task.id, task.bypasses)).collect());
         if self.allow_later.load(Ordering::Acquire) {
-            queue
-                .tasks
-                .last()
-                .map(|task| vec![task.id])
-                .unwrap_or_default()
+            queue.tasks.last().map(|task| vec![task.id]).unwrap_or_default()
         } else {
             Vec::new()
         }
@@ -50,10 +52,7 @@ async fn observe_until(
 ) -> Vec<(TaskId, u32)> {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let snapshot = receiver
-                .recv()
-                .await
-                .expect("scheduler observation channel stays open");
+            let snapshot = receiver.recv().await.expect("scheduler observation channel stays open");
             if predicate(&snapshot) {
                 return snapshot;
             }
@@ -81,13 +80,9 @@ struct ObservingFairPolicy {
 
 impl SchedulingPolicy for ObservingFairPolicy {
     fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId> {
-        let _ = self.observed.send(
-            queue
-                .tasks
-                .iter()
-                .map(|task| (task.id, task.bypasses))
-                .collect(),
-        );
+        let _ = self
+            .observed
+            .send(queue.tasks.iter().map(|task| (task.id, task.bypasses)).collect());
         self.inner.order(queue, resources)
     }
 }
@@ -105,15 +100,9 @@ impl TaskHandler for GatedHandler {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        payload: &'a [u8],
-        _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(&'a self, payload: &'a [u8], _context: TaskContext) -> qubit_task::store::TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
-            self.started
-                .send(payload[0])
-                .expect("test event receiver stays open");
+            self.started.send(payload[0]).expect("test event receiver stays open");
             self.release
                 .acquire()
                 .await
@@ -160,10 +149,7 @@ async fn empty_scheduler_rounds_do_not_increment_bypasses() {
         .build()
         .await
         .expect("service builds");
-    let handle = service
-        .submit_local(local_success)
-        .await
-        .expect("task is accepted");
+    let handle = service.submit_local(local_success).await.expect("task is accepted");
     let task_id = handle.task_id();
 
     let snapshots = tokio::time::timeout(Duration::from_secs(3), async {
@@ -182,13 +168,11 @@ async fn empty_scheduler_rounds_do_not_increment_bypasses() {
     .await
     .expect("scheduler completes repeated empty rounds");
 
-    assert!(snapshots.iter().all(|snapshot| {
-        snapshot
+    assert!(
+        snapshots
             .iter()
-            .find(|(id, _)| *id == task_id)
-            .map(|(_, count)| *count)
-            == Some(0)
-    }));
+            .all(|snapshot| { snapshot.iter().find(|(id, _)| *id == task_id).map(|(_, count)| *count) == Some(0) })
+    );
 }
 
 #[tokio::test]
@@ -215,16 +199,13 @@ async fn only_a_successfully_started_later_task_counts_as_a_bypass() {
     let second_id = second.task_id();
 
     observe_until(&mut observations, |snapshot| {
-        snapshot.iter().any(|(id, _)| *id == first_id)
-            && snapshot.iter().any(|(id, _)| *id == second_id)
+        snapshot.iter().any(|(id, _)| *id == first_id) && snapshot.iter().any(|(id, _)| *id == second_id)
     })
     .await;
     policy.allow_later.store(true, Ordering::Release);
 
     let after_start = observe_until(&mut observations, |snapshot| {
-        snapshot
-            .iter()
-            .any(|(id, bypasses)| *id == first_id && *bypasses > 0)
+        snapshot.iter().any(|(id, bypasses)| *id == first_id && *bypasses > 0)
     })
     .await;
     assert_eq!(
@@ -236,13 +217,7 @@ async fn only_a_successfully_started_later_task_counts_as_a_bypass() {
         "one later activation increments only the earlier task, exactly once"
     );
     assert!(first.result().await.expect("first outcome arrives").is_ok());
-    assert!(
-        second
-            .result()
-            .await
-            .expect("second outcome arrives")
-            .is_ok()
-    );
+    assert!(second.result().await.expect("second outcome arrives").is_ok());
 }
 
 #[tokio::test]
@@ -277,15 +252,13 @@ async fn failed_activation_does_not_count_as_a_bypass() {
     let second_id = second.task_id();
 
     observe_until(&mut observations, |snapshot| {
-        snapshot.iter().any(|(id, _)| *id == first_id)
-            && snapshot.iter().any(|(id, _)| *id == second_id)
+        snapshot.iter().any(|(id, _)| *id == first_id) && snapshot.iter().any(|(id, _)| *id == second_id)
     })
     .await;
     policy.allow_later.store(true, Ordering::Release);
 
     let after_failed_activation = observe_until(&mut observations, |snapshot| {
-        snapshot.iter().any(|(id, _)| *id == first_id)
-            && !snapshot.iter().any(|(id, _)| *id == second_id)
+        snapshot.iter().any(|(id, _)| *id == first_id) && !snapshot.iter().any(|(id, _)| *id == second_id)
     })
     .await;
     assert_eq!(
@@ -363,10 +336,7 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
 
     let mut preoccupier = TaskRequest::new("fairness-gated", "1", b"P".to_vec());
     preoccupier.resources.cpu_slots = 1;
-    service
-        .submit(preoccupier)
-        .await
-        .expect("preoccupier is accepted");
+    service.submit(preoccupier).await.expect("preoccupier is accepted");
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), starts.recv())
             .await
@@ -390,10 +360,7 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
             .expect("a later small task starts before protection threshold")
             .expect("handler event channel remains open");
         assert!((b'0'..=b'8').contains(&label));
-        assert_ne!(
-            label, b'8',
-            "the ninth small task must remain queued at the threshold"
-        );
+        assert_ne!(label, b'8', "the ninth small task must remain queued at the threshold");
         release.add_permits(1);
     }
 
@@ -409,10 +376,7 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
         .await
         .expect("a queued task starts after the preoccupier releases its slot")
         .expect("handler event channel remains open");
-    assert_eq!(
-        first_after_release, b'L',
-        "the protected large task starts first"
-    );
+    assert_eq!(first_after_release, b'L', "the protected large task starts first");
 }
 
 #[tokio::test]

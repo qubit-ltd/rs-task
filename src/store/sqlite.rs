@@ -264,9 +264,10 @@ impl TaskStore for SqliteTaskStore {
                     "Running" => counts.running = count,
                     "Blocked" => counts.blocked = count,
                     "Succeeded" | "Failed" | "Panicked" | "Cancelled" => {
-                        counts.terminal = counts.terminal.checked_add(count).ok_or_else(|| {
-                            StoreError::Failure("terminal state count exceeds usize".into())
-                        })?;
+                        counts.terminal = counts
+                            .terminal
+                            .checked_add(count)
+                            .ok_or_else(|| StoreError::Failure("terminal state count exceeds usize".into()))?;
                     }
                     _ => return Err(StoreError::Failure(format!("unknown task state kind: {kind}"))),
                 }

@@ -7,9 +7,9 @@
 // =============================================================================
 use tokio::sync::oneshot;
 
+use super::local_task_result_error::LocalTaskResultError;
 use crate::model::TaskId;
 use crate::model::TaskState;
-use super::local_task_result_error::LocalTaskResultError;
 
 /// Process-local typed result of one accepted task.
 pub struct LocalTaskHandle<R, E> {

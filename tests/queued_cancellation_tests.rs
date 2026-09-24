@@ -14,13 +14,13 @@ use std::time::Duration;
 
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskId;
-use qubit_task::service::LocalTaskOutcome;
 use qubit_task::model::ResourceSnapshot;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
 use qubit_task::scheduling::QueueSnapshot;
 use qubit_task::scheduling::SchedulingPolicy;
 use qubit_task::service::CancelOutcome;
+use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::TaskServiceError;
 
 struct HoldFirstOrder {
@@ -62,7 +62,10 @@ async fn test_cancelling_shared_queue_task_releases_one_capacity_slot() {
         .await
         .expect("service builds");
     let a = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect("A accepted")
         .task_id();
@@ -73,12 +76,18 @@ async fn test_cancelling_shared_queue_task_releases_one_capacity_slot() {
         vec![a]
     );
     let b = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect("B accepted")
         .task_id();
     service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect("C accepted");
     assert_eq!(
@@ -86,10 +95,16 @@ async fn test_cancelling_shared_queue_task_releases_one_capacity_slot() {
         CancelOutcome::CancelledBeforeStart
     );
     let d = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await;
     let e = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await;
     release.send(()).expect("release scheduler");
     service.shutdown().await.expect("remaining tasks drain");

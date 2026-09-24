@@ -5,6 +5,11 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
+use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::StoreCapabilities;
@@ -21,10 +26,6 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
-use qubit_task::TaskExecutionServiceBuilder;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 
 struct FailListStore {
     inner: Arc<dyn TaskStore>,
@@ -106,7 +107,10 @@ async fn transition(store: &dyn TaskStore, record: &TaskRecord, state: TaskState
 
 /// Verifies every state category against the same object-safe store API.
 async fn check_all_state_categories(store: &dyn TaskStore) {
-    assert_eq!(store.count_states().await.expect("empty store counts"), TaskStateCounts::default());
+    assert_eq!(
+        store.count_states().await.expect("empty store counts"),
+        TaskStateCounts::default()
+    );
 
     let _queued = accept(store).await;
     let running = transition(store, &accept(store).await, TaskState::Running).await;
@@ -206,7 +210,10 @@ async fn test_store_count_works_when_list_fails() {
         count_calls: AtomicUsize::new(0),
     };
     accept(&store).await;
-    assert!(matches!(store.list(TaskQuery::default()).await, Err(StoreError::Failure(_))));
+    assert!(matches!(
+        store.list(TaskQuery::default()).await,
+        Err(StoreError::Failure(_))
+    ));
     assert_eq!(
         store.count_states().await.expect("count uses store aggregation"),
         TaskStateCounts {
@@ -251,7 +258,12 @@ async fn test_sqlite_store_counts_all_state_categories() {
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     check_all_state_categories(&store).await;
     drop(store);
-    for file in [&path, &path.with_extension("owner.lock"), &path.with_extension("sqlite-wal"), &path.with_extension("sqlite-shm")] {
+    for file in [
+        &path,
+        &path.with_extension("owner.lock"),
+        &path.with_extension("sqlite-wal"),
+        &path.with_extension("sqlite-shm"),
+    ] {
         let _ = std::fs::remove_file(file);
     }
 }
@@ -287,7 +299,12 @@ async fn test_service_stats_uses_one_sqlite_aggregate_for_large_history() {
     drop(service);
     drop(store);
     drop(sqlite);
-    for file in [&path, &path.with_extension("owner.lock"), &path.with_extension("sqlite-wal"), &path.with_extension("sqlite-shm")] {
+    for file in [
+        &path,
+        &path.with_extension("owner.lock"),
+        &path.with_extension("sqlite-wal"),
+        &path.with_extension("sqlite-shm"),
+    ] {
         let _ = std::fs::remove_file(file);
     }
 }
@@ -309,7 +326,12 @@ async fn test_sqlite_store_count_rejects_unknown_state_kind() {
         .expect("test corrupts state kind");
     assert!(matches!(store.count_states().await, Err(StoreError::Failure(_))));
     drop(store);
-    for file in [&path, &path.with_extension("owner.lock"), &path.with_extension("sqlite-wal"), &path.with_extension("sqlite-shm")] {
+    for file in [
+        &path,
+        &path.with_extension("owner.lock"),
+        &path.with_extension("sqlite-wal"),
+        &path.with_extension("sqlite-shm"),
+    ] {
         let _ = std::fs::remove_file(file);
     }
 }

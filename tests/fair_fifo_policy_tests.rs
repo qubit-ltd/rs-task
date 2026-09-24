@@ -135,7 +135,11 @@ fn test_fair_fifo_policy_surfaces_requests_that_exceed_total_capacity() {
     let mut too_much_custom = queued_task("too-much-custom");
     too_much_custom.request.resources.custom.insert("license".into(), 2);
     let snapshot = queue(
-        vec![too_many_gpus.clone(), unknown_gpu_label.clone(), too_much_custom.clone()],
+        vec![
+            too_many_gpus.clone(),
+            unknown_gpu_label.clone(),
+            too_much_custom.clone(),
+        ],
         8,
     );
     let resources = ResourceSnapshot {

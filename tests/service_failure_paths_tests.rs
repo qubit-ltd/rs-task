@@ -23,9 +23,9 @@ use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TransitionCommand;
-use qubit_task::service::TaskServiceError;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::LocalTaskResultError;
+use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
@@ -103,7 +103,10 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
     let handle = service
         .submit_local(move |_| {
             handler_ran.store(true, Ordering::Release);
-            LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() }
+            LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+                value: (),
+                summary: TaskOutput::default(),
+            }
         })
         .await
         .expect("task is accepted before scheduler reads it");
@@ -122,10 +125,15 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
     let result = tokio::time::timeout(Duration::from_secs(2), handle.result())
         .await
         .expect("typed handle receives the store fault");
-    assert!(matches!(result, Err(LocalTaskResultError::StoreUnavailable(message)) if message.contains("injected get failure")));
+    assert!(
+        matches!(result, Err(LocalTaskResultError::StoreUnavailable(message)) if message.contains("injected get failure"))
+    );
 
     let error = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect_err("service rejects submissions after a store failure");
     assert!(matches!(error, TaskServiceError::StoreUnavailable(_)));
@@ -147,7 +155,10 @@ async fn test_recoverable_sqlite_store_rejects_local_closure_without_accepting_i
         .expect("service builds");
 
     let error = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect_err("recoverable stores cannot retain process-local closures");
     assert!(matches!(error, TaskServiceError::UnsupportedCapability));

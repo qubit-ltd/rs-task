@@ -195,7 +195,10 @@ impl TaskStore for MemoryTaskStore {
                     TaskState::Queued => counts.queued += 1,
                     TaskState::Running => counts.running += 1,
                     TaskState::Blocked { .. } => counts.blocked += 1,
-                    TaskState::Succeeded | TaskState::Failed { .. } | TaskState::Panicked { .. } | TaskState::Cancelled => {
+                    TaskState::Succeeded
+                    | TaskState::Failed { .. }
+                    | TaskState::Panicked { .. }
+                    | TaskState::Cancelled => {
                         counts.terminal += 1;
                     }
                 }

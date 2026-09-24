@@ -89,7 +89,11 @@ impl TaskStore for PauseEvictedGetStore {
                 if let Some(sender) = self.cancel_persisted.lock().take() {
                     let _ = sender.send(());
                 }
-                self.cancel_release.acquire().await.expect("cancel transition released").forget();
+                self.cancel_release
+                    .acquire()
+                    .await
+                    .expect("cancel transition released")
+                    .forget();
             }
             Ok(updated)
         })
@@ -101,7 +105,11 @@ impl TaskStore for PauseEvictedGetStore {
                 if let Some(sender) = self.get_entered.lock().take() {
                     let _ = sender.send(());
                 }
-                self.get_release.acquire().await.expect("scheduler get released").forget();
+                self.get_release
+                    .acquire()
+                    .await
+                    .expect("scheduler get released")
+                    .forget();
             }
             self.inner.get(id).await
         })
@@ -273,9 +281,7 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
         .await
         .expect("service builds");
     let handle = service
-        .submit_local(|_| -> LocalTaskOutcome<(), DomainError> {
-            panic!("cancelled handler must not run")
-        })
+        .submit_local(|_| -> LocalTaskOutcome<(), DomainError> { panic!("cancelled handler must not run") })
         .await
         .expect("first task accepted");
     let id = handle.task_id();
@@ -307,7 +313,11 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
     })
     .await
     .expect("scheduler releases first queue slot after get(None)");
-    replacement.result().await.expect("replacement finalizes").expect("replacement succeeds");
+    replacement
+        .result()
+        .await
+        .expect("replacement finalizes")
+        .expect("replacement succeeds");
 
     let mut result = Box::pin(handle.result());
     assert!(matches!(futures::poll!(result.as_mut()), std::task::Poll::Pending));
@@ -351,9 +361,16 @@ async fn test_local_handle_delivers_non_clone_value_after_summary_is_persisted()
         .expect("task succeeded")
         .expect("typed result succeeded");
     assert_eq!(value, "full in-process value");
-    let record = service.get(task_id).await.expect("record query succeeds").expect("record retained");
+    let record = service
+        .get(task_id)
+        .await
+        .expect("record query succeeds")
+        .expect("record retained");
     assert_eq!(record.state, TaskState::Succeeded);
-    assert_eq!(record.output.expect("summary persisted").summary, b"small persisted summary");
+    assert_eq!(
+        record.output.expect("summary persisted").summary,
+        b"small persisted summary"
+    );
     service.shutdown().await.expect("service shuts down");
 }
 
@@ -374,7 +391,11 @@ async fn test_local_handle_preserves_domain_error_type() {
         .expect("task finalizes")
         .expect_err("domain failure is retained");
     assert_eq!(error, DomainError::InvalidInput);
-    let record = service.get(id).await.expect("record query succeeds").expect("record retained");
+    let record = service
+        .get(id)
+        .await
+        .expect("record query succeeds")
+        .expect("record retained");
     assert!(matches!(record.state, TaskState::Failed { .. }));
     service.shutdown().await.expect("service shuts down");
 }
@@ -431,7 +452,11 @@ async fn test_queued_local_handle_reports_cancelled_without_running_handler() {
     ));
     assert!(!ran.load(Ordering::Acquire), "cancelled queued handler must not run");
     release.send(()).expect("release holding task");
-    holding.result().await.expect("holding task finalizes").expect("holding task succeeds");
+    holding
+        .result()
+        .await
+        .expect("holding task finalizes")
+        .expect("holding task succeeds");
     service.shutdown().await.expect("service shuts down");
 }
 
@@ -453,7 +478,12 @@ async fn test_handler_initiated_cancellation_has_distinct_handle_result() {
         Err(LocalTaskResultError::Cancelled)
     ));
     assert_eq!(
-        service.get(id).await.expect("record query succeeds").expect("record retained").state,
+        service
+            .get(id)
+            .await
+            .expect("record query succeeds")
+            .expect("record retained")
+            .state,
         TaskState::Cancelled
     );
     service.shutdown().await.expect("service shuts down");
@@ -490,7 +520,12 @@ async fn test_unsatisfiable_local_task_reports_blocked_without_running_handler()
     ));
     assert!(!ran.load(Ordering::Acquire));
     assert!(matches!(
-        service.get(id).await.expect("record query succeeds").expect("record retained").state,
+        service
+            .get(id)
+            .await
+            .expect("record query succeeds")
+            .expect("record retained")
+            .state,
         TaskState::Blocked { .. }
     ));
     service.shutdown().await.expect("blocked task permits shutdown");
@@ -510,9 +545,16 @@ async fn test_panicking_local_handler_reports_panic_without_typed_result() {
     let result = tokio::time::timeout(WAIT_LIMIT, handle.result())
         .await
         .expect("panicking handle finalizes");
-    assert!(matches!(result, Err(LocalTaskResultError::Panicked(message)) if message.contains("local handle panic marker")));
+    assert!(
+        matches!(result, Err(LocalTaskResultError::Panicked(message)) if message.contains("local handle panic marker"))
+    );
     assert!(matches!(
-        service.get(id).await.expect("record query succeeds").expect("record retained").state,
+        service
+            .get(id)
+            .await
+            .expect("record query succeeds")
+            .expect("record retained")
+            .state,
         TaskState::Panicked { .. }
     ));
     service.shutdown().await.expect("service shuts down");
@@ -569,7 +611,10 @@ async fn test_local_handle_result_survives_zero_history_retention() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_recoverable_store_rejects_typed_local_submission() {
-    let path = std::env::temp_dir().join(format!("qubit-task-typed-handle-{}.sqlite", qubit_task::TaskId::generate()));
+    let path = std::env::temp_dir().join(format!(
+        "qubit-task-typed-handle-{}.sqlite",
+        qubit_task::TaskId::generate()
+    ));
     let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
         .expect("SQLite builder created")
         .build()
