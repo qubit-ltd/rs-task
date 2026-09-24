@@ -32,6 +32,6 @@ test = true
 [dependencies]
 qubit-id = "0.6"
 qubit-executor = "0.8"
-qubit-thread-pool = "0.10"
+qubit-thread-pool = { version = "0.10", path = "../rs-thread-pool" }
 qubit-function = "0.18"
 thiserror = "^2.0"
