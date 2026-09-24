@@ -44,7 +44,11 @@ For work that must survive restart, enable `sqlite` and use
 `TaskExecutionServiceBuilder::recoverable_sqlite(path)`. Register a handler for
 each stored `(task_type, handler_version)` before building the service. See the
 [user guide](doc/user-guide.md) for recovery, resource scheduling, SPI assembly,
-and event notifications.
+and event notifications. Optional lifecycle notifications use a bounded queue
+(256 entries by default); a full queue drops the notification, and shutdown
+drains queued notifications unless the publisher worker panics. A synchronous
+event-bus provider can block the dedicated publisher thread, so shutdown can
+wait indefinitely on such a provider.
 
 ## Project documents
 

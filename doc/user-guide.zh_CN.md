@@ -143,6 +143,21 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 
 启用 `event-bus` feature 后，可将 `qubit_event_bus::EventBus` 具体门面注入构建器。状态变化后，服务会发布 `TaskEvent`。通知采用尽力而为语义：发布失败不会回滚任务状态。事件可能重复、延迟或丢失，因此消费者应比较 `state_version`，并在需要权威状态时查询服务。
 
+服务为通知创建一个串行发布线程和有界队列，默认容量为 256。可通过
+`event_bus_buffer_capacity(NonZeroUsize)` 设置其他正数容量。状态转移只调用
+`try_send`，不会等待事件总线完成发布；队列已满时丢弃新通知。服务关闭并停止接收入队后，晚到的通知也会丢弃，这些丢弃都不会改变任务结果。
+
+配置了事件总线时，`notification_stats()` 返回通知统计快照；未配置时返回
+`None`。`enqueued` 是成功进入本地队列的事件数，`queue_full` 和 `queue_closed`
+分别统计因队列已满、队列已关闭而丢弃的事件。`accepted` 表示至少一个可见目的地接受了事件；其中同时存在拒绝目的地的事件也计入 `partial_rejection`。
+`opaque_accepted` 表示 provider 报告接受、但没有公开目的地信息。`unaccepted`
+统计没有任何已报告目的地接受的回执，包括空目的地列表和拦截器丢弃。
+`publish_error` 统计发布调用返回错误的次数，`worker_panicked` 记录发布线程 panic。
+这些值表示队列接纳、provider 回执或线程状态，不代表订阅者 handler 已处理完成。
+计数单调递增并在 `u64::MAX` 饱和；同一快照的各字段不保证来自完全相同的时刻。
+
+调用 `shutdown()` 时，服务先等待已受理任务结束，再关闭通知入队并排空队列中的事件，然后返回。它不会关闭由应用持有的事件总线。同步 provider 在专用操作系统线程上运行，不会占用 Tokio runtime worker；但如果 provider 永不返回，该线程就无法完成发布，`shutdown()` 也可能无限等待。不调用 `shutdown()` 而直接丢弃服务时，发送端关闭后发布线程仍会排空已入队通知再退出，同样受 provider 是否返回的影响。若发布线程发生 panic，`worker_panicked` 会记录此情况，shutdown 仍可观察到线程退出，但队列中尚未处理的通知可能丢失。
+
 ## 查询、取消和重试
 
 使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它只会在 `TaskContext` 中设置协作取消信号；处理器必须观察信号并退出后，执行引擎才会释放资源。

@@ -194,6 +194,38 @@ Publishing is best effort: a publish error does not roll back a task transition.
 Events may be repeated, delayed, or missing, so consumers should compare
 `state_version` and query the service for authoritative state.
 
+The service owns one serial publisher thread and a bounded notification queue.
+The default capacity is 256; configure another positive capacity with
+`event_bus_buffer_capacity(NonZeroUsize)`. State transitions call `try_send`,
+so they do not wait for event-bus publication. If the queue is full, the new
+notification is dropped. Notifications attempted after shutdown closes the
+queue are also dropped. Neither case changes the task result.
+
+When the service has an event bus, `notification_stats()` returns a snapshot of
+the publisher counters; otherwise it returns `None`. `enqueued` counts events
+accepted by the local queue, while `queue_full` and `queue_closed` count events
+dropped at that queue boundary. `accepted` counts publications for which at
+least one reported destination accepted the event; `partial_rejection` counts
+those that also had a rejected destination. `opaque_accepted` counts provider
+acceptance when destinations are not exposed. `unaccepted` counts receipts with
+no reported accepting destination, including empty destination lists and
+interceptor drops. `publish_error` counts calls returning an error, and
+`worker_panicked` records a publisher-thread panic. These are admission and
+worker counters, not evidence that a subscriber handler completed. Counters
+are monotonic and saturate at `u64::MAX`; the fields in one snapshot need not
+represent the exact same instant.
+
+`shutdown()` first waits for accepted task work to settle, closes notification
+enqueue, then drains notifications already in the queue before returning. It
+does not shut down the application-owned event bus. Publication runs on a
+dedicated OS thread, keeping a synchronous provider off Tokio runtime workers;
+however, a synchronous provider that never returns can keep that thread busy
+and make `shutdown()` wait indefinitely. Dropping the service without calling
+`shutdown()` closes the sender and lets the worker drain queued notifications
+before exiting, subject to the same provider behavior. If the worker panics,
+`worker_panicked` records it and shutdown still observes worker completion, but
+notifications remaining in its queue may be lost.
+
 ## Query, cancel, and retry
 
 Use `get(TaskId)` for the current record and `list(TaskQuery)` for bounded
