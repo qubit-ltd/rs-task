@@ -561,8 +561,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
                     release_core_queue_slot(&core);
-                    pause_on_store_fault(&core, StoreError::NotFound);
-                    return;
+                    continue;
                 }
                 Err(error) => {
                     pause_on_store_fault(&core, error);
@@ -579,7 +578,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             });
             let Some(handler) = handler else {
                 release_core_queue_slot(&core);
-                if let Err(error) = mark_blocked(
+                match mark_blocked(
                     &core,
                     &record,
                     format!(
@@ -589,8 +588,11 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 )
                 .await
                 {
-                    pause_on_store_fault(&core, error);
-                    return;
+                    Ok(()) | Err(StoreError::Conflict) => {}
+                    Err(error) => {
+                        pause_on_store_fault(&core, error);
+                        return;
+                    }
                 }
                 continue;
             };
@@ -602,9 +604,12 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
                 Err(EngineError::Unsatisfiable) => {
                     release_core_queue_slot(&core);
-                    if let Err(error) = mark_blocked(&core, &record, "resource request is unsatisfiable".into()).await {
-                        pause_on_store_fault(&core, error);
-                        return;
+                    match mark_blocked(&core, &record, "resource request is unsatisfiable".into()).await {
+                        Ok(()) | Err(StoreError::Conflict) => {}
+                        Err(error) => {
+                            pause_on_store_fault(&core, error);
+                            return;
+                        }
                     }
                     continue;
                 }
@@ -652,12 +657,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                         {
                             handle.cancelled.store(true, Ordering::Release);
                         }
-                        Ok(Some(_)) => {}
-                        Ok(None) => {
-                            core.cancellations.lock().remove(&id);
-                            pause_on_store_fault(&core, StoreError::NotFound);
-                            return;
-                        }
+                        Ok(Some(_)) | Ok(None) => {}
                         Err(error) => {
                             core.cancellations.lock().remove(&id);
                             pause_on_store_fault(&core, error);
@@ -669,11 +669,28 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     started = true;
                 }
                 Err(error) => {
-                    if let Err(store_error) =
-                        mark_blocked(&core, &running, format!("engine activation failed: {error}")).await
-                    {
-                        pause_on_store_fault(&core, store_error);
-                        return;
+                    let reason = format!("engine activation failed: {error}");
+                    let mut latest = running;
+                    loop {
+                        match mark_blocked(&core, &latest, reason.clone()).await {
+                            Ok(()) => break,
+                            Err(StoreError::Conflict) => match core.store.get(id).await {
+                                Ok(Some(record))
+                                    if record.attempt == latest.attempt && matches!(record.state, TaskState::Running) =>
+                                {
+                                    latest = record;
+                                }
+                                Ok(_) => break,
+                                Err(error) => {
+                                    pause_on_store_fault(&core, error);
+                                    return;
+                                }
+                            },
+                            Err(error) => {
+                                pause_on_store_fault(&core, error);
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -765,10 +782,7 @@ async fn finish_attempt(
             Ok(Some(record)) if matches!(record.state, TaskState::Running) && record.attempt == running.attempt => {
                 record
             }
-            Ok(None) => {
-                pause_on_store_fault(&core, StoreError::NotFound);
-                break;
-            }
+            Ok(None) => break,
             Ok(_) => break,
             Err(error) => {
                 pause_on_store_fault(&core, error);
@@ -810,7 +824,7 @@ async fn finish_attempt(
 }
 
 async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -> Result<(), StoreError> {
-    let updated = transition(core, record, TaskState::Blocked { reason }, None, Vec::new(), false).await?;
+    let updated = transition(core, record, TaskState::Blocked { reason }, None, Vec::new(), record.cancel_requested).await?;
     core.changed.notify_waiters();
     publish_record(core, &updated);
     Ok(())
