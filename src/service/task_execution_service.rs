@@ -593,6 +593,12 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             },
             &core.engine.capacity(),
         );
+        let original_positions = queue
+            .iter()
+            .enumerate()
+            .map(|(position, task)| (task.id, position))
+            .collect::<HashMap<_, _>>();
+        let mut activated_positions = Vec::new();
         let mut started = false;
         for id in order {
             let Some(index) = queue.iter().position(|task| task.id == id) else {
@@ -689,6 +695,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 .await
             {
                 Ok(handle) => {
+                    activated_positions.push(original_positions[&id]);
                     core.cancellations.lock().insert(
                         id,
                         RunningCancellation {
@@ -743,7 +750,12 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             }
         }
         for item in &mut queue {
-            item.bypasses = item.bypasses.saturating_add(1);
+            let Some(position) = original_positions.get(&item.id) else {
+                continue;
+            };
+            if activated_positions.iter().any(|started_position| started_position > position) {
+                item.bypasses = item.bypasses.saturating_add(1);
+            }
         }
         {
             let mut retained = core.queue.lock();
