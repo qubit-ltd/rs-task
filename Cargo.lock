@@ -229,8 +229,6 @@ dependencies = [
 [[package]]
 name = "qubit-thread-pool"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62653b53fb99e936a3312f3b6645283cb3eded1159b145fafbbf26ed810b350c"
 dependencies = [
  "crossbeam-deque",
  "qubit-argument",
