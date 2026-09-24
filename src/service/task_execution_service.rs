@@ -561,7 +561,8 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
                     release_core_queue_slot(&core);
-                    continue;
+                    pause_on_store_fault(&core, StoreError::NotFound);
+                    return;
                 }
                 Err(error) => {
                     pause_on_store_fault(&core, error);
@@ -578,7 +579,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             });
             let Some(handler) = handler else {
                 release_core_queue_slot(&core);
-                let _ = mark_blocked(
+                if let Err(error) = mark_blocked(
                     &core,
                     &record,
                     format!(
@@ -586,7 +587,11 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                         task.request.task_type, task.request.handler_version
                     ),
                 )
-                .await;
+                .await
+                {
+                    pause_on_store_fault(&core, error);
+                    return;
+                }
                 continue;
             };
             let prepared = match core.engine.prepare(id, task.request.resources.clone()).await {
@@ -597,7 +602,10 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
                 Err(EngineError::Unsatisfiable) => {
                     release_core_queue_slot(&core);
-                    let _ = mark_blocked(&core, &record, "resource request is unsatisfiable".into()).await;
+                    if let Err(error) = mark_blocked(&core, &record, "resource request is unsatisfiable".into()).await {
+                        pause_on_store_fault(&core, error);
+                        return;
+                    }
                     continue;
                 }
                 Err(EngineError::Closed) => {
@@ -636,12 +644,25 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                             signal: handle.cancelled.clone(),
                         },
                     );
-                    if core.store.get(id).await.ok().flatten().is_some_and(|record| {
-                        record.attempt == running.attempt
-                            && matches!(record.state, TaskState::Running)
-                            && record.cancel_requested
-                    }) {
-                        handle.cancelled.store(true, Ordering::Release);
+                    match core.store.get(id).await {
+                        Ok(Some(record))
+                            if record.attempt == running.attempt
+                                && matches!(record.state, TaskState::Running)
+                                && record.cancel_requested =>
+                        {
+                            handle.cancelled.store(true, Ordering::Release);
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            core.cancellations.lock().remove(&id);
+                            pause_on_store_fault(&core, StoreError::NotFound);
+                            return;
+                        }
+                        Err(error) => {
+                            core.cancellations.lock().remove(&id);
+                            pause_on_store_fault(&core, error);
+                            return;
+                        }
                     }
                     let weak = Arc::downgrade(&core);
                     runtime().spawn(finish_attempt(weak, running, handle.receiver));
@@ -743,6 +764,10 @@ async fn finish_attempt(
         let latest = match core.store.get(running.id).await {
             Ok(Some(record)) if matches!(record.state, TaskState::Running) && record.attempt == running.attempt => {
                 record
+            }
+            Ok(None) => {
+                pause_on_store_fault(&core, StoreError::NotFound);
+                break;
             }
             Ok(_) => break,
             Err(error) => {

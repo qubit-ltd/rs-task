@@ -46,10 +46,15 @@ struct ControlledStore {
     detached_accept: bool,
     get_entered: Mutex<Option<oneshot::Sender<()>>>,
     get_release: Semaphore,
+    get_calls: AtomicUsize,
+    fail_get_on_call: AtomicUsize,
+    get_failed: Mutex<Option<oneshot::Sender<()>>>,
     recoverable: bool,
     release_count: AtomicUsize,
     fail_next_get: AtomicBool,
     fail_next_statistics: AtomicBool,
+    fail_next_block_transition: AtomicBool,
+    block_transition_failed: Mutex<Option<oneshot::Sender<()>>>,
     fail_release: bool,
 }
 
@@ -62,10 +67,15 @@ impl ControlledStore {
             detached_accept: false,
             get_entered: Mutex::new(None),
             get_release: Semaphore::new(0),
+            get_calls: AtomicUsize::new(0),
+            fail_get_on_call: AtomicUsize::new(0),
+            get_failed: Mutex::new(None),
             recoverable: false,
             release_count: AtomicUsize::new(0),
             fail_next_get: AtomicBool::new(false),
             fail_next_statistics: AtomicBool::new(false),
+            fail_next_block_transition: AtomicBool::new(false),
+            block_transition_failed: Mutex::new(None),
             fail_release: false,
         }
     }
@@ -110,18 +120,36 @@ impl TaskStore for ControlledStore {
     }
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
-        self.inner.transition(command)
+        if matches!(command.state, TaskState::Blocked { .. })
+            && self.fail_next_block_transition.swap(false, Ordering::AcqRel)
+        {
+            let signal = self.block_transition_failed.lock().take();
+            Box::pin(async move {
+                if let Some(signal) = signal {
+                    let _ = signal.send(());
+                }
+                Err(StoreError::Failure("injected blocked transition failure".into()))
+            })
+        } else {
+            self.inner.transition(command)
+        }
     }
 
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         let signal = self.get_entered.lock().take();
-        let fail = self.fail_next_get.swap(false, Ordering::AcqRel);
+        let call = self.get_calls.fetch_add(1, Ordering::AcqRel) + 1;
+        let fail = self.fail_next_get.swap(false, Ordering::AcqRel)
+            || self.fail_get_on_call.load(Ordering::Acquire) == call;
+        let failed_signal = if fail { self.get_failed.lock().take() } else { None };
         Box::pin(async move {
             if let Some(signal) = signal {
                 let _ = signal.send(());
                 self.get_release.acquire().await.expect("test get gate stays open").forget();
             }
             if fail {
+                if let Some(signal) = failed_signal {
+                    let _ = signal.send(());
+                }
                 Err(StoreError::Failure("injected scheduler get failure".into()))
             } else {
                 self.inner.get(id).await
@@ -452,6 +480,74 @@ async fn test_store_fault_wakes_waiter_with_diagnostic() {
         .expect("wait resolves after store fault")
         .expect_err("wait returns store fault");
     assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected scheduler get failure")));
+}
+
+#[tokio::test]
+async fn test_failed_queued_to_blocked_transition_pauses_service() {
+    let (failed_tx, failed_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        fail_next_block_transition: AtomicBool::new(true),
+        block_transition_failed: Mutex::new(Some(failed_tx)),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store)
+        .build()
+        .await
+        .expect("service builds");
+    let accepted = service
+        .submit(TaskRequest::new("missing-handler", "1", Vec::new()))
+        .await
+        .expect("task accepted before scheduler blocks it");
+    tokio::time::timeout(Duration::from_secs(2), failed_rx)
+        .await
+        .expect("scheduler attempts blocked transition")
+        .expect("transition failure signalled");
+
+    let error = tokio::time::timeout(Duration::from_secs(2), service.wait(accepted.id))
+        .await
+        .expect("wait resolves after blocked transition failure")
+        .expect_err("wait reports store fault");
+    assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected blocked transition failure")));
+    assert!(service.last_store_error().is_some());
+    assert!(matches!(
+        service.shutdown().await,
+        Err(TaskServiceError::StoreUnavailable(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_failed_post_activation_get_pauses_service() {
+    let (failed_tx, failed_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        fail_get_on_call: AtomicUsize::new(2),
+        get_failed: Mutex::new(Some(failed_tx)),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store)
+        .build()
+        .await
+        .expect("service builds");
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let id = service
+        .submit_local(move |_| {
+            resume_rx.recv().expect("test handler is released");
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), failed_rx)
+        .await
+        .expect("post-activation get is attempted")
+        .expect("get failure signalled");
+
+    let error = tokio::time::timeout(Duration::from_secs(2), service.wait(id))
+        .await
+        .expect("wait resolves after post-activation get failure")
+        .expect_err("wait reports store fault");
+    assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected scheduler get failure")));
+    resume_tx.send(()).expect("handler is released");
 }
 
 #[tokio::test]
