@@ -165,7 +165,7 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 
 使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它只会在 `TaskContext` 中设置协作取消信号；处理器必须观察信号并退出后，执行引擎才会释放资源。
 
-处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`，panic 进入 `Panicked`。可重试错误最多自动尝试三次（可通过构建器调整），达到上限后进入 `Blocked`。修复原因后再调用 `retry_blocked`。
+处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`，panic 进入 `Panicked`。可重试错误最多自动尝试三次（可通过构建器调整）；如果重试时有界等待队列已满，任务会因队列容量进入 `Blocked`，不会突破队列上限。队列有空位后调用 `retry_blocked` 可再次入队。
 
 ## 从旧版 API 迁移
 

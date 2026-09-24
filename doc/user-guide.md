@@ -241,8 +241,10 @@ released.
 
 Handlers return a `TaskRunError` with a category, diagnostic, and retryable
 flag. Non-retryable errors become `Failed`; panics become `Panicked`. Retryable
-errors are retried up to the configured maximum (three attempts by default),
-then become `Blocked`. Call `retry_blocked` only after correcting the cause.
+errors are retried up to the configured maximum (three attempts by default).
+If the bounded waiting queue is full when a retry is due, the task becomes
+`Blocked` with a queue-capacity reason instead of exceeding the limit. After
+capacity becomes available, call `retry_blocked` to enqueue it again.
 
 ## Migration from 0.5 and earlier's previous API
 

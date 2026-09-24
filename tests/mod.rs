@@ -104,6 +104,59 @@ impl TaskHandler for CooperativeHandler {
     }
 }
 
+struct RetryQueueHandler {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl TaskHandler for RetryQueueHandler {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
+            task_type: "retry-queue".into(),
+            version: "1".into(),
+        }
+    }
+
+    fn run<'a>(
+        &'a self,
+        payload: &'a [u8],
+        context: TaskContext,
+    ) -> qubit_task::store::TaskFuture<'a, Result<TaskOutput, TaskRunError>> {
+        Box::pin(async move {
+            if payload == b"retry" && context.attempt() == 1 {
+                self.started.notify_one();
+                self.release.notified().await;
+                return Err(TaskRunError {
+                    category: "temporary".into(),
+                    message: "retry later".into(),
+                    retryable: true,
+                });
+            }
+            Ok(TaskOutput::default())
+        })
+    }
+}
+
+struct PausablePolicy {
+    paused: std::sync::atomic::AtomicBool,
+    called: tokio::sync::Notify,
+    saw_nonempty: tokio::sync::Notify,
+}
+
+impl SchedulingPolicy for PausablePolicy {
+    fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> Vec<TaskId> {
+        self.called.notify_one();
+        if !queue.tasks.is_empty() {
+            self.saw_nonempty.notify_one();
+        }
+        if self.paused.load(std::sync::atomic::Ordering::Acquire) {
+            Vec::new()
+        } else {
+            queue.tasks.iter().map(|task| task.id).collect()
+        }
+    }
+}
+
 struct ExternalEngine {
     inner: LocalTaskExecutionEngine,
 }
@@ -506,6 +559,84 @@ async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
     gate.release(2);
     service.shutdown().await.expect("remaining tasks drain");
     assert!(matches!(e, Err(qubit_task::service::TaskServiceError::QueueFull)));
+}
+
+#[tokio::test]
+async fn test_retryable_completion_does_not_overfill_waiting_queue() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let policy = Arc::new(PausablePolicy {
+        paused: std::sync::atomic::AtomicBool::new(false),
+        called: tokio::sync::Notify::new(),
+        saw_nonempty: tokio::sync::Notify::new(),
+    });
+    let mut handlers = TaskHandlerRegistry::new();
+    handlers
+        .register(Arc::new(RetryQueueHandler {
+            started: started.clone(),
+            release: release.clone(),
+        }))
+        .expect("handler registers");
+    let service = qubit_task::TaskExecutionServiceBuilder::from_components(
+        Arc::new(MemoryTaskStore::new(8)),
+        Arc::new(LocalTaskExecutionEngine::new(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        })),
+        policy.clone(),
+    )
+    .handlers(handlers)
+    .queue_capacity(1)
+    .build()
+    .await
+    .expect("service builds");
+
+    let retrying = service
+        .submit(TaskRequest::new("retry-queue", "1", b"retry".to_vec()))
+        .await
+        .expect("first task is accepted");
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("first attempt starts");
+
+    let waiting = service
+        .submit(TaskRequest::new("retry-queue", "1", b"waiting".to_vec()))
+        .await
+        .expect("one waiting task fills the queue");
+    policy.paused.store(true, std::sync::atomic::Ordering::Release);
+    tokio::time::timeout(std::time::Duration::from_secs(2), policy.saw_nonempty.notified())
+        .await
+        .expect("scheduler observes the waiting task while paused");
+
+    release.notify_one();
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let record = service.get(retrying.id).await.unwrap().unwrap();
+            if !matches!(record.state, TaskState::Running) {
+                break record;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("first attempt finishes");
+    assert!(matches!(
+        blocked.state,
+        TaskState::Blocked { ref reason } if reason.contains("retry queue is full")
+    ));
+    assert!(matches!(
+        service.get(waiting.id).await.unwrap().unwrap().state,
+        TaskState::Queued
+    ));
+
+    policy.paused.store(false, std::sync::atomic::Ordering::Release);
+    assert_eq!(service.wait(waiting.id).await.unwrap().state, TaskState::Succeeded);
+    service
+        .retry_blocked(retrying.id)
+        .await
+        .expect("retry can be explicitly requeued when capacity is free");
+    assert_eq!(service.wait(retrying.id).await.unwrap().state, TaskState::Succeeded);
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio::test]
