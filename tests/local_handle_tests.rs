@@ -12,14 +12,31 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::model::AcceptOutcome;
+use qubit_task::model::OwnerEpoch;
+use qubit_task::model::StoreCapabilities;
+use qubit_task::model::StoredTaskPage;
+use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskPage;
+use qubit_task::model::TaskQuery;
+use qubit_task::model::TaskRecord;
+use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
+use qubit_task::model::TaskStateCounts;
+use qubit_task::model::TransitionCommand;
 use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::LocalTaskResultError;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::StoreError;
+use qubit_task::store::TaskFuture;
+use qubit_task::store::TaskStore;
+use tokio::sync::Semaphore;
+use tokio::sync::oneshot;
 
 const WAIT_LIMIT: Duration = Duration::from_secs(3);
 
@@ -34,6 +51,138 @@ impl fmt::Display for DomainError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "invalid input")
     }
+}
+
+struct PauseAfterAcceptStore {
+    inner: MemoryTaskStore,
+    accepted: Mutex<Option<oneshot::Sender<()>>>,
+    release: Semaphore,
+}
+
+impl TaskStore for PauseAfterAcceptStore {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
+        Box::pin(async move {
+            let accepted = self.inner.accept(id, request).await?;
+            if let Some(sender) = self.accepted.lock().take() {
+                let _ = sender.send(());
+            }
+            self.release.acquire().await.expect("test accept is released").forget();
+            Ok(accepted)
+        })
+    }
+
+    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        self.inner.find_idempotent(request)
+    }
+
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+        self.inner.transition(command)
+    }
+
+    fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        self.inner.get(id)
+    }
+
+    fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        self.inner.list(query)
+    }
+
+    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
+        self.inner.count_states()
+    }
+
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
+        self.inner.acquire_owner()
+    }
+
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+        self.inner.scan_unfinished(cursor)
+    }
+
+    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.inner.release_owner(epoch)
+    }
+}
+
+async fn cancel_during_accept(history_capacity: usize) {
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let store = Arc::new(PauseAfterAcceptStore {
+        inner: MemoryTaskStore::new(history_capacity),
+        accepted: Mutex::new(Some(accepted_tx)),
+        release: Semaphore::new(0),
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let ran = Arc::new(AtomicBool::new(false));
+    let handler_ran = Arc::clone(&ran);
+    let submitting = service.clone();
+    let submission = tokio::spawn(async move {
+        submitting
+            .submit_local(move |_| {
+                handler_ran.store(true, Ordering::Release);
+                LocalTaskOutcome::<(), DomainError>::Succeeded {
+                    value: (),
+                    summary: TaskOutput::default(),
+                }
+            })
+            .await
+    });
+    tokio::time::timeout(WAIT_LIMIT, accepted_rx)
+        .await
+        .expect("store persisted Queued")
+        .expect("store sent accept signal");
+    let page = service
+        .list(TaskQuery {
+            states: vec![TaskState::Queued],
+            limit: 2,
+            ..TaskQuery::default()
+        })
+        .await
+        .expect("persisted Queued record can be found before accept returns");
+    assert_eq!(page.records.len(), 1);
+    let id = page.records[0].id;
+    assert_eq!(
+        service.cancel(id).await.expect("persisted Queued task cancels"),
+        CancelOutcome::CancelledBeforeStart
+    );
+    store.release.add_permits(1);
+    let handle = tokio::time::timeout(WAIT_LIMIT, submission)
+        .await
+        .expect("submit finishes after accept gate opens")
+        .expect("submit task joins")
+        .expect("accepted task still returns a handle");
+    assert_eq!(handle.task_id(), id);
+    assert!(matches!(
+        tokio::time::timeout(WAIT_LIMIT, handle.result())
+            .await
+            .expect("cancelled handle finalizes"),
+        Err(LocalTaskResultError::Cancelled)
+    ));
+    assert!(!ran.load(Ordering::Acquire), "cancelled handler must never run");
+    let record = service.get(id).await.expect("record lookup succeeds");
+    if history_capacity == 0 {
+        assert!(record.is_none(), "zero-capacity history evicts cancellation");
+    } else {
+        assert_eq!(record.expect("cancelled record retained").state, TaskState::Cancelled);
+    }
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_cancel_persisted_local_task_before_accept_returns() {
+    cancel_during_accept(16).await;
+}
+
+#[tokio::test]
+async fn test_cancel_persisted_local_task_before_accept_returns_with_zero_history() {
+    cancel_during_accept(0).await;
 }
 
 #[tokio::test]

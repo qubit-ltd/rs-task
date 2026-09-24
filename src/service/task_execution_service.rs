@@ -272,23 +272,30 @@ impl TaskExecutionService {
             idempotency_key: None,
             metadata: Default::default(),
         };
+        self.core.local_finalizations.lock().insert(id, final_sender);
         match self.core.store.accept(id, request.clone()).await {
             Ok(AcceptOutcome::Accepted(record)) => {
-                self.core.local_handlers.lock().insert(id, handler);
-                self.core.local_finalizations.lock().insert(id, final_sender);
-                if let Some(error) = self.last_store_error() {
-                    finalize_local(&self.core, id, Err(LocalTaskResultError::StoreUnavailable(error)));
+                let finalizations = self.core.local_finalizations.lock();
+                if !finalizations.contains_key(&id) {
+                    self.release_queue_slot();
+                    return Ok(LocalTaskHandle::new(record.id, typed_receiver, final_receiver));
                 }
+                self.core.local_handlers.lock().insert(id, handler);
                 self.core.queue.lock().push_back(QueuedTask {
                     id,
                     request,
                     bypasses: 0,
                 });
+                drop(finalizations);
+                if let Some(error) = self.last_store_error() {
+                    finalize_local(&self.core, id, Err(LocalTaskResultError::StoreUnavailable(error)));
+                }
                 self.core.changed.notify_one();
                 publish_record(&self.core, &record);
                 Ok(LocalTaskHandle::new(record.id, typed_receiver, final_receiver))
             }
             Ok(AcceptOutcome::Existing(record)) => {
+                self.core.local_finalizations.lock().remove(&id);
                 self.release_queue_slot();
                 Err(TaskServiceError::InvalidRequest(format!(
                     "local task id {} was already accepted",
@@ -296,6 +303,7 @@ impl TaskExecutionService {
                 )))
             }
             Err(error) => {
+                self.core.local_finalizations.lock().remove(&id);
                 self.release_queue_slot();
                 Err(error.into())
             }
@@ -396,6 +404,11 @@ impl TaskExecutionService {
             .await;
             match updated {
                 Ok(updated) => {
+                    let local_sender = if queued || blocked {
+                        self.core.local_finalizations.lock().remove(&id)
+                    } else {
+                        None
+                    };
                     if queued {
                         let mut queue = self.core.queue.lock();
                         let previous_len = queue.len();
@@ -413,8 +426,8 @@ impl TaskExecutionService {
                     }
                     self.core.changed.notify_waiters();
                     publish_record(&self.core, &updated);
-                    if queued || blocked {
-                        finalize_local(&self.core, id, Ok(TaskState::Cancelled));
+                    if let Some(sender) = local_sender {
+                        let _ = sender.send(Ok(TaskState::Cancelled));
                     }
                     return Ok(if queued || blocked {
                         CancelOutcome::CancelledBeforeStart
@@ -586,6 +599,12 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
                     release_core_queue_slot(&core);
+                    core.local_handlers.lock().remove(&id);
+                    finalize_local(
+                        &core,
+                        id,
+                        Err(LocalTaskResultError::Infrastructure("queued task record disappeared".into())),
+                    );
                     continue;
                 }
                 Err(error) => {
@@ -595,6 +614,10 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             };
             if !matches!(record.state, TaskState::Queued) {
                 release_core_queue_slot(&core);
+                core.local_handlers.lock().remove(&id);
+                if record.state.is_terminal() || matches!(record.state, TaskState::Blocked { .. }) {
+                    finalize_local(&core, id, Ok(record.state));
+                }
                 continue;
             }
             let handler = core.local_handlers.lock().get(&id).cloned().or_else(|| {
@@ -874,6 +897,7 @@ fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
 fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
     let diagnostic = core.store_fault.lock().get_or_insert(diagnostic).clone();
     let finalizations = core.local_finalizations.lock().drain().map(|(_, sender)| sender).collect::<Vec<_>>();
+    core.local_handlers.lock().clear();
     for sender in finalizations {
         let _ = sender.send(Err(LocalTaskResultError::StoreUnavailable(diagnostic.clone())));
     }
