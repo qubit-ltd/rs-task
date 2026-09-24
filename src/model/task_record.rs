@@ -126,6 +126,19 @@ pub struct TaskPage {
 }
 
 /// Aggregate task counts suitable for service monitoring.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TaskStateCounts {
+    /// Number of retained tasks waiting for resources.
+    pub queued: usize,
+    /// Number of retained tasks currently executing.
+    pub running: usize,
+    /// Number of retained tasks requiring intervention.
+    pub blocked: usize,
+    /// Number of retained terminal task records.
+    pub terminal: usize,
+}
+
+/// Aggregate task counts and resource capacity suitable for service monitoring.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskStats {
     /// Number of tasks waiting for resources.

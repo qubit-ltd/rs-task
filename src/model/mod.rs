@@ -25,6 +25,7 @@ pub use task_record::TaskPage;
 pub use task_record::TaskQuery;
 pub use task_record::TaskRecord;
 pub use task_record::TaskState;
+pub use task_record::TaskStateCounts;
 pub use task_record::TaskStats;
 pub use task_record::TransitionCommand;
 pub use task_request::MAX_TASK_OUTPUT_SUMMARY_BYTES;
