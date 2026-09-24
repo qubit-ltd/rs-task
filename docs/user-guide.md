@@ -128,7 +128,7 @@ Use status(id) for one task and stats() for a snapshot. TaskExecutionStats count
 | --- | --- |
 | Submission returns DuplicateTask | Wait for the existing task to reach a terminal state, or choose another Id. |
 | Submission returns Suspended | Call is_suspended() and resume() when intake may resume. |
-| cancel returns false | The ID may be unknown, terminal, or already running. Check status(id). |
+| cancel returns false | The ID may be unknown, terminal, or already claimed by a worker and about to run. Check status(id). |
 | status(id) returns None after success | The record was never accepted or was evicted from bounded history. |
 | Shutdown does not mean the handle is ready | Call TaskHandle::get for the result, then wait_termination for worker termination. |
 
