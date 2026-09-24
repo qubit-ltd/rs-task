@@ -148,7 +148,13 @@ impl TaskExecutionServiceState {
         if !inner.matches_active(task_id, token) {
             return false;
         }
-        inner.active.remove(&task_id);
+        let record = inner
+            .active
+            .remove(&task_id)
+            .expect("matching active submission should exist");
+        if let Some(previous_completed) = record.previous_completed {
+            inner.remove_order_marker(task_id, &previous_completed.token);
+        }
         inner.remember(task_id, token.clone(), status);
         self.idle.notify_all();
         true
@@ -490,6 +496,26 @@ mod tests {
         let reused = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
         assert!(state.accept(Id::new(2), &reused));
         assert!(state.finish(Id::new(2), &reused, TaskStatus::Failed));
+
+        assert_eq!(state.status(Id::new(1)), Some(TaskStatus::Succeeded));
+        assert_eq!(state.status(Id::new(2)), Some(TaskStatus::Failed));
+        assert_eq!(state.stats().total, 2);
+        let inner = state.lock_inner();
+        assert_eq!(inner.completed_order.len(), inner.completed.len());
+        assert_eq!(inner.completed.len(), 2);
+    }
+
+    #[test]
+    fn test_finishing_reused_id_while_submitting_cleans_previous_marker() {
+        let state = TaskExecutionServiceState::new(2);
+        for id in 1..=2 {
+            let token = state.reserve(Id::new(id), inert_cancel()).expect("ID should be free");
+            assert!(state.accept(Id::new(id), &token));
+            assert!(state.finish(Id::new(id), &token, TaskStatus::Succeeded));
+        }
+
+        let replacement = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
+        assert!(state.finish(Id::new(2), &replacement, TaskStatus::Failed));
 
         assert_eq!(state.status(Id::new(1)), Some(TaskStatus::Succeeded));
         assert_eq!(state.status(Id::new(2)), Some(TaskStatus::Failed));
