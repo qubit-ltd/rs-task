@@ -17,6 +17,7 @@ use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskHandlerRegistry;
+use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
@@ -49,15 +50,15 @@ impl TaskHandler for EchoHandler {
         &'a self,
         payload: &'a [u8],
         _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, Result<TaskOutput, TaskRunError>> {
+    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             assert!(!_context.task_id().to_string().is_empty());
             assert!(_context.attempt() > 0);
             let _ = _context.assigned_resources();
             let _ = _context.cancellation_signal();
-            Ok(TaskOutput {
+            Ok(TaskRunOutcome::Succeeded(TaskOutput {
                 summary: payload.to_vec(),
-            })
+            }))
         })
     }
 }
@@ -76,7 +77,7 @@ impl TaskHandler for PanicHandler {
         &'a self,
         _payload: &'a [u8],
         _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, Result<TaskOutput, TaskRunError>> {
+    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async { panic!("handler panic") })
     }
 }
@@ -94,12 +95,12 @@ impl TaskHandler for CooperativeHandler {
         &'a self,
         _payload: &'a [u8],
         context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, Result<TaskOutput, TaskRunError>> {
+    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             while !context.is_cancelled() {
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             }
-            Ok(TaskOutput::default())
+            Ok(TaskRunOutcome::Cancelled)
         })
     }
 }
@@ -121,7 +122,7 @@ impl TaskHandler for RetryQueueHandler {
         &'a self,
         payload: &'a [u8],
         context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, Result<TaskOutput, TaskRunError>> {
+    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             if payload == b"retry" && context.attempt() == 1 {
                 self.started.notify_one();
@@ -132,7 +133,7 @@ impl TaskHandler for RetryQueueHandler {
                     retryable: true,
                 });
             }
-            Ok(TaskOutput::default())
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
         })
     }
 }
@@ -213,9 +214,9 @@ async fn test_in_memory_service_accepts_and_completes_a_local_task() {
     assert!(!service.capabilities().store.restart_recovery);
     let id = service
         .submit_local(|_| {
-            Ok(TaskOutput {
+            Ok(TaskRunOutcome::Succeeded(TaskOutput {
                 summary: b"done".to_vec(),
-            })
+            }))
         })
         .await
         .expect("local task is accepted");
@@ -787,8 +788,8 @@ fn test_handler_registry_rejects_invalid_and_duplicate_descriptors() {
             &'a self,
             _payload: &'a [u8],
             _context: TaskContext,
-        ) -> qubit_task::store::TaskFuture<'a, Result<TaskOutput, TaskRunError>> {
-            Box::pin(async { Ok(TaskOutput::default()) })
+        ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+            Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
         }
     }
 
@@ -812,7 +813,7 @@ async fn test_zero_capacity_queue_rejects_without_accepting() {
         .await
         .expect("service builds");
     let error = service
-        .submit_local(|_| Ok(TaskOutput::default()))
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
         .await
         .expect_err("zero-capacity queue rejects work");
     assert!(matches!(error, qubit_task::service::TaskServiceError::QueueFull));
@@ -1370,7 +1371,7 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
         .await
         .expect("service builds with bus");
     let id = service
-        .submit_local(|_| Ok(TaskOutput::default()))
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
         .await
         .expect("task accepted");
     assert_eq!(
@@ -1432,7 +1433,7 @@ async fn test_event_bus_publish_failure_does_not_change_task_result() {
         .await
         .expect("service builds with a stopped event bus");
     let id = service
-        .submit_local(|_| Ok(TaskOutput::default()))
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
         .await
         .expect("task is accepted");
     let finished = service

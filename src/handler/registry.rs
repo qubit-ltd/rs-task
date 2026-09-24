@@ -20,8 +20,17 @@ pub struct TaskHandlerDescriptor {
     pub version: String,
 }
 
-/// Handler result: a small persisted output or classified failure.
-pub type TaskRunResult = Result<crate::model::TaskOutput, crate::model::TaskRunError>;
+/// Explicit outcome of one handler execution attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskRunOutcome {
+    /// Execution completed successfully with a small persisted summary.
+    Succeeded(crate::model::TaskOutput),
+    /// The handler acknowledged cancellation and stopped work.
+    Cancelled,
+}
+
+/// Handler result: an explicit outcome or classified failure.
+pub type TaskRunResult = Result<TaskRunOutcome, crate::model::TaskRunError>;
 
 /// Resolves task handlers by their exact task type and version.
 #[derive(Default)]

@@ -27,6 +27,7 @@ use crate::handler::TaskContext;
 use crate::handler::TaskHandler;
 use crate::handler::TaskHandlerDescriptor;
 use crate::handler::TaskHandlerRegistry;
+use crate::handler::TaskRunOutcome;
 use crate::model::AcceptOutcome;
 use crate::model::OwnerEpoch;
 use crate::model::ResourceCapacity;
@@ -324,42 +325,71 @@ impl TaskExecutionService {
         Ok(stats)
     }
 
-    /// Cancels queued work or signals cooperative cancellation for a running
-    /// task.
+    /// Cancels queued or blocked work, or persists a cooperative cancellation
+    /// request for running work before signalling its local handler.
+    /// A running handler decides whether to acknowledge cancellation; a
+    /// concurrent terminal transition returns `AlreadyTerminal`.
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
-        let record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
-        if record.state.is_terminal() {
-            return Ok(CancelOutcome::AlreadyTerminal);
-        }
-        if matches!(record.state, TaskState::Queued) {
-            let updated = transition(&self.core, &record, TaskState::Cancelled, None, Vec::new(), false).await?;
-            {
-                let mut queue = self.core.queue.lock();
-                let previous_len = queue.len();
-                queue.retain(|task| task.id != id);
-                if queue.len() < previous_len {
-                    self.release_queue_slot();
-                }
+        let mut record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+        loop {
+            if record.state.is_terminal() {
+                return Ok(CancelOutcome::AlreadyTerminal);
             }
-            self.core.local_handlers.lock().remove(&id);
-            self.core.changed.notify_waiters();
-            publish_record(&self.core, &updated);
-            return Ok(CancelOutcome::CancelledBeforeStart);
+            let queued = matches!(record.state, TaskState::Queued);
+            let blocked = matches!(record.state, TaskState::Blocked { .. });
+            let updated = transition(
+                &self.core,
+                &record,
+                if queued || blocked {
+                    TaskState::Cancelled
+                } else {
+                    TaskState::Running
+                },
+                None,
+                if queued || blocked {
+                    Vec::new()
+                } else {
+                    record.assigned_resources.clone()
+                },
+                !queued && !blocked,
+            )
+            .await;
+            match updated {
+                Ok(updated) => {
+                    if queued {
+                        let mut queue = self.core.queue.lock();
+                        let previous_len = queue.len();
+                        queue.retain(|task| task.id != id);
+                        if queue.len() < previous_len {
+                            self.release_queue_slot();
+                        }
+                    }
+                    if queued || blocked {
+                        self.core.local_handlers.lock().remove(&id);
+                    } else if let Some(signal) = self.core.cancellations.lock().get(&id) {
+                        signal.store(true, Ordering::Release);
+                    }
+                    self.core.changed.notify_waiters();
+                    publish_record(&self.core, &updated);
+                    return Ok(if queued || blocked {
+                        CancelOutcome::CancelledBeforeStart
+                    } else {
+                        CancelOutcome::CancellationRequested
+                    });
+                }
+                Err(StoreError::Conflict) => {
+                    let latest = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+                    if latest.state.is_terminal() {
+                        return Ok(CancelOutcome::AlreadyTerminal);
+                    }
+                    if latest.state_version <= record.state_version {
+                        return Err(StoreError::Conflict.into());
+                    }
+                    record = latest;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
-        if let Some(signal) = self.core.cancellations.lock().get(&id) {
-            signal.store(true, Ordering::Release);
-        }
-        let updated = transition(
-            &self.core,
-            &record,
-            TaskState::Running,
-            None,
-            record.assigned_resources.clone(),
-            true,
-        )
-        .await?;
-        publish_record(&self.core, &updated);
-        Ok(CancelOutcome::CancellationRequested)
     }
 
     /// Requeues a blocked task after external intervention.
@@ -601,8 +631,8 @@ async fn finish_attempt(
     };
     core.cancellations.lock().remove(&running.id);
     let state = match &result {
-        Ok(_) if running.cancel_requested => TaskState::Cancelled,
-        Ok(_) => TaskState::Succeeded,
+        Ok(TaskRunOutcome::Succeeded(_)) => TaskState::Succeeded,
+        Ok(TaskRunOutcome::Cancelled) => TaskState::Cancelled,
         Err(error) if error.category == "panic" => TaskState::Panicked {
             message: error.message.clone(),
         },
@@ -615,15 +645,10 @@ async fn finish_attempt(
             message: error.message.clone(),
         },
     };
-    let latest = match core.store.get(running.id).await {
-        Ok(Some(record)) if matches!(record.state, TaskState::Running) && record.attempt == running.attempt => record,
-        Ok(_) => return,
-        Err(error) => {
-            pause_on_store_fault(&core, error);
-            return;
-        }
+    let output = match result {
+        Ok(TaskRunOutcome::Succeeded(output)) => Some(output),
+        _ => None,
     };
-    let output = result.ok();
     let mut final_state = if output
         .as_ref()
         .is_some_and(|value| value.summary.len() > crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES)
@@ -632,8 +657,6 @@ async fn finish_attempt(
             category: "output_too_large".into(),
             message: "task output summary exceeded the 65536-byte limit".into(),
         }
-    } else if latest.cancel_requested && matches!(state, TaskState::Succeeded) {
-        TaskState::Cancelled
     } else {
         state
     };
@@ -647,38 +670,48 @@ async fn finish_attempt(
             };
         }
     }
-    match transition(
-        &core,
-        &latest,
-        final_state.clone(),
-        output,
-        latest.assigned_resources.clone(),
-        latest.cancel_requested,
-    )
-    .await
-    {
-        Ok(updated) => {
-            if matches!(final_state, TaskState::Queued) {
-                core.queue.lock().push_back(QueuedTask {
-                    id: updated.id,
-                    request: updated.request.clone(),
-                    bypasses: 0,
-                });
+    loop {
+        let latest = match core.store.get(running.id).await {
+            Ok(Some(record)) if matches!(record.state, TaskState::Running) && record.attempt == running.attempt => {
+                record
             }
-            core.changed.notify_waiters();
-            publish_record(&core, &updated);
-        }
-        Err(StoreError::Conflict) => {
-            if retry_slot_reserved {
-                release_core_queue_slot(&core);
+            Ok(_) => break,
+            Err(error) => {
+                pause_on_store_fault(&core, error);
+                break;
+            }
+        };
+        match transition(
+            &core,
+            &latest,
+            final_state.clone(),
+            output.clone(),
+            latest.assigned_resources.clone(),
+            latest.cancel_requested,
+        )
+        .await
+        {
+            Ok(updated) => {
+                if matches!(final_state, TaskState::Queued) {
+                    core.queue.lock().push_back(QueuedTask {
+                        id: updated.id,
+                        request: updated.request.clone(),
+                        bypasses: 0,
+                    });
+                }
+                core.changed.notify_waiters();
+                publish_record(&core, &updated);
+                return;
+            }
+            Err(StoreError::Conflict) => continue,
+            Err(error) => {
+                pause_on_store_fault(&core, error);
+                break;
             }
         }
-        Err(error) => {
-            if retry_slot_reserved {
-                release_core_queue_slot(&core);
-            }
-            pause_on_store_fault(&core, error);
-        }
+    }
+    if retry_slot_reserved {
+        release_core_queue_slot(&core);
     }
 }
 

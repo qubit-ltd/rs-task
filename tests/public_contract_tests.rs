@@ -12,6 +12,7 @@ use qubit_task::engine::ExecutionHandle;
 use qubit_task::handler::LocalTaskHandler;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
+use qubit_task::handler::TaskRunOutcome;
 #[cfg(feature = "sqlite")]
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
@@ -21,7 +22,7 @@ use qubit_task::model::TaskRequest;
 #[test]
 fn execution_handle_cancellation_signal_is_a_shared_clone() {
     let cancellation = Arc::new(AtomicBool::new(false));
-    let (sender, receiver) = tokio::sync::oneshot::channel::<Result<TaskOutput, _>>();
+    let (sender, receiver) = tokio::sync::oneshot::channel::<qubit_task::handler::TaskRunResult>();
     let handle = ExecutionHandle::new(receiver, cancellation.clone());
 
     let signal = handle.cancellation_signal();
@@ -39,7 +40,9 @@ fn local_task_handler_returns_its_declared_descriptor() {
         task_type: "thumbnail".into(),
         version: "v3".into(),
     };
-    let handler = LocalTaskHandler::new(descriptor.clone(), |_| Ok(TaskOutput::default()));
+    let handler = LocalTaskHandler::new(descriptor.clone(), |_| {
+        Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+    });
 
     assert_eq!(handler.descriptor(), descriptor);
 }

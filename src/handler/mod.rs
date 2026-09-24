@@ -15,6 +15,7 @@ mod registry;
 pub use context::TaskContext;
 pub use registry::TaskHandlerDescriptor;
 pub use registry::TaskHandlerRegistry;
+pub use registry::TaskRunOutcome;
 pub use registry::TaskRunResult;
 
 /// Adapter that turns a one-shot local closure into a non-recoverable handler.
@@ -86,6 +87,11 @@ pub trait TaskHandler: Send + Sync {
     /// Identifies the exact task type and payload version this handler accepts.
     fn descriptor(&self) -> TaskHandlerDescriptor;
     /// Executes one attempt with a cooperative cancellation context.
+    ///
+    /// A cancellation signal is only a request; implementations return
+    /// `TaskRunOutcome::Cancelled` when they actually stop work.
+    /// Successful work returns `TaskRunOutcome::Succeeded` even if a request
+    /// arrived during execution.
     ///
     /// Implementations must not perform long CPU-bound or blocking operations
     /// directly on the async runtime worker. Use an appropriate blocking pool
