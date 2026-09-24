@@ -357,12 +357,20 @@ impl TaskExecutionService {
 
     /// Loads the latest lifecycle state of a task.
     pub async fn get(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskServiceError> {
-        self.core.store.get(id).await.map_err(|error| self.handle_store_error(error))
+        self.core
+            .store
+            .get(id)
+            .await
+            .map_err(|error| self.handle_store_error(error))
     }
 
     /// Returns a bounded page of retained history.
     pub async fn list(&self, query: TaskQuery) -> Result<TaskPage, TaskServiceError> {
-        self.core.store.list(query).await.map_err(|error| self.handle_store_error(error))
+        self.core
+            .store
+            .list(query)
+            .await
+            .map_err(|error| self.handle_store_error(error))
     }
 
     /// Counts visible task states and reports current resource use.
