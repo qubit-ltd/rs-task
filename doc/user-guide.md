@@ -35,24 +35,29 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 `in_memory()` makes the loss and retention behavior visible in the call site.
 It uses local execution, available CPU parallelism (or one slot), a waiting
 queue of 1024 tasks, and a terminal history of 1024 tasks. It does not probe for
-GPUs. `submit_local` accepts an in-process closure and returns a `TaskId`;
-closures run on Tokio's blocking pool. Query or wait on that ID to observe its
-result summary and state. Custom async handlers must move long CPU-bound or
-blocking work off async runtime workers themselves.
+GPUs. `submit_local` accepts an in-process closure and returns a typed
+`LocalTaskHandle<R, E>`; closures run on Tokio's blocking pool. The handle gives
+the closure's in-process value or original error, while `TaskRecord.output`
+retains only the small `TaskOutput` summary. Custom async handlers must move
+long CPU-bound or blocking work off async runtime workers themselves.
 
 ~~~rust,no_run
 use qubit_task::TaskExecutionService;
 use qubit_task::model::TaskOutput;
+use qubit_task::service::LocalTaskOutcome;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionService::in_memory().await?;
-    let id = service.submit_local(|context| {
+    let handle = service.submit_local(|context| {
         assert_eq!(context.attempt(), 1);
-        Ok(TaskOutput { summary: b"imported 21 rows".to_vec() })
+        LocalTaskOutcome::<usize, std::io::Error>::Succeeded {
+            value: 21_usize,
+            summary: TaskOutput { summary: b"imported 21 rows".to_vec() },
+        }
     }).await?;
-    let record = service.wait(id).await?;
-    println!("{}: {:?}", record.id, record.state);
+    let imported_rows = handle.result().await??;
+    assert_eq!(imported_rows, 21);
     service.shutdown().await?;
     Ok(())
 }
@@ -60,6 +65,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `submit_local` is intentionally unavailable when the store declares restart
 recovery. A closure cannot be reconstructed from a database after process exit.
+For a cooperative cancellation, return `LocalTaskOutcome::Cancelled` after
+observing `TaskContext::is_cancelled()`; then `handle.result()` returns
+`LocalTaskResultError::Cancelled`. A successful `TaskRunOutcome` or
+`TaskRecord.output` is not replaced by a late cancellation request.
 
 ## Register a versioned handler
 
@@ -76,8 +85,8 @@ remains queryable until the handler is installed and `retry_blocked` is called.
 ~~~rust,no_run
 use std::sync::Arc;
 use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::handler::{TaskContext, TaskHandler, TaskHandlerDescriptor};
-use qubit_task::model::{TaskOutput, TaskRequest, TaskRunError};
+use qubit_task::handler::{TaskContext, TaskHandler, TaskHandlerDescriptor, TaskRunOutcome, TaskRunResult};
+use qubit_task::model::{TaskOutput, TaskRequest};
 use qubit_task::store::TaskFuture;
 
 struct ImportV1;
@@ -87,10 +96,12 @@ impl TaskHandler for ImportV1 {
     }
 
     fn run<'a>(&'a self, payload: &'a [u8], _context: TaskContext)
-        -> TaskFuture<'a, Result<TaskOutput, TaskRunError>>
+        -> TaskFuture<'a, TaskRunResult>
     {
         Box::pin(async move {
-            Ok(TaskOutput { summary: format!("accepted {} bytes", payload.len()).into_bytes() })
+            Ok(TaskRunOutcome::Succeeded(TaskOutput {
+                summary: format!("accepted {} bytes", payload.len()).into_bytes(),
+            }))
         })
     }
 }
@@ -110,6 +121,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `TaskOutput` is a small persisted summary or reference. Store large results in
 the business application's own data store and return a bounded reference.
+Use `TaskRequest` with an exact handler version for work that must be
+reconstructed after restart; the existing SQLite restart-recovery test exercises
+that public service path.
 
 ## Schedule CPU, GPU, and named resources
 
@@ -140,7 +154,9 @@ engine. A request that exceeds configured capacity is rejected; a valid request
 without currently free resources stays queued. The default fair FIFO policy can let a fitting task
 pass a blocked head task, then protects a repeatedly bypassed task after a
 bounded number of passes. The queue itself remains bounded; a full queue returns
-`QueueFull` so the caller can apply backpressure.
+`QueueFull` so the caller can apply backpressure. A retry that finds the queue
+full is stored as `Blocked` and can be explicitly retried after capacity is
+available; it never exceeds the queue limit.
 
 ## Enable restart recovery with SQLite
 
@@ -168,7 +184,12 @@ state and service construction succeeds.
 
 `capabilities()` reports `persistent_history` and `restart_recovery` for the
 store that was actually assembled. Persistent history without recovery is a
-valid combination for a third-party store.
+valid combination for a third-party store. Every `TaskStore` implementation
+must implement `count_states()` as one aggregate over its retained records;
+`stats()` calls it once, and propagates its error. The task counts and engine
+resource snapshot are collected one after the other, so they are adjacent
+snapshots rather than one atomic view. Their cost is one aggregate query,
+independent of history page count.
 
 ## Assemble components with `qubit-spi`
 
@@ -219,7 +240,8 @@ worker counters, not evidence that a subscriber handler completed. Counters
 are monotonic and saturate at `u64::MAX`; the fields in one snapshot need not
 represent the exact same instant.
 
-`shutdown()` first waits for accepted task work to settle, closes notification
+`shutdown()` closes new admission, waits for in-flight submissions to finish
+acceptance, then waits for accepted task work to settle. It closes notification
 enqueue, then drains notifications already in the queue before returning. It
 does not shut down the application-owned event bus. Publication runs on a
 dedicated OS thread, keeping a synchronous provider off Tokio runtime workers;
@@ -235,9 +257,12 @@ notifications remaining in its queue may be lost.
 Use `get(TaskId)` for the current record and `list(TaskQuery)` for bounded
 history pages. `wait(TaskId)` resolves when the task is terminal and returns a
 blocked-task error when intervention is needed. `cancel(TaskId)` can cancel a
-queued task immediately. For running work it sets the cancellation signal in
-`TaskContext`; the handler must observe it and return before resources are
-released.
+queued task immediately. For running work it persists `cancel_requested` and
+sets the cancellation signal in `TaskContext`; this is only a request. The
+handler must return `TaskRunOutcome::Cancelled` for the service to confirm
+cancellation as `TaskState::Cancelled`. If it returns success or failure, that
+result remains authoritative. This distinction is also exercised by the
+cooperative cancellation integration tests.
 
 Handlers return a `TaskRunError` with a category, diagnostic, and retryable
 flag. Non-retryable errors become `Failed`; panics become `Panicked`. Retryable
@@ -248,11 +273,15 @@ capacity becomes available, call `retry_blocked` to enqueue it again.
 
 ## Migration from 0.5 and earlier's previous API
 
-This redesign deliberately removes caller-supplied IDs, `submit` closures,
-thread-pool-specific builder settings, and the old `TaskHandle<R, E>` API.
-Use generated `TaskId` values, `TaskRequest` with a versioned handler for
-recoverable work, or the explicitly volatile `submit_local` method for
-process-local closures. Do not rely on terminal ID reuse.
+This redesign removes caller-supplied IDs, `submit` closures,
+thread-pool-specific builder settings, and the old `TaskHandle<R, E>` API. There
+is no generic durable handle: `submit_local` now returns
+`LocalTaskHandle<R, E>` only for process-local closures, and `TaskRequest` plus
+`TaskId` remains the interface for reconstructable work. Third-party
+`TaskStore` implementations must add `count_states()` and return all retained
+state counts in one aggregate operation. These are intentional source-breaking
+changes; update downstream implementations and call sites together. No current
+`rs-*` crate in this workspace consumes `rs-task` directly.
 
 ## Operational limits
 
