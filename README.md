@@ -7,58 +7,51 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![中文文档](https://img.shields.io/badge/文档-中文版-blue.svg)](README.zh_CN.md)
 
-Task-oriented execution services built on `qubit-executor` and
-`qubit-thread-pool`.
+`qubit-task` accepts reconstructable business work, queues it against CPU, GPU,
+and named resource budgets, and exposes one queryable task service. Storage,
+scheduling, execution, and versioned handlers can be assembled directly or
+selected through `qubit-spi`.
 
-## Installation
-
-Add `qubit-task` and the task ID crate used by the examples to `Cargo.toml`:
+## Install
 
 ```toml
 [dependencies]
-qubit-task = "0.5"
-qubit-id = "0.6"
+qubit-task = "0.6"
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
-`TaskExecutionService` accepts a caller-provided task ID, runs a synchronous
-callable on a thread pool, and keeps an in-memory status for lookup and
-pre-start cancellation. The returned `TaskHandle` owns the typed result.
+## Start with volatile local work
 
-```rust
-use qubit_id::Id;
-use qubit_task::service::{TaskExecutionService, TaskStatus};
+This named preset keeps task state in memory. Pending tasks are lost when the
+process exits; completed history is bounded to 1024 records.
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = TaskExecutionService::builder()
-        .completed_history_capacity(128)
-        .build()?;
-    let id = Id::new(42);
-    let handle = service.submit_callable(id, || Ok::<u32, std::io::Error>(7))?;
-    assert_eq!(handle.get()?, 7);
-    assert_eq!(service.status(id), Some(TaskStatus::Succeeded));
-    service.shutdown();
-    service.wait_termination();
+```rust,no_run
+use qubit_task::TaskExecutionService;
+use qubit_task::model::TaskOutput;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let service = TaskExecutionService::in_memory().await?;
+    let id = service.submit_local(|_| Ok(TaskOutput { summary: b"finished".to_vec() })).await?;
+    let record = service.wait(id).await?;
+    assert!(record.state.is_terminal());
+    service.shutdown().await?;
     Ok(())
 }
 ```
 
-The service retains the latest 1024 terminal statuses by default. Set
-`completed_history_capacity(0)` to retain none. History is bounded and is not
-persistent storage: `status(id)` returns `None` after eviction. A task ID can
-be reused as soon as its previous submission has finished; the new submission
-replaces its prior status. `stats().total` counts currently visible accepted
-and retained records, not all tasks ever submitted.
+For work that must survive restart, enable `sqlite` and use
+`TaskExecutionServiceBuilder::recoverable_sqlite(path)`. Register a handler for
+each stored `(task_type, handler_version)` before building the service. See the
+[user guide](doc/user-guide.md) for recovery, resource scheduling, SPI assembly,
+and event notifications.
 
-`wait_for_idle()` and `wait_for_current_tasks()` wait for registry
-transitions. A result may still be publishing to its handle when they return;
-use `TaskHandle::get()` or await the handle when the result is required.
+## Project documents
 
-## Learn More
-
-- [User guide](docs/user-guide.md)
-- [Design notes](docs/design.md)
-- [API documentation](https://docs.rs/qubit-task)
-- [中文用户指南](docs/user-guide.zh_CN.md)
+- [User guide](doc/user-guide.md)
+- [Design overview](doc/design.md)
+- [Detailed TaskExecutionService design](doc/task_execution_service_design.md)
+- [中文用户指南](doc/user-guide.zh_CN.md)
 
 ## Testing
 
