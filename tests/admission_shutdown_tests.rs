@@ -41,6 +41,7 @@ use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::LocalTaskResultError;
+use qubit_task::service::TaskExecutionService;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
@@ -54,6 +55,8 @@ struct ControlledStore {
     accept_entered: Mutex<Option<oneshot::Sender<()>>>,
     accept_release: Arc<Semaphore>,
     detached_accept: bool,
+    fail_next_accept: AtomicBool,
+    fail_next_find: AtomicBool,
     get_entered: Mutex<Option<oneshot::Sender<()>>>,
     get_release: Semaphore,
     get_calls: AtomicUsize,
@@ -64,6 +67,7 @@ struct ControlledStore {
     fail_next_get: AtomicBool,
     fail_next_statistics: AtomicBool,
     fail_next_block_transition: AtomicBool,
+    fail_next_retry_transition: AtomicBool,
     block_transition_failed: Mutex<Option<oneshot::Sender<()>>>,
     block_transition_entered: Mutex<Option<oneshot::Sender<()>>>,
     block_transition_release: Arc<Semaphore>,
@@ -79,6 +83,8 @@ impl ControlledStore {
             accept_entered: Mutex::new(None),
             accept_release: Arc::new(Semaphore::new(0)),
             detached_accept: false,
+            fail_next_accept: AtomicBool::new(false),
+            fail_next_find: AtomicBool::new(false),
             get_entered: Mutex::new(None),
             get_release: Semaphore::new(0),
             get_calls: AtomicUsize::new(0),
@@ -89,6 +95,7 @@ impl ControlledStore {
             fail_next_get: AtomicBool::new(false),
             fail_next_statistics: AtomicBool::new(false),
             fail_next_block_transition: AtomicBool::new(false),
+            fail_next_retry_transition: AtomicBool::new(false),
             block_transition_failed: Mutex::new(None),
             block_transition_entered: Mutex::new(None),
             block_transition_release: Arc::new(Semaphore::new(0)),
@@ -108,6 +115,9 @@ impl TaskStore for ControlledStore {
     }
 
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
+        if self.fail_next_accept.swap(false, Ordering::AcqRel) {
+            return Box::pin(async { Err(StoreError::Failure("injected accept failure".into())) });
+        }
         let signal = self.accept_entered.lock().take();
         if self.detached_accept {
             let inner = Arc::clone(&self.inner);
@@ -144,11 +154,17 @@ impl TaskStore for ControlledStore {
     }
 
     fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
-        self.inner.find_idempotent(request)
+        if self.fail_next_find.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(StoreError::Failure("injected idempotency lookup failure".into())) })
+        } else {
+            self.inner.find_idempotent(request)
+        }
     }
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
-        if matches!(command.state, TaskState::Blocked { .. })
+        if matches!(command.state, TaskState::Queued) && self.fail_next_retry_transition.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(StoreError::Failure("injected retry transition failure".into())) })
+        } else if matches!(command.state, TaskState::Blocked { .. })
             && self.fail_next_block_transition.swap(false, Ordering::AcqRel)
         {
             let signal = self.block_transition_failed.lock().take();
@@ -249,6 +265,101 @@ impl TaskStore for ControlledStore {
             }
         })
     }
+}
+
+async fn assert_operational_fault_is_latched(service: &TaskExecutionService, expected: &str) {
+    assert!(
+        service.last_store_error().is_some_and(|message| message.contains(expected)),
+        "operational store failure remains diagnosable"
+    );
+    let error = tokio::time::timeout(Duration::from_secs(2), service.wait(TaskId::generate()))
+        .await
+        .expect("wait resolves after store failure")
+        .expect_err("wait reports the store failure");
+    assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains(expected)));
+    assert!(matches!(
+        service.submit(TaskRequest::new("after-fault", "1", Vec::new())).await,
+        Err(TaskServiceError::StoreUnavailable(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_idempotency_lookup_failure_pauses_admission() {
+    let store = Arc::new(ControlledStore {
+        fail_next_find: AtomicBool::new(true),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store)
+        .build()
+        .await
+        .expect("service builds");
+    let error = service
+        .submit(TaskRequest::new("lookup", "1", Vec::new()))
+        .await
+        .expect_err("lookup failure reaches caller");
+    assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
+    assert_operational_fault_is_latched(&service, "injected idempotency lookup failure").await;
+}
+
+#[tokio::test]
+async fn test_accept_failure_pauses_admission() {
+    let store = Arc::new(ControlledStore {
+        fail_next_accept: AtomicBool::new(true),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store)
+        .build()
+        .await
+        .expect("service builds");
+    let error = service
+        .submit(TaskRequest::new("accept", "1", Vec::new()))
+        .await
+        .expect_err("accept failure reaches caller");
+    assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
+    assert_operational_fault_is_latched(&service, "injected accept failure").await;
+}
+
+#[tokio::test]
+async fn test_local_accept_failure_pauses_admission() {
+    let store = Arc::new(ControlledStore {
+        fail_next_accept: AtomicBool::new(true),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store)
+        .build()
+        .await
+        .expect("service builds");
+    let error = service
+        .submit_local(|_| LocalTaskOutcome::<(), String>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect_err("local accept failure reaches caller");
+    assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
+    assert_operational_fault_is_latched(&service, "injected accept failure").await;
+}
+
+#[tokio::test]
+async fn test_retry_transition_failure_pauses_admission() {
+    let store = Arc::new(ControlledStore::new());
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let accepted = service
+        .submit(TaskRequest::new("missing-handler", "1", Vec::new()))
+        .await
+        .expect("task accepted");
+    assert!(matches!(service.wait(accepted.id).await, Err(TaskServiceError::Blocked)));
+    store.fail_next_retry_transition.store(true, Ordering::Release);
+    let error = service.retry_blocked(accepted.id).await.expect_err("retry write fails");
+    assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
+    assert_operational_fault_is_latched(&service, "injected retry transition failure").await;
 }
 
 struct RetryAfterClosingHandler {

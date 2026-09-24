@@ -188,11 +188,23 @@ impl TaskExecutionService {
         let _permit = self.core.admission.enter()?;
         let capacity = self.core.engine.capacity().capacity;
         validate_request(&request, &capacity)?;
-        if let Some(record) = self.core.store.find_idempotent(request.clone()).await? {
+        if let Some(record) = self
+            .core
+            .store
+            .find_idempotent(request.clone())
+            .await
+            .map_err(|error| self.handle_admission_store_error(error))?
+        {
             return Ok(record);
         }
         if self.core.queue_count.load(Ordering::Acquire) >= self.core.queue_capacity {
-            if let Some(record) = self.core.store.find_idempotent(request.clone()).await? {
+            if let Some(record) = self
+                .core
+                .store
+                .find_idempotent(request.clone())
+                .await
+                .map_err(|error| self.handle_admission_store_error(error))?
+            {
                 return Ok(record);
             }
             return Err(TaskServiceError::QueueFull);
@@ -202,7 +214,7 @@ impl TaskExecutionService {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.release_queue_slot();
-                return Err(error.into());
+                return Err(self.handle_admission_store_error(error));
             }
         };
         match outcome {
@@ -310,9 +322,18 @@ impl TaskExecutionService {
             Err(error) => {
                 self.core.local_finalizations.lock().remove(&id);
                 self.release_queue_slot();
-                Err(error.into())
+                Err(self.handle_admission_store_error(error))
             }
         }
+    }
+
+    /// Latches operational admission failures while preserving ordinary store
+    /// conflicts and not-found results for the calling operation.
+    fn handle_admission_store_error(&self, error: StoreError) -> TaskServiceError {
+        if matches!(error, StoreError::Failure(_)) {
+            record_store_fault(&self.core, error.to_string());
+        }
+        error.into()
     }
 
     fn reserve_queue_slot(&self) -> Result<(), TaskServiceError> {
@@ -451,7 +472,13 @@ impl TaskExecutionService {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
         let _permit = self.core.admission.enter()?;
-        let record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+        let record = self
+            .core
+            .store
+            .get(id)
+            .await
+            .map_err(|error| self.handle_admission_store_error(error))?
+            .ok_or(StoreError::NotFound)?;
         if !matches!(record.state, TaskState::Blocked { .. }) {
             return Err(TaskServiceError::Blocked);
         }
@@ -460,7 +487,7 @@ impl TaskExecutionService {
             Ok(updated) => updated,
             Err(error) => {
                 self.core.queue_count.fetch_sub(1, Ordering::AcqRel);
-                return Err(error.into());
+                return Err(self.handle_admission_store_error(error));
             }
         };
         self.core.queue.lock().push_back(QueuedTask {
