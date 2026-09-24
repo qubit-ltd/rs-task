@@ -1,0 +1,461 @@
+//! Bounded serial publication of best-effort task lifecycle notifications.
+
+use std::io;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::Condvar;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::TrySendError;
+use std::sync::mpsc::sync_channel;
+use std::thread;
+use std::thread::JoinHandle;
+
+use qubit_event_bus::EventBus;
+use qubit_event_bus::model::AdmissionStatus;
+use qubit_event_bus::model::PublishAcknowledgement;
+use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::Topic;
+
+use super::task_event_notification_stats::TaskEventNotificationStats;
+use crate::event::TaskEvent;
+
+#[derive(Default)]
+struct Counters {
+    enqueued: AtomicU64,
+    queue_full: AtomicU64,
+    queue_closed: AtomicU64,
+    accepted: AtomicU64,
+    opaque_accepted: AtomicU64,
+    unaccepted: AtomicU64,
+    partial_rejection: AtomicU64,
+    publish_error: AtomicU64,
+    worker_panicked: AtomicU64,
+}
+
+fn increment(counter: &AtomicU64) {
+    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        Some(value.saturating_add(1))
+    });
+}
+
+/// Owns one worker and one bounded queue for a service's event bus.
+pub(super) struct TaskEventPublisher {
+    sender: Mutex<Option<SyncSender<TaskEvent>>>,
+    counters: Arc<Counters>,
+    finished: Arc<(Mutex<bool>, Condvar)>,
+    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl TaskEventPublisher {
+    /// Starts a dedicated worker before service scheduling begins.
+    pub(super) fn new(bus: EventBus, capacity: NonZeroUsize) -> io::Result<Self> {
+        let (sender, receiver) = sync_channel(capacity.get());
+        let counters = Arc::new(Counters::default());
+        let finished = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_counters = Arc::clone(&counters);
+        let worker_finished = Arc::clone(&finished);
+        let worker = thread::Builder::new()
+            .name("task-event-publisher".into())
+            .spawn(move || {
+                worker_main(&worker_counters, &worker_finished, || {
+                    let topic = Topic::<TaskEvent>::new("task.lifecycle").expect("fixed task lifecycle topic is valid");
+                    while let Ok(event) = receiver.recv() {
+                        match PublishRequest::new(topic.clone(), event) {
+                            Ok(request) => match bus.publish(request) {
+                                Ok(receipt) => record_admission(&worker_counters, receipt.acknowledgement()),
+                                Err(_) => increment(&worker_counters.publish_error),
+                            },
+                            Err(_) => increment(&worker_counters.publish_error),
+                        }
+                    }
+                });
+            })?;
+        Ok(Self {
+            sender: Mutex::new(Some(sender)),
+            counters,
+            finished,
+            worker: Arc::new(Mutex::new(Some(worker))),
+        })
+    }
+
+    /// Attempts to enqueue without waiting for the worker or event bus.
+    pub(super) fn enqueue(&self, event: TaskEvent) {
+        let sender = self.sender.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match sender.as_ref().map(|sender| sender.try_send(event)) {
+            Some(Ok(())) => increment(&self.counters.enqueued),
+            Some(Err(TrySendError::Full(_))) => increment(&self.counters.queue_full),
+            Some(Err(TrySendError::Disconnected(_))) | None => increment(&self.counters.queue_closed),
+        }
+    }
+
+    /// Returns a monotonic snapshot of enqueue and publication outcomes.
+    pub(super) fn stats(&self) -> TaskEventNotificationStats {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Acquire);
+        TaskEventNotificationStats {
+            enqueued: load(&self.counters.enqueued),
+            queue_full: load(&self.counters.queue_full),
+            queue_closed: load(&self.counters.queue_closed),
+            accepted: load(&self.counters.accepted),
+            opaque_accepted: load(&self.counters.opaque_accepted),
+            unaccepted: load(&self.counters.unaccepted),
+            partial_rejection: load(&self.counters.partial_rejection),
+            publish_error: load(&self.counters.publish_error),
+            worker_panicked: load(&self.counters.worker_panicked),
+        }
+    }
+
+    /// Stops enqueue, drains accepted events, and waits for the worker to exit.
+    pub(super) async fn close(&self) {
+        self.sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let finished = Arc::clone(&self.finished);
+        let worker = Arc::clone(&self.worker);
+        let _ = super::task_execution_service::runtime()
+            .spawn_blocking(move || {
+                let (lock, changed) = &*finished;
+                let mut done = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*done {
+                    done = changed.wait(done).unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                drop(done);
+                if let Some(handle) = worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+                    let _ = handle.join();
+                }
+            })
+            .await;
+    }
+}
+
+fn worker_main(work_counters: &Counters, finished: &(Mutex<bool>, Condvar), work: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
+        increment(&work_counters.worker_panicked);
+    }
+    let (lock, changed) = finished;
+    *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    changed.notify_all();
+}
+
+fn record_admission(counters: &Counters, acknowledgement: &PublishAcknowledgement) {
+    match acknowledgement {
+        PublishAcknowledgement::Accepted { .. } => increment(&counters.opaque_accepted),
+        PublishAcknowledgement::DestinationAdmissions(admissions) => {
+            let accepted = admissions
+                .iter()
+                .any(|admission| matches!(admission.status(), AdmissionStatus::Accepted));
+            let rejected = admissions
+                .iter()
+                .any(|admission| matches!(admission.status(), AdmissionStatus::Rejected(_)));
+            if accepted {
+                increment(&counters.accepted);
+                if rejected {
+                    increment(&counters.partial_rejection);
+                }
+            } else {
+                increment(&counters.unaccepted);
+            }
+        }
+        PublishAcknowledgement::DroppedByInterceptor => increment(&counters.unaccepted),
+        _ => increment(&counters.unaccepted),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::Condvar;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use qubit_event_bus::EventBus;
+    use qubit_event_bus::SubscribeError;
+    use qubit_event_bus::error::SpiError;
+    use qubit_event_bus::model::AdmissionStatus;
+    use qubit_event_bus::model::DestinationAdmission;
+    use qubit_event_bus::model::ProviderId;
+    use qubit_event_bus::model::PublishAcknowledgement;
+    use qubit_event_bus::model::SubscribeRequest;
+    use qubit_event_bus::model::SubscriberId;
+    use qubit_event_bus::model::Topic;
+    use qubit_event_bus::spi::DelayedDeliveryCapability;
+    use qubit_event_bus::spi::DurabilityCapability;
+    use qubit_event_bus::spi::EventBusCapabilities;
+    use qubit_event_bus::spi::EventBusSpi;
+    use qubit_event_bus::spi::EventSubscriptionSpi;
+    use qubit_event_bus::spi::OrderingCapability;
+    use qubit_event_bus::spi::OutboundMessage;
+    use qubit_event_bus::spi::PayloadModes;
+    use qubit_event_bus::spi::PublishGuarantee;
+    use qubit_event_bus::spi::PublishVisibility;
+    use qubit_event_bus::spi::ReplayCapability;
+    use qubit_event_bus::spi::SettlementCapabilities;
+    use qubit_event_bus::spi::ShutdownMode;
+    use qubit_event_bus::spi::ShutdownOutcome;
+    use qubit_event_bus::spi::SpiSubscriptionRequest;
+    use qubit_event_bus::spi::TransportPayload;
+
+    use super::Counters;
+    use super::TaskEventPublisher;
+    use super::worker_main;
+    use crate::event::TaskEvent;
+    use crate::model::TaskId;
+    use crate::model::TaskState;
+
+    struct FakeSpi {
+        calls: Mutex<Vec<u64>>,
+        entered: AtomicUsize,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        block_first: bool,
+        outcome: Outcome,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Outcome {
+        Opaque,
+        AllRejected,
+        Partial,
+        Error,
+        Empty,
+        Dropped,
+        Panic,
+    }
+
+    impl FakeSpi {
+        fn new(block_first: bool, outcome: Outcome) -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                entered: AtomicUsize::new(0),
+                gate: Arc::new((Mutex::new(false), Condvar::new())),
+                block_first,
+                outcome,
+            })
+        }
+
+        fn release(&self) {
+            let (lock, changed) = &*self.gate;
+            *lock.lock().expect("gate lock") = true;
+            changed.notify_all();
+        }
+    }
+
+    impl EventBusSpi for FakeSpi {
+        fn capabilities(&self) -> EventBusCapabilities {
+            EventBusCapabilities::new(
+                PayloadModes::Native,
+                SettlementCapabilities::None,
+                OrderingCapability::None,
+                DelayedDeliveryCapability::None,
+                DurabilityCapability::Ephemeral,
+                false,
+                ReplayCapability::None,
+                PublishGuarantee::Accepted,
+                PublishVisibility::Opaque,
+            )
+        }
+
+        fn publish(&self, message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
+            let index = self.entered.fetch_add(1, Ordering::AcqRel);
+            if self.block_first && index == 0 {
+                let (lock, changed) = &*self.gate;
+                let mut open = lock.lock().expect("gate lock");
+                while !*open {
+                    open = changed.wait(open).expect("gate wait");
+                }
+            }
+            if let TransportPayload::Native(payload) = message.payload() {
+                let event = payload.downcast_ref::<TaskEvent>().expect("task event payload");
+                self.calls.lock().expect("calls lock").push(event.state_version);
+            }
+            let admission = |index, status| {
+                DestinationAdmission::new(
+                    qubit_id::Id::new(index),
+                    SubscriberId::new("fake").expect("subscriber ID"),
+                    status,
+                )
+            };
+            match self.outcome {
+                Outcome::Opaque => Ok(PublishAcknowledgement::Accepted {
+                    provider_message_id: None,
+                    metadata: Default::default(),
+                }),
+                Outcome::AllRejected => Ok(PublishAcknowledgement::DestinationAdmissions(vec![admission(
+                    1,
+                    AdmissionStatus::Rejected("rejected".into()),
+                )])),
+                Outcome::Partial => Ok(PublishAcknowledgement::DestinationAdmissions(vec![
+                    admission(1, AdmissionStatus::Accepted),
+                    admission(2, AdmissionStatus::Rejected("rejected".into())),
+                ])),
+                Outcome::Empty => Ok(PublishAcknowledgement::DestinationAdmissions(Vec::new())),
+                Outcome::Dropped => Ok(PublishAcknowledgement::DroppedByInterceptor),
+                Outcome::Error => Err(SpiError::Operation {
+                    provider_id: "fake".into(),
+                    operation: "publish",
+                    resource: None,
+                    kind: "scripted",
+                    retryable: Some(false),
+                    source: Box::new(std::io::Error::other("scripted error")),
+                }),
+                Outcome::Panic => panic!("scripted worker panic"),
+            }
+        }
+
+        fn subscribe(&self, _: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
+            Err(SpiError::Operation {
+                provider_id: "fake".into(),
+                operation: "subscribe",
+                resource: None,
+                kind: "unsupported",
+                retryable: Some(false),
+                source: Box::new(std::io::Error::other("subscriptions are unsupported")),
+            })
+        }
+        fn shutdown(&self, _: ShutdownMode) -> Result<ShutdownOutcome, SpiError> {
+            Ok(ShutdownOutcome::Complete)
+        }
+    }
+
+    fn event(version: u64) -> TaskEvent {
+        TaskEvent {
+            task_id: TaskId::generate(),
+            state_version: version,
+            state: TaskState::Queued,
+            correlation_key: None,
+        }
+    }
+
+    fn publisher(spi: Arc<FakeSpi>, capacity: usize) -> TaskEventPublisher {
+        let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
+        TaskEventPublisher::new(bus, NonZeroUsize::new(capacity).expect("nonzero capacity")).expect("publisher starts")
+    }
+
+    #[test]
+    fn test_task_event_publisher_fake_spi_unsupported_subscription_is_reported() {
+        let spi = FakeSpi::new(false, Outcome::Opaque);
+        let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
+        let request = SubscribeRequest::new(
+            SubscriberId::new("task-observer").expect("subscriber ID"),
+            Topic::<TaskEvent>::new("task.lifecycle").expect("task lifecycle topic"),
+        );
+
+        let error = match bus.subscribe(request, |_| ()) {
+            Ok(_) => panic!("fake SPI does not support subscriptions"),
+            Err(error) => error,
+        };
+        let SubscribeError::Spi(error) = error else {
+            panic!("expected provider SPI error");
+        };
+        assert_eq!(error.provider_id(), "fake");
+        assert_eq!(error.operation(), "subscribe");
+        assert_eq!(error.kind(), "unsupported");
+        assert_eq!(error.retryable(), Some(false));
+    }
+
+    #[test]
+    fn test_task_event_publisher_fake_spi_shutdown_is_complete() {
+        let spi = FakeSpi::new(false, Outcome::Opaque);
+        let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
+
+        let outcome = bus.shutdown(ShutdownMode::Immediate).expect("bus shutdown");
+
+        assert!(matches!(outcome, ShutdownOutcome::Complete));
+    }
+
+    #[tokio::test]
+    async fn test_task_event_publisher_queue_full_is_nonblocking_and_ordered() {
+        let spi = FakeSpi::new(true, Outcome::Opaque);
+        let publisher = Arc::new(publisher(spi.clone(), 1));
+        publisher.enqueue(event(1));
+        while spi.entered.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+        publisher.enqueue(event(2));
+        let third_publisher = Arc::clone(&publisher);
+        let (returned, received) = std::sync::mpsc::channel();
+        let third = std::thread::spawn(move || {
+            third_publisher.enqueue(event(3));
+            returned.send(()).expect("enqueue return signal");
+        });
+        let nonblocking = received.recv_timeout(std::time::Duration::from_millis(100)).is_ok();
+        spi.release();
+        third.join().expect("third enqueue thread");
+        assert!(nonblocking, "full-queue enqueue returned without waiting for publish");
+        assert_eq!(publisher.stats().queue_full, 1);
+        publisher.close().await;
+        assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
+        assert_eq!(publisher.stats().enqueued, 2);
+        assert_eq!(publisher.stats().opaque_accepted, 2);
+    }
+
+    #[tokio::test]
+    async fn test_task_event_publisher_admission_outcomes_and_panic() {
+        for outcome in [
+            Outcome::AllRejected,
+            Outcome::Partial,
+            Outcome::Error,
+            Outcome::Empty,
+            Outcome::Dropped,
+            Outcome::Panic,
+        ] {
+            let publisher = publisher(FakeSpi::new(false, outcome), 1);
+            publisher.enqueue(event(1));
+            publisher.close().await;
+            let stats = publisher.stats();
+            match outcome {
+                Outcome::AllRejected | Outcome::Empty | Outcome::Dropped => {
+                    assert_eq!(stats.unaccepted, 1)
+                }
+                Outcome::Partial => {
+                    assert_eq!(stats.accepted, 1);
+                    assert_eq!(stats.partial_rejection, 1);
+                }
+                Outcome::Error => assert_eq!(stats.publish_error, 1),
+                Outcome::Panic => assert_eq!(stats.publish_error, 1),
+                Outcome::Opaque => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_task_event_publisher_worker_panic_is_counted_and_signalled() {
+        let counters = Counters::default();
+        let finished = (Mutex::new(false), Condvar::new());
+        worker_main(&counters, &finished, || panic!("scripted worker failure"));
+        assert_eq!(counters.worker_panicked.load(Ordering::Acquire), 1);
+        assert!(*finished.0.lock().expect("finished lock"));
+    }
+
+    #[tokio::test]
+    async fn test_task_event_publisher_concurrent_close_waits_for_drain() {
+        let spi = FakeSpi::new(true, Outcome::Opaque);
+        let publisher = Arc::new(publisher(spi.clone(), 1));
+        publisher.enqueue(event(1));
+        while spi.entered.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+        publisher.enqueue(event(2));
+        let first = {
+            let publisher = publisher.clone();
+            tokio::spawn(async move { publisher.close().await })
+        };
+        let second = {
+            let publisher = publisher.clone();
+            tokio::spawn(async move { publisher.close().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!first.is_finished());
+        assert!(!second.is_finished());
+        spi.release();
+        first.await.expect("first close");
+        second.await.expect("second close");
+        publisher.enqueue(event(3));
+        assert_eq!(publisher.stats().queue_closed, 1);
+        assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
+    }
+}

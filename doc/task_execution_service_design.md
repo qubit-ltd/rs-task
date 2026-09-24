@@ -28,8 +28,8 @@
 
 - `TaskId` 标识一次提交，由服务生成，提交后保持稳定；业务自己的标识放在 `correlation_key` 中。可选 `idempotency_key` 用于受理去重。同一去重键与相同任务描述重复提交时返回原 `TaskId`；内容不同则拒绝。去重键的有效期与存储保留期一致，过期后不保证去重。
 - `TaskRequest` 包含 `task_type`、`handler_version`、有大小上限的 `payload`、资源需求和可选业务关联字段。它不包含进程地址、闭包或持久化后无法重建的对象。
-- 处理器通过 `TaskHandlerRegistry` 在服务启动时按 `(task_type, handler_version)` 注册。注册表可由 `rs-spi` 发现的处理器 provider 构建，也允许应用显式注入实例。服务恢复旧任务前检查处理器是否存在；缺失时保持任务待处理并报告不可运行原因，不把它当作业务执行失败，也不静默丢弃。
-- `submit` 接受可重建的 `TaskRequest`。服务也可提供 `submit_local` 以保留本地闭包和类型化 `TaskHandle` 的使用体验；只有当前 `TaskStore` 不承诺重启恢复时才允许此接口，使用可恢复存储时明确拒绝。两种提交方式始终通过同一个服务门面。
+- 处理器通过 `TaskHandlerRegistry` 在服务启动时按 `(task_type, handler_version)` 注册。注册表可由 `rs-spi` 发现的处理器 provider 构建，也允许应用显式注入实例。服务恢复旧任务前检查处理器是否存在；缺失时将任务置为 `Blocked` 并报告不可运行原因，不把它当作业务执行失败，也不静默丢弃。当前没有 payload 预检接口，解码失败由处理器返回为执行错误。
+- `submit` 接受可重建的 `TaskRequest` 并返回受理时的 `TaskRecord`。`submit_local` 接受本地闭包并返回 `TaskId`，可通过同一门面的查询和等待接口跟踪；仅在不承诺重启恢复的存储上可用，使用可恢复存储时明确拒绝。两种提交方式始终通过同一个服务门面。
 - `TaskContext` 向处理器提供 `TaskId`、尝试次数、取消信号和实际分配的资源标识。大结果由业务写入外部存储；任务记录只保存有大小上限的结果摘要或引用、错误类别和诊断信息。
 
 ### 3.2 资源模型
@@ -44,9 +44,9 @@
 
 公开状态为 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked`、`Cancelled`；`Queued` 包含已受理但尚未获资源的任务，`Blocked` 表示需要运维或业务方修复后才能重新入队。受理中的临时状态和终态提交中的内部状态不向业务方承诺。每条 `TaskRecord` 包含 `TaskId`、业务关联、受理/启动/结束时间、尝试次数、当前状态、资源请求及分配结果、失败摘要和单调递增的状态版本。
 
-基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、解码失败或达到重试上限时进入 `Blocked`；修复后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；只有处理器实际退出且确认取消才进入 `Cancelled`。已经产生成功或失败的结果不能被迟到的取消请求覆盖。恢复时，上一进程遗留的 `Running` 记录转回 `Queued` 并增加尝试次数；对外可查询到它在等待重试及其原因。
+基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；只有处理器实际退出且确认取消才进入 `Cancelled`。已经产生成功或失败的结果不能被迟到的取消请求覆盖。恢复时，上一进程遗留的 `Running` 记录转回 `Queued`，随后由下一次启动将尝试号递增；对外可查询到它在等待重试及其原因。
 
-提供按 `TaskId` 查询、按状态和时间分页列举、查询队列及资源使用统计、等待单个任务终态的接口。等待中的任务进入 `Blocked` 时，等待接口返回需要干预的结果，不能无限等待。查不到任务、历史已经过期、存储查询失败要分别表达。`TaskId` 是查询主键；`correlation_key` 仅供过滤与业务关联。完成历史的保留容量或 TTL 由构造配置及具体存储实现控制，不能清理活跃或 `Blocked` 任务；持久化后端应提供分页查询，不能要求将全量历史载入内存。
+提供按 `TaskId` 查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。当前分页游标按 `TaskId` 排序，不提供受理时间范围过滤。等待中的任务进入 `Blocked` 时，等待接口返回需要干预的结果，不能无限等待。`get` 对不存在或已过期的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储仅限制终态历史数量；SQLite 当前不清理持久历史。持久化后端通过分页查询读取历史，不要求将全量历史载入内存。
 
 ## 4. 服务接口与职责划分
 
@@ -73,24 +73,25 @@
 | `TaskStore` | 权威任务记录、查询和能力声明；需要时提供持久受理与恢复操作 | 接口；库内提供基本内存实现，第三方可通过 SPI 提供数据库或文件等实现 |
 | `TaskExecutionEngine` | 检查本执行域的资源容量，原子预约资源，启动处理器，归还资源并报告执行结果 | 接口；库内提供本机实现，未来可扩展分布式实现 |
 | `TaskHandler` 与注册表 | 按任务类型和版本执行具体业务任务 | 处理器接口通过 SPI 发现多个实现；注册表负责唯一性校验和索引 |
-| `rs-event-bus` | 可选任务状态通知 | 装配层使用具体同步 `EventBus` 或 `AsyncEventBus`；需要解耦/缓冲时由应用提供有界转发队列，不把 facade 当 trait |
+| `rs-event-bus::EventBus` | 可选任务状态通知 | 直接使用该库提供的抽象，不定义 `TaskEventSink` |
 
 以下签名表达设计边界，不是已存在的可编译 API：
 
 ```text
 TaskExecutionService
   capabilities() -> ServiceCapabilities
-  submit(TaskRequest) -> SubmissionReceipt
-  submit_local(local_task) -> (TaskId, TaskHandle<R, E>) | UnsupportedCapability
+  submit(TaskRequest) -> TaskRecord
+  submit_local(local_task) -> TaskId | UnsupportedCapability
   get(TaskId) -> TaskRecord | NotFound | Error
   list(TaskQuery) -> Page<TaskRecord>
   cancel(TaskId) -> CancelOutcome
   retry_blocked(TaskId) -> RetryOutcome
   stats() -> TaskStats
-  shutdown(Graceful | CancelQueued)
+  wait(TaskId) -> TaskRecord | Blocked | Error
+  shutdown() -> Result
 ```
 
-`TaskExecutionService` 是一个门面类型，而不是为不同存储能力实现多套公共 trait。构建时由装配的 `TaskStore` 决定是否启动恢复流程，并可配置 `require_recovery`：要求恢复但所选存储不支持时，构建失败。`capabilities()` 返回实际组件组合的有效能力。`submit_local` 可以是门面的泛型固有方法；若存储声明重启恢复，则返回 `UnsupportedCapability`，防止不可重建闭包被当作可恢复任务。提交返回 `Ok` 只代表受理：不可恢复存储已保存于本机队列；可恢复存储已完成持久化受理。它不代表任务已启动或成功。
+`TaskExecutionService` 是一个门面类型，而不是为不同存储能力实现多套公共 trait。构建时由装配的 `TaskStore` 决定是否启动恢复流程，并可配置 `require_recovery`：要求恢复但所选存储不支持时，构建失败。`capabilities()` 返回存储能力及本地闭包支持情况。当前 `submit_local` 返回 `TaskId`，随后通过 `get`、`wait` 查询结果；若存储声明重启恢复，则返回 `UnsupportedCapability`，防止不可重建闭包被当作可恢复任务。提交返回 `Ok` 只代表受理：不可恢复存储已保存于本机队列；可恢复存储已完成持久化受理。它不代表任务已启动或成功。
 
 `TaskScheduler` 使用 `SchedulingPolicy` 从待执行任务中选择候选项，再向 `TaskExecutionEngine` 请求原子分配和启动。资源账本归执行引擎所有，避免调度器与执行器对剩余资源有不同认识。本期 `LocalTaskExecutionEngine` 在服务所在机器执行；今后替换为分布式实现时，提交与查询模型不必重写。`TaskStore` 是状态依据；不得由协调器或执行引擎另建一套相互竞争的权威状态。
 
@@ -106,7 +107,7 @@ TaskExecutionService
 - 存储、执行引擎和调度策略各选择一个 provider。应用使用 `rs-spi` 的具名选择并传入运行时配置；数据库连接、文件路径和资源配额在创建时注入，不放入链接期静态注册项。同一服务族的 provider 共用 `ServiceSpec::Config` 类型，因此每个服务族有配置封套，携带 provider ID 和具体配置对象；provider 校验其类型与内容，并返回明确的配置错误。测试或已有业务对象仍可直接注入。
 - 应用选择 `TaskStore` provider 后，查询其 `StoreCapabilities`，并在需要重启恢复时设置 `require_recovery`。存储缺失、初始化失败、能力不满足或不符合其能力契约时构建失败，不静默替换为内存实现。应用也可查询服务装配完成后的有效能力。
 
-`rs-spi` 的 registry 可以在应用装配阶段修改；服务启动后将选择结果固定为本服务实例使用的组件，不在任务运行期间悄悄切换 provider。处理器升级采用新 `handler_version`，旧版本需要保留到相应未完成任务处理完或经过显式迁移；不能只因发现了新版就用它解码旧 payload。链接期发现作为可选 feature 提供，基础 SPI 注册与显式注入不依赖 `inventory`，以保持最小构建可用。事件总线实例由应用按 `rs-event-bus` 的接口创建并注入；如应用希望用 SPI 选择事件总线实现，可在应用的装配层完成，不在 `qubit-task` 中增设通知接口。
+`rs-spi` 的 registry 可以在应用装配阶段修改；服务启动后将选择结果固定为本服务实例使用的组件，不在任务运行期间悄悄切换 provider。处理器升级采用新 `handler_version`，旧版本需要保留到相应未完成任务处理完或经过显式迁移；不能只因发现了新版就用它解码旧 payload。链接期发现作为可选 feature 提供，基础 SPI 注册与显式注入不依赖 `inventory`，以保持最小构建可用。事件总线实例由应用创建并直接注入；如应用希望用 SPI 选择事件总线实现，可在应用的装配层完成，不在 `qubit-task` 中增设通知接口。
 
 库内至少提供 `MemoryTaskStore`、默认公平调度策略、`LocalTaskExecutionEngine` 和便于包装本地函数的处理器适配器，并将这些实现注册为可发现的 provider。为使恢复能力可以直接使用，另提供一个可选的本地 SQLite `TaskStore` provider，满足 `restart_recovery` 契约；第三方仍可提供其他 SQL、Redis、MongoDB 或文件系统实现。具体数据库依赖通过可选 feature 隔离，不强加给只用内存服务的应用。
 
@@ -144,7 +145,7 @@ TaskExecutionService
 
 1. 应用选择具名预设，或利用 `rs-spi` 发现并创建 `TaskStore`、`SchedulingPolicy`、`TaskExecutionEngine` 和处理器，再按需直接注入 `rs-event-bus` 实例。
 2. 服务构建器检查组件和配置，读取 `StoreCapabilities`，验证 `require_recovery`、资源容量、队列上限，以及处理器类型与版本的唯一性。第三方 provider 的初始化错误按原组件和 provider ID 返回，不自动替换实现。
-3. 若存储支持重启恢复，先取得独占所有权，再分页装载未完成任务。处理器缺失、payload 无法解码或新资源配置永久无法满足的任务进入可查询的 `Blocked`，其余任务重建待执行索引。
+3. 若存储支持重启恢复，先取得独占所有权，再分页装载未完成任务。遗留 `Running` 记录转为待调度状态；缺少精确版本处理器的任务进入可查询的 `Blocked`，其余任务重建待执行队列。payload 解码由处理器负责，当前没有单独的预检钩子。
 4. 启动调度循环，确认组件已可接收任务后才向应用返回服务。任一步失败都释放已取得的存储所有权及本机资源，不返回半启动的服务。
 
 服务运行中不热切换存储、执行引擎或策略。应用若需改变这些组件，应有序关闭旧服务，再以新配置创建服务；持久化任务的重接管遵守存储所有权和恢复契约。
@@ -166,13 +167,19 @@ TaskExecutionService
 
 恢复规则：`Queued` 任务重新入队；遗留的 `Running` 任务重新入队等待下一次尝试。由于进程可能在业务副作用发生之后、终态持久化之前退出，可恢复模式只能保证**至少一次执行**，不能保证恰好一次。业务处理器应使用 `TaskId` 或自身业务键做幂等。超过恢复/重试次数上限、处理器版本缺失或任务描述无法解码时，记录进入 `Blocked` 并保留诊断信息，不自动启动，也不当作正常成功。优雅关闭时停止受理，等待运行任务退出；超时退出后的恢复仍按上述规则处理。
 
-可恢复存储写入不可用时，服务停止新任务受理和启动；尚未成功写入的终态不能对外宣称已经持久完成。执行已结束但终态尚未提交的任务保留内部待提交状态并重试写入；若进程随后退出，恢复会再次执行该任务。资源在处理器实际退出后释放，但状态提交失败期间仍须限制新任务启动，避免持续扩大不确定结果。
+可恢复存储操作失败时，服务停止新任务受理和后续调度，并通过 `last_store_error()` 暴露诊断。若执行已结束但终态没有提交，持久记录仍为 `Running`，服务不对外报告成功；进程重启后该任务可能再次执行。当前实现不在同一进程内重试失败的状态写入，也不对 SQLite 记录实施自动历史清理。
 
 ## 6. 事件通知
 
-`rs-event-bus` 当前提供具体、可克隆的同步 `EventBus` 与异步 `AsyncEventBus` facade；`EventBus` 不是 trait，也不支持 `B: EventBus` 这样的泛型约束。装配层若接受同步发布开销，可将具体 `EventBus` 交给通知组件。若事件发布不得阻塞调度循环，应由装配层持有 `AsyncEventBus` 及其 async provider/runner，或通过应用自有的有界队列把状态变更转交给异步通知任务；队列满时记录通知失败并保留查询路径。事件可包含 `TaskId`、状态版本、时间和必要摘要，不携带大 payload；未配置通知时仍可使用查询接口。本设计不额外定义 `TaskEventSink` trait 或新的任务服务 SPI。
+启用 `event-bus` feature 后，应用可以向服务注入 `rs-event-bus` 提供的 `EventBus` 门面。服务向 `task.lifecycle` 主题发布 `TaskEvent`，事件包含 `TaskId`、状态版本、状态和业务关联键，不携带大 payload；不配置事件总线时仍可使用查询接口。这里不另设事件发布 trait、适配器或 SPI 服务族。
 
-事件在锁外发布，失败不回滚已提交的任务状态。通知可能丢失、重复或乱序；消费者按 `TaskId` 和状态版本去重，再调用查询接口取得权威状态。可靠跨进程投递需由持久化后端增加事务性 outbox，属于后续能力，不能把本期事件总线通知描述为可靠消息。事件发布不得阻塞调度循环；使用有界异步缓冲，缓冲满时记录失败并保留查询路径。
+当前 Cargo 配置将 `qubit-event-bus` 0.12 固定到 revision `319fffb85c150c0d2b2f83655ee06799b19ef035`。发布器按该版本已有的 `PublishAcknowledgement` 变体统计结果，不依赖较新 event-bus revision 的接纳检查 API；更新依赖 revision 时，应重新核对回执分支和统计语义。
+
+服务为事件总线启动一个专用串行发布线程，并通过 `sync_channel` 维护有界队列，默认容量为 256，可用 `TaskExecutionServiceBuilder::event_bus_buffer_capacity(NonZeroUsize)` 配置。任务状态转移只用 `try_send` 尝试入队，不等待同步 provider；队列满时丢弃新通知。队列关闭后的入队尝试也会丢弃。通知失败不会回滚已提交的任务状态，通知可能丢失、重复或延迟。消费者按 `TaskId` 和状态版本去重，再查询服务取得权威状态。不同并发状态转移按实际入队顺序串行发布，不保证跨生产者按 `state_version` 全局排序。
+
+`TaskExecutionService::notification_stats()` 在配置总线时返回统计快照，未配置时返回 `None`。`enqueued` 统计进入本地队列的事件，`queue_full` 与 `queue_closed` 统计对应的丢弃；`accepted` 表示至少一个已报告目的地接受，`partial_rejection` 表示同一事件同时有接受和拒绝目的地，`opaque_accepted` 表示 provider 接受但未暴露目的地，`unaccepted` 表示没有可见目的地接受（含空列表和 interceptor drop），`publish_error` 记录发布错误，`worker_panicked` 记录线程 panic。计数为单调饱和值；它们只描述本地排队、provider 的接纳回执和 worker 状态，不代表 subscriber handler 已完成。
+
+`shutdown()` 在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker，但同步 provider 若一直阻塞，显式 shutdown 仍可能无限等待。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
 
 ## 7. 关键操作顺序与不变量
 
@@ -190,4 +197,4 @@ TaskExecutionService
 
 核心验证包括：资源不足排队、GPU 设备分配、非法资源请求、队列满拒绝、越过次数后的防饥饿、取消与启动竞态、panic 后资源归还、重复提交、历史存储故障、事件故障、持久受理失败、终态写入失败、重启恢复，以及旧实例回调被版本/代际拒绝。还要验证 `in_memory()` 无 SPI 装配可执行本地任务、通用 builder 未选存储时拒绝构建、默认容量可覆盖、SQLite 便捷入口完成恢复后才返回，以及链接第三方 provider 不改变默认行为。SPI 场景要验证跨 crate 自动发现、未链接 provider 不会被发现、重复处理器键报错、运行时配置注入、`StoreCapabilities` 与实际操作一致、`require_recovery` 失败而不降级，以及旧处理器版本恢复。`TaskStore` 提供按能力分组的可复用契约测试套件，让外部后端检验原子受理、条件更新、恢复扫描和独占所有权。
 
-实施可分三步：先抽出任务模型与资源调度，定义 `rs-spi` 服务族并交付统一门面、内存 `TaskStore`、默认调度策略和本机执行引擎；再完成可恢复 `TaskStore` 的能力契约、可选 SQLite provider 和重启场景；最后直接接入可选的 `rs-event-bus` 事件通知。每一步都应有可运行的端到端场景。旧 API 需要迁移指南：无参数的 `TaskExecutionService::new()` 改为明确的 `in_memory()`，`submit(Id, closure)` 改为 `submit_local`，业务 ID 改放关联字段，原先允许终态 ID 复用的行为不再适用于新版 `TaskId`。正式实施时评估语义化版本升级，并同步更新 `README`、用户指南和 Cargo 打包清单；当前 `Cargo.toml` 的 `include` 仅列出 `/docs/**`，要发布本设计所在的 `/doc/**` 需另行纳入。
+实施分三步：先交付统一门面、内存 `TaskStore`、默认调度策略、本机执行引擎和 SPI 服务族；再完成可恢复 `TaskStore`、SQLite provider 和重启场景；最后直接接入可选的 `rs-event-bus` 事件通知。新版将破坏旧公开 API，使用 `in_memory()` 代替含糊的无参数构造，使用 `submit_local` 或版本化 `TaskRequest` 代替旧闭包提交，并用服务生成且不复用的 `TaskId`。README、用户指南、概览和 Cargo 打包清单均已更新。

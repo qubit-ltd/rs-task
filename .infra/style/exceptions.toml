@@ -1,1 +1,91 @@
 format = 1
+
+[[exceptions]]
+rule = "aggregation-files"
+path = "src/spi/mod.rs"
+reason = "This module groups the public SPI service families and their built-in provider registries as one cohesive extension point."
+
+[[exceptions]]
+rule = "aggregation-files"
+path = "src/handler/mod.rs"
+reason = "This module groups the handler contract and its context and registry implementations as one cohesive API."
+
+[[exceptions]]
+rule = "aggregation-files"
+path = "src/scheduling/mod.rs"
+reason = "This module groups the scheduling policy contract and its shared queue snapshot types."
+
+[[exceptions]]
+rule = "aggregation-files"
+path = "src/event/mod.rs"
+reason = "This module groups the task event payload with the event bus topic contract."
+
+[[exceptions]]
+rule = "aggregation-files"
+path = "src/engine/mod.rs"
+reason = "This module groups the execution engine contract with its prepared execution and result types."
+
+[[exceptions]]
+rule = "aggregation-files"
+path = "src/store/mod.rs"
+reason = "This module groups the store contract, shared errors, and async future alias used by all backends."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/spi/mod.rs"
+reason = "SPI specs, provider configs, and registry constructors form one cohesive service-family module."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/handler/registry.rs"
+reason = "The registry and its registration error describe one inseparable handler registry API."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/service/task_execution_service.rs"
+reason = "The facade, effective capabilities, and operation errors define the single public service boundary."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/service/task_execution_service_builder.rs"
+reason = "The builder and its build error form one construction API."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/scheduling/fair_fifo.rs"
+reason = "The fair FIFO policy and its queued task view are a single policy implementation contract."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/model/task_record.rs"
+reason = "Task state, record, query, page, statistics, and transition command are the cohesive persisted lifecycle model."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/model/resource.rs"
+reason = "Capacity, request, and snapshot are the cohesive resource accounting model."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/model/task_request.rs"
+reason = "Task request, output, and execution error are the cohesive handler exchange model."
+
+[[exceptions]]
+rule = "type-file-name"
+path = "src/handler/context.rs"
+reason = "The context module name describes the handler capability while TaskContext is its sole public type."
+
+[[exceptions]]
+rule = "type-file-name"
+path = "src/engine/local.rs"
+reason = "The local module name distinguishes the single-node engine implementation from future engine backends."
+
+[[exceptions]]
+rule = "type-file-name"
+path = "src/store/memory.rs"
+reason = "The memory module name distinguishes the volatile store implementation from persistent backends."
+
+[[exceptions]]
+rule = "type-file-name"
+path = "src/store/sqlite.rs"
+reason = "The sqlite module name identifies the optional storage backend and its single public store type."

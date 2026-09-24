@@ -6,7 +6,7 @@ rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/qubit-ltd/rs-task"
-description = "Task-oriented services built on top of qubit-executor and qubit-thread-pool"
+description = "Resource-aware asynchronous task execution service"
 homepage = "https://github.com/qubit-ltd/rs-task"
 documentation = "https://docs.rs/qubit-task"
 readme = "README.md"
@@ -17,7 +17,7 @@ include = [
     "/LICENSE",
     "/README.md",
     "/README.zh_CN.md",
-    "/docs/**",
+    "/doc/**",
     "/examples/**",
     "/resources/**",
     "/src/**",
@@ -30,8 +30,24 @@ doctest = true
 test = true
 
 [dependencies]
-qubit-id = "0.6"
-qubit-executor = "0.8"
-qubit-thread-pool = { version = "0.11", path = "../rs-thread-pool" }
-qubit-function = "0.18"
+futures = "^0.3"
+fs2 = { version = "^0.4", optional = true }
+parking_lot = "^0.12"
+qubit-event-bus = { version = "0.12", git = "https://github.com/qubit-ltd/rs-event-bus", rev = "319fffb85c150c0d2b2f83655ee06799b19ef035", optional = true }
+qubit-id = { version = "0.6", features = ["uuid"] }
+qubit-spi = "0.13"
+rusqlite = { version = "^0.32", features = ["bundled"], optional = true }
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "^1.0"
+tokio = { version = "^1.53", features = ["rt-multi-thread", "sync", "time"] }
 thiserror = "^2.0"
+uuid = { version = "^1.0", features = ["v4", "serde"] }
+
+[features]
+default = []
+inventory = ["qubit-spi/inventory"]
+sqlite = ["dep:rusqlite", "dep:fs2"]
+event-bus = ["dep:qubit-event-bus"]
+
+[dev-dependencies]
+tokio = { version = "^1.53", features = ["macros", "rt-multi-thread", "time"] }

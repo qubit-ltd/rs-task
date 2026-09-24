@@ -7,48 +7,45 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![English Document](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 
-`qubit-task` 在 `qubit-executor` 和 `qubit-thread-pool` 之上提供面向任务的执行服务。
+`qubit-task` 接受可重建的业务任务，根据 CPU、GPU 和具名资源额度排队执行，并通过统一门面提供状态查询。存储、调度、执行引擎和版本化处理器既可直接装配，也可通过 `qubit-spi` 选择。
 
 ## 安装
-
-README 示例还会直接使用任务 ID 类型，请在 `Cargo.toml` 中添加：
 
 ```toml
 [dependencies]
 qubit-task = "0.6"
-qubit-id = "0.6"
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
-`TaskExecutionService` 接收调用方提供的任务 ID，在线程池中运行同步 callable，并在内存中保留状态以便查询和执行前取消。取消排队任务成功返回时，任务已从队列移除且其捕获值已释放；worker 领取任务后再取消会返回 `false`，即使 callable 尚未开始执行也是如此。返回的 `TaskHandle` 负责保存类型化结果。
+## 从易失型本机任务开始
 
-```rust
-use qubit_id::Id;
-use qubit_task::service::{TaskExecutionService, TaskStatus};
+这个具名预设把任务状态保存在内存中。进程退出时未完成任务会丢失，终态历史最多保留 1024 条。
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = TaskExecutionService::builder()
-        .completed_history_capacity(128)
-        .build()?;
-    let id = Id::new(42);
-    let handle = service.submit_callable(id, || Ok::<u32, std::io::Error>(7))?;
-    assert_eq!(handle.get()?, 7);
-    assert_eq!(service.status(id), Some(TaskStatus::Succeeded));
-    service.shutdown();
-    service.wait_termination();
+```rust,no_run
+use qubit_task::TaskExecutionService;
+use qubit_task::model::TaskOutput;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let service = TaskExecutionService::in_memory().await?;
+    let id = service.submit_local(|_| Ok(TaskOutput { summary: b"完成".to_vec() })).await?;
+    let record = service.wait(id).await?;
+    assert!(record.state.is_terminal());
+    service.shutdown().await?;
     Ok(())
 }
 ```
 
-服务默认最多保留 1024 个不同任务 ID 的终态。设置 `completed_history_capacity(0)` 可不保留终态。历史记录有界且不是持久化存储：记录被淘汰后，`status(id)` 返回 `None`。任务完成后可以复用任务 ID，新终态会替换旧记录，不会额外占用一个历史名额。`stats().total` 统计当前可见的已接受任务和保留的终态 ID，而不是累计提交次数。`thread_pool_stats()` 提供只读线程池指标快照，不会暴露可提交任务的线程池接口。
+需要重启后恢复任务时，启用 `sqlite` feature，并使用 `TaskExecutionServiceBuilder::recoverable_sqlite(path)`。构建服务前，为每个已保存的 `(task_type, handler_version)` 注册对应处理器。
 
-`wait_for_idle()` 和 `wait_for_current_tasks()` 等待注册表状态转换。它们返回时，结果可能仍在发布到句柄；需要结果时请调用 `TaskHandle::get()` 或等待该句柄。
+可选的生命周期通知使用有界队列，默认容量为 256；队列满时会丢弃新通知，关闭服务时通常会排空已入队通知，发布线程 panic 时队列中剩余通知可能丢失。同步事件总线 provider 可能阻塞专用发布线程，因此 provider 一直不返回时，服务关闭也可能一直等待。更多通知配置和统计说明见[用户指南](doc/user-guide.zh_CN.md)。
 
-## 延伸阅读
+## 项目文档
 
-- [用户指南](docs/user-guide.zh_CN.md)
-- [设计说明](docs/design.zh_CN.md)
-- [API 文档](https://docs.rs/qubit-task)
-- [English user guide](docs/user-guide.md)
+- [用户指南](doc/user-guide.zh_CN.md)
+- [架构概览](doc/design.zh_CN.md)
+- [TaskExecutionService 详细设计](doc/task_execution_service_design.md)
+- [English user guide](doc/user-guide.md)
 
 ## 测试
 
@@ -76,7 +73,7 @@ Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
 ## 贡献
 
 欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试，并在提交
-Pull Request 前运行 `./align-ci.sh` 格式化代码，运行 `./ci-check.sh` 对齐 CI 要求。
+Pull Request 前运行 `./align-ci.sh` 格式化代码，运行`./ci-check.sh`对齐CI要求。
 
 ## 作者
 
