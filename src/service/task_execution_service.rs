@@ -10,6 +10,7 @@ use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::panic::resume_unwind;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use qubit_executor::service::ExecutorService;
 use qubit_executor::service::ExecutorServiceBuilderError;
@@ -19,7 +20,7 @@ use qubit_executor::task::spi::TaskSlotCell;
 use qubit_function::Callable;
 use qubit_function::Runnable;
 use qubit_id::Id;
-use qubit_thread_pool::PoolJob;
+use qubit_thread_pool::PoolJobTicket;
 use qubit_thread_pool::ThreadPool;
 
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
@@ -259,42 +260,61 @@ impl TaskExecutionService {
         let (handle, slot) = TaskEndpointPair::new().into_parts();
         let slot = Arc::new(TaskSlotCell::new(slot));
         let accept_slot = Arc::clone(&slot);
-        let cancel_slot = Arc::clone(&slot);
-        let cancel: CancelFn = Arc::new(move || cancel_slot.cancel_unstarted());
+        let ticket = Arc::new(OnceLock::new());
+        let cancel_ticket = Arc::clone(&ticket);
+        let cancel: CancelFn = Arc::new(move || cancel_ticket.get().is_some_and(PoolJobTicket::cancel_queued));
         let token = self.state.reserve(task_id, cancel)?;
 
-        let accept_state = Arc::clone(&self.state);
+        let accept_state = Arc::downgrade(&self.state);
         let accept_token = token.clone();
         let run_slot = Arc::clone(&slot);
-        let run_state = Arc::clone(&self.state);
+        let run_state = Arc::downgrade(&self.state);
         let run_token = token.clone();
         let stop_slot = Arc::clone(&slot);
-        let stop_state = Arc::clone(&self.state);
+        let stop_state = Arc::downgrade(&self.state);
         let stop_token = token.clone();
-        let job = PoolJob::with_accept(
+        let (job, job_ticket) = self.pool.prepare_cancellable_job(
             Box::new(move || {
                 accept_slot.accept();
-                let _ = accept_state.accept(task_id, &accept_token);
+                if let Some(state) = accept_state.upgrade() {
+                    let _ = state.accept(task_id, &accept_token);
+                }
             }),
             Box::new(move || {
                 let slot = run_slot.take();
                 if let Some(slot) = slot {
-                    let task = StatusReportingTask {
-                        task_id,
-                        task,
-                        state: run_state,
-                        token: run_token,
-                    };
-                    let _ran = slot.run(task);
+                    if let Some(state) = run_state.upgrade() {
+                        let task = StatusReportingTask {
+                            task_id,
+                            task,
+                            state,
+                            token: run_token,
+                        };
+                        let _ran = slot.run(task);
+                    } else {
+                        let _ran = slot.run(task);
+                    }
                 }
             }),
             Box::new(move || {
-                if stop_slot.cancel_unstarted() {
-                    let _ = stop_state.finish(task_id, &stop_token, TaskStatus::Cancelled);
+                // A user waker can panic after the slot publishes cancellation.
+                // Finish the registry before letting the pool contain that panic.
+                let cancelled = catch_unwind(AssertUnwindSafe(|| stop_slot.cancel_unstarted()));
+                if !matches!(cancelled, Ok(false))
+                    && let Some(state) = stop_state.upgrade()
+                {
+                    let _ = state.finish(task_id, &stop_token, TaskStatus::Cancelled);
+                }
+                if let Err(payload) = cancelled {
+                    resume_unwind(payload);
                 }
             }),
         );
 
+        // The registry exposes cancellation only after accept, which runs
+        // after this ticket is initialized. Weak callback references avoid a
+        // registry -> ticket -> queued job -> registry ownership cycle.
+        ticket.get_or_init(|| job_ticket);
         if let Err(error) = self.pool.submit_job(job) {
             let _ = self.state.discard(task_id, &token);
             return Err(error.into());
@@ -338,15 +358,10 @@ impl TaskExecutionService {
     /// task with this ID can be cancelled.
     #[must_use]
     pub fn cancel(&self, task_id: Id) -> bool {
-        let Some((token, cancel)) = self.state.cancel_candidate(task_id) else {
+        let Some((_token, cancel)) = self.state.cancel_candidate(task_id) else {
             return false;
         };
-        if cancel() {
-            let _ = self.state.finish(task_id, &token, TaskStatus::Cancelled);
-            true
-        } else {
-            false
-        }
+        cancel()
     }
 
     /// Returns the current status of a task.
