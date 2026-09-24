@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
+use super::admission_gate::AdmissionGate;
 #[cfg(feature = "event-bus")]
 use super::task_event_notification_stats::TaskEventNotificationStats;
 #[cfg(feature = "event-bus")]
@@ -116,7 +117,7 @@ pub(crate) struct ServiceCore {
     pub(crate) local_handlers: Mutex<HashMap<TaskId, Arc<dyn TaskHandler>>>,
     pub(crate) cancellations: Mutex<HashMap<TaskId, RunningCancellation>>,
     pub(crate) changed: Notify,
-    pub(crate) accepting: AtomicBool,
+    pub(super) admission: AdmissionGate,
     pub(crate) owner: Option<OwnerEpoch>,
     pub(crate) store_fault: Mutex<Option<String>>,
     #[cfg(feature = "event-bus")]
@@ -171,9 +172,7 @@ impl TaskExecutionService {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
-        if !self.core.accepting.load(Ordering::Acquire) {
-            return Err(TaskServiceError::ShuttingDown);
-        }
+        let _permit = self.core.admission.enter()?;
         let capacity = self.core.engine.capacity().capacity;
         validate_request(&request, &capacity)?;
         if let Some(record) = self.core.store.find_idempotent(request.clone()).await? {
@@ -223,9 +222,7 @@ impl TaskExecutionService {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
-        if !self.core.accepting.load(Ordering::Acquire) {
-            return Err(TaskServiceError::ShuttingDown);
-        }
+        let _permit = self.core.admission.enter()?;
         self.reserve_queue_slot()?;
         let id = TaskId::generate();
         let descriptor = TaskHandlerDescriptor {
@@ -402,6 +399,10 @@ impl TaskExecutionService {
 
     /// Requeues a blocked task after external intervention.
     pub async fn retry_blocked(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+        if let Some(error) = self.last_store_error() {
+            return Err(TaskServiceError::StoreUnavailable(error));
+        }
+        let _permit = self.core.admission.enter()?;
         let record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
         if !matches!(record.state, TaskState::Blocked { .. }) {
             return Err(TaskServiceError::Blocked);
@@ -431,6 +432,9 @@ impl TaskExecutionService {
             let notified = self.core.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if let Some(error) = self.last_store_error() {
+                return Err(TaskServiceError::StoreUnavailable(error));
+            }
             let record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
             if record.state.is_terminal() {
                 return Ok(record);
@@ -444,15 +448,31 @@ impl TaskExecutionService {
 
     /// Stops accepting new work and waits for all accepted work to settle.
     pub async fn shutdown(&self) -> Result<(), TaskServiceError> {
-        self.core.accepting.store(false, Ordering::Release);
-        self.core.changed.notify_waiters();
-        if let Some(error) = self.last_store_error() {
-            return Err(TaskServiceError::StoreUnavailable(error));
+        if self.core.admission.close() {
+            self.core.changed.notify_waiters();
+            let service = self.clone();
+            runtime().spawn(async move {
+                let result = service.coordinate_shutdown().await;
+                service
+                    .core
+                    .admission
+                    .finish_close(result.map_err(|error| error.to_string()));
+                service.core.changed.notify_waiters();
+            });
         }
+        self.core.admission.wait_closed().await
+    }
+
+    /// Drains accepted work and releases ownership after the admission gate is idle.
+    async fn coordinate_shutdown(&self) -> Result<(), TaskServiceError> {
+        self.core.admission.wait_idle().await;
         loop {
             let notified = self.core.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if let Some(error) = self.last_store_error() {
+                return Err(TaskServiceError::StoreUnavailable(error));
+            }
             let stats = self.stats().await?;
             if stats.queued == 0 && stats.running == 0 {
                 break;
@@ -487,7 +507,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
         }
         let mut queue = core.queue.lock().drain(..).collect::<Vec<_>>();
         if queue.is_empty() {
-            if !core.accepting.load(Ordering::Acquire) {
+            if core.admission.is_closed() {
                 return;
             }
             drop(core);
@@ -741,9 +761,17 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -
     Ok(())
 }
 
-fn pause_on_store_fault(core: &ServiceCore, error: StoreError) {
-    *core.store_fault.lock() = Some(error.to_string());
-    core.accepting.store(false, Ordering::Release);
+fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
+    let diagnostic = error.to_string();
+    *core.store_fault.lock() = Some(diagnostic.clone());
+    if core.admission.close() {
+        let core = Arc::clone(core);
+        runtime().spawn(async move {
+            core.admission.wait_idle().await;
+            core.admission.finish_close(Err(diagnostic));
+            core.changed.notify_waiters();
+        });
+    }
     core.changed.notify_waiters();
 }
 
