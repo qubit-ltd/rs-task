@@ -40,28 +40,32 @@ use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
 
 struct ControlledStore {
-    inner: MemoryTaskStore,
+    inner: Arc<MemoryTaskStore>,
     accept_entered: Mutex<Option<oneshot::Sender<()>>>,
-    accept_release: Semaphore,
+    accept_release: Arc<Semaphore>,
+    detached_accept: bool,
     get_entered: Mutex<Option<oneshot::Sender<()>>>,
     get_release: Semaphore,
     recoverable: bool,
     release_count: AtomicUsize,
     fail_next_get: AtomicBool,
+    fail_next_statistics: AtomicBool,
     fail_release: bool,
 }
 
 impl ControlledStore {
     fn new() -> Self {
         Self {
-            inner: MemoryTaskStore::new(16),
+            inner: Arc::new(MemoryTaskStore::new(16)),
             accept_entered: Mutex::new(None),
-            accept_release: Semaphore::new(0),
+            accept_release: Arc::new(Semaphore::new(0)),
+            detached_accept: false,
             get_entered: Mutex::new(None),
             get_release: Semaphore::new(0),
             recoverable: false,
             release_count: AtomicUsize::new(0),
             fail_next_get: AtomicBool::new(false),
+            fail_next_statistics: AtomicBool::new(false),
             fail_release: false,
         }
     }
@@ -77,6 +81,21 @@ impl TaskStore for ControlledStore {
 
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         let signal = self.accept_entered.lock().take();
+        if self.detached_accept {
+            let inner = Arc::clone(&self.inner);
+            let release = Arc::clone(&self.accept_release);
+            let (sender, receiver) = oneshot::channel();
+            tokio::spawn(async move {
+                if let Some(signal) = signal {
+                    let _ = signal.send(());
+                    release.acquire().await.expect("detached accept gate stays open").forget();
+                }
+                let _ = sender.send(inner.accept(id, request).await);
+            });
+            return Box::pin(async move {
+                receiver.await.map_err(|_| StoreError::Failure("detached accept worker stopped".into()))?
+            });
+        }
         Box::pin(async move {
             if let Some(signal) = signal {
                 let _ = signal.send(());
@@ -111,11 +130,19 @@ impl TaskStore for ControlledStore {
     }
 
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
-        self.inner.list(query)
+        if self.fail_next_statistics.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(StoreError::Failure("injected statistics failure".into())) })
+        } else {
+            self.inner.list(query)
+        }
     }
 
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
-        self.inner.count_states()
+        if self.fail_next_statistics.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(StoreError::Failure("injected statistics failure".into())) })
+        } else {
+            self.inner.count_states()
+        }
     }
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
@@ -308,6 +335,47 @@ async fn test_shutdown_continues_after_first_caller_is_cancelled() {
 }
 
 #[tokio::test]
+async fn test_aborted_submission_keeps_permit_until_detached_store_accept_finishes() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        accept_entered: Mutex::new(Some(entered_tx)),
+        detached_accept: true,
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let submitting_service = service.clone();
+    let submission = tokio::spawn(async move {
+        submitting_service
+            .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("detached store worker enters accept")
+        .expect("accept entry signalled");
+    submission.abort();
+    let _ = submission.await.expect_err("submission caller was cancelled");
+
+    let closing_service = service.clone();
+    let mut closing = tokio::spawn(async move { closing_service.shutdown().await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut closing).await.is_err(),
+        "shutdown must wait while the detached store worker can still commit"
+    );
+    store.accept_release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), closing)
+        .await
+        .expect("shutdown finishes after detached accept and scheduling")
+        .expect("shutdown task joins")
+        .expect("shutdown succeeds");
+    assert_eq!(service.stats().await.expect("stats load").terminal, 1);
+}
+
+#[tokio::test]
 async fn test_shutdown_keeps_scheduler_running_for_retry_after_close() {
     let (started_tx, started_rx) = oneshot::channel();
     let (resume_tx, resume_rx) = oneshot::channel();
@@ -466,4 +534,46 @@ async fn test_shutdown_failure_is_shared_with_other_callers() {
     assert!(first.to_string().contains("injected owner release failure"));
     assert_eq!(first.to_string(), second.to_string());
     assert_eq!(store.release_count.load(Ordering::Acquire), 1);
+    assert!(service.last_store_error().is_some(), "owner release failure pauses the service");
+}
+
+#[tokio::test]
+async fn test_shutdown_statistics_failure_wakes_waiter_with_store_diagnostic() {
+    let store = Arc::new(ControlledStore::new());
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let (started_tx, started_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let id = service
+        .submit_local(move |_| {
+            let _ = started_tx.send(());
+            resume_rx.recv().expect("test handler is released");
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("handler starts")
+        .expect("handler start signalled");
+
+    store.fail_next_statistics.store(true, Ordering::Release);
+    let error = tokio::time::timeout(Duration::from_secs(2), service.shutdown())
+        .await
+        .expect("shutdown returns statistics failure")
+        .expect_err("shutdown must fail");
+    assert!(error.to_string().contains("injected statistics failure"));
+    assert!(
+        service.last_store_error().is_some_and(|message| message.contains("injected statistics failure")),
+        "coordinator preserves the storage fault diagnostic"
+    );
+    let error = tokio::time::timeout(Duration::from_secs(2), service.wait(id))
+        .await
+        .expect("wait resolves after coordinator fault")
+        .expect_err("wait reports storage fault");
+    assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected statistics failure")));
+    resume_tx.send(()).expect("blocked handler is released");
 }

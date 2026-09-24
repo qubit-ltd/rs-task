@@ -169,6 +169,12 @@ impl TaskExecutionService {
 
     /// Accepts a reconstructable request and returns its stable task record.
     pub async fn submit(&self, request: TaskRequest) -> Result<TaskRecord, TaskServiceError> {
+        let service = self.clone();
+        await_admission(runtime().spawn(async move { service.submit_admitted(request).await })).await
+    }
+
+    /// Runs an admitted request to completion even if its caller is cancelled.
+    async fn submit_admitted(&self, request: TaskRequest) -> Result<TaskRecord, TaskServiceError> {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
@@ -213,6 +219,15 @@ impl TaskExecutionService {
     /// Submits a process-local closure when the selected store cannot promise
     /// restart recovery.
     pub async fn submit_local<F>(&self, task: F) -> Result<TaskId, TaskServiceError>
+    where
+        F: FnOnce(TaskContext) -> crate::handler::TaskRunResult + Send + 'static,
+    {
+        let service = self.clone();
+        await_admission(runtime().spawn(async move { service.submit_local_admitted(task).await })).await
+    }
+
+    /// Retains a local handler through acceptance and queue publication.
+    async fn submit_local_admitted<F>(&self, task: F) -> Result<TaskId, TaskServiceError>
     where
         F: FnOnce(TaskContext) -> crate::handler::TaskRunResult + Send + 'static,
     {
@@ -399,6 +414,12 @@ impl TaskExecutionService {
 
     /// Requeues a blocked task after external intervention.
     pub async fn retry_blocked(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+        let service = self.clone();
+        await_admission(runtime().spawn(async move { service.retry_blocked_admitted(id).await })).await
+    }
+
+    /// Retains the permit through retry persistence and queue publication.
+    async fn retry_blocked_admitted(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
@@ -473,14 +494,23 @@ impl TaskExecutionService {
             if let Some(error) = self.last_store_error() {
                 return Err(TaskServiceError::StoreUnavailable(error));
             }
-            let stats = self.stats().await?;
+            let stats = match self.stats().await {
+                Ok(stats) => stats,
+                Err(error) => {
+                    record_store_fault(&self.core, error.to_string());
+                    return Err(error);
+                }
+            };
             if stats.queued == 0 && stats.running == 0 {
                 break;
             }
             notified.await;
         }
         if let Some(epoch) = self.core.owner {
-            self.core.store.release_owner(epoch).await?;
+            if let Err(error) = self.core.store.release_owner(epoch).await {
+                record_store_fault(&self.core, error.to_string());
+                return Err(error.into());
+            }
         }
         #[cfg(feature = "event-bus")]
         if let Some(publisher) = &self.core.event_bus {
@@ -762,8 +792,12 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -
 }
 
 fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
-    let diagnostic = error.to_string();
-    *core.store_fault.lock() = Some(diagnostic.clone());
+    record_store_fault(core, error.to_string());
+}
+
+/// Records the first storage failure and closes admission for all waiters.
+fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
+    let diagnostic = core.store_fault.lock().get_or_insert(diagnostic).clone();
     if core.admission.close() {
         let core = Arc::clone(core);
         runtime().spawn(async move {
@@ -773,6 +807,16 @@ fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
         });
     }
     core.changed.notify_waiters();
+}
+
+/// Preserves an admission worker after caller cancellation and reports a
+/// worker failure as an explicit service error.
+async fn await_admission<T>(
+    handle: tokio::task::JoinHandle<Result<T, TaskServiceError>>,
+) -> Result<T, TaskServiceError> {
+    handle.await.map_err(|error| {
+        TaskServiceError::StoreUnavailable(format!("task admission worker stopped: {error}"))
+    })?
 }
 
 fn publish_record(core: &ServiceCore, record: &TaskRecord) {
