@@ -5,23 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Managed task execution services.
-//!
-//! This module contains task-oriented services that assign stable task IDs and
-//! track execution status while delegating actual concurrency to
-//! `qubit-executor` and `qubit-thread-pool`.
+//! Unified task submission, status, scheduling, and lifecycle facade.
 
 mod task_execution_service;
 mod task_execution_service_builder;
-mod task_execution_service_error;
-mod task_execution_service_state;
-mod task_execution_stats;
-mod task_handle;
-mod task_status;
 
+pub use task_execution_service::CancelOutcome;
 pub use task_execution_service::TaskExecutionService;
+pub use task_execution_service::TaskServiceCapabilities;
+pub use task_execution_service::TaskServiceError;
 pub use task_execution_service_builder::TaskExecutionServiceBuilder;
-pub use task_execution_service_error::TaskExecutionServiceError;
-pub use task_execution_stats::TaskExecutionStats;
-pub use task_handle::TaskHandle;
-pub use task_status::TaskStatus;
+pub use task_execution_service_builder::TaskServiceBuildError;

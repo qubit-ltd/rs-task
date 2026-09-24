@@ -5,17 +5,22 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use std::io;
-
-use qubit_id::Id;
-use qubit_task::service::TaskExecutionService;
+use qubit_task::TaskExecutionService;
+use qubit_task::model::TaskOutput;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = TaskExecutionService::new()?;
-    let handle = service.submit_callable(Id::new(42), || Ok::<_, io::Error>(21))?;
-    assert_eq!(handle.get()?, 21);
-    service.wait_for_idle();
-    service.shutdown();
-    service.wait_termination();
-    Ok(())
+    futures::executor::block_on(async {
+        let service = TaskExecutionService::in_memory().await?;
+        let task_id = service
+            .submit_local(|_| {
+                Ok(TaskOutput {
+                    summary: b"completed".to_vec(),
+                })
+            })
+            .await?;
+        let record = service.wait(task_id).await?;
+        assert!(record.state.is_terminal());
+        service.shutdown().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
 }
