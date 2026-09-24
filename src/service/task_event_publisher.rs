@@ -180,8 +180,8 @@ mod tests {
     use qubit_event_bus::model::DestinationAdmission;
     use qubit_event_bus::model::ProviderId;
     use qubit_event_bus::model::PublishAcknowledgement;
-    use qubit_event_bus::model::SubscriberId;
     use qubit_event_bus::model::SubscribeRequest;
+    use qubit_event_bus::model::SubscriberId;
     use qubit_event_bus::model::Topic;
     use qubit_event_bus::spi::DelayedDeliveryCapability;
     use qubit_event_bus::spi::DurabilityCapability;
