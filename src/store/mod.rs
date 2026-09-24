@@ -28,6 +28,7 @@ use crate::model::TaskPage;
 use crate::model::TaskQuery;
 use crate::model::TaskRecord;
 use crate::model::TaskRequest;
+use crate::model::TaskStateCounts;
 use crate::model::TransitionCommand;
 
 /// Sendable boxed future used by object-safe asynchronous component APIs.
@@ -49,6 +50,9 @@ pub trait TaskStore: Send + Sync {
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
     /// Lists a bounded page of task history.
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>>;
+    /// Counts every retained lifecycle state in one store snapshot, including
+    /// terminal records. Returns a storage error if aggregation fails.
+    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>>;
     /// Acquires exclusive ownership before a recoverable service starts.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>>;
     /// Scans one bounded page of unfinished tasks during recovery.

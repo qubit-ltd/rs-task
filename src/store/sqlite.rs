@@ -28,6 +28,7 @@ use crate::model::TaskQuery;
 use crate::model::TaskRecord;
 use crate::model::TaskRequest;
 use crate::model::TaskState;
+use crate::model::TaskStateCounts;
 use crate::model::TransitionCommand;
 
 /// SQLite-backed history with an exclusive OS lock for one active service
@@ -244,6 +245,33 @@ impl TaskStore for SqliteTaskStore {
             }
             let next = has_more.then(|| records.last().map(|record| record.id)).flatten();
             Ok(TaskPage { records, next })
+        })
+    }
+
+    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
+        self.run(|connection| {
+            let mut statement = connection
+                .prepare("SELECT state_kind, COUNT(*) FROM tasks GROUP BY state_kind")
+                .map_err(failure)?;
+            let mut rows = statement.query([]).map_err(failure)?;
+            let mut counts = TaskStateCounts::default();
+            while let Some(row) = rows.next().map_err(failure)? {
+                let kind: String = row.get(0).map_err(failure)?;
+                let count: i64 = row.get(1).map_err(failure)?;
+                let count = usize::try_from(count).map_err(failure)?;
+                match kind.as_str() {
+                    "Queued" => counts.queued = count,
+                    "Running" => counts.running = count,
+                    "Blocked" => counts.blocked = count,
+                    "Succeeded" | "Failed" | "Panicked" | "Cancelled" => {
+                        counts.terminal = counts.terminal.checked_add(count).ok_or_else(|| {
+                            StoreError::Failure("terminal state count exceeds usize".into())
+                        })?;
+                    }
+                    _ => return Err(StoreError::Failure(format!("unknown task state kind: {kind}"))),
+                }
+            }
+            Ok(counts)
         })
     }
 

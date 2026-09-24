@@ -24,6 +24,7 @@ use crate::model::TaskQuery;
 use crate::model::TaskRecord;
 use crate::model::TaskRequest;
 use crate::model::TaskState;
+use crate::model::TaskStateCounts;
 use crate::model::TransitionCommand;
 
 struct MemoryState {
@@ -182,6 +183,24 @@ impl TaskStore for MemoryTaskStore {
             }
             let next = has_more.then(|| records.last().map(|record| record.id)).flatten();
             Ok(TaskPage { records, next })
+        })
+    }
+
+    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
+        Box::pin(async move {
+            let state = self.state.lock();
+            let mut counts = TaskStateCounts::default();
+            for record in state.records.values() {
+                match record.state {
+                    TaskState::Queued => counts.queued += 1,
+                    TaskState::Running => counts.running += 1,
+                    TaskState::Blocked { .. } => counts.blocked += 1,
+                    TaskState::Succeeded | TaskState::Failed { .. } | TaskState::Panicked { .. } | TaskState::Cancelled => {
+                        counts.terminal += 1;
+                    }
+                }
+            }
+            Ok(counts)
         })
     }
 

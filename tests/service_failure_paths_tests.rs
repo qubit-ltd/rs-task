@@ -22,6 +22,7 @@ use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
@@ -70,6 +71,10 @@ impl TaskStore for FailFirstGetStore {
 
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.inner.list(query)
+    }
+
+    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
+        self.inner.count_states()
     }
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
