@@ -68,6 +68,7 @@ struct ControlledStore {
     fail_next_statistics: AtomicBool,
     fail_next_block_transition: AtomicBool,
     fail_next_retry_transition: AtomicBool,
+    fail_next_cancel_transition: AtomicBool,
     block_transition_failed: Mutex<Option<oneshot::Sender<()>>>,
     block_transition_entered: Mutex<Option<oneshot::Sender<()>>>,
     block_transition_release: Arc<Semaphore>,
@@ -96,6 +97,7 @@ impl ControlledStore {
             fail_next_statistics: AtomicBool::new(false),
             fail_next_block_transition: AtomicBool::new(false),
             fail_next_retry_transition: AtomicBool::new(false),
+            fail_next_cancel_transition: AtomicBool::new(false),
             block_transition_failed: Mutex::new(None),
             block_transition_entered: Mutex::new(None),
             block_transition_release: Arc::new(Semaphore::new(0)),
@@ -162,7 +164,11 @@ impl TaskStore for ControlledStore {
     }
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
-        if matches!(command.state, TaskState::Queued) && self.fail_next_retry_transition.swap(false, Ordering::AcqRel) {
+        if matches!(command.state, TaskState::Cancelled) && self.fail_next_cancel_transition.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(StoreError::Failure("injected cancellation transition failure".into())) })
+        } else if matches!(command.state, TaskState::Queued)
+            && self.fail_next_retry_transition.swap(false, Ordering::AcqRel)
+        {
             Box::pin(async { Err(StoreError::Failure("injected retry transition failure".into())) })
         } else if matches!(command.state, TaskState::Blocked { .. })
             && self.fail_next_block_transition.swap(false, Ordering::AcqRel)
@@ -269,7 +275,9 @@ impl TaskStore for ControlledStore {
 
 async fn assert_operational_fault_is_latched(service: &TaskExecutionService, expected: &str) {
     assert!(
-        service.last_store_error().is_some_and(|message| message.contains(expected)),
+        service
+            .last_store_error()
+            .is_some_and(|message| message.contains(expected)),
         "operational store failure remains diagnosable"
     );
     let error = tokio::time::timeout(Duration::from_secs(2), service.wait(TaskId::generate()))
@@ -355,11 +363,110 @@ async fn test_retry_transition_failure_pauses_admission() {
         .submit(TaskRequest::new("missing-handler", "1", Vec::new()))
         .await
         .expect("task accepted");
-    assert!(matches!(service.wait(accepted.id).await, Err(TaskServiceError::Blocked)));
+    assert!(matches!(
+        service.wait(accepted.id).await,
+        Err(TaskServiceError::Blocked)
+    ));
     store.fail_next_retry_transition.store(true, Ordering::Release);
     let error = service.retry_blocked(accepted.id).await.expect_err("retry write fails");
     assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
     assert_operational_fault_is_latched(&service, "injected retry transition failure").await;
+}
+
+#[tokio::test]
+async fn test_public_read_failure_pauses_service() {
+    for operation in ["get", "list", "stats", "wait"] {
+        let store = Arc::new(ControlledStore::new());
+        let service = TaskExecutionServiceBuilder::default()
+            .store(store.clone())
+            .build()
+            .await
+            .expect("service builds");
+        let (error, diagnostic) = match operation {
+            "get" => {
+                store.fail_next_get.store(true, Ordering::Release);
+                (
+                    service.get(TaskId::generate()).await.err().expect("get returns store failure"),
+                    "injected scheduler get failure",
+                )
+            }
+            "list" => {
+                store.fail_next_statistics.store(true, Ordering::Release);
+                (
+                    service.list(TaskQuery::default()).await.err().expect("list returns store failure"),
+                    "injected statistics failure",
+                )
+            }
+            "stats" => {
+                store.fail_next_statistics.store(true, Ordering::Release);
+                (
+                    service.stats().await.err().expect("stats returns store failure"),
+                    "injected statistics failure",
+                )
+            }
+            "wait" => {
+                store.fail_next_get.store(true, Ordering::Release);
+                (
+                    service.wait(TaskId::generate()).await.err().expect("wait returns store failure"),
+                    "injected scheduler get failure",
+                )
+            }
+            _ => unreachable!("all read operations are enumerated"),
+        };
+        assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
+        assert_operational_fault_is_latched(&service, diagnostic).await;
+    }
+}
+
+#[tokio::test]
+async fn test_cancel_failure_on_initial_get_pauses_service() {
+    let store = Arc::new(ControlledStore {
+        fail_next_get: AtomicBool::new(true),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store)
+        .build()
+        .await
+        .expect("service builds");
+    let error = service.cancel(TaskId::generate()).await.expect_err("cancel get fails");
+    assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
+    assert_operational_fault_is_latched(&service, "injected scheduler get failure").await;
+}
+
+#[tokio::test]
+async fn test_cancel_failure_on_transition_pauses_service() {
+    let (get_entered_tx, get_entered_rx) = oneshot::channel();
+    let (block_entered_tx, block_entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        get_entered: Mutex::new(Some(get_entered_tx)),
+        block_transition_entered: Mutex::new(Some(block_entered_tx)),
+        fail_next_cancel_transition: AtomicBool::new(true),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let accepted = service
+        .submit(TaskRequest::new("cancel-fault", "1", Vec::new()))
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), get_entered_rx)
+        .await
+        .expect("scheduler get entered")
+        .expect("scheduler get signalled");
+    let error = service.cancel(accepted.id).await.expect_err("cancel transition fails");
+    assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
+    assert_operational_fault_is_latched(&service, "injected cancellation transition failure").await;
+    store.get_release.add_permits(1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), block_entered_rx)
+            .await
+            .is_err(),
+        "scheduler must not start a blocked transition after a public store failure"
+    );
 }
 
 struct RetryAfterClosingHandler {

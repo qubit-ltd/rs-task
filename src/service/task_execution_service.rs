@@ -193,7 +193,7 @@ impl TaskExecutionService {
             .store
             .find_idempotent(request.clone())
             .await
-            .map_err(|error| self.handle_admission_store_error(error))?
+            .map_err(|error| self.handle_store_error(error))?
         {
             return Ok(record);
         }
@@ -203,7 +203,7 @@ impl TaskExecutionService {
                 .store
                 .find_idempotent(request.clone())
                 .await
-                .map_err(|error| self.handle_admission_store_error(error))?
+                .map_err(|error| self.handle_store_error(error))?
             {
                 return Ok(record);
             }
@@ -214,7 +214,7 @@ impl TaskExecutionService {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.release_queue_slot();
-                return Err(self.handle_admission_store_error(error));
+                return Err(self.handle_store_error(error));
             }
         };
         match outcome {
@@ -322,14 +322,14 @@ impl TaskExecutionService {
             Err(error) => {
                 self.core.local_finalizations.lock().remove(&id);
                 self.release_queue_slot();
-                Err(self.handle_admission_store_error(error))
+                Err(self.handle_store_error(error))
             }
         }
     }
 
-    /// Latches operational admission failures while preserving ordinary store
-    /// conflicts and not-found results for the calling operation.
-    fn handle_admission_store_error(&self, error: StoreError) -> TaskServiceError {
+    /// Latches operational store failures while preserving ordinary conflicts
+    /// and not-found results for the calling operation.
+    fn handle_store_error(&self, error: StoreError) -> TaskServiceError {
         if matches!(error, StoreError::Failure(_)) {
             record_store_fault(&self.core, error.to_string());
         }
@@ -357,12 +357,12 @@ impl TaskExecutionService {
 
     /// Loads the latest lifecycle state of a task.
     pub async fn get(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskServiceError> {
-        Ok(self.core.store.get(id).await?)
+        self.core.store.get(id).await.map_err(|error| self.handle_store_error(error))
     }
 
     /// Returns a bounded page of retained history.
     pub async fn list(&self, query: TaskQuery) -> Result<TaskPage, TaskServiceError> {
-        Ok(self.core.store.list(query).await?)
+        self.core.store.list(query).await.map_err(|error| self.handle_store_error(error))
     }
 
     /// Counts visible task states and reports current resource use.
@@ -372,7 +372,12 @@ impl TaskExecutionService {
             running,
             blocked,
             terminal,
-        } = self.core.store.count_states().await?;
+        } = self
+            .core
+            .store
+            .count_states()
+            .await
+            .map_err(|error| self.handle_store_error(error))?;
         let resources = self.core.engine.capacity();
         Ok(TaskStats {
             queued,
@@ -388,7 +393,13 @@ impl TaskExecutionService {
     /// A running handler decides whether to acknowledge cancellation; a
     /// concurrent terminal transition returns `AlreadyTerminal`.
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
-        let mut record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+        let mut record = self
+            .core
+            .store
+            .get(id)
+            .await
+            .map_err(|error| self.handle_store_error(error))?
+            .ok_or(StoreError::NotFound)?;
         loop {
             if record.state.is_terminal() {
                 return Ok(CancelOutcome::AlreadyTerminal);
@@ -446,7 +457,13 @@ impl TaskExecutionService {
                     });
                 }
                 Err(StoreError::Conflict) => {
-                    let latest = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+                    let latest = self
+                        .core
+                        .store
+                        .get(id)
+                        .await
+                        .map_err(|error| self.handle_store_error(error))?
+                        .ok_or(StoreError::NotFound)?;
                     if latest.state.is_terminal() {
                         return Ok(CancelOutcome::AlreadyTerminal);
                     }
@@ -455,7 +472,7 @@ impl TaskExecutionService {
                     }
                     record = latest;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(self.handle_store_error(error)),
             }
         }
     }
@@ -477,7 +494,7 @@ impl TaskExecutionService {
             .store
             .get(id)
             .await
-            .map_err(|error| self.handle_admission_store_error(error))?
+            .map_err(|error| self.handle_store_error(error))?
             .ok_or(StoreError::NotFound)?;
         if !matches!(record.state, TaskState::Blocked { .. }) {
             return Err(TaskServiceError::Blocked);
@@ -487,7 +504,7 @@ impl TaskExecutionService {
             Ok(updated) => updated,
             Err(error) => {
                 self.core.queue_count.fetch_sub(1, Ordering::AcqRel);
-                return Err(self.handle_admission_store_error(error));
+                return Err(self.handle_store_error(error));
             }
         };
         self.core.queue.lock().push_back(QueuedTask {
@@ -510,7 +527,13 @@ impl TaskExecutionService {
             if let Some(error) = self.last_store_error() {
                 return Err(TaskServiceError::StoreUnavailable(error));
             }
-            let record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+            let record = self
+                .core
+                .store
+                .get(id)
+                .await
+                .map_err(|error| self.handle_store_error(error))?
+                .ok_or(StoreError::NotFound)?;
             if record.state.is_terminal() {
                 return Ok(record);
             }
@@ -549,13 +572,7 @@ impl TaskExecutionService {
             if let Some(error) = self.last_store_error() {
                 return Err(TaskServiceError::StoreUnavailable(error));
             }
-            let stats = match self.stats().await {
-                Ok(stats) => stats,
-                Err(error) => {
-                    record_store_fault(&self.core, error.to_string());
-                    return Err(error);
-                }
-            };
+            let stats = self.stats().await?;
             if stats.queued == 0 && stats.running == 0 {
                 break;
             }
@@ -614,6 +631,9 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
         let mut activated_positions = Vec::new();
         let mut started = false;
         for id in order {
+            if core.store_fault.lock().is_some() {
+                return;
+            }
             let Some(index) = queue.iter().position(|task| task.id == id) else {
                 continue;
             };
@@ -630,6 +650,9 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     return;
                 }
             };
+            if core.store_fault.lock().is_some() {
+                return;
+            }
             if !matches!(record.state, TaskState::Queued) {
                 release_core_queue_slot(&core);
                 core.local_handlers.lock().remove(&id);
@@ -684,6 +707,9 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     break;
                 }
             };
+            if core.store_fault.lock().is_some() {
+                return;
+            }
             let assigned = prepared.assigned_resources().to_vec();
             let running = match transition(&core, &record, TaskState::Running, None, assigned.clone(), false).await {
                 Ok(value) => value,
@@ -699,6 +725,9 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             };
             release_core_queue_slot(&core);
             publish_record(&core, &running);
+            if core.store_fault.lock().is_some() {
+                return;
+            }
             core.local_handlers.lock().remove(&id);
             let cancelled = Arc::new(AtomicBool::new(false));
             let context = TaskContext::new(id, running.attempt, assigned, cancelled);
