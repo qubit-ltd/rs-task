@@ -493,7 +493,9 @@ mod tests {
         assert!(state.accept(Id::new(2), &second));
         assert!(state.finish(Id::new(2), &second, TaskStatus::Succeeded));
 
-        let reused = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
+        let reused = state
+            .reserve(Id::new(2), inert_cancel())
+            .expect("ID should be reusable");
         assert!(state.accept(Id::new(2), &reused));
         assert!(state.finish(Id::new(2), &reused, TaskStatus::Failed));
 
@@ -514,7 +516,9 @@ mod tests {
             assert!(state.finish(Id::new(id), &token, TaskStatus::Succeeded));
         }
 
-        let replacement = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
+        let replacement = state
+            .reserve(Id::new(2), inert_cancel())
+            .expect("ID should be reusable");
         assert!(state.finish(Id::new(2), &replacement, TaskStatus::Failed));
 
         assert_eq!(state.status(Id::new(1)), Some(TaskStatus::Succeeded));
@@ -533,7 +537,9 @@ mod tests {
             assert!(state.accept(Id::new(id), &token));
             assert!(state.finish(Id::new(id), &token, status));
         }
-        let retry = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
+        let retry = state
+            .reserve(Id::new(2), inert_cancel())
+            .expect("ID should be reusable");
         assert_eq!(state.status(Id::new(2)), None);
         assert!(state.discard(Id::new(2), &retry));
         assert_eq!(state.status(Id::new(1)), Some(TaskStatus::Succeeded));
@@ -563,7 +569,9 @@ mod tests {
             assert!(state.accept(Id::new(id), &token));
             assert!(state.finish(Id::new(id), &token, TaskStatus::Succeeded));
         }
-        let retry = state.reserve(Id::new(2), inert_cancel()).expect("ID should be reusable");
+        let retry = state
+            .reserve(Id::new(2), inert_cancel())
+            .expect("ID should be reusable");
 
         for id in 3..=4 {
             let token = state.reserve(Id::new(id), inert_cancel()).expect("ID should be free");
