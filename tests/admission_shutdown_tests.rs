@@ -13,12 +13,20 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::engine::EngineError;
+use qubit_task::engine::ExecutionHandle;
+use qubit_task::engine::LocalTaskExecutionEngine;
+use qubit_task::engine::PreparedExecution;
+use qubit_task::engine::TaskExecutionEngine;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::ResourceCapacity;
+use qubit_task::model::ResourceRequest;
+use qubit_task::model::ResourceSnapshot;
 use qubit_task::model::StoreCapabilities;
 use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
@@ -55,6 +63,8 @@ struct ControlledStore {
     fail_next_statistics: AtomicBool,
     fail_next_block_transition: AtomicBool,
     block_transition_failed: Mutex<Option<oneshot::Sender<()>>>,
+    block_transition_entered: Mutex<Option<oneshot::Sender<()>>>,
+    block_transition_release: Arc<Semaphore>,
     fail_release: bool,
 }
 
@@ -76,6 +86,8 @@ impl ControlledStore {
             fail_next_statistics: AtomicBool::new(false),
             fail_next_block_transition: AtomicBool::new(false),
             block_transition_failed: Mutex::new(None),
+            block_transition_entered: Mutex::new(None),
+            block_transition_release: Arc::new(Semaphore::new(0)),
             fail_release: false,
         }
     }
@@ -120,9 +132,7 @@ impl TaskStore for ControlledStore {
     }
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
-        if matches!(command.state, TaskState::Blocked { .. })
-            && self.fail_next_block_transition.swap(false, Ordering::AcqRel)
-        {
+        if matches!(command.state, TaskState::Blocked { .. }) && self.fail_next_block_transition.swap(false, Ordering::AcqRel) {
             let signal = self.block_transition_failed.lock().take();
             Box::pin(async move {
                 if let Some(signal) = signal {
@@ -130,6 +140,15 @@ impl TaskStore for ControlledStore {
                 }
                 Err(StoreError::Failure("injected blocked transition failure".into()))
             })
+        } else if matches!(command.state, TaskState::Blocked { .. }) {
+            if let Some(signal) = self.block_transition_entered.lock().take() {
+                return Box::pin(async move {
+                    let _ = signal.send(());
+                    self.block_transition_release.acquire().await.expect("block transition gate stays open").forget();
+                    self.inner.transition(command).await
+                });
+            }
+            self.inner.transition(command)
         } else {
             self.inner.transition(command)
         }
@@ -197,6 +216,30 @@ struct RetryAfterClosingHandler {
     attempts: AtomicUsize,
     started: Mutex<Option<oneshot::Sender<()>>>,
     resume: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+struct RejectActivationEngine {
+    inner: LocalTaskExecutionEngine,
+}
+
+impl TaskExecutionEngine for RejectActivationEngine {
+    fn capacity(&self) -> ResourceSnapshot {
+        self.inner.capacity()
+    }
+
+    fn prepare<'a>(&'a self, id: TaskId, request: ResourceRequest) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
+        self.inner.prepare(id, request)
+    }
+
+    fn activate<'a>(
+        &'a self,
+        _prepared: PreparedExecution,
+        _handler: Arc<dyn TaskHandler>,
+        _payload: Vec<u8>,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
+        Box::pin(async { Err(EngineError::Closed) })
+    }
 }
 
 impl TaskHandler for RetryAfterClosingHandler {
@@ -548,6 +591,164 @@ async fn test_failed_post_activation_get_pauses_service() {
         .expect_err("wait reports store fault");
     assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected scheduler get failure")));
     resume_tx.send(()).expect("handler is released");
+}
+
+#[tokio::test]
+async fn test_evicted_cancelled_task_does_not_pause_scheduler() {
+    let (get_entered_tx, get_entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        inner: Arc::new(MemoryTaskStore::new(0)),
+        get_entered: Mutex::new(Some(get_entered_tx)),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let cancelled_id = service
+        .submit_local(|_| panic!("cancelled task must not run"))
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), get_entered_rx)
+        .await
+        .expect("scheduler enters its first get")
+        .expect("scheduler get entry signalled");
+    assert_eq!(
+        service.cancel(cancelled_id).await.expect("queued task cancels"),
+        qubit_task::service::CancelOutcome::CancelledBeforeStart
+    );
+    store.get_release.add_permits(1);
+
+    let (started_tx, started_rx) = oneshot::channel();
+    service
+        .submit_local(move |_| {
+            let _ = started_tx.send(());
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+        .await
+        .expect("service still admits work after terminal record eviction");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("scheduler continues after evicted cancellation")
+        .expect("replacement handler starts");
+    service.shutdown().await.expect("service shuts down normally");
+    assert!(service.last_store_error().is_none());
+}
+
+#[tokio::test]
+async fn test_cancel_racing_blocked_transition_conflict_does_not_pause_service() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        block_transition_entered: Mutex::new(Some(entered_tx)),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let accepted = service
+        .submit(TaskRequest::new("missing-handler", "1", Vec::new()))
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("scheduler begins blocked transition")
+        .expect("blocked transition signalled");
+    assert_eq!(
+        service.cancel(accepted.id).await.expect("queued task cancels"),
+        qubit_task::service::CancelOutcome::CancelledBeforeStart
+    );
+    store.block_transition_release.add_permits(1);
+
+    let (started_tx, started_rx) = oneshot::channel();
+    service
+        .submit_local(move |_| {
+            let _ = started_tx.send(());
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+        .await
+        .expect("service remains open after the normal version conflict");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("scheduler continues after version conflict")
+        .expect("later task starts");
+    assert_eq!(service.wait(accepted.id).await.expect("cancelled record remains").state, TaskState::Cancelled);
+    service.shutdown().await.expect("service shuts down normally");
+    assert!(service.last_store_error().is_none());
+}
+
+#[tokio::test]
+async fn test_activation_failure_retries_blocked_transition_after_cancel_conflict() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        block_transition_entered: Mutex::new(Some(entered_tx)),
+        ..ControlledStore::new()
+    });
+    let engine = Arc::new(RejectActivationEngine {
+        inner: LocalTaskExecutionEngine::new(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        }),
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .engine(engine)
+        .build()
+        .await
+        .expect("service builds");
+    let id = service
+        .submit_local(|_| panic!("activation failure prevents handler execution"))
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("scheduler begins activation-failure block")
+        .expect("blocked transition entry signalled");
+    assert_eq!(
+        service.cancel(id).await.expect("running task cancellation request persists"),
+        qubit_task::service::CancelOutcome::CancellationRequested
+    );
+    store.block_transition_release.add_permits(1);
+
+    let record = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let record = service.get(id).await.expect("record loads").expect("record exists");
+            if matches!(record.state, TaskState::Blocked { .. }) {
+                break record;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("activation failure eventually blocks latest running revision");
+    assert!(record.cancel_requested);
+    assert!(service.last_store_error().is_none());
+    service.shutdown().await.expect("blocked task allows shutdown");
+}
+
+#[tokio::test]
+async fn test_zero_history_fast_handler_completion_keeps_service_healthy() {
+    let service = TaskExecutionServiceBuilder::default()
+        .store(Arc::new(MemoryTaskStore::new(0)))
+        .build()
+        .await
+        .expect("service builds");
+    let (ran_tx, ran_rx) = oneshot::channel();
+    service
+        .submit_local(move |_| {
+            let _ = ran_tx.send(());
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), ran_rx)
+        .await
+        .expect("fast handler runs")
+        .expect("handler run signalled");
+    service.shutdown().await.expect("service shuts down after fast completion");
+    assert!(service.last_store_error().is_none());
 }
 
 #[tokio::test]
