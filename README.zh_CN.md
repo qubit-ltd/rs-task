@@ -38,6 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 需要重启后恢复任务时，启用 `sqlite` feature，并使用 `TaskExecutionServiceBuilder::recoverable_sqlite(path)`。构建服务前，为每个已保存的 `(task_type, handler_version)` 注册对应处理器。
 
+可选的生命周期通知使用有界队列，默认容量为 256；队列满时会丢弃新通知，关闭服务时通常会排空已入队通知，发布线程 panic 时队列中剩余通知可能丢失。同步事件总线 provider 可能阻塞专用发布线程，因此 provider 一直不返回时，服务关闭也可能一直等待。更多通知配置和统计说明见[用户指南](doc/user-guide.zh_CN.md)。
+
 ## 项目文档
 
 - [用户指南](doc/user-guide.zh_CN.md)
