@@ -65,6 +65,8 @@ struct ControlledStore {
     block_transition_failed: Mutex<Option<oneshot::Sender<()>>>,
     block_transition_entered: Mutex<Option<oneshot::Sender<()>>>,
     block_transition_release: Arc<Semaphore>,
+    running_transition_entered: Mutex<Option<oneshot::Sender<()>>>,
+    running_transition_release: Arc<Semaphore>,
     fail_release: bool,
 }
 
@@ -88,6 +90,8 @@ impl ControlledStore {
             block_transition_failed: Mutex::new(None),
             block_transition_entered: Mutex::new(None),
             block_transition_release: Arc::new(Semaphore::new(0)),
+            running_transition_entered: Mutex::new(None),
+            running_transition_release: Arc::new(Semaphore::new(0)),
             fail_release: false,
         }
     }
@@ -145,6 +149,15 @@ impl TaskStore for ControlledStore {
                 return Box::pin(async move {
                     let _ = signal.send(());
                     self.block_transition_release.acquire().await.expect("block transition gate stays open").forget();
+                    self.inner.transition(command).await
+                });
+            }
+            self.inner.transition(command)
+        } else if matches!(command.state, TaskState::Running) {
+            if let Some(signal) = self.running_transition_entered.lock().take() {
+                return Box::pin(async move {
+                    let _ = signal.send(());
+                    self.running_transition_release.acquire().await.expect("running transition gate stays open").forget();
                     self.inner.transition(command).await
                 });
             }
@@ -637,9 +650,10 @@ async fn test_evicted_cancelled_task_does_not_pause_scheduler() {
 }
 
 #[tokio::test]
-async fn test_cancel_racing_blocked_transition_conflict_does_not_pause_service() {
+async fn test_evicted_cancel_racing_blocked_transition_does_not_pause_service() {
     let (entered_tx, entered_rx) = oneshot::channel();
     let store = Arc::new(ControlledStore {
+        inner: Arc::new(MemoryTaskStore::new(0)),
         block_transition_entered: Mutex::new(Some(entered_tx)),
         ..ControlledStore::new()
     });
@@ -674,7 +688,50 @@ async fn test_cancel_racing_blocked_transition_conflict_does_not_pause_service()
         .await
         .expect("scheduler continues after version conflict")
         .expect("later task starts");
-    assert_eq!(service.wait(accepted.id).await.expect("cancelled record remains").state, TaskState::Cancelled);
+    assert!(service.get(accepted.id).await.expect("cancelled task lookup succeeds").is_none());
+    service.shutdown().await.expect("service shuts down normally");
+    assert!(service.last_store_error().is_none());
+}
+
+#[tokio::test]
+async fn test_evicted_cancel_racing_running_transition_does_not_pause_service() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        inner: Arc::new(MemoryTaskStore::new(0)),
+        running_transition_entered: Mutex::new(Some(entered_tx)),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let cancelled_id = service
+        .submit_local(|_| panic!("cancelled task must not run"))
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("scheduler begins Running transition")
+        .expect("Running transition entry signalled");
+    assert_eq!(
+        service.cancel(cancelled_id).await.expect("queued task cancels"),
+        qubit_task::service::CancelOutcome::CancelledBeforeStart
+    );
+    store.running_transition_release.add_permits(1);
+
+    let (started_tx, started_rx) = oneshot::channel();
+    service
+        .submit_local(move |_| {
+            let _ = started_tx.send(());
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+        .await
+        .expect("service remains open after evicted cancellation");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("scheduler executes later task")
+        .expect("later task starts");
     service.shutdown().await.expect("service shuts down normally");
     assert!(service.last_store_error().is_none());
 }

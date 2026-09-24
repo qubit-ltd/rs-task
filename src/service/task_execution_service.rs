@@ -588,7 +588,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 )
                 .await
                 {
-                    Ok(()) | Err(StoreError::Conflict) => {}
+                    Ok(()) | Err(StoreError::Conflict | StoreError::NotFound) => {}
                     Err(error) => {
                         pause_on_store_fault(&core, error);
                         return;
@@ -605,7 +605,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 Err(EngineError::Unsatisfiable) => {
                     release_core_queue_slot(&core);
                     match mark_blocked(&core, &record, "resource request is unsatisfiable".into()).await {
-                        Ok(()) | Err(StoreError::Conflict) => {}
+                        Ok(()) | Err(StoreError::Conflict | StoreError::NotFound) => {}
                         Err(error) => {
                             pause_on_store_fault(&core, error);
                             return;
@@ -621,7 +621,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             let assigned = prepared.assigned_resources().to_vec();
             let running = match transition(&core, &record, TaskState::Running, None, assigned.clone(), false).await {
                 Ok(value) => value,
-                Err(StoreError::Conflict) => {
+                Err(StoreError::Conflict | StoreError::NotFound) => {
                     release_core_queue_slot(&core);
                     continue;
                 }
