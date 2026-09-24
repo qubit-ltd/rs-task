@@ -624,7 +624,7 @@ async fn finish_attempt(
         }
     };
     let output = result.ok();
-    let final_state = if output
+    let mut final_state = if output
         .as_ref()
         .is_some_and(|value| value.summary.len() > crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES)
     {
@@ -638,6 +638,15 @@ async fn finish_attempt(
         state
     };
     let output = output.filter(|value| value.summary.len() <= crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES);
+    let mut retry_slot_reserved = false;
+    if matches!(final_state, TaskState::Queued) {
+        retry_slot_reserved = try_reserve_core_queue_slot(&core);
+        if !retry_slot_reserved {
+            final_state = TaskState::Blocked {
+                reason: "retry queue is full; call retry_blocked when capacity is available".into(),
+            };
+        }
+    }
     match transition(
         &core,
         &latest,
@@ -650,7 +659,6 @@ async fn finish_attempt(
     {
         Ok(updated) => {
             if matches!(final_state, TaskState::Queued) {
-                core.queue_count.fetch_add(1, Ordering::AcqRel);
                 core.queue.lock().push_back(QueuedTask {
                     id: updated.id,
                     request: updated.request.clone(),
@@ -660,8 +668,17 @@ async fn finish_attempt(
             core.changed.notify_waiters();
             publish_record(&core, &updated);
         }
-        Err(StoreError::Conflict) => {}
-        Err(error) => pause_on_store_fault(&core, error),
+        Err(StoreError::Conflict) => {
+            if retry_slot_reserved {
+                release_core_queue_slot(&core);
+            }
+        }
+        Err(error) => {
+            if retry_slot_reserved {
+                release_core_queue_slot(&core);
+            }
+            pause_on_store_fault(&core, error);
+        }
     }
 }
 
@@ -750,6 +767,14 @@ fn release_core_queue_slot(core: &ServiceCore) {
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             Some(count.saturating_sub(1))
         });
+}
+
+fn try_reserve_core_queue_slot(core: &ServiceCore) -> bool {
+    core.queue_count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < core.queue_capacity).then_some(count + 1)
+        })
+        .is_ok()
 }
 
 pub(super) fn runtime() -> &'static tokio::runtime::Runtime {

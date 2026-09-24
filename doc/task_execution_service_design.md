@@ -44,7 +44,7 @@
 
 公开状态为 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked`、`Cancelled`；`Queued` 包含已受理但尚未获资源的任务，`Blocked` 表示需要运维或业务方修复后才能重新入队。受理中的临时状态和终态提交中的内部状态不向业务方承诺。每条 `TaskRecord` 包含 `TaskId`、业务关联、受理/启动/结束时间、尝试次数、当前状态、资源请求及分配结果、失败摘要和单调递增的状态版本。
 
-基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器或达到重试上限时进入 `Blocked`；修复后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；只有处理器实际退出且确认取消才进入 `Cancelled`。已经产生成功或失败的结果不能被迟到的取消请求覆盖。恢复时，上一进程遗留的 `Running` 记录转回 `Queued`，随后由下一次启动将尝试号递增；对外可查询到它在等待重试及其原因。
+基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；只有处理器实际退出且确认取消才进入 `Cancelled`。已经产生成功或失败的结果不能被迟到的取消请求覆盖。恢复时，上一进程遗留的 `Running` 记录转回 `Queued`，随后由下一次启动将尝试号递增；对外可查询到它在等待重试及其原因。
 
 提供按 `TaskId` 查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。当前分页游标按 `TaskId` 排序，不提供受理时间范围过滤。等待中的任务进入 `Blocked` 时，等待接口返回需要干预的结果，不能无限等待。`get` 对不存在或已过期的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储仅限制终态历史数量；SQLite 当前不清理持久历史。持久化后端通过分页查询读取历史，不要求将全量历史载入内存。
 
