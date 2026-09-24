@@ -333,8 +333,14 @@ impl TaskExecutionService {
         }
         if matches!(record.state, TaskState::Queued) {
             let updated = transition(&self.core, &record, TaskState::Cancelled, None, Vec::new(), false).await?;
-            self.core.queue.lock().retain(|task| task.id != id);
-            self.release_queue_slot();
+            {
+                let mut queue = self.core.queue.lock();
+                let previous_len = queue.len();
+                queue.retain(|task| task.id != id);
+                if queue.len() < previous_len {
+                    self.release_queue_slot();
+                }
+            }
             self.core.local_handlers.lock().remove(&id);
             self.core.changed.notify_waiters();
             publish_record(&self.core, &updated);
