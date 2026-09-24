@@ -62,6 +62,7 @@ node_modules/
 .env.production.local
 
 # Project specific exclusions
+.worktrees/
 external/
 .cursor
 .cursor/
