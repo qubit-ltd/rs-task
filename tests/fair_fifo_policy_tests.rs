@@ -101,7 +101,6 @@ fn test_fair_fifo_policy_checks_gpu_labels_and_custom_resources() {
                 ("gpu1".to_owned(), vec!["cuda".to_owned(), "fast".to_owned()]),
             ]),
             custom: BTreeMap::from([("license".to_owned(), 3)]),
-            ..ResourceCapacity::default()
         },
         used_gpus: vec!["gpu0".to_owned()],
         used_custom: BTreeMap::from([("license".to_owned(), 1)]),
