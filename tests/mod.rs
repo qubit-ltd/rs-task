@@ -872,7 +872,7 @@ fn test_memory_store_reports_non_recovery_capabilities() {
 }
 
 #[test]
-fn test_fair_fifo_policy_orders_fit_candidates_and_protects_starved_head() {
+fn test_fair_fifo_policy_orders_fit_candidates_before_unschedulable_head() {
     let make_task = |name: &str, bypasses| QueuedTask {
         id: qubit_task::TaskId::generate(),
         request: TaskRequest::new(name, "1", Vec::new()),
@@ -895,9 +895,9 @@ fn test_fair_fifo_policy_orders_fit_candidates_and_protects_starved_head() {
         ..ResourceSnapshot::default()
     };
     let ordered = policy.order(&snapshot, &resources);
-    assert_eq!(ordered.first(), Some(&head.id));
+    assert_eq!(ordered, vec![head.id]);
     let policy = FairFifoPolicy::new(10);
-    assert_eq!(policy.order(&snapshot, &resources).first(), Some(&small.id));
+    assert_eq!(policy.order(&snapshot, &resources), vec![small.id, head.id]);
 }
 
 #[cfg(feature = "sqlite")]

@@ -58,7 +58,7 @@ fn test_fair_fifo_policy_respects_scan_budget() {
     let within_budget = FairFifoPolicy::new(8).order(&queue(vec![blocked, available.clone()], 2), &resources);
 
     assert_eq!(truncated, vec![blocked_id]);
-    assert_eq!(within_budget, vec![blocked_id, available.id]);
+    assert_eq!(within_budget, vec![available.id, blocked_id]);
 }
 
 #[test]

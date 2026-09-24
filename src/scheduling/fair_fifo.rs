@@ -55,7 +55,13 @@ impl SchedulingPolicy for FairFifoPolicy {
         result.extend(
             candidates
                 .iter()
-                .filter(|task| likely_fits(task, resources) || !can_fit_capacity(task, &resources.capacity))
+                .filter(|task| likely_fits(task, resources))
+                .map(|task| task.id),
+        );
+        result.extend(
+            candidates
+                .iter()
+                .filter(|task| !can_fit_capacity(task, &resources.capacity))
                 .map(|task| task.id),
         );
         result
