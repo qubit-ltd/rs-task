@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskId;
+use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::ResourceSnapshot;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
@@ -61,7 +62,7 @@ async fn test_cancelling_shared_queue_task_releases_one_capacity_slot() {
         .await
         .expect("service builds");
     let a = service
-        .submit_local(|_| Ok(TaskOutput::default()))
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
         .await
         .expect("A accepted");
     assert_eq!(
@@ -71,19 +72,23 @@ async fn test_cancelling_shared_queue_task_releases_one_capacity_slot() {
         vec![a]
     );
     let b = service
-        .submit_local(|_| Ok(TaskOutput::default()))
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
         .await
         .expect("B accepted");
     service
-        .submit_local(|_| Ok(TaskOutput::default()))
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
         .await
         .expect("C accepted");
     assert_eq!(
         service.cancel(b).await.expect("B cancelled"),
         CancelOutcome::CancelledBeforeStart
     );
-    let d = service.submit_local(|_| Ok(TaskOutput::default())).await;
-    let e = service.submit_local(|_| Ok(TaskOutput::default())).await;
+    let d = service
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+        .await;
+    let e = service
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
+        .await;
     release.send(()).expect("release scheduler");
     service.shutdown().await.expect("remaining tasks drain");
     assert!(d.is_ok(), "D uses B's released slot: {d:?}");

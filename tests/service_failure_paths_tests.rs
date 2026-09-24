@@ -11,11 +11,13 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::StoreCapabilities;
 use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
+use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRecord;
@@ -95,7 +97,7 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
     service
         .submit_local(move |_| {
             handler_ran.store(true, Ordering::Release);
-            Ok(Default::default())
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
         })
         .await
         .expect("task is accepted before scheduler reads it");
@@ -112,7 +114,7 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
     .expect("scheduler records the storage failure");
 
     let error = service
-        .submit_local(|_| Ok(Default::default()))
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
         .await
         .expect_err("service rejects submissions after a store failure");
     assert!(matches!(error, TaskServiceError::StoreUnavailable(_)));
@@ -134,7 +136,7 @@ async fn test_recoverable_sqlite_store_rejects_local_closure_without_accepting_i
         .expect("service builds");
 
     let error = service
-        .submit_local(|_| Ok(Default::default()))
+        .submit_local(|_| Ok(TaskRunOutcome::Succeeded(TaskOutput::default())))
         .await
         .expect_err("recoverable stores cannot retain process-local closures");
     assert!(matches!(error, TaskServiceError::UnsupportedCapability));

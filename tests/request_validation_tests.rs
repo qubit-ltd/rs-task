@@ -12,12 +12,12 @@ use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
+use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::MAX_TASK_PAYLOAD_BYTES;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
-use qubit_task::model::TaskRunError;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::TaskFuture;
 
@@ -35,8 +35,8 @@ impl TaskHandler for ValidationHandler {
         &'a self,
         _payload: &'a [u8],
         _context: TaskContext,
-    ) -> TaskFuture<'a, Result<TaskOutput, TaskRunError>> {
-        Box::pin(async { Ok(TaskOutput::default()) })
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
 
