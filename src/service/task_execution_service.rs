@@ -5,662 +5,784 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
-use std::panic::AssertUnwindSafe;
-use std::panic::catch_unwind;
-use std::panic::resume_unwind;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
-use qubit_executor::service::ExecutorService;
-use qubit_executor::service::ExecutorServiceBuilderError;
-use qubit_executor::service::StopReport;
-use qubit_executor::task::spi::TaskEndpointPair;
-use qubit_executor::task::spi::TaskSlotCell;
-use qubit_function::Callable;
-use qubit_function::Runnable;
-use qubit_id::Id;
-use qubit_thread_pool::PoolJobTicket;
-use qubit_thread_pool::ThreadPool;
-use qubit_thread_pool::ThreadPoolStats;
+use parking_lot::Mutex;
+use tokio::sync::Notify;
 
+#[cfg(feature = "event-bus")]
+use super::task_event_notification_stats::TaskEventNotificationStats;
+#[cfg(feature = "event-bus")]
+use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
-use super::task_execution_service_error::TaskExecutionServiceError;
-use super::task_execution_service_state::CancelFn;
-use super::task_execution_service_state::SubmissionToken;
-use super::task_execution_service_state::TaskExecutionServiceState;
-use super::task_execution_stats::TaskExecutionStats;
-use super::task_handle::TaskHandle;
-use super::task_status::TaskStatus;
+use crate::engine::EngineError;
+use crate::engine::TaskExecutionEngine;
+use crate::handler::LocalTaskHandler;
+use crate::handler::TaskContext;
+use crate::handler::TaskHandler;
+use crate::handler::TaskHandlerDescriptor;
+use crate::handler::TaskHandlerRegistry;
+use crate::model::AcceptOutcome;
+use crate::model::OwnerEpoch;
+use crate::model::ResourceCapacity;
+use crate::model::StoreCapabilities;
+use crate::model::TaskId;
+use crate::model::TaskPage;
+use crate::model::TaskQuery;
+use crate::model::TaskRecord;
+use crate::model::TaskRequest;
+use crate::model::TaskState;
+use crate::model::TaskStats;
+use crate::model::TransitionCommand;
+use crate::scheduling::QueueSnapshot;
+use crate::scheduling::QueuedTask;
+use crate::scheduling::SchedulingPolicy;
+use crate::store::StoreError;
+use crate::store::TaskStore;
 
-/// Managed task execution service built on [`ThreadPool`].
-///
-/// Accepts a caller-provided business [`Id`] per task and tracks
-/// service-level status (submitted, running, succeeded, failed, cancelled,
-/// panicked). The typed task outcome is still retrieved through [`TaskHandle`].
-///
-/// # Responsibilities
-///
-/// - **Registry**: The same [`Id`] cannot be submitted again while its task is
-///   active or being submitted; a duplicate returns
-///   [`TaskExecutionServiceError::DuplicateTask`]. Use this when you need
-///   lookup by ID or optional pre-start cancellation. Terminal statuses are
-///   retained only up to the builder's history capacity (1024 by default). A
-///   terminal ID can be reused; a new submission replaces its old status.
-/// - **Thread pool**: Owns a [`ThreadPool`] for queuing and worker threads;
-///   queue internals are not exposed. Configure the pool via
-///   [`TaskExecutionServiceBuilder`] or [`Self::builder`].
-/// - **Submission semantics**: [`Self::submit`] / [`Self::submit_callable`]
-///   returning `Ok(handle)` means only that the **service accepted** the
-///   task—not that it started or succeeded. Observe the final result with
-///   [`TaskHandle::get`] or by awaiting the handle’s
-///   [`Future`](std::future::Future) implementation.
-///
-/// # Suspend
-///
-/// [`Self::suspend`] rejects **new** submissions
-/// ([`TaskExecutionServiceError::Suspended`]). Tasks already queued or running
-/// are unaffected. [`Self::resume`] re-enables submission.
-///
-/// # Cancel
-///
-/// [`Self::cancel`] may succeed only before a worker claims the queued job.
-/// After the claim, cancellation returns `false`, even if the callable has not
-/// started yet.
-///
-/// # Shutdown
-///
-/// [`Self::shutdown`] and [`Self::stop`] delegate to the backing pool.
-/// [`Self::wait_termination`] blocks the current thread until all accepted work
-/// has completed, failed, panicked, or been cancelled.
-///
-/// # Example: submit, inspect status, wait for idle, shutdown
-///
-/// ```
-/// use std::error::Error;
-/// use qubit_id::Id;
-/// use qubit_task::service::{TaskExecutionService, TaskStatus};
-///
-/// fn main() -> Result<(), Box<dyn Error>> {
-///     let service = TaskExecutionService::new()?;
-///     let id: Id = Id::new(1001);
-///
-///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
-///     handle.get().unwrap();
-///
-///     assert_eq!(service.status(id), Some(TaskStatus::Succeeded));
-///
-///     service.wait_for_idle();
-///     service.shutdown();
-///     Ok(())
-/// }
-/// ```
-#[must_use = "a task execution service must be retained to submit and observe tasks"]
+/// Effective store capabilities and local-closure support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskServiceCapabilities {
+    /// Capabilities declared by the selected store.
+    pub store: StoreCapabilities,
+    /// Whether local in-process handlers can be submitted.
+    pub submit_local: bool,
+}
+
+/// Failure reported by a service operation.
+#[derive(Debug, thiserror::Error)]
+pub enum TaskServiceError {
+    /// The selected store failed an operation.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// The configured queue has no remaining waiting capacity.
+    #[error("task queue is full")]
+    QueueFull,
+    /// The request exceeds available configured capacity.
+    #[error("task request cannot be satisfied by configured resources")]
+    Unsatisfiable,
+    /// The request contains invalid metadata or an oversized payload.
+    #[error("invalid task request: {0}")]
+    InvalidRequest(String),
+    /// The requested task is blocked pending intervention.
+    #[error("task is blocked and requires intervention")]
+    Blocked,
+    /// New task submissions have been stopped.
+    #[error("task execution service is shutting down")]
+    ShuttingDown,
+    /// A persistence failure suspended task acceptance and scheduling.
+    #[error("task execution service is paused after a task store failure: {0}")]
+    StoreUnavailable(String),
+    /// No handler matches the submitted type and exact version.
+    #[error("no handler registered for `{task_type}` version `{version}`")]
+    MissingHandler {
+        /// Task type requested by the submitted record.
+        task_type: String,
+        /// Exact version requested by the submitted record.
+        version: String,
+    },
+    /// Reconstructable storage cannot accept a local closure.
+    #[error("local closure submission is unavailable with a restart-recoverable store")]
+    UnsupportedCapability,
+}
+
+/// Outcome of a cancellation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// The task was cancelled while it was queued.
+    CancelledBeforeStart,
+    /// Cooperative cancellation was signalled to a running handler.
+    CancellationRequested,
+    /// The task had already reached a terminal state.
+    AlreadyTerminal,
+}
+
+pub(crate) struct ServiceCore {
+    pub(crate) store: Arc<dyn TaskStore>,
+    pub(crate) engine: Arc<dyn TaskExecutionEngine>,
+    pub(crate) policy: Arc<dyn SchedulingPolicy>,
+    pub(crate) handlers: TaskHandlerRegistry,
+    pub(crate) queue_capacity: usize,
+    pub(crate) scan_budget: usize,
+    pub(crate) max_attempts: u32,
+    pub(crate) queue: Mutex<VecDeque<QueuedTask>>,
+    pub(crate) queue_count: AtomicUsize,
+    pub(crate) local_handlers: Mutex<HashMap<TaskId, Arc<dyn TaskHandler>>>,
+    pub(crate) cancellations: Mutex<HashMap<TaskId, Arc<AtomicBool>>>,
+    pub(crate) changed: Notify,
+    pub(crate) accepting: AtomicBool,
+    pub(crate) owner: Option<OwnerEpoch>,
+    pub(crate) store_fault: Mutex<Option<String>>,
+    #[cfg(feature = "event-bus")]
+    pub(super) event_bus: Option<TaskEventPublisher>,
+}
+
+/// Single service facade over volatile or restart-recoverable components.
+#[derive(Clone)]
 pub struct TaskExecutionService {
-    /// Backing pool that accepts and runs submitted tasks.
-    pool: ThreadPool,
-    /// Registry containing task lifecycle state and bounded terminal history.
-    state: Arc<TaskExecutionServiceState>,
+    pub(crate) core: Arc<ServiceCore>,
 }
 
 impl TaskExecutionService {
-    /// Creates a service using the default
-    /// [`qubit_thread_pool::ThreadPoolBuilder`] settings (worker counts,
-    /// queue, and other defaults match [`ThreadPool::builder`]).
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
-    ///     let _service = TaskExecutionService::new()?;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Self)` on success, or [`ExecutorServiceBuilderError`] if the pool
-    /// cannot be built.
-    pub fn new() -> Result<Self, ExecutorServiceBuilderError> {
-        Self::builder().build()
+    /// Builds an explicitly volatile, single-process service.
+    pub async fn in_memory() -> Result<Self, super::task_execution_service_builder::TaskServiceBuildError> {
+        TaskExecutionServiceBuilder::in_memory().build().await
     }
 
-    /// Returns a [`TaskExecutionServiceBuilder`] so you can tune the backing
-    /// pool before [`TaskExecutionServiceBuilder::build`] (for example
-    /// [`qubit_thread_pool::ThreadPoolBuilder::pool_size`],
-    /// [`qubit_thread_pool::ThreadPoolBuilder::queue_capacity`]).
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
-    /// use qubit_thread_pool::ThreadPoolBuilder;
-    ///
-    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
-    ///     let _service = TaskExecutionService::builder()
-    ///         .thread_pool(ThreadPoolBuilder::default().pool_size(8))
-    ///         .build()?;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Returns
-    ///
-    /// A builder holding the default [`qubit_thread_pool::ThreadPoolBuilder`].
+    /// Reports the selected store's history and recovery guarantees.
     #[must_use]
-    #[inline]
-    pub fn builder() -> TaskExecutionServiceBuilder {
-        TaskExecutionServiceBuilder::default()
-    }
-
-    /// Builds a service from an already constructed pool and history policy.
-    ///
-    /// The pool is assumed to be configured by the caller; this constructor
-    /// only creates the service registry around it.
-    ///
-    /// # Parameters
-    ///
-    /// * `pool` - Already configured pool owned by the new service.
-    /// * `history_capacity` - Maximum number of terminal statuses to retain.
-    ///
-    /// # Returns
-    ///
-    /// A service using the supplied pool and history policy.
-    pub(crate) fn from_thread_pool(pool: ThreadPool, history_capacity: usize) -> Self {
-        Self {
-            pool,
-            state: Arc::new(TaskExecutionServiceState::new(history_capacity)),
+    pub fn capabilities(&self) -> TaskServiceCapabilities {
+        let store = self.core.store.capabilities();
+        TaskServiceCapabilities {
+            store,
+            submit_local: !store.restart_recovery,
         }
     }
 
-    /// Submits a runnable task with a business task ID.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::error::Error;
-    /// use qubit_id::Id;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), Box<dyn Error>> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let handle = service.submit(Id::new(42), || Ok::<(), ()>(()))?;
-    ///     handle.get().unwrap();
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Parameters
-    ///
-    /// * `task_id` - Caller-provided business ID, unique among active tasks.
-    /// * `task` - Runnable to execute.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Runnable task type.
-    /// * `E` - Error type returned by the runnable.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(handle)` if the service accepts the task. This only means
-    /// acceptance; task success is observed through the handle. Returns
-    /// [`TaskExecutionServiceError`] when the ID is duplicated, the service is
-    /// suspended, or the backing pool rejects the task.
-    #[inline]
-    pub fn submit<T, E>(&self, task_id: Id, mut task: T) -> Result<TaskHandle<(), E>, TaskExecutionServiceError>
-    where
-        T: Runnable<E> + Send + 'static,
-        E: Send + 'static,
-    {
-        self.submit_callable(task_id, move || task.run())
+    /// Returns the diagnostic that suspended storage-dependent progress, if
+    /// any.
+    #[must_use]
+    pub fn last_store_error(&self) -> Option<String> {
+        self.core.store_fault.lock().clone()
     }
 
-    /// Submits a callable task with a business task ID.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::error::Error;
-    /// use qubit_id::Id;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), Box<dyn Error>> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let id: Id = Id::new(7);
-    ///     let handle = service.submit_callable(id, || Ok::<i32, ()>(21))?;
-    ///     assert_eq!(handle.get().unwrap(), 21);
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Parameters
-    ///
-    /// * `task_id` - Caller-provided business ID, unique among active tasks.
-    /// * `task` - Callable to execute.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(handle)` if the service accepts the task. The handle reports the
-    /// typed task result while this service records only service-level status.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `C` - Callable task type.
-    /// * `R` - Successful result type.
-    /// * `E` - Error type returned by the callable.
-    pub fn submit_callable<C, R, E>(&self, task_id: Id, task: C) -> Result<TaskHandle<R, E>, TaskExecutionServiceError>
-    where
-        C: Callable<R, E> + Send + 'static,
-        R: Send + 'static,
-        E: Send + 'static,
-    {
-        let (handle, slot) = TaskEndpointPair::new().into_parts();
-        let slot = Arc::new(TaskSlotCell::new(slot));
-        let accept_slot = Arc::clone(&slot);
-        let ticket = Arc::new(OnceLock::new());
-        let cancel_ticket = Arc::clone(&ticket);
-        let cancel: CancelFn = Arc::new(move || cancel_ticket.get().is_some_and(PoolJobTicket::cancel_queued));
-        let token = self.state.reserve(task_id, cancel)?;
+    /// Returns lifecycle notification admission counters when a bus is
+    /// configured.
+    #[cfg(feature = "event-bus")]
+    #[must_use]
+    pub fn notification_stats(&self) -> Option<TaskEventNotificationStats> {
+        self.core.event_bus.as_ref().map(TaskEventPublisher::stats)
+    }
 
-        let accept_state = Arc::downgrade(&self.state);
-        let accept_token = token.clone();
-        let run_slot = Arc::clone(&slot);
-        let run_state = Arc::downgrade(&self.state);
-        let run_token = token.clone();
-        let stop_slot = Arc::clone(&slot);
-        let stop_state = Arc::downgrade(&self.state);
-        let stop_token = token.clone();
-        let (job, job_ticket) = self.pool.prepare_cancellable_job(
-            Box::new(move || {
-                accept_slot.accept();
-                if let Some(state) = accept_state.upgrade() {
-                    let _ = state.accept(task_id, &accept_token);
+    /// Accepts a reconstructable request and returns its stable task record.
+    pub async fn submit(&self, request: TaskRequest) -> Result<TaskRecord, TaskServiceError> {
+        if let Some(error) = self.last_store_error() {
+            return Err(TaskServiceError::StoreUnavailable(error));
+        }
+        if !self.core.accepting.load(Ordering::Acquire) {
+            return Err(TaskServiceError::ShuttingDown);
+        }
+        let capacity = self.core.engine.capacity().capacity;
+        validate_request(&request, &capacity)?;
+        if let Some(record) = self.core.store.find_idempotent(request.clone()).await? {
+            return Ok(record);
+        }
+        if self.core.queue_count.load(Ordering::Acquire) >= self.core.queue_capacity {
+            if let Some(record) = self.core.store.find_idempotent(request.clone()).await? {
+                return Ok(record);
+            }
+            return Err(TaskServiceError::QueueFull);
+        }
+        self.reserve_queue_slot()?;
+        let outcome = match self.core.store.accept(TaskId::generate(), request.clone()).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.release_queue_slot();
+                return Err(error.into());
+            }
+        };
+        match outcome {
+            AcceptOutcome::Accepted(record) => {
+                self.core.queue.lock().push_back(QueuedTask {
+                    id: record.id,
+                    request,
+                    bypasses: 0,
+                });
+                self.core.changed.notify_one();
+                publish_record(&self.core, &record);
+                Ok(record)
+            }
+            AcceptOutcome::Existing(record) => {
+                self.release_queue_slot();
+                Ok(record)
+            }
+        }
+    }
+
+    /// Submits a process-local closure when the selected store cannot promise
+    /// restart recovery.
+    pub async fn submit_local<F>(&self, task: F) -> Result<TaskId, TaskServiceError>
+    where
+        F: FnOnce(TaskContext) -> crate::handler::TaskRunResult + Send + 'static,
+    {
+        if self.core.store.capabilities().restart_recovery {
+            return Err(TaskServiceError::UnsupportedCapability);
+        }
+        if let Some(error) = self.last_store_error() {
+            return Err(TaskServiceError::StoreUnavailable(error));
+        }
+        if !self.core.accepting.load(Ordering::Acquire) {
+            return Err(TaskServiceError::ShuttingDown);
+        }
+        self.reserve_queue_slot()?;
+        let id = TaskId::generate();
+        let descriptor = TaskHandlerDescriptor {
+            task_type: format!("local:{id}"),
+            version: "1".into(),
+        };
+        let handler: Arc<dyn TaskHandler> = Arc::new(LocalTaskHandler::new(descriptor.clone(), task));
+        let request = TaskRequest {
+            task_type: descriptor.task_type,
+            handler_version: descriptor.version,
+            payload: Vec::new(),
+            resources: crate::model::ResourceRequest {
+                cpu_slots: 1,
+                ..Default::default()
+            },
+            correlation_key: None,
+            idempotency_key: None,
+            metadata: Default::default(),
+        };
+        match self.core.store.accept(id, request.clone()).await {
+            Ok(AcceptOutcome::Accepted(record)) => {
+                self.core.local_handlers.lock().insert(id, handler);
+                self.core.queue.lock().push_back(QueuedTask {
+                    id,
+                    request,
+                    bypasses: 0,
+                });
+                self.core.changed.notify_one();
+                publish_record(&self.core, &record);
+                Ok(record.id)
+            }
+            Ok(AcceptOutcome::Existing(record)) => {
+                self.release_queue_slot();
+                Ok(record.id)
+            }
+            Err(error) => {
+                self.release_queue_slot();
+                Err(error.into())
+            }
+        }
+    }
+
+    fn reserve_queue_slot(&self) -> Result<(), TaskServiceError> {
+        self.core
+            .queue_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < self.core.queue_capacity).then_some(count + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| TaskServiceError::QueueFull)
+    }
+
+    fn release_queue_slot(&self) {
+        let _ = self
+            .core
+            .queue_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                Some(count.saturating_sub(1))
+            });
+    }
+
+    /// Loads the latest lifecycle state of a task.
+    pub async fn get(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskServiceError> {
+        Ok(self.core.store.get(id).await?)
+    }
+
+    /// Returns a bounded page of retained history.
+    pub async fn list(&self, query: TaskQuery) -> Result<TaskPage, TaskServiceError> {
+        Ok(self.core.store.list(query).await?)
+    }
+
+    /// Counts visible task states and reports current resource use.
+    pub async fn stats(&self) -> Result<TaskStats, TaskServiceError> {
+        let mut stats = TaskStats {
+            resources: self.core.engine.capacity(),
+            ..TaskStats::default()
+        };
+        let mut after = None;
+        loop {
+            let page = self
+                .core
+                .store
+                .list(TaskQuery {
+                    limit: 512,
+                    after,
+                    ..TaskQuery::default()
+                })
+                .await?;
+            for record in page.records {
+                match record.state {
+                    TaskState::Queued => stats.queued += 1,
+                    TaskState::Running => stats.running += 1,
+                    TaskState::Blocked { .. } => stats.blocked += 1,
+                    state if state.is_terminal() => stats.terminal += 1,
+                    _ => {}
                 }
-            }),
-            Box::new(move || {
-                let slot = run_slot.take();
-                if let Some(slot) = slot {
-                    if let Some(state) = run_state.upgrade() {
-                        let task = StatusReportingTask {
-                            task_id,
-                            task,
-                            state,
-                            token: run_token,
-                        };
-                        let _ran = slot.run(task);
-                    } else {
-                        let _ran = slot.run(task);
+            }
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        Ok(stats)
+    }
+
+    /// Cancels queued work or signals cooperative cancellation for a running
+    /// task.
+    pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
+        let record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+        if record.state.is_terminal() {
+            return Ok(CancelOutcome::AlreadyTerminal);
+        }
+        if matches!(record.state, TaskState::Queued) {
+            let updated = transition(&self.core, &record, TaskState::Cancelled, None, Vec::new(), false).await?;
+            {
+                let mut queue = self.core.queue.lock();
+                let previous_len = queue.len();
+                queue.retain(|task| task.id != id);
+                if queue.len() < previous_len {
+                    self.release_queue_slot();
+                }
+            }
+            self.core.local_handlers.lock().remove(&id);
+            self.core.changed.notify_waiters();
+            publish_record(&self.core, &updated);
+            return Ok(CancelOutcome::CancelledBeforeStart);
+        }
+        if let Some(signal) = self.core.cancellations.lock().get(&id) {
+            signal.store(true, Ordering::Release);
+        }
+        let updated = transition(
+            &self.core,
+            &record,
+            TaskState::Running,
+            None,
+            record.assigned_resources.clone(),
+            true,
+        )
+        .await?;
+        publish_record(&self.core, &updated);
+        Ok(CancelOutcome::CancellationRequested)
+    }
+
+    /// Requeues a blocked task after external intervention.
+    pub async fn retry_blocked(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+        let record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+        if !matches!(record.state, TaskState::Blocked { .. }) {
+            return Err(TaskServiceError::Blocked);
+        }
+        self.reserve_queue_slot()?;
+        let updated = match transition(&self.core, &record, TaskState::Queued, None, Vec::new(), false).await {
+            Ok(updated) => updated,
+            Err(error) => {
+                self.core.queue_count.fetch_sub(1, Ordering::AcqRel);
+                return Err(error.into());
+            }
+        };
+        self.core.queue.lock().push_back(QueuedTask {
+            id,
+            request: updated.request.clone(),
+            bypasses: 0,
+        });
+        self.core.changed.notify_one();
+        publish_record(&self.core, &updated);
+        Ok(updated)
+    }
+
+    /// Resolves when the task becomes terminal; returns an error if it becomes
+    /// blocked.
+    pub async fn wait(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+        loop {
+            let notified = self.core.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let record = self.core.store.get(id).await?.ok_or(StoreError::NotFound)?;
+            if record.state.is_terminal() {
+                return Ok(record);
+            }
+            if matches!(record.state, TaskState::Blocked { .. }) {
+                return Err(TaskServiceError::Blocked);
+            }
+            notified.await;
+        }
+    }
+
+    /// Stops accepting new work and waits for all accepted work to settle.
+    pub async fn shutdown(&self) -> Result<(), TaskServiceError> {
+        self.core.accepting.store(false, Ordering::Release);
+        self.core.changed.notify_waiters();
+        if let Some(error) = self.last_store_error() {
+            return Err(TaskServiceError::StoreUnavailable(error));
+        }
+        loop {
+            let notified = self.core.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let stats = self.stats().await?;
+            if stats.queued == 0 && stats.running == 0 {
+                break;
+            }
+            notified.await;
+        }
+        if let Some(epoch) = self.core.owner {
+            self.core.store.release_owner(epoch).await?;
+        }
+        #[cfg(feature = "event-bus")]
+        if let Some(publisher) = &self.core.event_bus {
+            publisher.close().await;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn start(core: ServiceCore) -> Self {
+        let service = Self { core: Arc::new(core) };
+        let weak = Arc::downgrade(&service.core);
+        runtime().spawn(scheduler_loop(weak));
+        service
+    }
+}
+
+async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
+    loop {
+        let Some(core) = core_ref.upgrade() else {
+            return;
+        };
+        if core.store_fault.lock().is_some() {
+            return;
+        }
+        let mut queue = core.queue.lock().drain(..).collect::<Vec<_>>();
+        if queue.is_empty() {
+            if !core.accepting.load(Ordering::Acquire) {
+                return;
+            }
+            drop(core);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+        let order = core.policy.order(
+            &QueueSnapshot {
+                tasks: queue.clone(),
+                scan_budget: core.scan_budget,
+            },
+            &core.engine.capacity(),
+        );
+        let mut started = false;
+        for id in order {
+            let Some(index) = queue.iter().position(|task| task.id == id) else {
+                continue;
+            };
+            let task = queue.remove(index);
+            let record = match core.store.get(id).await {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    release_core_queue_slot(&core);
+                    continue;
+                }
+                Err(error) => {
+                    pause_on_store_fault(&core, error);
+                    return;
+                }
+            };
+            if !matches!(record.state, TaskState::Queued) {
+                release_core_queue_slot(&core);
+                continue;
+            }
+            let handler = core.local_handlers.lock().get(&id).cloned().or_else(|| {
+                core.handlers
+                    .resolve(&task.request.task_type, &task.request.handler_version)
+            });
+            let Some(handler) = handler else {
+                release_core_queue_slot(&core);
+                let _ = mark_blocked(
+                    &core,
+                    &record,
+                    format!(
+                        "missing handler {}@{}",
+                        task.request.task_type, task.request.handler_version
+                    ),
+                )
+                .await;
+                continue;
+            };
+            let prepared = match core.engine.prepare(id, task.request.resources.clone()).await {
+                Ok(value) => value,
+                Err(EngineError::TemporarilyUnavailable) => {
+                    queue.push(task);
+                    continue;
+                }
+                Err(EngineError::Unsatisfiable) => {
+                    release_core_queue_slot(&core);
+                    let _ = mark_blocked(&core, &record, "resource request is unsatisfiable".into()).await;
+                    continue;
+                }
+                Err(EngineError::Closed) => {
+                    queue.push(task);
+                    break;
+                }
+            };
+            let assigned = prepared.assigned_resources().to_vec();
+            let running = match transition(&core, &record, TaskState::Running, None, assigned.clone(), false).await {
+                Ok(value) => value,
+                Err(StoreError::Conflict) => {
+                    release_core_queue_slot(&core);
+                    continue;
+                }
+                Err(error) => {
+                    release_core_queue_slot(&core);
+                    pause_on_store_fault(&core, error);
+                    return;
+                }
+            };
+            release_core_queue_slot(&core);
+            publish_record(&core, &running);
+            core.local_handlers.lock().remove(&id);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let context = TaskContext::new(id, running.attempt, assigned, cancelled);
+            match core
+                .engine
+                .activate(prepared, handler, task.request.payload.clone(), context)
+                .await
+            {
+                Ok(handle) => {
+                    core.cancellations.lock().insert(id, handle.cancelled.clone());
+                    if core
+                        .store
+                        .get(id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|record| record.cancel_requested)
+                    {
+                        handle.cancelled.store(true, Ordering::Release);
+                    }
+                    let weak = Arc::downgrade(&core);
+                    runtime().spawn(finish_attempt(weak, running, handle.receiver));
+                    started = true;
+                }
+                Err(error) => {
+                    if let Err(store_error) =
+                        mark_blocked(&core, &running, format!("engine activation failed: {error}")).await
+                    {
+                        pause_on_store_fault(&core, store_error);
+                        return;
                     }
                 }
-            }),
-            Box::new(move || {
-                // A user waker can panic after the slot publishes cancellation.
-                // Finish the registry before letting the pool contain that panic.
-                let cancelled = catch_unwind(AssertUnwindSafe(|| stop_slot.cancel_unstarted()));
-                if !matches!(cancelled, Ok(false))
-                    && let Some(state) = stop_state.upgrade()
-                {
-                    let _ = state.finish(task_id, &stop_token, TaskStatus::Cancelled);
-                }
-                if let Err(payload) = cancelled {
-                    resume_unwind(payload);
-                }
-            }),
-        );
-
-        // The registry exposes cancellation only after accept, which runs
-        // after this ticket is initialized. Weak callback references avoid a
-        // registry -> ticket -> queued job -> registry ownership cycle.
-        ticket.get_or_init(|| job_ticket);
-        if let Err(error) = self.pool.submit_job(job) {
-            let _ = self.state.discard(task_id, &token);
-            return Err(error.into());
+            }
         }
-        Ok(TaskHandle::new(task_id, handle))
-    }
-
-    /// Attempts to cancel a submitted task by ID.
-    ///
-    /// Cancellation succeeds only before a worker claims the queued job.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::error::Error;
-    /// use qubit_id::Id;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), Box<dyn Error>> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let id: Id = Id::new(1);
-    ///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
-    ///     // `true` only before a worker claims the queued job (race with the pool).
-    ///     let _cancelled = service.cancel(id);
-    ///     match handle.get() {
-    ///         Ok(()) => {}
-    ///         Err(e) if e.is_cancelled() => {}
-    ///         Err(e) => panic!("unexpected task outcome: {e:?}"),
-    ///     }
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Parameters
-    ///
-    /// * `task_id` - ID of the task to cancel.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the task was cancelled before a worker claimed it, or `false`
-    /// if no active task with this ID can be cancelled.
-    #[must_use]
-    pub fn cancel(&self, task_id: Id) -> bool {
-        let Some((_token, cancel)) = self.state.cancel_candidate(task_id) else {
-            return false;
-        };
-        cancel()
-    }
-
-    /// Returns the current status of a task.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::error::Error;
-    /// use qubit_id::Id;
-    /// use qubit_task::service::{TaskExecutionService, TaskStatus};
-    ///
-    /// fn main() -> Result<(), Box<dyn Error>> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let id: Id = Id::new(10);
-    ///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
-    ///     handle.get().unwrap();
-    ///     assert_eq!(service.status(id), Some(TaskStatus::Succeeded));
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Parameters
-    ///
-    /// * `task_id` - ID of the task to inspect.
-    ///
-    /// # Returns
-    ///
-    /// `Some(status)` for an accepted active or retained terminal task. Returns
-    /// `None` for an unaccepted reservation, unknown ID, or evicted terminal
-    /// record. A new task with the same ID replaces the old terminal status.
-    /// Cancellation may publish a handle result just before this registry is
-    /// updated; handle and service observations are not an atomic pair.
-    #[must_use]
-    #[inline]
-    pub fn status(&self, task_id: Id) -> Option<TaskStatus> {
-        self.state.status(task_id)
-    }
-
-    /// Returns registry-derived task statistics.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::error::Error;
-    /// use qubit_id::Id;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), Box<dyn Error>> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let handle = service.submit(Id::new(1), || Ok::<(), ()>(()))?;
-    ///     handle.get().unwrap();
-    ///     let snapshot = service.stats();
-    ///     assert!(snapshot.total >= 1);
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Returns
-    ///
-    /// A snapshot of accepted active and retained terminal tasks grouped by
-    /// status. `total` is the sum of these visible records, not a lifetime
-    /// submission counter; unaccepted reservations are excluded.
-    #[inline]
-    pub fn stats(&self) -> TaskExecutionStats {
-        self.state.stats()
-    }
-
-    /// Suspends new submissions.
-    ///
-    /// Existing submitted and running tasks continue normally.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     service.suspend();
-    ///     assert!(service.is_suspended());
-    ///     service.resume();
-    ///     assert!(!service.is_suspended());
-    ///     Ok(())
-    /// }
-    /// ```
-    #[inline]
-    pub fn suspend(&self) {
-        self.state.set_suspended(true);
-    }
-
-    /// Resumes accepting new submissions.
-    #[inline]
-    pub fn resume(&self) {
-        self.state.set_suspended(false);
-    }
-
-    /// Returns whether the service is suspended.
-    ///
-    /// # Returns
-    ///
-    /// `true` if new submissions are rejected before reaching the pool.
-    #[must_use]
-    #[inline]
-    pub fn is_suspended(&self) -> bool {
-        self.state.is_suspended()
-    }
-
-    /// Waits for the submission identity snapshot observed at call time to
-    /// leave the active registry.
-    ///
-    /// A later submission reusing an ID does not extend this snapshot. This
-    /// method blocks the current thread and does not guarantee that a task
-    /// handle has finished publishing its result.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::error::Error;
-    /// use qubit_id::Id;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), Box<dyn Error>> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let a: Id = Id::new(1);
-    ///     let b: Id = Id::new(2);
-    ///     let h1 = service.submit(a, || Ok::<(), ()>(()))?;
-    ///     let h2 = service.submit(b, || Ok::<(), ()>(()))?;
-    ///     service.wait_for_current_tasks();
-    ///     h1.get().unwrap();
-    ///     h2.get().unwrap();
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn wait_for_current_tasks(&self) {
-        self.state.await_in_flight_tasks_completion();
-    }
-
-    /// Waits until the service registry has no submitted or running tasks.
-    ///
-    /// This method blocks until no accepted task or pending reservation is
-    /// active. Result publication to a handle may still be in progress.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::error::Error;
-    /// use qubit_id::Id;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), Box<dyn Error>> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let id: Id = Id::new(1);
-    ///     let handle = service.submit(id, || Ok::<(), ()>(()))?;
-    ///     handle.get().unwrap();
-    ///     service.wait_for_idle();
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn wait_for_idle(&self) {
-        self.state.await_idle();
-    }
-
-    /// Initiates graceful shutdown of the backing pool.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     service.shutdown();
-    ///     assert!(service.is_not_running());
-    ///     Ok(())
-    /// }
-    /// ```
-    #[inline]
-    pub fn shutdown(&self) {
-        self.pool.shutdown();
-    }
-
-    /// Initiates immediate stop of the backing pool.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     let _report = service.stop();
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Returns
-    ///
-    /// A count-based report from the backing pool.
-    #[must_use]
-    #[inline]
-    pub fn stop(&self) -> StopReport {
-        self.pool.stop()
-    }
-
-    /// Returns whether the backing pool no longer accepts new work.
-    #[must_use]
-    #[inline]
-    pub fn is_not_running(&self) -> bool {
-        self.pool.is_not_running()
-    }
-
-    /// Returns whether the backing pool has terminated.
-    #[must_use]
-    #[inline]
-    pub fn is_terminated(&self) -> bool {
-        self.pool.is_terminated()
-    }
-
-    /// Blocks until the backing pool has terminated.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use qubit_executor::service::ExecutorServiceBuilderError;
-    /// use qubit_task::service::TaskExecutionService;
-    ///
-    /// fn main() -> Result<(), ExecutorServiceBuilderError> {
-    ///     let service = TaskExecutionService::new()?;
-    ///     service.shutdown();
-    ///     service.wait_termination();
-    ///     assert!(service.is_terminated());
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Returns
-    ///
-    /// Returns after shutdown and worker exit.
-    #[inline]
-    pub fn wait_termination(&self) {
-        self.pool.wait_termination();
-    }
-
-    /// Returns a snapshot of the backing thread pool's statistics.
-    ///
-    /// The values are sampled together but may no longer describe the pool's
-    /// state by the time this method returns.
-    #[must_use]
-    #[inline]
-    pub fn thread_pool_stats(&self) -> ThreadPoolStats {
-        self.pool.stats()
+        for item in &mut queue {
+            item.bypasses = item.bypasses.saturating_add(1);
+        }
+        {
+            let mut retained = core.queue.lock();
+            for item in queue.into_iter().rev() {
+                retained.push_front(item);
+            }
+        }
+        if !started {
+            drop(core);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        } else {
+            core.changed.notify_waiters();
+        }
     }
 }
 
-/// Callable wrapper that keeps service-level status aligned with task outcome.
-///
-/// # Type Parameters
-///
-/// * `C` - User callable whose outcome is reported to the service registry.
-struct StatusReportingTask<C> {
-    /// Stable business task ID.
-    task_id: Id,
-    /// User task to execute.
-    task: C,
-    /// Shared service registry.
-    state: Arc<TaskExecutionServiceState>,
-    /// Identity of this submission, protecting reused business IDs.
-    token: SubmissionToken,
-}
-
-impl<C, R, E> Callable<R, E> for StatusReportingTask<C>
-where
-    C: Callable<R, E>,
-{
-    /// Runs the user task and records the corresponding service-level status.
-    ///
-    /// # Returns
-    ///
-    /// The user's successful value or error. A panic is recorded as
-    /// [`TaskStatus::Panicked`] and then resumed on the worker thread.
-    fn call(&mut self) -> Result<R, E> {
-        let _ = self.state.start(self.task_id, &self.token);
-        match catch_unwind(AssertUnwindSafe(|| self.task.call())) {
-            Ok(Ok(value)) => {
-                let _ = self.state.finish(self.task_id, &self.token, TaskStatus::Succeeded);
-                Ok(value)
-            }
-            Ok(Err(error)) => {
-                let _ = self.state.finish(self.task_id, &self.token, TaskStatus::Failed);
-                Err(error)
-            }
-            Err(payload) => {
-                let _ = self.state.finish(self.task_id, &self.token, TaskStatus::Panicked);
-                resume_unwind(payload);
-            }
+async fn finish_attempt(
+    core_ref: std::sync::Weak<ServiceCore>,
+    running: TaskRecord,
+    receiver: tokio::sync::oneshot::Receiver<crate::handler::TaskRunResult>,
+) {
+    let result = receiver.await.unwrap_or_else(|_| {
+        Err(crate::model::TaskRunError {
+            category: "engine".into(),
+            message: "execution worker stopped".into(),
+            retryable: true,
+        })
+    });
+    let Some(core) = core_ref.upgrade() else {
+        return;
+    };
+    core.cancellations.lock().remove(&running.id);
+    let state = match &result {
+        Ok(_) if running.cancel_requested => TaskState::Cancelled,
+        Ok(_) => TaskState::Succeeded,
+        Err(error) if error.category == "panic" => TaskState::Panicked {
+            message: error.message.clone(),
+        },
+        Err(error) if error.retryable && running.attempt < core.max_attempts => TaskState::Queued,
+        Err(error) if error.retryable => TaskState::Blocked {
+            reason: format!("retry limit reached: {}", error.message),
+        },
+        Err(error) => TaskState::Failed {
+            category: error.category.clone(),
+            message: error.message.clone(),
+        },
+    };
+    let latest = match core.store.get(running.id).await {
+        Ok(Some(record)) if matches!(record.state, TaskState::Running) && record.attempt == running.attempt => record,
+        Ok(_) => return,
+        Err(error) => {
+            pause_on_store_fault(&core, error);
+            return;
+        }
+    };
+    let output = result.ok();
+    let mut final_state = if output
+        .as_ref()
+        .is_some_and(|value| value.summary.len() > crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES)
+    {
+        TaskState::Failed {
+            category: "output_too_large".into(),
+            message: "task output summary exceeded the 65536-byte limit".into(),
+        }
+    } else if latest.cancel_requested && matches!(state, TaskState::Succeeded) {
+        TaskState::Cancelled
+    } else {
+        state
+    };
+    let output = output.filter(|value| value.summary.len() <= crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES);
+    let mut retry_slot_reserved = false;
+    if matches!(final_state, TaskState::Queued) {
+        retry_slot_reserved = try_reserve_core_queue_slot(&core);
+        if !retry_slot_reserved {
+            final_state = TaskState::Blocked {
+                reason: "retry queue is full; call retry_blocked when capacity is available".into(),
+            };
         }
     }
+    match transition(
+        &core,
+        &latest,
+        final_state.clone(),
+        output,
+        latest.assigned_resources.clone(),
+        latest.cancel_requested,
+    )
+    .await
+    {
+        Ok(updated) => {
+            if matches!(final_state, TaskState::Queued) {
+                core.queue.lock().push_back(QueuedTask {
+                    id: updated.id,
+                    request: updated.request.clone(),
+                    bypasses: 0,
+                });
+            }
+            core.changed.notify_waiters();
+            publish_record(&core, &updated);
+        }
+        Err(StoreError::Conflict) => {
+            if retry_slot_reserved {
+                release_core_queue_slot(&core);
+            }
+        }
+        Err(error) => {
+            if retry_slot_reserved {
+                release_core_queue_slot(&core);
+            }
+            pause_on_store_fault(&core, error);
+        }
+    }
+}
+
+async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -> Result<(), StoreError> {
+    let updated = transition(core, record, TaskState::Blocked { reason }, None, Vec::new(), false).await?;
+    core.changed.notify_waiters();
+    publish_record(core, &updated);
+    Ok(())
+}
+
+fn pause_on_store_fault(core: &ServiceCore, error: StoreError) {
+    *core.store_fault.lock() = Some(error.to_string());
+    core.accepting.store(false, Ordering::Release);
+    core.changed.notify_waiters();
+}
+
+fn publish_record(core: &ServiceCore, record: &TaskRecord) {
+    #[cfg(feature = "event-bus")]
+    if let Some(bus) = &core.event_bus {
+        bus.enqueue(crate::event::TaskEvent::from(record));
+    }
+    #[cfg(not(feature = "event-bus"))]
+    let _ = (core, record);
+}
+
+async fn transition(
+    core: &ServiceCore,
+    record: &TaskRecord,
+    state: TaskState,
+    output: Option<crate::model::TaskOutput>,
+    assigned_resources: Vec<String>,
+    cancel_requested: bool,
+) -> Result<TaskRecord, StoreError> {
+    core.store
+        .transition(TransitionCommand {
+            id: record.id,
+            expected_version: record.state_version,
+            expected_attempt: record.attempt,
+            state,
+            output,
+            assigned_resources,
+            cancel_requested,
+        })
+        .await
+}
+
+fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
+    if request.task_type.is_empty() || request.handler_version.is_empty() {
+        return Err(TaskServiceError::InvalidRequest(
+            "task type and handler version must not be empty".into(),
+        ));
+    }
+    if request.payload.len() > crate::model::MAX_TASK_PAYLOAD_BYTES {
+        return Err(TaskServiceError::InvalidRequest(
+            "payload exceeds the 16 MiB limit".into(),
+        ));
+    }
+    if request.resources.custom.keys().any(String::is_empty)
+        || request.resources.gpu_labels.iter().any(String::is_empty)
+    {
+        return Err(TaskServiceError::InvalidRequest(
+            "resource names and GPU labels must not be empty".into(),
+        ));
+    }
+    let matching_gpus = capacity
+        .gpus
+        .values()
+        .filter(|labels| request.resources.gpu_labels.iter().all(|label| labels.contains(label)))
+        .count();
+    if request.resources.cpu_slots > capacity.cpu_slots
+        || request.resources.gpu_count as usize > matching_gpus
+        || request
+            .resources
+            .custom
+            .iter()
+            .any(|(key, value)| capacity.custom.get(key).is_none_or(|limit| value > limit))
+    {
+        return Err(TaskServiceError::Unsatisfiable);
+    }
+    Ok(())
+}
+
+fn release_core_queue_slot(core: &ServiceCore) {
+    let _ = core
+        .queue_count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            Some(count.saturating_sub(1))
+        });
+}
+
+fn try_reserve_core_queue_slot(core: &ServiceCore) -> bool {
+    core.queue_count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < core.queue_capacity).then_some(count + 1)
+        })
+        .is_ok()
+}
+
+pub(super) fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("task service runtime must be created")
+    })
 }

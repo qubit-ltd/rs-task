@@ -1,0 +1,94 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+//! Versioned task handler contracts and registry.
+
+type LocalTaskClosure = Box<dyn FnOnce(TaskContext) -> TaskRunResult + Send>;
+
+mod context;
+mod registry;
+
+pub use context::TaskContext;
+pub use registry::TaskHandlerDescriptor;
+pub use registry::TaskHandlerRegistry;
+pub use registry::TaskRunResult;
+
+/// Adapter that turns a one-shot local closure into a non-recoverable handler.
+pub struct LocalTaskHandler {
+    descriptor: TaskHandlerDescriptor,
+    closure: std::sync::Mutex<Option<LocalTaskClosure>>,
+}
+
+impl LocalTaskHandler {
+    /// Creates a one-shot handler for a closure submitted directly to a
+    /// volatile service.
+    #[must_use]
+    pub fn new<F>(descriptor: TaskHandlerDescriptor, closure: F) -> Self
+    where
+        F: FnOnce(TaskContext) -> TaskRunResult + Send + 'static,
+    {
+        Self {
+            descriptor,
+            closure: std::sync::Mutex::new(Some(Box::new(closure))),
+        }
+    }
+}
+
+impl TaskHandler for LocalTaskHandler {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn run<'a>(&'a self, _payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        Box::pin(async move {
+            let closure = self
+                .closure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            match closure {
+                Some(closure) => tokio::task::spawn_blocking(move || closure(context))
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(crate::model::TaskRunError {
+                            category: "panic".into(),
+                            message: error.to_string(),
+                            retryable: false,
+                        })
+                    }),
+                None => Err(crate::model::TaskRunError {
+                    category: "local_handler".into(),
+                    message: "one-shot local closure ran more than once".into(),
+                    retryable: false,
+                }),
+            }
+        })
+    }
+}
+
+use crate::store::TaskFuture;
+
+/// Task handler factory contract shared by SPI providers and direct
+/// registration.
+pub trait TaskHandlerProvider: Send + Sync {
+    /// Returns the stable handler type and version supplied by this provider.
+    fn descriptor(&self) -> TaskHandlerDescriptor;
+    /// Builds the handler instance during application assembly.
+    fn create(&self) -> Result<std::sync::Arc<dyn TaskHandler>, String>;
+}
+
+/// Async function contract used by handler implementations.
+pub trait TaskHandler: Send + Sync {
+    /// Identifies the exact task type and payload version this handler accepts.
+    fn descriptor(&self) -> TaskHandlerDescriptor;
+    /// Executes one attempt with a cooperative cancellation context.
+    ///
+    /// Implementations must not perform long CPU-bound or blocking operations
+    /// directly on the async runtime worker. Use an appropriate blocking pool
+    /// or a dedicated execution backend for that work.
+    fn run<'a>(&'a self, payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult>;
+}
