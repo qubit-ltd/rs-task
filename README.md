@@ -22,7 +22,10 @@ qubit-id = "0.6"
 
 `TaskExecutionService` accepts a caller-provided task ID, runs a synchronous
 callable on a thread pool, and keeps an in-memory status for lookup and
-pre-start cancellation. The returned `TaskHandle` owns the typed result.
+pre-start cancellation. A successful cancellation removes queued work and
+releases its captured values before returning; cancellation after a worker has
+started the callable returns `false`. The returned `TaskHandle` owns the typed
+result.
 
 ```rust
 use qubit_id::Id;
@@ -42,12 +45,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The service retains the latest 1024 terminal statuses by default. Set
+The service retains up to 1024 distinct terminal task IDs by default. Set
 `completed_history_capacity(0)` to retain none. History is bounded and is not
 persistent storage: `status(id)` returns `None` after eviction. A task ID can
-be reused as soon as its previous submission has finished; the new submission
-replaces its prior status. `stats().total` counts currently visible accepted
-and retained records, not all tasks ever submitted.
+be reused as soon as its previous submission has finished; the new terminal
+record replaces the old one without consuming an additional history slot.
+`stats().total` counts currently visible accepted tasks and retained terminal
+IDs, not all tasks ever submitted. `thread_pool_stats()` provides a read-only
+pool metrics snapshot without exposing the pool's submission API.
 
 `wait_for_idle()` and `wait_for_current_tasks()` wait for registry
 transitions. A result may still be publishing to its handle when they return;

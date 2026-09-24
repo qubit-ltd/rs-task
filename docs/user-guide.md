@@ -98,7 +98,16 @@ let service = TaskExecutionService::builder()
 
 ### Pause intake and cancel queued work
 
-suspend rejects new submissions with TaskExecutionServiceError::Suspended, while accepted work continues. Call resume to accept new submissions again. cancel(id) returns true only when the task is cancelled before a worker starts it; cancellation races with the thread pool, so a running task returns false.
+suspend rejects new submissions with TaskExecutionServiceError::Suspended, while accepted work continues. Call resume to accept new submissions again. cancel(id) returns true only when the task is cancelled before a worker starts it; cancellation races with the thread pool, so a running task returns false. When cancellation succeeds, the dynamic pool removes the queued job and drops its captured values before cancel returns. This immediately releases that queue position for another submission.
+
+The service does not expose a reference that can submit work directly to its backing pool. Read pool metrics through a snapshot instead:
+
+~~~rust
+let pool_snapshot = service.thread_pool_stats();
+println!("{} tasks queued", pool_snapshot.queued_tasks);
+~~~
+
+`ThreadPoolStats` is a point-in-time observation that may already be stale when returned, not a synchronization primitive. Its counters can reflect adjacent instants; use task handles or the service's wait methods to coordinate work.
 
 ### Wait for work
 
@@ -111,7 +120,7 @@ There are two error layers:
 - Submission errors are returned by submit and submit_callable. They may be DuplicateTask, Suspended, Rejected, or AcceptancePanicked.
 - The accepted task's result is returned by its handle. A callable's own Err(E) is a failed task; a panic is reported as a panicked task by the executor result type.
 
-Use status(id) for one task and stats() for a snapshot. TaskExecutionStats counts visible active tasks and retained terminal records, not lifetime submissions. A terminal status can disappear after eviction, in which case status(id) returns None.
+Use status(id) for one task and stats() for a snapshot. TaskExecutionStats counts visible active tasks and retained terminal IDs, not lifetime submissions. Reusing an ID replaces its previous terminal record and does not consume a second history slot. A terminal status can disappear after eviction, in which case status(id) returns None.
 
 ## Troubleshooting
 

@@ -19,7 +19,7 @@ qubit-task = "0.5"
 qubit-id = "0.6"
 ```
 
-`TaskExecutionService` 接收调用方提供的任务 ID，在线程池中运行同步 callable，并在内存中保留状态以便查询和执行前取消。返回的 `TaskHandle` 负责保存类型化结果。
+`TaskExecutionService` 接收调用方提供的任务 ID，在线程池中运行同步 callable，并在内存中保留状态以便查询和执行前取消。取消排队任务成功返回时，任务已从队列移除且其捕获值已释放；worker 已开始执行 callable 后再取消会返回 `false`。返回的 `TaskHandle` 负责保存类型化结果。
 
 ```rust
 use qubit_id::Id;
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-服务默认保留最近 1024 个终态。设置 `completed_history_capacity(0)` 可不保留终态。历史记录有界且不是持久化存储：记录被淘汰后，`status(id)` 返回 `None`。任务完成后可以复用任务 ID，新提交会替换该 ID 的旧状态。`stats().total` 统计当前可见的已接受任务和保留终态，而不是所有历史提交次数。
+服务默认最多保留 1024 个不同任务 ID 的终态。设置 `completed_history_capacity(0)` 可不保留终态。历史记录有界且不是持久化存储：记录被淘汰后，`status(id)` 返回 `None`。任务完成后可以复用任务 ID，新终态会替换旧记录，不会额外占用一个历史名额。`stats().total` 统计当前可见的已接受任务和保留的终态 ID，而不是累计提交次数。`thread_pool_stats()` 提供只读线程池指标快照，不会暴露可提交任务的线程池接口。
 
 `wait_for_idle()` 和 `wait_for_current_tasks()` 等待注册表状态转换。它们返回时，结果可能仍在发布到句柄；需要结果时请调用 `TaskHandle::get()` 或等待该句柄。
 
