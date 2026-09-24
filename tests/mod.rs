@@ -1133,13 +1133,19 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
     let topic = Topic::<qubit_task::event::TaskEvent>::new("task.lifecycle").expect("topic is valid");
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count_ref = count.clone();
+    let versions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let versions_ref = versions.clone();
     let subscription = bus
         .subscribe(
             SubscribeRequest::new(
                 SubscriberId::new("task-test").expect("subscriber ID is valid"),
                 topic.clone(),
             ),
-            move |_| {
+            move |delivery| {
+                versions_ref
+                    .lock()
+                    .expect("versions lock")
+                    .push(delivery.payload().state_version);
                 count_ref.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 Ok::<(), DeliveryError>(())
             },
@@ -1147,6 +1153,7 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
         .expect("topic subscription succeeds");
     let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
         .event_bus(bus.clone())
+        .event_bus_buffer_capacity(std::num::NonZeroUsize::new(256).expect("nonzero capacity"))
         .build()
         .await
         .expect("service builds with bus");
@@ -1158,6 +1165,25 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
         service.wait(id).await.expect("task completes").state,
         TaskState::Succeeded
     );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while service.notification_stats().expect("notification counters").enqueued < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal notification enqueued");
+    let enqueued_before_shutdown = service.notification_stats().expect("notification counters").enqueued;
+    assert!(
+        enqueued_before_shutdown >= 3,
+        "queued, running, and terminal events enqueued"
+    );
+    service
+        .shutdown()
+        .await
+        .expect("service shuts down after publication drain");
+    let after_shutdown = service.notification_stats().expect("notification counters");
+    assert_eq!(after_shutdown.enqueued, enqueued_before_shutdown);
+    assert_eq!(after_shutdown.accepted, enqueued_before_shutdown);
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while count.load(std::sync::atomic::Ordering::Acquire) < 3 {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
@@ -1172,7 +1198,8 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
         "received {} task events",
         count.load(std::sync::atomic::Ordering::Acquire)
     );
-    service.shutdown().await.expect("service shuts down");
+    let versions = versions.lock().expect("versions lock");
+    assert_eq!(versions.as_slice(), &[0, 1, 2]);
     subscription.cancel().expect("subscription is cancelled");
     bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
         .expect("event bus shuts down");
@@ -1201,5 +1228,17 @@ async fn test_event_bus_publish_failure_does_not_change_task_result() {
         .await
         .expect("task succeeds despite notification failure");
     assert_eq!(finished.state, TaskState::Succeeded);
+    service.shutdown().await.expect("service shuts down");
+    let stats = service.notification_stats().expect("notification counters");
+    assert!(stats.publish_error >= 3);
+}
+
+#[cfg(feature = "event-bus")]
+#[tokio::test]
+async fn test_event_bus_stats_are_absent_without_a_bus() {
+    let service = qubit_task::TaskExecutionService::in_memory()
+        .await
+        .expect("service builds");
+    assert!(service.notification_stats().is_none());
     service.shutdown().await.expect("service shuts down");
 }

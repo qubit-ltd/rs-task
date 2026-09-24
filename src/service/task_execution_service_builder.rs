@@ -5,8 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "event-bus")]
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+#[cfg(feature = "event-bus")]
+use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service::ServiceCore;
 use super::task_execution_service::TaskExecutionService;
 use crate::engine::LocalTaskExecutionEngine;
@@ -40,6 +44,10 @@ pub enum TaskServiceBuildError {
     /// SQLite support is disabled for this crate build.
     #[error("SQLite support requires the `sqlite` feature")]
     SqliteFeatureDisabled,
+    /// The dedicated lifecycle event publisher thread could not start.
+    #[cfg(feature = "event-bus")]
+    #[error("failed to start task event publisher thread: {0}")]
+    EventPublisherThread(#[source] std::io::Error),
 }
 
 /// Explicit component assembly and resource policy for one task service.
@@ -55,6 +63,8 @@ pub struct TaskExecutionServiceBuilder {
     require_recovery: bool,
     #[cfg(feature = "event-bus")]
     event_bus: Option<qubit_event_bus::EventBus>,
+    #[cfg(feature = "event-bus")]
+    event_bus_buffer_capacity: NonZeroUsize,
 }
 
 impl Default for TaskExecutionServiceBuilder {
@@ -75,6 +85,8 @@ impl Default for TaskExecutionServiceBuilder {
             require_recovery: false,
             #[cfg(feature = "event-bus")]
             event_bus: None,
+            #[cfg(feature = "event-bus")]
+            event_bus_buffer_capacity: NonZeroUsize::new(256).expect("default event bus buffer capacity is nonzero"),
         }
     }
 }
@@ -183,6 +195,14 @@ impl TaskExecutionServiceBuilder {
         self
     }
 
+    /// Sets the number of lifecycle notifications waiting behind the publisher.
+    #[cfg(feature = "event-bus")]
+    #[must_use]
+    pub fn event_bus_buffer_capacity(mut self, capacity: NonZeroUsize) -> Self {
+        self.event_bus_buffer_capacity = capacity;
+        self
+    }
+
     /// Builds one unified task service after validating and preparing recovery.
     pub async fn build(self) -> Result<TaskExecutionService, TaskServiceBuildError> {
         let store = self.store.ok_or(TaskServiceBuildError::MissingStore)?;
@@ -228,6 +248,19 @@ impl TaskExecutionServiceBuilder {
             }
         };
         let queue_count = queue.len();
+        #[cfg(feature = "event-bus")]
+        let event_bus = match self.event_bus {
+            Some(bus) => match TaskEventPublisher::new(bus, self.event_bus_buffer_capacity) {
+                Ok(publisher) => Some(publisher),
+                Err(error) => {
+                    if let Some(epoch) = owner {
+                        let _ = store.release_owner(epoch).await;
+                    }
+                    return Err(TaskServiceBuildError::EventPublisherThread(error));
+                }
+            },
+            None => None,
+        };
         let core = ServiceCore {
             store,
             engine,
@@ -245,7 +278,7 @@ impl TaskExecutionServiceBuilder {
             owner,
             store_fault: parking_lot::Mutex::new(None),
             #[cfg(feature = "event-bus")]
-            event_bus: self.event_bus,
+            event_bus,
         };
         let service = TaskExecutionService::start(core);
         Ok(service)
