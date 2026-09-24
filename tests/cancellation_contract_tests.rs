@@ -16,7 +16,6 @@ use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
-use qubit_task::service::LocalTaskOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
@@ -33,6 +32,7 @@ use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::CancelOutcome;
+use qubit_task::service::LocalTaskOutcome;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
@@ -211,7 +211,9 @@ async fn test_success_after_cancellation_request_stays_succeeded() {
             );
             LocalTaskOutcome::<(), std::io::Error>::Succeeded {
                 value: (),
-                summary: TaskOutput { summary: b"completed".to_vec() },
+                summary: TaskOutput {
+                    summary: b"completed".to_vec(),
+                },
             }
         })
         .await
@@ -289,7 +291,10 @@ async fn test_handler_result_racing_cancellation_commits_one_terminal_state() {
         .await
         .expect("service builds");
     let id = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect("task accepted")
         .task_id();

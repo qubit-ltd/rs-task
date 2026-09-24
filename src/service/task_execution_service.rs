@@ -511,7 +511,8 @@ impl TaskExecutionService {
         self.core.admission.wait_closed().await
     }
 
-    /// Drains accepted work and releases ownership after the admission gate is idle.
+    /// Drains accepted work and releases ownership after the admission gate is
+    /// idle.
     async fn coordinate_shutdown(&self) -> Result<(), TaskServiceError> {
         self.core.admission.wait_idle().await;
         loop {
@@ -533,11 +534,11 @@ impl TaskExecutionService {
             }
             notified.await;
         }
-        if let Some(epoch) = self.core.owner {
-            if let Err(error) = self.core.store.release_owner(epoch).await {
-                record_store_fault(&self.core, error.to_string());
-                return Err(error.into());
-            }
+        if let Some(epoch) = self.core.owner
+            && let Err(error) = self.core.store.release_owner(epoch).await
+        {
+            record_store_fault(&self.core, error.to_string());
+            return Err(error.into());
         }
         #[cfg(feature = "event-bus")]
         if let Some(publisher) = &self.core.event_bus {
@@ -715,7 +716,8 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                             Ok(()) => break,
                             Err(StoreError::Conflict) => match core.store.get(id).await {
                                 Ok(Some(record))
-                                    if record.attempt == latest.attempt && matches!(record.state, TaskState::Running) =>
+                                    if record.attempt == latest.attempt
+                                        && matches!(record.state, TaskState::Running) =>
                                 {
                                     latest = record;
                                 }
@@ -738,7 +740,10 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             let Some(position) = original_positions.get(&item.id) else {
                 continue;
             };
-            if activated_positions.iter().any(|started_position| started_position > position) {
+            if activated_positions
+                .iter()
+                .any(|started_position| started_position > position)
+            {
                 item.bypasses = item.bypasses.saturating_add(1);
             }
         }
@@ -871,7 +876,15 @@ async fn finish_attempt(
 }
 
 async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -> Result<(), StoreError> {
-    let updated = transition(core, record, TaskState::Blocked { reason }, None, Vec::new(), record.cancel_requested).await?;
+    let updated = transition(
+        core,
+        record,
+        TaskState::Blocked { reason },
+        None,
+        Vec::new(),
+        record.cancel_requested,
+    )
+    .await?;
     core.changed.notify_waiters();
     publish_record(core, &updated);
     finalize_local(core, updated.id, Ok(updated.state));
@@ -894,7 +907,12 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
     let (diagnostic, finalizations) = {
         let mut fault = core.store_fault.lock();
         let diagnostic = fault.get_or_insert(diagnostic).clone();
-        let finalizations = core.local_finalizations.lock().drain().map(|(_, sender)| sender).collect::<Vec<_>>();
+        let finalizations = core
+            .local_finalizations
+            .lock()
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect::<Vec<_>>();
         (diagnostic, finalizations)
     };
     core.local_handlers.lock().clear();
@@ -917,9 +935,9 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
 async fn await_admission<T>(
     handle: tokio::task::JoinHandle<Result<T, TaskServiceError>>,
 ) -> Result<T, TaskServiceError> {
-    handle.await.map_err(|error| {
-        TaskServiceError::StoreUnavailable(format!("task admission worker stopped: {error}"))
-    })?
+    handle
+        .await
+        .map_err(|error| TaskServiceError::StoreUnavailable(format!("task admission worker stopped: {error}")))?
 }
 
 fn publish_record(core: &ServiceCore, record: &TaskRecord) {

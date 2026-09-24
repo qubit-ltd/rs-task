@@ -30,7 +30,8 @@ pub enum LocalTaskOutcome<R, E> {
     Cancelled,
 }
 
-/// Converts a typed closure result into the handler outcome persisted by the service.
+/// Converts a typed closure result into the handler outcome persisted by the
+/// service.
 pub(crate) fn adapt_local_outcome<F, R, E>(
     task: F,
     sender: oneshot::Sender<Result<R, E>>,

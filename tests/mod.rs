@@ -18,7 +18,6 @@ use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskHandlerRegistry;
 use qubit_task::handler::TaskRunOutcome;
-use qubit_task::service::LocalTaskOutcome;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
@@ -34,6 +33,7 @@ use qubit_task::scheduling::FairFifoPolicy;
 use qubit_task::scheduling::QueueSnapshot;
 use qubit_task::scheduling::QueuedTask;
 use qubit_task::scheduling::SchedulingPolicy;
+use qubit_task::service::LocalTaskOutcome;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
@@ -214,11 +214,11 @@ async fn test_in_memory_service_accepts_and_completes_a_local_task() {
         .expect("volatile service builds");
     assert!(!service.capabilities().store.restart_recovery);
     let id = service
-        .submit_local(|_| {
-            LocalTaskOutcome::<(), std::io::Error>::Succeeded {
-                value: (),
-                summary: TaskOutput { summary: b"done".to_vec() },
-            }
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput {
+                summary: b"done".to_vec(),
+            },
         })
         .await
         .expect("local task is accepted")
@@ -817,7 +817,10 @@ async fn test_zero_capacity_queue_rejects_without_accepting() {
         .await
         .expect("service builds");
     let error = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect_err("zero-capacity queue rejects work");
     assert!(matches!(error, qubit_task::service::TaskServiceError::QueueFull));
@@ -1375,7 +1378,10 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
         .await
         .expect("service builds with bus");
     let id = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect("task accepted")
         .task_id();
@@ -1438,7 +1444,10 @@ async fn test_event_bus_publish_failure_does_not_change_task_result() {
         .await
         .expect("service builds with a stopped event bus");
     let id = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded { value: (), summary: TaskOutput::default() })
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect("task is accepted")
         .task_id();
