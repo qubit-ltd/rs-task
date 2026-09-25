@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(context.attempt(), 1);
         LocalTaskOutcome::<usize, std::io::Error>::Succeeded {
             value: 21_usize,
-            summary: TaskOutput { summary: b"已导入 21 行".to_vec() },
+            summary: TaskOutput { summary: "已导入 21 行".as_bytes().to_vec() },
         }
     }).await?;
     let imported_rows = handle.result().await??;
@@ -153,9 +153,8 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 ## 发布状态事件
 
 启用 `event-bus` feature 后，可将 `qubit_event_bus::EventBus` 具体门面注入构建器。状态变化后，服务会发布 `TaskEvent`。通知采用尽力而为语义：发布失败不会回滚任务状态。事件可能重复、延迟或丢失，因此消费者应比较 `state_version`，并在需要权威状态时查询服务。
-当前版本将 `qubit-event-bus` 0.12 固定到 revision
-`319fffb85c150c0d2b2f83655ee06799b19ef035`；发布器直接识别该 revision 的
-`PublishAcknowledgement`，不依赖更新版本提供的接纳检查 API。
+当前版本依赖 `qubit-event-bus` 0.12。发布器根据该版本的
+`PublishAcknowledgement` 统计结果，不依赖更新版本提供的接纳检查 API。
 
 服务为通知创建一个串行发布线程和有界队列，默认容量为 256。可通过
 `event_bus_buffer_capacity(NonZeroUsize)` 设置其他正数容量。状态转移只调用
