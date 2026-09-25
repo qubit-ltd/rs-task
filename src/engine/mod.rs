@@ -116,6 +116,19 @@ pub enum EngineError {
 }
 
 /// Resource-aware execution engine extension point.
+///
+/// Implementations reserve all requested resources before changing the task to
+/// `Running` and keep the reservation until the execution attempt exits.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::engine::{LocalTaskExecutionEngine, TaskExecutionEngine};
+/// use qubit_task::model::ResourceCapacity;
+///
+/// let engine = LocalTaskExecutionEngine::new(ResourceCapacity::default());
+/// assert_eq!(engine.capacity().capacity.cpu_slots, 0);
+/// ```
 pub trait TaskExecutionEngine: Send + Sync {
     /// Reports configured capacity and current reservations.
     fn capacity(&self) -> ResourceSnapshot;

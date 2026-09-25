@@ -27,6 +27,21 @@ pub struct QueueSnapshot {
 
 /// Ordering strategy extension point; implementations only select candidate
 /// IDs.
+///
+/// The policy receives a bounded queue snapshot and current resource usage. It
+/// does not mutate task state or reserve resources; the execution engine makes
+/// the final atomic reservation decision.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::scheduling::{FairFifoPolicy, QueueSnapshot, SchedulingPolicy};
+/// use qubit_task::model::ResourceSnapshot;
+///
+/// let policy = FairFifoPolicy::default();
+/// let ordered = policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default());
+/// assert!(ordered.is_empty());
+/// ```
 pub trait SchedulingPolicy: Send + Sync {
     /// Returns candidate IDs in preferred order without changing task state.
     fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId>;

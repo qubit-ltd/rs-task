@@ -52,6 +52,22 @@ pub enum TaskServiceBuildError {
 }
 
 /// Explicit component assembly and resource policy for one task service.
+///
+/// The in-memory preset supplies a volatile store and local scheduler/engine;
+/// applications can replace each component before calling
+/// [`build`](Self::build).
+///
+/// # Examples
+///
+/// ```
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let service = qubit_task::TaskExecutionServiceBuilder::in_memory().build().await?;
+/// assert!(!service.capabilities().store.restart_recovery);
+/// service.shutdown().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct TaskExecutionServiceBuilder {
     store: Option<Arc<dyn TaskStore>>,
     engine: Option<Arc<dyn TaskExecutionEngine>>,
@@ -288,6 +304,8 @@ impl TaskExecutionServiceBuilder {
     }
 }
 
+/// Resets interrupted attempts and queues recoverable tasks with available
+/// handlers.
 async fn restore_tasks(
     store: &Arc<dyn TaskStore>,
     handlers: &TaskHandlerRegistry,

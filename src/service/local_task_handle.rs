@@ -12,6 +12,28 @@ use crate::model::TaskId;
 use crate::model::TaskState;
 
 /// Process-local typed result of one accepted task.
+///
+/// The handle owns one-shot result channels. Consuming it with
+/// [`result`](Self::result) waits for persisted finalization before exposing
+/// the process-local value.
+///
+/// # Examples
+///
+/// ```
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let service = qubit_task::TaskExecutionService::in_memory().await?;
+/// let handle = service.submit_local(|_| {
+///     qubit_task::service::LocalTaskOutcome::<u32, std::io::Error>::Succeeded {
+///         value: 7,
+///         summary: qubit_task::model::TaskOutput { summary: b"seven".to_vec() },
+///     }
+/// }).await?;
+/// assert_eq!(handle.result().await??, 7);
+/// service.shutdown().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct LocalTaskHandle<R, E> {
     id: TaskId,
     typed_result: oneshot::Receiver<Result<R, E>>,
@@ -19,6 +41,8 @@ pub struct LocalTaskHandle<R, E> {
 }
 
 impl<R, E> LocalTaskHandle<R, E> {
+    /// Creates a handle from the result and authoritative-finalization
+    /// channels.
     pub(crate) fn new(
         id: TaskId,
         typed_result: oneshot::Receiver<Result<R, E>>,
@@ -38,6 +62,12 @@ impl<R, E> LocalTaskHandle<R, E> {
     }
 
     /// Waits for the authoritative state before delivering a typed result.
+    ///
+    /// # Returns
+    ///
+    /// The original closure result for successful or failed application work;
+    /// infrastructure, cancellation, blocked, and channel failures are
+    /// reported as [`LocalTaskResultError`].
     pub async fn result(self) -> Result<Result<R, E>, LocalTaskResultError> {
         let state = self
             .final_state

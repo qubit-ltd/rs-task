@@ -39,6 +39,20 @@ pub const MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES: usize = 128;
 pub const MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES: usize = 4 * 1024;
 
 /// Reconstructible description accepted by a task handler.
+///
+/// The payload is interpreted by the exact `(task_type, handler_version)`
+/// handler registered at service startup. Text limits are measured in UTF-8
+/// bytes, and the payload is limited to [`MAX_TASK_PAYLOAD_BYTES`].
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskRequest;
+///
+/// let request = TaskRequest::new("image.resize", "2", b"input-key".to_vec());
+/// assert_eq!(request.resources.cpu_slots, 1);
+/// assert!(request.correlation_key.is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRequest {
     /// Stable task family understood by registered handlers.
@@ -59,6 +73,11 @@ pub struct TaskRequest {
 
 impl TaskRequest {
     /// Checks the size limits used by both the service and task stores.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when all fields fit their documented byte and entry limits;
+    /// otherwise returns a static diagnostic suitable for validation errors.
     pub(crate) fn validate_limits(&self) -> Result<(), &'static str> {
         if self.task_type.is_empty() || self.handler_version.is_empty() {
             return Err("task type and handler version must not be empty");
@@ -106,6 +125,17 @@ impl TaskRequest {
     }
 
     /// Creates a versioned request with one CPU slot and no optional metadata.
+    ///
+    /// # Parameters
+    ///
+    /// * `task_type` - Stable handler family name.
+    /// * `handler_version` - Exact payload interpretation version.
+    /// * `payload` - Opaque bytes passed to the selected handler.
+    ///
+    /// # Returns
+    ///
+    /// A request with one CPU slot and empty correlation, idempotency, and
+    /// metadata fields.
     #[must_use]
     pub fn new(task_type: impl Into<String>, handler_version: impl Into<String>, payload: Vec<u8>) -> Self {
         Self {
@@ -124,6 +154,15 @@ impl TaskRequest {
 }
 
 /// Small result summary saved with the task record.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskOutput;
+///
+/// let output = TaskOutput { summary: b"stored result key".to_vec() };
+/// assert_eq!(output.summary, b"stored result key");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TaskOutput {
     /// Bounded opaque summary or external result reference.
@@ -131,6 +170,23 @@ pub struct TaskOutput {
 }
 
 /// Classified failure reported by a handler.
+///
+/// Set `retryable` only when repeating the operation is safe under the
+/// application's idempotency and side-effect rules. Persisted category and
+/// message strings are byte-bounded by the service.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskRunError;
+///
+/// let error = TaskRunError {
+///     category: "remote_unavailable".into(),
+///     message: "try again later".into(),
+///     retryable: true,
+/// };
+/// assert!(error.retryable);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRunError {
     /// Stable error category suitable for business logic.

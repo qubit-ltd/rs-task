@@ -139,6 +139,23 @@ pub(crate) struct RunningCancellation {
 }
 
 /// Single service facade over volatile or restart-recoverable components.
+///
+/// The service owns admission and scheduling for its components. Call
+/// [`shutdown`](Self::shutdown) before dropping the application runtime when
+/// accepted work must be drained.
+///
+/// # Examples
+///
+/// ```
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let service = qubit_task::TaskExecutionService::in_memory().await?;
+///     let capabilities = service.capabilities();
+///     assert!(!capabilities.store.restart_recovery);
+///     service.shutdown().await?;
+///     Ok(())
+/// }
+/// ```
 #[derive(Clone)]
 pub struct TaskExecutionService {
     pub(crate) core: Arc<ServiceCore>,
@@ -181,7 +198,8 @@ impl TaskExecutionService {
         await_admission(runtime().spawn(async move { service.submit_admitted(request).await })).await
     }
 
-    /// Runs an admitted request to completion even if its caller is cancelled.
+    /// Finishes request acceptance in a background worker that holds an
+    /// admission permit even if the caller is cancelled.
     async fn submit_admitted(&self, request: TaskRequest) -> Result<TaskRecord, TaskServiceError> {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
@@ -248,7 +266,8 @@ impl TaskExecutionService {
         await_admission(runtime().spawn(async move { service.submit_local_admitted(task).await })).await
     }
 
-    /// Retains a local handler through acceptance and queue publication.
+    /// Registers a local closure and retains it through acceptance and queue
+    /// publication.
     async fn submit_local_admitted<F, R, E>(&self, task: F) -> Result<LocalTaskHandle<R, E>, TaskServiceError>
     where
         F: FnOnce(TaskContext) -> LocalTaskOutcome<R, E> + Send + 'static,
@@ -328,8 +347,8 @@ impl TaskExecutionService {
         }
     }
 
-    /// Latches operational store failures while preserving ordinary conflicts
-    /// and not-found results for the calling operation.
+    /// Converts a store error and latches operational failures while preserving
+    /// ordinary conflicts and not-found results for the calling operation.
     fn handle_store_error(&self, error: StoreError) -> TaskServiceError {
         if matches!(error, StoreError::Failure(_)) {
             record_store_fault(&self.core, error.to_string());
@@ -337,6 +356,7 @@ impl TaskExecutionService {
         error.into()
     }
 
+    /// Atomically reserves one waiting-queue position when capacity remains.
     fn reserve_queue_slot(&self) -> Result<(), TaskServiceError> {
         self.core
             .queue_count
@@ -347,6 +367,7 @@ impl TaskExecutionService {
             .map_err(|_| TaskServiceError::QueueFull)
     }
 
+    /// Releases one previously reserved waiting-queue position.
     fn release_queue_slot(&self) {
         let _ = self
             .core
@@ -492,7 +513,8 @@ impl TaskExecutionService {
         await_admission(runtime().spawn(async move { service.retry_blocked_admitted(id).await })).await
     }
 
-    /// Retains the permit through retry persistence and queue publication.
+    /// Requeues a blocked task while holding a permit through persistence and
+    /// queue publication.
     async fn retry_blocked_admitted(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
@@ -569,8 +591,8 @@ impl TaskExecutionService {
         self.core.admission.wait_closed().await
     }
 
-    /// Drains accepted work and releases ownership after the admission gate is
-    /// idle.
+    /// Drains accepted work, releases store ownership, and closes publishers
+    /// after the admission gate is idle.
     async fn coordinate_shutdown(&self) -> Result<(), TaskServiceError> {
         self.core.admission.wait_idle().await;
         let transition_guard = loop {
@@ -604,6 +626,7 @@ impl TaskExecutionService {
         Ok(())
     }
 
+    /// Starts the background scheduler and wraps its shared service state.
     pub(crate) fn start(core: ServiceCore) -> Self {
         let service = Self { core: Arc::new(core) };
         let weak = Arc::downgrade(&service.core);
@@ -612,6 +635,7 @@ impl TaskExecutionService {
     }
 }
 
+/// Selects queued work, reserves resources, and starts eligible task attempts.
 async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
     loop {
         let Some(core) = core_ref.upgrade() else {
@@ -830,6 +854,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
     }
 }
 
+/// Persists an execution result, retry decision, and local-handle completion.
 async fn finish_attempt(
     core_ref: std::sync::Weak<ServiceCore>,
     running: TaskRecord,
@@ -945,6 +970,7 @@ async fn finish_attempt(
     }
 }
 
+/// Persists a blocked state and completes any local handle waiting on it.
 async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -> Result<(), StoreError> {
     let updated = transition(
         core,
@@ -962,6 +988,7 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -
     Ok(())
 }
 
+/// Sends final state or infrastructure failure to a process-local task handle.
 fn finalize_local(core: &ServiceCore, id: TaskId, result: Result<TaskState, LocalTaskResultError>) {
     let sender = core.local_finalizations.lock().remove(&id);
     if let Some(sender) = sender {
@@ -969,6 +996,7 @@ fn finalize_local(core: &ServiceCore, id: TaskId, result: Result<TaskState, Loca
     }
 }
 
+/// Latches a worker-side store error and suspends service admission.
 fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
     record_store_fault(core, error.to_string());
 }
@@ -1003,6 +1031,7 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
 
 /// Preserves an admission worker after caller cancellation and reports a
 /// worker failure as an explicit service error.
+/// Awaits an admission worker and maps task-join failures into service errors.
 async fn await_admission<T>(
     handle: tokio::task::JoinHandle<Result<T, TaskServiceError>>,
 ) -> Result<T, TaskServiceError> {
@@ -1011,6 +1040,7 @@ async fn await_admission<T>(
         .map_err(|error| TaskServiceError::StoreUnavailable(format!("task admission worker stopped: {error}")))?
 }
 
+/// Enqueues a best-effort lifecycle event when event-bus support is enabled.
 fn publish_record(core: &ServiceCore, record: &TaskRecord) {
     #[cfg(feature = "event-bus")]
     if let Some(bus) = &core.event_bus {
@@ -1020,6 +1050,7 @@ fn publish_record(core: &ServiceCore, record: &TaskRecord) {
     let _ = (core, record);
 }
 
+/// Applies a version-checked store transition and publishes its new revision.
 async fn transition(
     core: &ServiceCore,
     record: &TaskRecord,
@@ -1045,6 +1076,7 @@ async fn transition(
     Ok(updated)
 }
 
+/// Validates request limits and whether configured resources can satisfy it.
 fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
     request
         .validate_limits()
@@ -1075,6 +1107,7 @@ fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Resul
 }
 
 /// Truncates a string without splitting a UTF-8 code point.
+/// Truncates diagnostics at a UTF-8 boundary so persisted values stay valid.
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
@@ -1086,6 +1119,7 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     value[..end].to_owned()
 }
 
+/// Releases one queue slot reserved by a scheduler worker.
 fn release_core_queue_slot(core: &ServiceCore) {
     let _ = core
         .queue_count
@@ -1094,6 +1128,7 @@ fn release_core_queue_slot(core: &ServiceCore) {
         });
 }
 
+/// Attempts to reserve a queue slot for an automatic retry.
 fn try_reserve_core_queue_slot(core: &ServiceCore) -> bool {
     core.queue_count
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -1102,6 +1137,7 @@ fn try_reserve_core_queue_slot(core: &ServiceCore) -> bool {
         .is_ok()
 }
 
+/// Returns the process-wide runtime used for service-owned background work.
 pub(super) fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {

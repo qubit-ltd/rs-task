@@ -14,6 +14,20 @@ use super::TaskOutput;
 use super::TaskRequest;
 
 /// Observable lifecycle state for an accepted task.
+///
+/// A blocked task needs intervention before it can be requeued. Terminal
+/// states cannot transition again, while a running task may return to the
+/// queue after a retryable failure.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskState;
+///
+/// let state = TaskState::Queued;
+/// assert!(!state.is_terminal());
+/// assert!(state.allows_transition_to(&TaskState::Running));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState {
     /// Accepted and waiting for suitable resources.
@@ -46,6 +60,11 @@ pub enum TaskState {
 impl TaskState {
     /// Returns whether every persisted diagnostic field satisfies its byte
     /// limit.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the state can be persisted, or a static diagnostic naming
+    /// the exceeded limit.
     pub(crate) fn validate_diagnostics(&self) -> Result<(), &'static str> {
         use super::task_request::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES;
         use super::task_request::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES;
@@ -68,6 +87,10 @@ impl TaskState {
     }
 
     /// Returns the payload-free lifecycle category used by history filters.
+    ///
+    /// # Returns
+    ///
+    /// The lifecycle variant without any diagnostic strings.
     #[must_use]
     #[inline]
     pub fn kind(&self) -> TaskStateKind {
@@ -83,6 +106,10 @@ impl TaskState {
     }
 
     /// Reports whether this state ends normal task execution.
+    ///
+    /// # Returns
+    ///
+    /// `true` for succeeded, failed, panicked, or cancelled states.
     #[must_use]
     #[inline]
     pub fn is_terminal(&self) -> bool {
@@ -94,6 +121,14 @@ impl TaskState {
 
     /// Reports whether the lifecycle may advance to `next` under the service
     /// contract.
+    ///
+    /// # Parameters
+    ///
+    /// * `next` - Proposed next lifecycle state.
+    ///
+    /// # Returns
+    ///
+    /// Whether the service contract permits that transition.
     #[must_use]
     pub fn allows_transition_to(&self, next: &Self) -> bool {
         match self {
@@ -115,6 +150,18 @@ impl TaskState {
 }
 
 /// Payload-free category of a task lifecycle state.
+///
+/// Use this type for filters that should match a state regardless of its
+/// diagnostic payload, such as every blocked task.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskStateKind;
+///
+/// let filter = vec![TaskStateKind::Queued, TaskStateKind::Blocked];
+/// assert!(filter.contains(&TaskStateKind::Blocked));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TaskStateKind {
     /// Accepted and waiting for suitable resources.
@@ -151,6 +198,26 @@ impl TaskStateKind {
 }
 
 /// Queryable task lifecycle snapshot.
+///
+/// The state version increases after every successful lifecycle transition.
+/// Timestamps are Unix epoch milliseconds, and `attempt` counts starts rather
+/// than submissions.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::TaskExecutionService;
+/// use qubit_task::model::TaskRequest;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let service = TaskExecutionService::in_memory().await?;
+///     let record = service.submit(TaskRequest::new("report", "1", vec![])).await?;
+///     assert_eq!(record.attempt, 0);
+///     service.shutdown().await?;
+///     Ok(())
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRecord {
     /// Stable service-generated identity.
@@ -178,6 +245,18 @@ pub struct TaskRecord {
 }
 
 /// Filters and bounds a task history query.
+///
+/// Empty `states` matches every state. A zero `limit` is treated as one
+/// record, and `after` is an exclusive task-ID cursor.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::{TaskQuery, TaskStateKind};
+///
+/// let query = TaskQuery { states: vec![TaskStateKind::Queued], limit: 20, ..TaskQuery::default() };
+/// assert_eq!(query.limit, 20);
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct TaskQuery {
     /// Optional set of lifecycle states to include.
@@ -191,6 +270,18 @@ pub struct TaskQuery {
 }
 
 /// One bounded page of task history.
+///
+/// `next` is present only when another page may exist; pass it as the next
+/// query's exclusive `after` cursor.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskPage;
+///
+/// let page = TaskPage::default();
+/// assert!(page.records.is_empty());
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct TaskPage {
     /// Records selected by the query.
@@ -200,6 +291,18 @@ pub struct TaskPage {
 }
 
 /// Aggregate task counts suitable for service monitoring.
+///
+/// Terminal counts include every retained succeeded, failed, panicked, and
+/// cancelled record.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskStateCounts;
+///
+/// let counts = TaskStateCounts::default();
+/// assert_eq!(counts.queued + counts.running + counts.blocked + counts.terminal, 0);
+/// ```
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TaskStateCounts {
     /// Number of retained tasks waiting for resources.
@@ -213,6 +316,22 @@ pub struct TaskStateCounts {
 }
 
 /// Aggregate task counts and resource capacity suitable for service monitoring.
+///
+/// Store counts and resource usage are collected consecutively and are not an
+/// atomic snapshot across both components.
+///
+/// # Examples
+///
+/// ```
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let service = qubit_task::TaskExecutionService::in_memory().await?;
+///     let stats = service.stats().await?;
+///     assert_eq!(stats.queued, 0);
+///     service.shutdown().await?;
+///     Ok(())
+/// }
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskStats {
     /// Number of tasks waiting for resources.
@@ -228,6 +347,32 @@ pub struct TaskStats {
 }
 
 /// Complete request and record used to reconstruct an unfinished task.
+///
+/// Recovery pages contain only unfinished work; terminal history remains
+/// available through the store's ordinary query interface.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::{StoredTask, TaskId, TaskRecord, TaskRequest, TaskState};
+///
+/// let task = StoredTask {
+///     record: TaskRecord {
+///         id: TaskId::generate(),
+///         request: TaskRequest::new("report", "1", vec![]),
+///         state: TaskState::Queued,
+///         state_version: 0,
+///         attempt: 0,
+///         accepted_at_ms: 0,
+///         started_at_ms: None,
+///         finished_at_ms: None,
+///         assigned_resources: Vec::new(),
+///         output: None,
+///         cancel_requested: false,
+///     },
+/// };
+/// assert!(!task.record.state.is_terminal());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredTask {
     /// Task lifecycle snapshot.
@@ -235,6 +380,18 @@ pub struct StoredTask {
 }
 
 /// Store-level capability claims made during service assembly.
+///
+/// `restart_recovery` implies that unfinished request descriptions can be
+/// scanned after restart; it does not promise recovery of process-local values.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::StoreCapabilities;
+///
+/// let volatile = StoreCapabilities { persistent_history: false, restart_recovery: false };
+/// assert!(!volatile.restart_recovery);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreCapabilities {
     /// Whether task history survives a process restart.
@@ -244,6 +401,33 @@ pub struct StoreCapabilities {
 }
 
 /// Result of atomically accepting a task request.
+///
+/// `Existing` is returned for an identical request with the same idempotency
+/// key, so callers should use the returned record in either case.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::{AcceptOutcome, TaskId, TaskRecord, TaskRequest, TaskState};
+///
+/// let outcome = AcceptOutcome::Accepted(TaskRecord {
+///     id: TaskId::generate(),
+///     request: TaskRequest::new("report", "1", vec![]),
+///     state: TaskState::Queued,
+///     state_version: 0,
+///     attempt: 0,
+///     accepted_at_ms: 0,
+///     started_at_ms: None,
+///     finished_at_ms: None,
+///     assigned_resources: Vec::new(),
+///     output: None,
+///     cancel_requested: false,
+/// });
+/// let record = match outcome {
+///     AcceptOutcome::Accepted(record) | AcceptOutcome::Existing(record) => record,
+/// };
+/// assert_eq!(record.state, TaskState::Queued);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptOutcome {
     /// A new task was accepted.
@@ -253,6 +437,26 @@ pub enum AcceptOutcome {
 }
 
 /// Conditional task state update guarded by state version and attempt.
+///
+/// Stores reject stale commands with a conflict, preventing a delayed worker
+/// from overwriting a newer task lifecycle revision.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::{TaskId, TaskState, TransitionCommand};
+///
+/// let command = TransitionCommand {
+///     id: TaskId::generate(),
+///     expected_version: 0,
+///     expected_attempt: 0,
+///     state: qubit_task::model::TaskState::Running,
+///     output: None,
+///     assigned_resources: Vec::new(),
+///     cancel_requested: false,
+/// };
+/// assert!(!command.cancel_requested);
+/// ```
 #[derive(Debug, Clone)]
 pub struct TransitionCommand {
     /// Target task identity.
@@ -272,10 +476,34 @@ pub struct TransitionCommand {
 }
 
 /// Exclusive store-owner generation for one running service process.
+///
+/// A recoverable store issues an epoch when a service acquires ownership and
+/// requires the same epoch when that service releases it.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::OwnerEpoch;
+///
+/// let epoch = OwnerEpoch(7);
+/// assert_eq!(epoch.0, 7);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OwnerEpoch(pub u64);
 
 /// Page of unfinished stored work returned during recovery.
+///
+/// The cursor can be passed back to `scan_unfinished` until `next` is `None`.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::StoredTaskPage;
+///
+/// let page = StoredTaskPage::default();
+/// assert!(page.tasks.is_empty());
+/// assert!(page.next.is_none());
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct StoredTaskPage {
     /// Reconstructible unfinished tasks.
@@ -287,6 +515,10 @@ pub struct StoredTaskPage {
 /// Resource request helper available without opening the original request.
 impl TaskRecord {
     /// Returns the resource demand used to validate and schedule this task.
+    ///
+    /// # Returns
+    ///
+    /// A borrow of the resource request stored inside this record.
     #[must_use]
     #[inline]
     pub fn resource_request(&self) -> &ResourceRequest {

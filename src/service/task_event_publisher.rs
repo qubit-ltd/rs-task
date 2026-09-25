@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Bounded serial publication of best-effort task lifecycle notifications.
 
 use std::io;
@@ -21,6 +28,7 @@ use qubit_event_bus::model::Topic;
 use super::task_event_notification_stats::TaskEventNotificationStats;
 use crate::event::TaskEvent;
 
+/// Atomic counters shared between the service thread and publisher worker.
 #[derive(Default)]
 struct Counters {
     enqueued: AtomicU64,
@@ -34,6 +42,7 @@ struct Counters {
     worker_panicked: AtomicU64,
 }
 
+/// Increments a counter without wrapping its accumulated diagnostic value.
 fn increment(counter: &AtomicU64) {
     let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
         Some(value.saturating_add(1))
@@ -130,6 +139,7 @@ impl TaskEventPublisher {
     }
 }
 
+/// Runs the publisher worker body and always signals shutdown waiters.
 fn worker_main(work_counters: &Counters, finished: &(Mutex<bool>, Condvar), work: impl FnOnce()) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
         increment(&work_counters.worker_panicked);
@@ -139,6 +149,7 @@ fn worker_main(work_counters: &Counters, finished: &(Mutex<bool>, Condvar), work
     changed.notify_all();
 }
 
+/// Adds one provider admission result to the corresponding observable counters.
 fn record_admission(counters: &Counters, outcome: AdmissionOutcome) {
     match outcome {
         AdmissionOutcome::OpaqueAccepted => increment(&counters.opaque_accepted),

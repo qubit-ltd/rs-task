@@ -11,6 +11,18 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Resource units that a task must hold for its entire execution.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::ResourceRequest;
+///
+/// let request = ResourceRequest {
+///     cpu_slots: 2,
+///     ..ResourceRequest::default()
+/// };
+/// assert_eq!(request.cpu_slots, 2);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResourceRequest {
     /// Number of CPU concurrency slots.
@@ -24,6 +36,18 @@ pub struct ResourceRequest {
 }
 
 /// Resource limits available to this service instance.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::ResourceCapacity;
+///
+/// let capacity = ResourceCapacity {
+///     cpu_slots: 4,
+///     ..ResourceCapacity::default()
+/// };
+/// assert!(capacity.cpu_slots >= 1);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResourceCapacity {
     /// CPU concurrency slots available to tasks.
@@ -35,6 +59,15 @@ pub struct ResourceCapacity {
 }
 
 /// Current resource usage exposed for health and metrics reporting.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::ResourceSnapshot;
+///
+/// let snapshot = ResourceSnapshot::default();
+/// assert_eq!(snapshot.used_cpu_slots, 0);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResourceSnapshot {
     /// Configured resource capacity.

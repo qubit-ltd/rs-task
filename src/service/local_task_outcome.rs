@@ -16,6 +16,22 @@ use crate::model::TaskOutput;
 use crate::model::TaskRunError;
 
 /// Outcome returned by a process-local task closure.
+///
+/// The full success value and original application error stay in process-local
+/// channels; only `summary` and classified lifecycle state are persisted.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskOutput;
+/// use qubit_task::service::LocalTaskOutcome;
+///
+/// let outcome = LocalTaskOutcome::<u32, std::io::Error>::Succeeded {
+///     value: 42,
+///     summary: TaskOutput { summary: b"answer=42".to_vec() },
+/// };
+/// assert!(matches!(outcome, LocalTaskOutcome::Succeeded { value: 42, .. }));
+/// ```
 pub enum LocalTaskOutcome<R, E> {
     /// Provides a process-local value and a bounded persisted summary.
     Succeeded {
