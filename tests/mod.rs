@@ -1459,6 +1459,8 @@ async fn test_event_bus_publish_failure_does_not_change_task_result() {
     assert_eq!(finished.state, TaskState::Succeeded);
     service.shutdown().await.expect("service shuts down");
     let stats = service.notification_stats().expect("notification counters");
+    assert_eq!(stats.enqueued, 3, "all accepted state changes are queued");
+    assert_eq!(stats.queue_closed, 0, "shutdown waits for transition notifications");
     assert!(stats.publish_error >= 3);
 }
 

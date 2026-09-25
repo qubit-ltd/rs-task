@@ -276,6 +276,7 @@ impl TaskExecutionServiceBuilder {
             local_finalizations: parking_lot::Mutex::new(Default::default()),
             cancellations: parking_lot::Mutex::new(Default::default()),
             changed: tokio::sync::Notify::new(),
+            transition_event_lock: tokio::sync::RwLock::new(()),
             admission: AdmissionGate::new(),
             owner,
             store_fault: parking_lot::Mutex::new(None),
