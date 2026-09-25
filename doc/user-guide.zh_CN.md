@@ -134,6 +134,26 @@ let builder = TaskExecutionServiceBuilder::in_memory().capacity(capacity);
 
 服务会根据执行引擎公布的容量校验每个请求。超出已配置容量的请求会被拒绝；当前资源不足但以后可能满足的请求会继续排队。默认公平 FIFO 策略允许符合当前资源条件的任务越过队首，并在队首任务多次被越过后为其保留执行机会。等待队列有容量限制；队列满时返回 `QueueFull`，由调用方施加背压。自动重试遇到满队列时，任务会记录为 `Blocked`，等待容量恢复后可显式重试，不会突破队列上限。
 
+### 限制运行并发与重启恢复
+
+资源槽位和任务并发数是两个独立上限。可用
+`max_running_tasks(NonZeroUsize)` 限制同时运行的尝试数；即使请求零 CPU
+槽，也会占用一个运行名额。默认值为本机可用并行度，无法获取时为 1。
+重启时未完成记录数必须不超过 `queue_capacity + max_running_tasks`；否则构建失败并保留记录。调大其中一个上限后再重启。
+
+~~~rust,no_run
+use std::num::NonZeroUsize;
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+let builder = TaskExecutionServiceBuilder::in_memory()
+    .max_running_tasks(NonZeroUsize::new(8).expect("limit must be positive"));
+~~~
+
+`max_attempts` 统计同一任务 ID 跨进程启动的总次数。恢复时达到上限的
+`Queued` 或 `Running` 记录会进入 `Blocked`，不会再次启动。对耗尽预算的记录调用
+`retry_blocked` 会返回 `TaskServiceError::AttemptsExhausted`；提交新任务才能获得新预算。
+此行为改变了 0.6.0 的重试契约。
+
 ## 使用 SQLite 在重启后恢复
 
 启用可选 feature 并指定持久化路径：

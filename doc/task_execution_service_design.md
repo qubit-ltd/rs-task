@@ -44,7 +44,7 @@
 
 公开状态为 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked`、`Cancelled`；`Queued` 包含已受理但尚未获资源的任务，`Blocked` 表示需要运维或业务方修复后才能重新入队。受理中的临时状态和终态提交中的内部状态不向业务方承诺。每条 `TaskRecord` 包含 `TaskId`、业务关联、受理/启动/结束时间、尝试次数、当前状态、资源请求及分配结果、失败摘要和单调递增的状态版本。
 
-基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；`cancel_requested` 只表示发起了请求。只有处理器实际退出并返回 `TaskRunOutcome::Cancelled` 才进入 `Cancelled`；返回成功或失败时保留该业务结果。`LocalTaskHandle::result()` 等待权威终态写入后，才返回类型化结果、业务错误或明确的取消错误。恢复时，上一进程遗留的 `Running` 记录转回 `Queued`，随后由下一次启动将尝试号递增；对外可查询到它在等待重试及其原因。
+基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；`cancel_requested` 只表示发起了请求。只有处理器实际退出并返回 `TaskRunOutcome::Cancelled` 才进入 `Cancelled`；返回成功或失败时保留该业务结果。`LocalTaskHandle::result()` 等待权威终态写入后，才返回类型化结果、业务错误或明确的取消错误。`max_attempts` 是同一 TaskId 跨进程启动的总次数；恢复时达到上限的 Queued/Running 任务转为 Blocked，人工重试也不能重置预算。`test_shutdown_keeps_scheduler_running_for_retry_after_close` 用信号控制首次执行并验证关闭受理后的自动重试，调度器仅在关闭协调器确认队列和运行任务均为空后退出。
 
 提供按 `TaskId` 查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。`stats()` 通过一次 `TaskStore::count_states()` 聚合查询得到所有保留状态计数，再读取执行引擎资源快照；二者相邻读取但不是同一事务中的原子快照。存储统计失败向调用方传播，查询成本不随历史页数增长。当前 `list()` 游标按 `TaskId` 排序，不提供受理时间范围过滤。等待中的任务进入 `Blocked` 时，等待接口返回需要干预的结果，不能无限等待。`get` 对不存在或已过期的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储仅限制终态历史数量；SQLite 当前不清理持久历史。持久化后端分页读取明细历史，不要求将全量历史载入内存。
 
@@ -122,7 +122,7 @@ TaskExecutionService
 | `TaskExecutionServiceBuilder::recoverable_sqlite(path)` | 可选 SQLite `TaskStore`、默认调度策略、本机执行引擎；强制要求恢复能力 | 单节点重启恢复；构建前须注册稳定的处理器 |
 | `TaskExecutionServiceBuilder::from_components(store, engine, policy)` | 由应用传入直接创建或经 SPI 解析的组件 | 自定义装配，不隐式补入内存存储 |
 
-默认 CPU 并发槽位取 `available_parallelism()`，无法取得时使用 1；每个任务默认请求 1 个 CPU 槽位。默认队列最多容纳 1024 个等待任务，内存终态历史保留最近 1024 条；默认不自动发现 GPU、不给任何 GPU 额度，GPU 任务需要显式配置设备。默认调度策略按提交顺序扫描，并设置有界越过次数防止大任务长期饥饿。这些值均可通过 builder 覆盖。无事件总线时查询和等待接口仍完整可用。
+默认 CPU 并发槽位取 `available_parallelism()`，无法取得时使用 1；独立的最大运行任务数默认取相同并行度，最低为 1，零 CPU 资源请求仍消耗一个运行名额。每个任务默认请求 1 个 CPU 槽位。默认队列最多容纳 1024 个等待任务，内存终态历史保留最近 1024 条；默认不自动发现 GPU、不给任何 GPU 额度，GPU 任务需要显式配置设备。默认调度策略按提交顺序扫描，并设置有界越过次数防止大任务长期饥饿。恢复扫描先核算未完成记录数，再分页恢复；上限为 `queue_capacity + max_running_tasks`，超限或存储页无效会使构建失败并保留历史。上述容量均可通过 builder 覆盖。无事件总线时查询和等待接口仍完整可用。
 
 便捷入口不会触发全局 SPI 自动选择，不会因为链接了某个第三方 provider 就改变行为。`in_memory()` 可直接用于 `submit_local`；使用 `TaskRequest` 前仍须提供相应处理器。应用需要自定义组件时，可以直接传入实例，也可以从 `rs-spi` registry 解析后装配。通用 builder 在没有显式选择存储或具名预设时必须拒绝构建。`recoverable_sqlite` 只在启用相应 feature 时存在，打开失败或恢复能力检查失败会返回构建错误，不回退到内存。构建返回前必须完成必要的存储初始化与恢复准备；如果恢复扫描是异步的，构造方法也应是异步的，不能返回一个尚未准备好接收任务的服务。
 
