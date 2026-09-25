@@ -2,9 +2,17 @@
 
 [中文版本](user-guide.zh_CN.md)
 
-This guide covers `qubit-task` 0.6.x on Rust 1.94 or later. The crate accepts
-work that cannot finish during the caller's request, schedules it against
-resource budgets, and lets the application inspect its progress later.
+This guide covers `qubit-task` 0.6.x on Rust 1.94 or later. It is for Rust service developers who need bounded background execution, task history, and a clear choice between volatile work and restart recovery. The crate accepts work that cannot finish during the caller's request, schedules it against resource budgets, and lets the application inspect its progress later.
+
+## Conceptual model
+
+A `TaskRequest` is the durable description of work: task type, exact handler version, payload, resource demand, and optional business keys. A `TaskRecord` is the service's queryable lifecycle state and bounded output summary. A `TaskHandler` interprets the request, while the `TaskStore`, `SchedulingPolicy`, and `TaskExecutionEngine` determine persistence, queue choice, and execution capacity. `LocalTaskHandle` is a separate process-local result channel for closures submitted with `submit_local`; it cannot be reconstructed after restart.
+
+The service facade coordinates these components. The selected store declares whether history persists and whether unfinished tasks can be recovered; resource capacity controls admission and concurrent execution, not OS-level CPU or GPU discovery.
+
+## Scenario: accept a data import without holding the request open
+
+Suppose an API receives a CSV import request and must return promptly while the import runs. For work that can be recreated after restart, encode the import parameters in a versioned `TaskRequest`, register the matching handler before building the service, then return the accepted task ID to the caller. The caller can use `get`, `list`, or `wait` to observe the resulting state. The next sections show this path and how to select its storage and resource guarantees.
 
 ## Choose a storage guarantee
 
@@ -251,6 +259,12 @@ before exiting, subject to the same provider behavior. If the worker panics,
 `worker_panicked` records it and shutdown still observes worker completion, but
 notifications remaining in its queue may be lost.
 
+## Errors and diagnostics
+
+`TaskRunError` distinguishes a handler failure by category, diagnostic text, and retryability. Non-retryable errors settle as `Failed`; a handler panic settles as `Panicked`. Stored diagnostic text is bounded, so keep the original application error in the application's own logs or result store when more detail is needed. `LocalTaskHandle<R, E>` preserves the original typed error for process-local work.
+
+A `Blocked` record is queryable and carries a reason for intervention, such as a missing handler version or a full retry queue. Use `get` or `list` to inspect that record, correct the registration or capacity condition, then call `retry_blocked`. For lifecycle events, use `notification_stats()` to distinguish local queue drops, publication errors, and worker failure; those counters do not indicate subscriber completion.
+
 ## Query, cancel, and retry
 
 Use `get(TaskId)` for the current record and `list(TaskQuery)` for bounded
@@ -289,6 +303,14 @@ fenced by store ownership, including direct calls through an old store handle.
 SQLite runs one blocking database operation at a time; callers must poll store
 operations from a Tokio runtime.
 
+## Troubleshooting
+
+- **The service rejects a submission with `QueueFull`:** the bounded waiting queue has no slot. Apply backpressure at the caller, wait for work to progress, or increase the configured queue limit when the deployment can safely retain more pending work. A retry that encounters a full queue becomes `Blocked`; after capacity is available, call `retry_blocked`.
+- **A task remains `Blocked` after restart:** inspect its stored diagnostic and confirm a handler with the exact `(task_type, handler_version)` is registered. After correcting the registration or cause, use `retry_blocked`.
+- **A running task does not stop after `cancel`:** cancellation is cooperative. Ensure the handler checks `TaskContext::is_cancelled()` and returns `TaskRunOutcome::Cancelled`; arbitrary code is not forcibly interrupted.
+- **SQLite startup fails:** check that the database path is available and that no other service process owns the database. Recovery failures do not fall back to in-memory storage.
+- **An event is missing:** inspect `notification_stats()` for queue drops, provider errors, or a publisher worker panic. Events are best effort; query the service for authoritative task state.
+
 ## Operational limits
 
 Request limits use UTF-8 byte lengths: `task_type` 128, `handler_version` 64,
@@ -305,3 +327,10 @@ multi-node leasing, distributed resource discovery, workflow dependencies,
 cron scheduling, forced interruption of arbitrary code, or exactly-once
 business side effects. A future distributed engine can implement the same
 `TaskExecutionEngine` boundary without changing the service facade.
+
+## Further reading
+
+- [Project overview and quick start](../README.md)
+- [API documentation](https://docs.rs/qubit-task)
+- [中文用户指南](user-guide.zh_CN.md)
+- [Detailed service design](task_execution_service_design.md)

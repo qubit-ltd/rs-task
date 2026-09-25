@@ -2,7 +2,17 @@
 
 [English version](user-guide.md)
 
-本指南适用于 Rust 1.94 或更高版本以及 `qubit-task` 0.6.x。该 crate 接受无法在当前业务请求中完成的工作，根据资源额度安排执行，并允许业务系统稍后查询任务进度。
+本指南适用于 Rust 1.94 或更高版本以及 `qubit-task` 0.6.x，面向需要有界后台执行、任务历史，并需选择易失存储或重启恢复方案的 Rust 服务开发者。该 crate 接受无法在当前业务请求中完成的工作，根据资源额度安排执行，并允许业务系统稍后查询任务进度。
+
+## 概念模型
+
+`TaskRequest` 描述可持久化的任务：任务类型、精确的处理器版本、payload、资源需求，以及可选的业务关联键。`TaskRecord` 保存可查询的生命周期状态和有大小上限的输出摘要。`TaskHandler` 负责解释请求；`TaskStore`、`SchedulingPolicy` 和 `TaskExecutionEngine` 分别决定持久化方式、队列选择和执行容量。通过 `submit_local` 提交的闭包则使用独立的进程内结果通道 `LocalTaskHandle`，进程重启后无法重建。
+
+服务门面负责协调这些组件。存储声明历史是否持久化、未完成任务是否可恢复；资源容量控制受理和并发执行额度，不负责发现或绑定操作系统上的 CPU、GPU。
+
+## 场景：提交数据导入任务并及时返回
+
+假设某个 API 收到 CSV 导入请求，需要尽快响应，同时让导入继续运行。若任务必须支持重启恢复，应把导入参数编码进带版本的 `TaskRequest`，构建服务前注册与请求版本匹配的处理器，再把受理后的任务 ID 返回调用方。调用方随后可通过 `get`、`list` 或 `wait` 查看状态。后续章节会逐步说明这一流程，以及如何选择存储和资源保证。
 
 ## 选择持久化保证
 
@@ -171,6 +181,12 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 
 调用 `shutdown()` 时，服务先停止新的受理并等待进行中的提交完成受理，再等待已受理任务结束；随后关闭通知入队并排空队列中的事件，然后返回。它不会关闭由应用持有的事件总线。同步 provider 在专用操作系统线程上运行，不会占用 Tokio runtime worker；但如果 provider 永不返回，该线程就无法完成发布，`shutdown()` 也可能无限等待。不调用 `shutdown()` 而直接丢弃服务时，发送端关闭后发布线程仍会排空已入队通知再退出，同样受 provider 是否返回的影响。若发布线程发生 panic，`worker_panicked` 会记录此情况，shutdown 仍可观察到线程退出，但队列中尚未处理的通知可能丢失。
 
+## 错误与诊断
+
+`TaskRunError` 用错误类别、诊断文本和可重试标记描述处理器失败。不可重试错误会以 `Failed` 结束，处理器 panic 则以 `Panicked` 结束。持久化诊断文本有长度上限；如需保留更完整的信息，应由业务应用记录原始错误或写入自己的结果存储。进程内任务的 `LocalTaskHandle<R, E>` 会保留原始类型化错误。
+
+`Blocked` 记录可查询，并附有需要人工处理的原因，例如找不到对应版本的处理器，或重试时队列已满。可用 `get` 或 `list` 查看记录，修复注册或容量问题后调用 `retry_blocked`。生命周期事件可通过 `notification_stats()` 区分本地队列丢弃、发布错误和 worker 故障；这些计数不表示订阅者已处理事件。
+
 ## 查询、取消和重试
 
 使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它会持久化 `cancel_requested` 并在 `TaskContext` 中设置协作取消信号；这只是取消请求。处理器必须返回 `TaskRunOutcome::Cancelled`，服务才会以 `TaskState::Cancelled` 确认取消。如果处理器返回成功或失败，那个结果仍是权威结果。协作取消集成测试覆盖了这一契约。
@@ -186,6 +202,14 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 所有权 fencing 保护，旧 store 句柄也不能绕过。SQLite 同时只执行一个阻塞数据库
 操作；调用方须在 Tokio runtime 中轮询 store 操作。
 
+## 排障
+
+- **提交时收到 `QueueFull`：** 有界等待队列已满。调用方可以施加背压、等待队列前进；如果部署能够安全保留更多待执行任务，也可以提高队列上限。自动重试遇到队列满时会进入 `Blocked`；有空位后调用 `retry_blocked`。
+- **重启后任务仍处于 `Blocked`：** 查看持久化诊断，并确认服务注册了完全匹配 `(task_type, handler_version)` 的处理器。修正注册或原因后调用 `retry_blocked`。
+- **调用 `cancel` 后任务仍在运行：** 取消采用协作方式。处理器需要检查 `TaskContext::is_cancelled()` 并返回 `TaskRunOutcome::Cancelled`；服务不会强行中断任意代码。
+- **SQLite 服务启动失败：** 检查数据库路径是否可用，以及是否已有其他服务进程持有数据库。恢复失败时不会自动回退到内存存储。
+- **没有收到状态事件：** 检查 `notification_stats()` 中的队列丢弃、provider 错误或发布线程 panic 计数。事件采用尽力而为语义；任务状态应以服务查询结果为准。
+
 ## 运行限制
 
 请求上限按 UTF-8 字节数计算：`task_type` 128、`handler_version` 64、
@@ -195,3 +219,10 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 UTF-8 字符边界裁剪；`LocalTaskHandle` 仍保留原始类型化结果和错误值。
 
 本版本只在单个服务进程内调度任务，不提供多节点租约、分布式资源发现、工作流依赖、定时任务、任意代码强制中断或业务副作用恰好一次保证。未来的分布式执行实现可以实现相同的 `TaskExecutionEngine` 接口，而不要求更改服务门面。
+
+## 延伸阅读
+
+- [项目概览与快速开始](../README.zh_CN.md)
+- [API 文档](https://docs.rs/qubit-task)
+- [English user guide](user-guide.md)
+- [TaskExecutionService 详细设计](task_execution_service_design.md)
