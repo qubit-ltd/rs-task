@@ -284,6 +284,29 @@ If the bounded waiting queue is full when a retry is due, the task becomes
 `Blocked` with a queue-capacity reason instead of exceeding the limit. After
 capacity becomes available, call `retry_blocked` to enqueue it again.
 
+### Bound running work and restart recovery
+
+Resource slots and task concurrency are separate limits. Configure
+`max_running_tasks(NonZeroUsize)` to cap active attempts even when requests
+use zero CPU slots. Its default is the available system parallelism, falling
+back to one. On restart, unfinished records must fit within
+`queue_capacity + max_running_tasks`; otherwise construction fails and keeps
+the records intact. Increase one of those limits before restarting again.
+
+~~~rust,no_run
+use std::num::NonZeroUsize;
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+let builder = TaskExecutionServiceBuilder::in_memory()
+    .max_running_tasks(NonZeroUsize::new(8).expect("positive limit"));
+~~~
+
+`max_attempts` counts total starts for a task ID across process restarts. A
+recovered `Queued` or `Running` record at the limit becomes `Blocked` without
+starting again. `retry_blocked` returns `TaskServiceError::AttemptsExhausted`
+for an exhausted record; submit a new task ID for a fresh attempt budget. This
+behavior changes the 0.6.0 retry contract.
+
 ## Migration from 0.5 and earlier's previous API
 
 This redesign removes caller-supplied IDs, `submit` closures,

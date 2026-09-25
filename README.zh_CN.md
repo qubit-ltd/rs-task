@@ -67,6 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API 与存储契约
 
+服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
+
 `TaskQuery.states` 使用 `TaskStateKind`；此前用带诊断内容的 `TaskState`
 构造筛选条件的调用方需要迁移。请求文本上限按 UTF-8 字节计算：`task_type`
 128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键
