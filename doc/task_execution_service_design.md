@@ -195,7 +195,15 @@ TaskExecutionService
 
 实现时须特别处理“执行引擎接受任务”与“`Running` 持久化”之间的竞态：处理器不得早于 `Running` 的成功提交开始，提交失败则回滚尚未启动的工作并释放资源。所有状态转换及资源账本更新应具有清晰的线性化点；不在状态锁内执行用户代码、外部存储调用或事件发布。任务回调带 `TaskId`、尝试序号和所有权代际，旧回调不能覆盖新尝试的状态。任何任务终止路径，包括 panic、取消与执行引擎拒绝，都必须归还已预约资源。查询允许看到尚未发布事件的已提交状态。
 
-## 8. 验证与迁移
+## 8. 查询、写入与记录边界
+
+历史状态筛选使用 `TaskStateKind`，不携带或比较 `Failed`、`Blocked` 等状态中的诊断载荷；该公开类型变更要求调用方将 `TaskQuery.states` 从 `TaskState` 迁移为 `TaskStateKind`。关闭开始后服务写操作通过 admission gate 拒绝；关闭会等待已取得 permit 的写操作完成。SQLite 的 `accept` 与 `transition` 还要求当前 store 持有匹配所有权 epoch，释放所有权后旧句柄无法写入。所有权状态与连接操作按“连接锁后所有权锁”的顺序串行化。
+
+SQLite 使用单个连接，因此同时运行的阻塞数据库操作上限为 1。异步 store 调用先取得 Tokio semaphore permit，再通过 `spawn_blocking` 执行同步 SQLite 工作；permit 由阻塞闭包持有到操作完成，即使调用方取消等待中的 future，也不会释放正在执行操作的容量。轮询 SQLite store future 需要 Tokio runtime。
+
+请求及诊断文本限额按 UTF-8 字节计算：`task_type` 128、`handler_version` 64、`correlation_key` 与 `idempotency_key` 各 256；metadata 最多 32 项，键 128、值 4096、键值总计 16384。超限请求在持久化受理前返回 `InvalidRequest`，Memory 和 SQLite store 也执行相同的请求边界检查。诊断类别最多 128 字节，Blocked 原因、Panicked 消息及其他诊断最多 4096 字节。执行阶段的诊断在 UTF-8 字符边界裁剪；`LocalTaskHandle` 的类型化错误通道仍传递原始值。既有 payload 16 MiB 与 output summary 64 KiB 上限保持不变。
+
+## 9. 验证与迁移
 
 核心验证包括：资源不足排队、GPU 设备分配、非法资源请求、队列满拒绝、越过次数后的防饥饿、取消与启动竞态、panic 后资源归还、重复提交、历史存储故障、事件故障、持久受理失败、终态写入失败、重启恢复，以及旧实例回调被版本/代际拒绝。还要验证 `in_memory()` 无 SPI 装配可执行本地任务、通用 builder 未选存储时拒绝构建、默认容量可覆盖、SQLite 便捷入口完成恢复后才返回，以及链接第三方 provider 不改变默认行为。SPI 场景要验证跨 crate 自动发现、未链接 provider 不会被发现、重复处理器键报错、运行时配置注入、`StoreCapabilities` 与实际操作一致、`require_recovery` 失败而不降级，以及旧处理器版本恢复。`TaskStore` 提供按能力分组的可复用契约测试套件，让外部后端检验原子受理、条件更新、恢复扫描、独占所有权和单次状态聚合；`stats()` 在服务层由拒绝 `list()` 的测试存储验证只执行一次 `count_states()`。
 
