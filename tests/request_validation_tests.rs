@@ -17,9 +17,11 @@ use qubit_task::model::MAX_TASK_PAYLOAD_BYTES;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
+use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::TaskFuture;
 
@@ -88,6 +90,37 @@ async fn test_submit_rejects_empty_handler_version() {
         Err(TaskServiceError::InvalidRequest(message))
             if message == "task type and handler version must not be empty"
     ));
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_submit_local_rejects_unsatisfiable_cpu_capacity_before_acceptance() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .capacity(ResourceCapacity {
+            cpu_slots: 0,
+            ..ResourceCapacity::default()
+        })
+        .build()
+        .await
+        .expect("service builds");
+
+    let result = service
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await;
+
+    assert!(matches!(result, Err(TaskServiceError::Unsatisfiable)));
+    assert_eq!(service.stats().await.expect("stats succeed").queued, 0);
+    assert!(
+        service
+            .list(TaskQuery::default())
+            .await
+            .expect("history query succeeds")
+            .records
+            .is_empty()
+    );
     service.shutdown().await.expect("service shuts down");
 }
 

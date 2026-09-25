@@ -91,6 +91,7 @@ pub struct TaskExecutionServiceBuilder {
     scan_budget: usize,
     max_attempts: u32,
     require_recovery: bool,
+    runtime_handle: Option<tokio::runtime::Handle>,
     #[cfg(feature = "event-bus")]
     event_bus: Option<qubit_event_bus::EventBus>,
     #[cfg(feature = "event-bus")]
@@ -114,6 +115,7 @@ impl Default for TaskExecutionServiceBuilder {
             scan_budget: 128,
             max_attempts: 3,
             require_recovery: false,
+            runtime_handle: None,
             #[cfg(feature = "event-bus")]
             event_bus: None,
             #[cfg(feature = "event-bus")]
@@ -225,6 +227,17 @@ impl TaskExecutionServiceBuilder {
         self
     }
 
+    /// Selects the Tokio runtime used for service-owned background tasks.
+    ///
+    /// The runtime must remain alive until `TaskExecutionService::shutdown`
+    /// completes. When omitted, the service uses its process-wide default
+    /// runtime. Store futures continue to run on the runtime polling them.
+    #[must_use]
+    pub fn runtime_handle(mut self, handle: tokio::runtime::Handle) -> Self {
+        self.runtime_handle = Some(handle);
+        self
+    }
+
     /// Injects the concrete event bus facade for optional status notifications.
     #[cfg(feature = "event-bus")]
     #[must_use]
@@ -285,6 +298,9 @@ impl TaskExecutionServiceBuilder {
             }
         };
         let queue_count = queue.len();
+        let runtime_handle = self
+            .runtime_handle
+            .unwrap_or_else(|| super::task_execution_service::runtime().handle().clone());
         #[cfg(feature = "event-bus")]
         let event_bus = match self.event_bus {
             Some(bus) => match TaskEventPublisher::new(bus, self.event_bus_buffer_capacity) {
@@ -302,6 +318,7 @@ impl TaskExecutionServiceBuilder {
             store,
             engine,
             policy,
+            runtime_handle,
             handlers: self.handlers,
             queue_capacity: self.queue_capacity,
             running_slots: Arc::new(tokio::sync::Semaphore::new(self.max_running_tasks.get())),
@@ -450,7 +467,7 @@ async fn restore_tasks_paged(
                 } else {
                     queue.push_back(QueuedTask {
                         id: record.id,
-                        request: record.request.clone(),
+                        resources: record.request.resources.clone(),
                         bypasses: 0,
                     });
                 }

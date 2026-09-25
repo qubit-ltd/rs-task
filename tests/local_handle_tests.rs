@@ -124,6 +124,14 @@ impl TaskStore for PauseEvictedGetStore {
         self.inner.count_states()
     }
 
+    fn prune_terminal_before<'a>(
+        &'a self,
+        _accepted_before_ms: u64,
+        _max_rows: std::num::NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         self.inner.acquire_owner()
     }
@@ -171,6 +179,14 @@ impl TaskStore for PauseAfterAcceptStore {
 
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
         self.inner.count_states()
+    }
+
+    fn prune_terminal_before<'a>(
+        &'a self,
+        _accepted_before_ms: u64,
+        _max_rows: std::num::NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
@@ -491,7 +507,7 @@ async fn test_handler_initiated_cancellation_has_distinct_handle_result() {
 }
 
 #[tokio::test]
-async fn test_unsatisfiable_local_task_reports_blocked_without_running_handler() {
+async fn test_unsatisfiable_local_task_is_rejected_before_acceptance() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .capacity(qubit_task::model::ResourceCapacity {
             cpu_slots: 0,
@@ -502,7 +518,7 @@ async fn test_unsatisfiable_local_task_reports_blocked_without_running_handler()
         .expect("service builds");
     let ran = Arc::new(AtomicBool::new(false));
     let handler_ran = Arc::clone(&ran);
-    let handle = service
+    let result = service
         .submit_local(move |_| {
             handler_ran.store(true, Ordering::Release);
             LocalTaskOutcome::<(), DomainError>::Succeeded {
@@ -510,26 +526,22 @@ async fn test_unsatisfiable_local_task_reports_blocked_without_running_handler()
                 summary: TaskOutput::default(),
             }
         })
-        .await
-        .expect("local task accepted");
-    let id = handle.task_id();
+        .await;
     assert!(matches!(
-        tokio::time::timeout(WAIT_LIMIT, handle.result())
-            .await
-            .expect("blocked handle finalizes"),
-        Err(LocalTaskResultError::Blocked(reason)) if reason.contains("unsatisfiable")
+        result,
+        Err(qubit_task::service::TaskServiceError::Unsatisfiable)
     ));
     assert!(!ran.load(Ordering::Acquire));
-    assert!(matches!(
+    assert_eq!(service.stats().await.expect("stats query succeeds").queued, 0);
+    assert!(
         service
-            .get(id)
+            .list(qubit_task::model::TaskQuery::default())
             .await
-            .expect("record query succeeds")
-            .expect("record retained")
-            .state,
-        TaskState::Blocked { .. }
-    ));
-    service.shutdown().await.expect("blocked task permits shutdown");
+            .expect("history query succeeds")
+            .records
+            .is_empty()
+    );
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio::test]

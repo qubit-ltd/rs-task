@@ -8,9 +8,9 @@
 use super::QueueSnapshot;
 use super::SchedulingPolicy;
 use crate::model::ResourceCapacity;
+use crate::model::ResourceRequest;
 use crate::model::ResourceSnapshot;
 use crate::model::TaskId;
-use crate::model::TaskRequest;
 
 /// Queue entry metadata needed to keep a frequently bypassed request
 /// progressing.
@@ -19,7 +19,7 @@ pub struct QueuedTask {
     /// Stable task identity.
     pub id: TaskId,
     /// Resource requirements used to determine likely fit.
-    pub request: TaskRequest,
+    pub resources: ResourceRequest,
     /// Number of scheduling cycles in which a later task started first.
     pub bypasses: u32,
 }
@@ -70,7 +70,7 @@ impl SchedulingPolicy for FairFifoPolicy {
 
 /// Reports whether configured capacity can ever satisfy the task's request.
 fn can_fit_capacity(task: &QueuedTask, capacity: &ResourceCapacity) -> bool {
-    let request = &task.request.resources;
+    let request = &task.resources;
     request.cpu_slots <= capacity.cpu_slots
         && capacity
             .gpus
@@ -86,7 +86,7 @@ fn can_fit_capacity(task: &QueuedTask, capacity: &ResourceCapacity) -> bool {
 
 /// Reports whether currently unreserved resources appear sufficient for a task.
 fn likely_fits(task: &QueuedTask, resources: &ResourceSnapshot) -> bool {
-    let request = &task.request.resources;
+    let request = &task.resources;
     request.cpu_slots <= resources.capacity.cpu_slots.saturating_sub(resources.used_cpu_slots)
         && resources
             .capacity

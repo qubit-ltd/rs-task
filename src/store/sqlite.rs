@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::fs::File;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 #[cfg(test)]
@@ -26,6 +27,7 @@ use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
 use crate::model::StoredTask;
 use crate::model::StoredTaskPage;
+use crate::model::TaskCursor;
 use crate::model::TaskId;
 use crate::model::TaskPage;
 use crate::model::TaskQuery;
@@ -97,7 +99,7 @@ impl SqliteTaskStore {
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(failure)?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);").map_err(failure)?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);").map_err(failure)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             owner_state: Arc::new(Mutex::new(SqliteOwnerState {
@@ -291,23 +293,35 @@ impl TaskStore for SqliteTaskStore {
 
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.run(move |connection| {
+            let page_size = query.limit.max(1);
+            let fetch_limit = page_size
+                .checked_add(1)
+                .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
+            let fetch_limit = i64::try_from(fetch_limit)
+                .map_err(|_| StoreError::InvalidRequest("task history page limit is too large"))?;
+            let after_time = query
+                .after
+                .map(|cursor| i64::try_from(cursor.accepted_at_ms))
+                .transpose()
+                .map_err(|_| StoreError::InvalidRequest("task history cursor timestamp is too large"))?;
             let state_kinds = query.states.iter().map(|kind| kind.as_str()).collect::<Vec<_>>();
             let mut sql = String::from(
-                "SELECT record_json FROM tasks WHERE (?1 IS NULL OR id > ?1) AND (?2 IS NULL OR correlation_key = ?2)",
+                "SELECT record_json FROM tasks WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2)) AND (?3 IS NULL OR correlation_key = ?3)",
             );
             if !state_kinds.is_empty() {
-                let placeholders = (3..3 + state_kinds.len())
+                let placeholders = (4..4 + state_kinds.len())
                     .map(|i| format!("?{i}"))
                     .collect::<Vec<_>>()
                     .join(",");
                 sql.push_str(&format!(" AND state_kind IN ({placeholders})"));
             }
-            sql.push_str(&format!(" ORDER BY id LIMIT ?{}", 3 + state_kinds.len()));
+            sql.push_str(&format!(" ORDER BY accepted_at, id LIMIT ?{}", 4 + state_kinds.len()));
             let mut values = vec![
-                query
-                    .after
-                    .map(|id| id.to_string())
-                    .map_or(rusqlite::types::Value::Null, rusqlite::types::Value::Text),
+                after_time.map_or(rusqlite::types::Value::Null, rusqlite::types::Value::Integer),
+                query.after.map(|cursor| cursor.id.to_string()).map_or(
+                    rusqlite::types::Value::Null,
+                    rusqlite::types::Value::Text,
+                ),
                 query
                     .correlation_key
                     .map_or(rusqlite::types::Value::Null, rusqlite::types::Value::Text),
@@ -317,7 +331,7 @@ impl TaskStore for SqliteTaskStore {
                     .into_iter()
                     .map(|kind| rusqlite::types::Value::Text(kind.into())),
             );
-            values.push(rusqlite::types::Value::Integer((query.limit.max(1) + 1) as i64));
+            values.push(rusqlite::types::Value::Integer(fetch_limit));
             let mut statement = connection.prepare(&sql).map_err(failure)?;
             let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(failure)?;
             let mut records = Vec::new();
@@ -326,11 +340,13 @@ impl TaskStore for SqliteTaskStore {
                     serde_json::from_str::<TaskRecord>(&row.get::<_, String>(0).map_err(failure)?).map_err(failure)?,
                 );
             }
-            let has_more = records.len() > query.limit.max(1);
+            let has_more = records.len() > page_size;
             if has_more {
-                records.truncate(query.limit.max(1));
+                records.truncate(page_size);
             }
-            let next = has_more.then(|| records.last().map(|record| record.id)).flatten();
+            let next = has_more
+                .then(|| records.last().map(TaskCursor::from))
+                .flatten();
             Ok(TaskPage { records, next })
         })
     }
@@ -360,6 +376,51 @@ impl TaskStore for SqliteTaskStore {
                 }
             }
             Ok(counts)
+        })
+    }
+
+    fn prune_terminal_before<'a>(
+        &'a self,
+        accepted_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        let accepted_before_ms = match i64::try_from(accepted_before_ms) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async {
+                    Err(StoreError::InvalidRequest(
+                        "task history cutoff exceeds the SQLite integer range",
+                    ))
+                });
+            }
+        };
+        let max_rows = match i64::try_from(max_rows.get()) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async {
+                    Err(StoreError::InvalidRequest(
+                        "task history prune limit exceeds the SQLite integer range",
+                    ))
+                });
+            }
+        };
+        self.run_write(move |connection| {
+            let transaction = connection.unchecked_transaction().map_err(failure)?;
+            let mut statement = transaction
+                .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND accepted_at < ?1 ORDER BY accepted_at, id LIMIT ?2")
+                .map_err(failure)?;
+            let rows = statement
+                .query_map(rusqlite::params![accepted_before_ms, max_rows], |row| row.get::<_, String>(0))
+                .map_err(failure)?;
+            let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
+            drop(statement);
+            for id in &ids {
+                transaction
+                    .execute("DELETE FROM tasks WHERE id=?1", [id])
+                    .map_err(failure)?;
+            }
+            transaction.commit().map_err(failure)?;
+            Ok(ids.len())
         })
     }
 
@@ -454,6 +515,10 @@ mod tests {
 
     use super::SqliteTaskStore;
     use super::TaskId;
+    use crate::model::AcceptOutcome;
+    use crate::model::TaskQuery;
+    use crate::model::TaskRequest;
+    use crate::store::TaskStore;
 
     /// Creates a unique database path for one worker scheduling test.
     fn test_database_path() -> std::path::PathBuf {
@@ -466,6 +531,75 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("owner.lock"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn same_millisecond_pages_use_task_id_as_tie_breaker() {
+        let path = test_database_path();
+        let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+        let ids = [TaskId::generate(), TaskId::generate()];
+        for id in ids {
+            assert!(matches!(
+                store
+                    .accept(id, TaskRequest::new("cursor-test", "1", Vec::new()))
+                    .await
+                    .expect("task accepted"),
+                AcceptOutcome::Accepted(_)
+            ));
+        }
+        store
+            .run(move |connection| {
+                for id in ids {
+                    connection
+                        .execute(
+                            "UPDATE tasks SET accepted_at=42, record_json=json_set(record_json, '$.accepted_at_ms', 42) WHERE id=?1",
+                            [id.to_string()],
+                        )
+                        .map_err(super::failure)?;
+                }
+                Ok(())
+            })
+            .await
+            .expect("timestamps are aligned in the test database");
+
+        let first = store
+            .list(TaskQuery {
+                limit: 1,
+                ..TaskQuery::default()
+            })
+            .await
+            .expect("first page succeeds");
+        let second = store
+            .list(TaskQuery {
+                after: first.next,
+                limit: 1,
+                ..TaskQuery::default()
+            })
+            .await
+            .expect("second page succeeds");
+        assert_eq!(first.records[0].id, ids[0].min(ids[1]));
+        assert_eq!(second.records[0].id, ids[0].max(ids[1]));
+        drop(store);
+        remove_database(&path);
+    }
+
+    #[tokio::test]
+    async fn pruning_rejects_values_outside_sqlite_integer_range() {
+        let path = test_database_path();
+        let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+        let cutoff = store
+            .prune_terminal_before(u64::MAX, std::num::NonZeroUsize::new(1).expect("positive limit"))
+            .await;
+        assert!(matches!(cutoff, Err(crate::store::StoreError::InvalidRequest(_))));
+        let limit = store
+            .prune_terminal_before(
+                0,
+                std::num::NonZeroUsize::new(i64::MAX as usize + 1).expect("positive limit"),
+            )
+            .await;
+        assert!(matches!(limit, Err(crate::store::StoreError::InvalidRequest(_))));
+        drop(store);
+        remove_database(&path);
     }
 
     #[tokio::test]

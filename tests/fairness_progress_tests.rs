@@ -47,10 +47,7 @@ impl SchedulingPolicy for ObservePolicy {
     }
 }
 
-async fn observe_until(
-    receiver: &mut mpsc::UnboundedReceiver<Vec<(TaskId, u32)>>,
-    predicate: impl Fn(&[(TaskId, u32)]) -> bool,
-) -> Vec<(TaskId, u32)> {
+async fn observe_until<T>(receiver: &mut mpsc::UnboundedReceiver<Vec<T>>, predicate: impl Fn(&[T]) -> bool) -> Vec<T> {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let snapshot = receiver.recv().await.expect("scheduler observation channel stays open");
@@ -79,6 +76,24 @@ struct ObservingFairPolicy {
     observed: mpsc::UnboundedSender<Vec<(TaskId, u32)>>,
 }
 
+struct BoundedSnapshotPolicy {
+    inner: FairFifoPolicy,
+    observed: mpsc::UnboundedSender<Vec<(TaskId, qubit_task::model::ResourceRequest)>>,
+}
+
+impl SchedulingPolicy for BoundedSnapshotPolicy {
+    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId> {
+        let _ = self.observed.send(
+            queue
+                .tasks
+                .iter()
+                .map(|task| (task.id, task.resources.clone()))
+                .collect(),
+        );
+        self.inner.order(queue, resources)
+    }
+}
+
 impl SchedulingPolicy for ObservingFairPolicy {
     fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId> {
         let _ = self
@@ -91,6 +106,36 @@ impl SchedulingPolicy for ObservingFairPolicy {
 struct GatedHandler {
     started: mpsc::UnboundedSender<u8>,
     release: Arc<HashMap<u8, Arc<Semaphore>>>,
+}
+
+struct PayloadHandler {
+    started: mpsc::UnboundedSender<Vec<u8>>,
+    release_first: Arc<Semaphore>,
+}
+
+impl TaskHandler for PayloadHandler {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
+            task_type: "payload-copy".into(),
+            version: "1".into(),
+        }
+    }
+
+    fn run<'a>(&'a self, payload: &'a [u8], _context: TaskContext) -> qubit_task::store::TaskFuture<'a, TaskRunResult> {
+        Box::pin(async move {
+            self.started
+                .send(payload.to_vec())
+                .expect("payload receiver stays open");
+            if payload.first() == Some(&b'P') {
+                self.release_first
+                    .acquire()
+                    .await
+                    .expect("first task gate stays open")
+                    .forget();
+            }
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+    }
 }
 
 impl TaskHandler for GatedHandler {
@@ -279,13 +324,13 @@ async fn failed_activation_does_not_count_as_a_bypass() {
 fn protected_head_stays_first_until_resources_are_returned() {
     let mut large = qubit_task::scheduling::QueuedTask {
         id: TaskId::generate(),
-        request: qubit_task::model::TaskRequest::new("large", "1", Vec::new()),
+        resources: qubit_task::model::TaskRequest::new("large", "1", Vec::new()).resources,
         bypasses: 2,
     };
-    large.request.resources.cpu_slots = 2;
+    large.resources.cpu_slots = 2;
     let later = qubit_task::scheduling::QueuedTask {
         id: TaskId::generate(),
-        request: qubit_task::model::TaskRequest::new("small", "1", Vec::new()),
+        resources: qubit_task::model::TaskRequest::new("small", "1", Vec::new()).resources,
         bypasses: 0,
     };
     let policy = FairFifoPolicy::new(2);
@@ -391,48 +436,112 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
 }
 
 #[tokio::test]
-async fn permanently_unavailable_request_is_classified_without_bypass_counting() {
+async fn large_payloads_survive_bounded_resource_only_scheduler_snapshots() {
+    let (observed, mut observations) = mpsc::unbounded_channel();
+    let (started, mut starts) = mpsc::unbounded_channel();
+    let release_first = Arc::new(Semaphore::new(0));
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .capacity(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        })
+        .queue_capacity(8)
+        .scan_budget(1)
+        .policy(Arc::new(BoundedSnapshotPolicy {
+            inner: FairFifoPolicy::default(),
+            observed,
+        }))
+        .register_handler(Arc::new(PayloadHandler {
+            started,
+            release_first: Arc::clone(&release_first),
+        }))
+        .expect("handler registration succeeds")
+        .build()
+        .await
+        .expect("service builds");
+
+    let first_payload = vec![b'P'];
+    service
+        .submit(TaskRequest::new("payload-copy", "1", first_payload.clone()))
+        .await
+        .expect("first task is accepted");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), starts.recv())
+            .await
+            .expect("first task starts")
+            .expect("payload receiver remains open"),
+        first_payload
+    );
+
+    let payloads = (0..4).map(|index| vec![b'A' + index; 256 * 1024]).collect::<Vec<_>>();
+    let mut queued_ids = Vec::new();
+    for payload in &payloads {
+        queued_ids.push(
+            service
+                .submit(TaskRequest::new("payload-copy", "1", payload.clone()))
+                .await
+                .expect("large payload task is accepted")
+                .id,
+        );
+    }
+    let snapshot = observe_until(&mut observations, |candidate| {
+        candidate.iter().any(|(id, _)| queued_ids.contains(id))
+    })
+    .await;
+    assert_eq!(snapshot.len(), 1, "policy receives no more than scan_budget candidates");
+    assert_eq!(snapshot[0].1.cpu_slots, 1, "policy receives resource demand only");
+
+    release_first.add_permits(1);
+    let mut received = Vec::new();
+    for _ in &payloads {
+        received.push(
+            tokio::time::timeout(Duration::from_secs(5), starts.recv())
+                .await
+                .expect("queued task starts after resources are released")
+                .expect("payload receiver remains open"),
+        );
+    }
+    received.sort_by_key(|payload| payload[0]);
+    let mut expected = payloads;
+    expected.sort_by_key(|payload| payload[0]);
+    assert_eq!(received, expected, "full payload bytes come from the task store");
+    service.shutdown().await.expect("service drains and shuts down");
+}
+
+#[tokio::test]
+async fn missing_handler_is_classified_without_bypass_counting() {
     let (observed, mut observations) = mpsc::unbounded_channel();
     let policy = Arc::new(ObservingFairPolicy {
         inner: FairFifoPolicy::default(),
         observed,
     });
     let service = TaskExecutionServiceBuilder::in_memory()
-        .capacity(ResourceCapacity {
-            cpu_slots: 0,
-            ..ResourceCapacity::default()
-        })
         .policy(policy)
         .build()
         .await
         .expect("service builds");
-    let handle = service
-        .submit_local(|_| LocalTaskOutcome::<(), Infallible>::Succeeded {
-            value: (),
-            summary: TaskOutput::default(),
-        })
-        .await
-        .expect("unsatisfiable task is accepted for reporting");
-    let task_id = handle.task_id();
-
-    let outcome = tokio::time::timeout(Duration::from_secs(3), handle.result()).await;
-    let record = service
-        .get(task_id)
-        .await
-        .expect("task record query succeeds")
-        .expect("accepted task record remains stored");
-    assert!(matches!(
-        record.state,
-        qubit_task::model::TaskState::Blocked { ref reason } if reason.contains("unsatisfiable")
-    ));
-    assert!(
-        matches!(
-            outcome,
-            Ok(Err(qubit_task::service::LocalTaskResultError::Blocked(ref reason))) if reason.contains("unsatisfiable")
-        ),
-        "unsatisfiable task should finalize Blocked; result={outcome:?}, stored state={:?}",
-        record.state
-    );
+    let request = TaskRequest::new("missing-handler", "1", Vec::new());
+    let record = service.submit(request).await.expect("task is accepted for reporting");
+    let task_id = record.id;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let record = service
+                .get(task_id)
+                .await
+                .expect("task record query succeeds")
+                .expect("accepted task record remains stored");
+            if matches!(record.state, qubit_task::model::TaskState::Blocked { .. }) {
+                assert!(matches!(
+                    record.state,
+                    qubit_task::model::TaskState::Blocked { ref reason } if reason.contains("handler")
+                ));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("missing handler is classified as Blocked");
     let snapshot = observe_until(&mut observations, |snapshot| {
         snapshot.iter().any(|(id, _)| *id == task_id)
     })

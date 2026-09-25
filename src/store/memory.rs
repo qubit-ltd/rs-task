@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 
 use parking_lot::Mutex;
 
@@ -18,6 +19,7 @@ use crate::model::AcceptOutcome;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
 use crate::model::StoredTaskPage;
+use crate::model::TaskCursor;
 use crate::model::TaskId;
 use crate::model::TaskPage;
 use crate::model::TaskQuery;
@@ -176,6 +178,10 @@ impl TaskStore for MemoryTaskStore {
 
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         Box::pin(async move {
+            let page_size = query.limit.max(1);
+            let fetch_limit = page_size
+                .checked_add(1)
+                .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
             let state = self.state.lock();
             let mut records = state
                 .records
@@ -186,16 +192,21 @@ impl TaskStore for MemoryTaskStore {
                             .correlation_key
                             .as_ref()
                             .is_none_or(|key| record.request.correlation_key.as_ref() == Some(key))
-                        && query.after.is_none_or(|after| record.id > after)
+                        && query
+                            .after
+                            .is_none_or(|after| (record.accepted_at_ms, record.id) > (after.accepted_at_ms, after.id))
                 })
-                .take(query.limit.max(1) + 1)
-                .cloned()
                 .collect::<Vec<_>>();
-            let has_more = records.len() > query.limit.max(1);
+            records.sort_by_key(|record| (record.accepted_at_ms, record.id));
+            records.truncate(fetch_limit);
+            let has_more = records.len() > page_size;
             if has_more {
-                records.truncate(query.limit.max(1));
+                records.truncate(page_size);
             }
-            let next = has_more.then(|| records.last().map(|record| record.id)).flatten();
+            let next = has_more
+                .then(|| records.last().map(|record| TaskCursor::from(*record)))
+                .flatten();
+            let records = records.into_iter().cloned().collect::<Vec<_>>();
             Ok(TaskPage { records, next })
         })
     }
@@ -221,6 +232,36 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    fn prune_terminal_before<'a>(
+        &'a self,
+        accepted_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock();
+            let mut candidates = state
+                .records
+                .values()
+                .filter(|record| record.state.is_terminal() && record.accepted_at_ms < accepted_before_ms)
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|record| (record.accepted_at_ms, record.id));
+            let expired = candidates
+                .into_iter()
+                .take(max_rows.get())
+                .map(|record| record.id)
+                .collect::<Vec<_>>();
+            for id in &expired {
+                if let Some(record) = state.records.remove(id)
+                    && let Some(key) = record.request.idempotency_key
+                {
+                    state.idempotency.remove(&key);
+                }
+            }
+            state.terminal_order.retain(|id| !expired.contains(id));
+            Ok(expired.len())
+        })
+    }
+
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
@@ -241,4 +282,53 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryTaskStore;
+    use crate::model::AcceptOutcome;
+    use crate::model::TaskId;
+    use crate::model::TaskQuery;
+    use crate::model::TaskRequest;
+    use crate::store::TaskStore;
+
+    #[tokio::test]
+    async fn same_millisecond_pages_use_task_id_as_tie_breaker() {
+        let store = MemoryTaskStore::new(8);
+        let first_id = TaskId::generate();
+        let second_id = TaskId::generate();
+        for id in [first_id, second_id] {
+            let AcceptOutcome::Accepted(_) = store
+                .accept(id, TaskRequest::new("cursor-test", "1", Vec::new()))
+                .await
+                .expect("task is accepted")
+            else {
+                panic!("each generated identifier is new")
+            };
+        }
+        {
+            let mut state = store.state.lock();
+            for record in state.records.values_mut() {
+                record.accepted_at_ms = 42;
+            }
+        }
+        let first = store
+            .list(TaskQuery {
+                limit: 1,
+                ..TaskQuery::default()
+            })
+            .await
+            .expect("first page succeeds");
+        assert_eq!(first.records[0].id, first_id.min(second_id));
+        let second = store
+            .list(TaskQuery {
+                after: first.next,
+                limit: 1,
+                ..TaskQuery::default()
+            })
+            .await
+            .expect("second page succeeds");
+        assert_eq!(second.records[0].id, first_id.max(second_id));
+    }
 }
