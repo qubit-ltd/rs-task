@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![English Document](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 
-`qubit-task` 接受可重建的业务任务，根据 CPU、GPU 和具名资源额度排队执行，并通过统一门面提供状态查询。存储、调度、执行引擎和版本化处理器既可直接装配，也可通过 `qubit-spi` 选择。
+`qubit-task` 让 Rust 服务能够接收耗时较长的后台任务，按 CPU、GPU 和具名资源额度调度，并通过统一门面查询任务状态。它适合需要有界后台执行和任务历史、又不希望业务代码绑定特定存储或执行引擎的应用。存储、调度、执行引擎和版本化处理器既可直接装配，也可通过 `qubit-spi` 选择。
 
 ## 安装
 
@@ -52,6 +52,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 第三方 `TaskStore` provider 必须实现 `count_states()`，一次聚合统计所有保留记录。
 `stats()` 调用该聚合一次，再读取引擎资源，因此两部分是相邻但非原子的快照。
 
+## 适用场景与能力边界
+
+例如，接口收到数据导入请求后，可以提交任务并立即返回任务 ID；服务再按资源上限调用对应版本的处理器，调用方随后查询执行状态，无须让原始请求一直等待。若结果只需在当前进程内交还给调用代码，可使用 `submit_local`；若任务需要重建或在进程重启后恢复，应使用 `TaskRequest`。
+
+本 crate 提供有界队列、资源感知调度、本地或可插拔执行、查询与取消接口，以及可选的 SQLite 恢复和生命周期通知。它不负责多节点分布式调度、工作流依赖、定时任务、强制中断任意代码，也不保证业务副作用恰好执行一次。
+
 ## 项目文档
 
 - [用户指南](doc/user-guide.zh_CN.md)
@@ -94,7 +100,7 @@ Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
 ## 贡献
 
 欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试，并在提交
-Pull Request 前运行 `./align-ci.sh` 格式化代码，运行`./ci-check.sh`对齐CI要求。
+Pull Request 前运行 `./align-ci.sh` 格式化代码，运行 `./ci-check.sh` 对齐 CI 要求。
 
 ## 作者
 

@@ -7,10 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![中文文档](https://img.shields.io/badge/文档-中文版-blue.svg)](README.zh_CN.md)
 
-`qubit-task` accepts reconstructable business work, queues it against CPU, GPU,
-and named resource budgets, and exposes one queryable task service. Storage,
-scheduling, execution, and versioned handlers can be assembled directly or
-selected through `qubit-spi`.
+`qubit-task` lets Rust services accept work that outlives a request, schedule it against CPU, GPU, and named resource budgets, and expose one queryable task service. It is for applications that need bounded background execution and task history without coupling business code to a particular store or execution engine. Storage, scheduling, execution, and versioned handlers can be assembled directly or selected through `qubit-spi`.
 
 ## Install
 
@@ -64,6 +61,12 @@ summary or reference rather than the full result.
 Custom `TaskStore` providers must implement `count_states()` as one aggregate
 over retained records. `stats()` uses that aggregate once and then reads engine
 resources; these are adjacent snapshots, not one atomic snapshot.
+
+## Why this project exists
+
+A request handler can submit an import, return a task ID, and let a versioned handler process the payload under the service's resource limits. The caller can then query progress without keeping the original request open. Choose `submit_local` when the result must return to code in the same process; use `TaskRequest` when the work must be reconstructable or recoverable after restart.
+
+The crate provides bounded queues, resource-aware scheduling, local or pluggable execution, query and cancellation APIs, and optional SQLite recovery and lifecycle notifications. It does not provide distributed multi-node scheduling, workflow dependencies, cron scheduling, forced interruption of arbitrary code, or exactly-once business side effects.
 
 ## Project documents
 
