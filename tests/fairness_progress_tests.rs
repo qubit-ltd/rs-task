@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -89,7 +90,7 @@ impl SchedulingPolicy for ObservingFairPolicy {
 
 struct GatedHandler {
     started: mpsc::UnboundedSender<u8>,
-    release: Arc<Semaphore>,
+    release: Arc<HashMap<u8, Arc<Semaphore>>>,
 }
 
 impl TaskHandler for GatedHandler {
@@ -102,8 +103,11 @@ impl TaskHandler for GatedHandler {
 
     fn run<'a>(&'a self, payload: &'a [u8], _context: TaskContext) -> qubit_task::store::TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
-            self.started.send(payload[0]).expect("test event receiver stays open");
+            let label = payload[0];
+            self.started.send(label).expect("test event receiver stays open");
             self.release
+                .get(&label)
+                .expect("each test task has a dedicated release gate")
                 .acquire()
                 .await
                 .expect("test release gate stays open")
@@ -313,7 +317,12 @@ fn protected_head_stays_first_until_resources_are_returned() {
 async fn protected_large_task_starts_before_small_tasks_after_resources_return() {
     let (observed, mut observations) = mpsc::unbounded_channel();
     let (started, mut starts) = mpsc::unbounded_channel();
-    let release = Arc::new(Semaphore::new(0));
+    let release = Arc::new(
+        (*b"PL012345678")
+            .into_iter()
+            .map(|label| (label, Arc::new(Semaphore::new(0))))
+            .collect::<HashMap<_, _>>(),
+    );
     let policy = Arc::new(ObservingFairPolicy {
         inner: FairFifoPolicy::default(),
         observed,
@@ -344,7 +353,6 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
             .expect("handler event channel remains open"),
         b'P'
     );
-
     let mut large = TaskRequest::new("fairness-gated", "1", b"L".to_vec());
     large.resources.cpu_slots = 2;
     let large = service.submit(large).await.expect("large task is accepted");
@@ -354,6 +362,7 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
         service.submit(small).await.expect("small task is accepted");
     }
 
+    let mut observed_bypasses = 0;
     for _ in 0..8 {
         let label = tokio::time::timeout(Duration::from_secs(3), starts.recv())
             .await
@@ -361,17 +370,19 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
             .expect("handler event channel remains open");
         assert!((b'0'..=b'8').contains(&label));
         assert_ne!(label, b'8', "the ninth small task must remain queued at the threshold");
-        release.add_permits(1);
+        observe_until(&mut observations, |snapshot| {
+            snapshot
+                .iter()
+                .find(|(id, _)| *id == large.id)
+                .is_some_and(|(_, bypasses)| *bypasses > observed_bypasses)
+        })
+        .await;
+        observed_bypasses += 1;
+        release[&label].add_permits(1);
     }
 
-    observe_until(&mut observations, |snapshot| {
-        snapshot
-            .iter()
-            .find(|(id, _)| *id == large.id)
-            .is_some_and(|(_, bypasses)| *bypasses >= 8)
-    })
-    .await;
-    release.add_permits(1);
+    assert_eq!(observed_bypasses, 8);
+    release[&b'P'].add_permits(1);
     let first_after_release = tokio::time::timeout(Duration::from_secs(3), starts.recv())
         .await
         .expect("a queued task starts after the preoccupier releases its slot")

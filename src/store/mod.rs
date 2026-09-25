@@ -78,6 +78,9 @@ pub enum StoreError {
     /// The expected state revision or attempt no longer matches.
     #[error("task state changed before the requested transition")]
     Conflict,
+    /// A request or persisted diagnostic violates a documented size limit.
+    #[error("invalid task data: {0}")]
+    InvalidRequest(&'static str),
     /// A valid revision attempted an illegal lifecycle transition.
     #[error("task lifecycle transition is not allowed")]
     InvalidTransition,

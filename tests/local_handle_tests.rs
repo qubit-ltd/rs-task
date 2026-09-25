@@ -26,6 +26,7 @@ use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
+use qubit_task::model::TaskStateKind;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
@@ -217,7 +218,7 @@ async fn cancel_during_accept(history_capacity: usize) {
         .expect("store sent accept signal");
     let page = service
         .list(TaskQuery {
-            states: vec![TaskState::Queued],
+            states: vec![TaskStateKind::Queued],
             limit: 2,
             ..TaskQuery::default()
         })

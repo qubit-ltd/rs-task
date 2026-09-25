@@ -17,6 +17,26 @@ pub const MAX_TASK_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Maximum number of bytes retained for a task output summary.
 pub const MAX_TASK_OUTPUT_SUMMARY_BYTES: usize = 64 * 1024;
+/// Maximum byte lengths for stable task request identifiers.
+pub const MAX_TASK_TYPE_BYTES: usize = 128;
+/// Maximum byte lengths for handler versions.
+pub const MAX_HANDLER_VERSION_BYTES: usize = 64;
+/// Maximum byte lengths for caller correlation keys.
+pub const MAX_CORRELATION_KEY_BYTES: usize = 256;
+/// Maximum byte lengths for idempotency keys.
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+/// Maximum number of metadata entries per task.
+pub const MAX_TASK_METADATA_ENTRIES: usize = 32;
+/// Maximum byte length of each metadata key.
+pub const MAX_TASK_METADATA_KEY_BYTES: usize = 128;
+/// Maximum byte length of each metadata value.
+pub const MAX_TASK_METADATA_VALUE_BYTES: usize = 4 * 1024;
+/// Maximum combined UTF-8 bytes used by task metadata.
+pub const MAX_TASK_METADATA_BYTES: usize = 16 * 1024;
+/// Maximum byte length of a persisted diagnostic category.
+pub const MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES: usize = 128;
+/// Maximum byte length of a persisted diagnostic message.
+pub const MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES: usize = 4 * 1024;
 
 /// Reconstructible description accepted by a task handler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +58,53 @@ pub struct TaskRequest {
 }
 
 impl TaskRequest {
+    /// Checks the size limits used by both the service and task stores.
+    pub(crate) fn validate_limits(&self) -> Result<(), &'static str> {
+        if self.task_type.is_empty() || self.handler_version.is_empty() {
+            return Err("task type and handler version must not be empty");
+        }
+        if self.task_type.len() > MAX_TASK_TYPE_BYTES {
+            return Err("task type exceeds the 128-byte limit");
+        }
+        if self.handler_version.len() > MAX_HANDLER_VERSION_BYTES {
+            return Err("handler version exceeds the 64-byte limit");
+        }
+        if self.payload.len() > MAX_TASK_PAYLOAD_BYTES {
+            return Err("payload exceeds the 16 MiB limit");
+        }
+        if self
+            .correlation_key
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_CORRELATION_KEY_BYTES)
+        {
+            return Err("correlation key exceeds the 256-byte limit");
+        }
+        if self
+            .idempotency_key
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_IDEMPOTENCY_KEY_BYTES)
+        {
+            return Err("idempotency key exceeds the 256-byte limit");
+        }
+        if self.metadata.len() > MAX_TASK_METADATA_ENTRIES {
+            return Err("metadata exceeds the 32-entry limit");
+        }
+        let mut metadata_bytes = 0_usize;
+        for (key, value) in &self.metadata {
+            if key.len() > MAX_TASK_METADATA_KEY_BYTES {
+                return Err("metadata key exceeds the 128-byte limit");
+            }
+            if value.len() > MAX_TASK_METADATA_VALUE_BYTES {
+                return Err("metadata value exceeds the 4096-byte limit");
+            }
+            metadata_bytes = metadata_bytes.saturating_add(key.len()).saturating_add(value.len());
+        }
+        if metadata_bytes > MAX_TASK_METADATA_BYTES {
+            return Err("metadata exceeds the 16384-byte limit");
+        }
+        Ok(())
+    }
+
     /// Creates a versioned request with one CPU slot and no optional metadata.
     #[must_use]
     pub fn new(task_type: impl Into<String>, handler_version: impl Into<String>, payload: Vec<u8>) -> Self {

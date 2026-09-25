@@ -401,6 +401,7 @@ impl TaskExecutionService {
     /// A running handler decides whether to acknowledge cancellation; a
     /// concurrent terminal transition returns `AlreadyTerminal`.
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
+        let _permit = self.core.admission.enter()?;
         let mut record = self
             .core
             .store
@@ -854,15 +855,18 @@ async fn finish_attempt(
         Ok(TaskRunOutcome::Succeeded(_)) => TaskState::Succeeded,
         Ok(TaskRunOutcome::Cancelled) => TaskState::Cancelled,
         Err(error) if error.category == "panic" => TaskState::Panicked {
-            message: error.message.clone(),
+            message: truncate_utf8(&error.message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES),
         },
         Err(error) if error.retryable && running.attempt < core.max_attempts => TaskState::Queued,
         Err(error) if error.retryable => TaskState::Blocked {
-            reason: format!("retry limit reached: {}", error.message),
+            reason: truncate_utf8(
+                &format!("retry limit reached: {}", error.message),
+                crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES,
+            ),
         },
         Err(error) => TaskState::Failed {
-            category: error.category.clone(),
-            message: error.message.clone(),
+            category: truncate_utf8(&error.category, crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES),
+            message: truncate_utf8(&error.message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES),
         },
     };
     let output = match result {
@@ -943,7 +947,9 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -
     let updated = transition(
         core,
         record,
-        TaskState::Blocked { reason },
+        TaskState::Blocked {
+            reason: truncate_utf8(&reason, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES),
+        },
         None,
         Vec::new(),
         record.cancel_requested,
@@ -1035,16 +1041,9 @@ async fn transition(
 }
 
 fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
-    if request.task_type.is_empty() || request.handler_version.is_empty() {
-        return Err(TaskServiceError::InvalidRequest(
-            "task type and handler version must not be empty".into(),
-        ));
-    }
-    if request.payload.len() > crate::model::MAX_TASK_PAYLOAD_BYTES {
-        return Err(TaskServiceError::InvalidRequest(
-            "payload exceeds the 16 MiB limit".into(),
-        ));
-    }
+    request
+        .validate_limits()
+        .map_err(|message| TaskServiceError::InvalidRequest(message.into()))?;
     if request.resources.custom.keys().any(String::is_empty)
         || request.resources.gpu_labels.iter().any(String::is_empty)
     {
@@ -1068,6 +1067,18 @@ fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Resul
         return Err(TaskServiceError::Unsatisfiable);
     }
     Ok(())
+}
+
+/// Truncates a string without splitting a UTF-8 code point.
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 fn release_core_queue_slot(core: &ServiceCore) {

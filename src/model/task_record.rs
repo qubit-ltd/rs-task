@@ -44,6 +44,44 @@ pub enum TaskState {
 }
 
 impl TaskState {
+    /// Returns whether every persisted diagnostic field satisfies its byte
+    /// limit.
+    pub(crate) fn validate_diagnostics(&self) -> Result<(), &'static str> {
+        use super::task_request::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES;
+        use super::task_request::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES;
+
+        match self {
+            Self::Blocked { reason } if reason.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES => {
+                Err("blocked reason exceeds the 4096-byte limit")
+            }
+            Self::Failed { category, message }
+                if category.len() > MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES
+                    || message.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES =>
+            {
+                Err("failure diagnostic exceeds its byte limit")
+            }
+            Self::Panicked { message } if message.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES => {
+                Err("panic diagnostic exceeds the 4096-byte limit")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Returns the payload-free lifecycle category used by history filters.
+    #[must_use]
+    #[inline]
+    pub fn kind(&self) -> TaskStateKind {
+        match self {
+            Self::Queued => TaskStateKind::Queued,
+            Self::Running => TaskStateKind::Running,
+            Self::Blocked { .. } => TaskStateKind::Blocked,
+            Self::Succeeded => TaskStateKind::Succeeded,
+            Self::Failed { .. } => TaskStateKind::Failed,
+            Self::Panicked { .. } => TaskStateKind::Panicked,
+            Self::Cancelled => TaskStateKind::Cancelled,
+        }
+    }
+
     /// Reports whether this state ends normal task execution.
     #[must_use]
     #[inline]
@@ -72,6 +110,42 @@ impl TaskState {
             ),
             Self::Blocked { .. } => matches!(next, Self::Queued | Self::Cancelled),
             Self::Succeeded | Self::Failed { .. } | Self::Panicked { .. } | Self::Cancelled => false,
+        }
+    }
+}
+
+/// Payload-free category of a task lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TaskStateKind {
+    /// Accepted and waiting for suitable resources.
+    Queued,
+    /// Resources have been reserved and execution has started.
+    Running,
+    /// Requires operator or business intervention before it can continue.
+    Blocked,
+    /// Handler returned successfully.
+    Succeeded,
+    /// Handler returned a non-retryable error.
+    Failed,
+    /// Handler panicked.
+    Panicked,
+    /// Cancellation was acknowledged by the handler or before execution.
+    Cancelled,
+}
+
+impl TaskStateKind {
+    /// Returns the stable SQLite state key for this lifecycle category.
+    #[must_use]
+    #[inline]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Running => "Running",
+            Self::Blocked => "Blocked",
+            Self::Succeeded => "Succeeded",
+            Self::Failed => "Failed",
+            Self::Panicked => "Panicked",
+            Self::Cancelled => "Cancelled",
         }
     }
 }
@@ -107,7 +181,7 @@ pub struct TaskRecord {
 #[derive(Debug, Clone, Default)]
 pub struct TaskQuery {
     /// Optional set of lifecycle states to include.
-    pub states: Vec<TaskState>,
+    pub states: Vec<TaskStateKind>,
     /// Maximum number of records to return.
     pub limit: usize,
     /// Opaque cursor represented by a task ID.
