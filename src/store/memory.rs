@@ -65,6 +65,7 @@ impl TaskStore for MemoryTaskStore {
 
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         Box::pin(async move {
+            request.validate_limits().map_err(StoreError::InvalidRequest)?;
             let mut state = self.state.lock();
             if let Some(key) = &request.idempotency_key
                 && let Some((existing_request, existing_id)) = state.idempotency.get(key)
@@ -106,6 +107,19 @@ impl TaskStore for MemoryTaskStore {
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
         Box::pin(async move {
+            command
+                .state
+                .validate_diagnostics()
+                .map_err(StoreError::InvalidRequest)?;
+            if command
+                .output
+                .as_ref()
+                .is_some_and(|output| output.summary.len() > crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES)
+            {
+                return Err(StoreError::InvalidRequest(
+                    "task output summary exceeds the 65536-byte limit",
+                ));
+            }
             let mut state = self.state.lock();
             let record = state.records.get_mut(&command.id).ok_or(StoreError::NotFound)?;
             if record.state_version != command.expected_version || record.attempt != command.expected_attempt {
@@ -167,7 +181,7 @@ impl TaskStore for MemoryTaskStore {
                 .records
                 .values()
                 .filter(|record| {
-                    (query.states.is_empty() || query.states.contains(&record.state))
+                    (query.states.is_empty() || query.states.contains(&record.state.kind()))
                         && query
                             .correlation_key
                             .as_ref()

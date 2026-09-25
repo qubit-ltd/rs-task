@@ -28,6 +28,7 @@ use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
+use qubit_task::model::TaskStateKind;
 use qubit_task::model::TransitionCommand;
 use qubit_task::scheduling::FairFifoPolicy;
 use qubit_task::scheduling::QueueSnapshot;
@@ -351,7 +352,7 @@ async fn test_service_query_listing_stats_and_unknown_cancellation() {
     assert!(first_result.state.is_terminal() && second_result.state.is_terminal());
     let terminal = service
         .list(TaskQuery {
-            states: vec![TaskState::Succeeded],
+            states: vec![TaskStateKind::Succeeded],
             limit: 8,
             ..TaskQuery::default()
         })
@@ -998,7 +999,7 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
     let filtered = store
         .list(TaskQuery {
             limit: 8,
-            states: vec![TaskState::Queued],
+            states: vec![TaskStateKind::Queued],
             correlation_key: Some("query-batch".into()),
             ..TaskQuery::default()
         })
