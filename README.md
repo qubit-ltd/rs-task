@@ -68,9 +68,21 @@ resources; these are adjacent snapshots, not one atomic snapshot.
 ## Project documents
 
 - [User guide](doc/user-guide.md)
-- [Design overview](doc/design.md)
+- [中文 README](README.zh_CN.md)
 - [Detailed TaskExecutionService design](doc/task_execution_service_design.md)
 - [中文用户指南](doc/user-guide.zh_CN.md)
+
+## API and storage contracts
+
+`TaskQuery.states` uses `TaskStateKind`; migrate callers that previously built
+filters from payload-bearing `TaskState` values. Request text limits are
+measured in UTF-8 bytes: task type 128, handler version 64, correlation and
+idempotency keys 256 each, and metadata 32 entries, 128-byte keys, 4096-byte
+values, and 16384 combined bytes. Persisted diagnostic categories are limited
+to 128 bytes and messages to 4096 bytes; execution diagnostics are truncated at
+a UTF-8 boundary. SQLite runs one blocking database operation at a time.
+Shutdown rejects new service writes, and a SQLite handle cannot write after
+releasing its ownership.
 
 ## Testing
 
@@ -94,18 +106,6 @@ Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the
 full license text.
-
-## API and storage contracts
-
-`TaskQuery.states` uses `TaskStateKind`; migrate callers that previously built
-filters from payload-bearing `TaskState` values. Request text limits are
-measured in UTF-8 bytes: task type 128, handler version 64, correlation and
-idempotency keys 256 each, and metadata 32 entries, 128-byte keys, 4096-byte
-values, and 16384 combined bytes. Persisted diagnostic categories are limited
-to 128 bytes and messages to 4096 bytes; execution diagnostics are truncated at
-a UTF-8 boundary. SQLite runs one blocking database operation at a time.
-Shutdown rejects new service writes, and a SQLite handle cannot write after
-releasing its ownership.
 
 ## Contributing
 

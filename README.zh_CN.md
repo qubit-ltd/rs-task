@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionService::in_memory().await?;
     let handle = service.submit_local(|_| LocalTaskOutcome::<String, std::io::Error>::Succeeded {
         value: "完成".to_owned(),
-        summary: TaskOutput { summary: b"完成".to_vec() },
+        summary: TaskOutput { summary: "完成".as_bytes().to_vec() },
     }).await?;
     let value = handle.result().await??;
     assert_eq!(value, "完成");
@@ -55,9 +55,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 项目文档
 
 - [用户指南](doc/user-guide.zh_CN.md)
-- [架构概览](doc/design.zh_CN.md)
+- [English README](README.md)
 - [TaskExecutionService 详细设计](doc/task_execution_service_design.md)
 - [English user guide](doc/user-guide.md)
+
+## API 与存储契约
+
+`TaskQuery.states` 使用 `TaskStateKind`；此前用带诊断内容的 `TaskState`
+构造筛选条件的调用方需要迁移。请求文本上限按 UTF-8 字节计算：`task_type`
+128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键
+128、值 4096、键值合计 16384。持久化诊断类别最多 128 字节，消息最多
+4096 字节；执行诊断会在 UTF-8 字符边界裁剪。SQLite 同时只执行一个阻塞
+数据库操作。开始关闭后服务拒绝新的写入，SQLite 所有权释放后旧句柄不能写入。
 
 ## 测试
 
@@ -81,15 +90,6 @@ Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
 
 本项目基于 Apache License 2.0 授权。完整许可证文本请参阅
 [LICENSE](LICENSE)。
-
-## API 与存储契约
-
-`TaskQuery.states` 使用 `TaskStateKind`；此前用带诊断内容的 `TaskState`
-构造筛选条件的调用方需要迁移。请求文本上限按 UTF-8 字节计算：`task_type`
-128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键
-128、值 4096、键值合计 16384。持久化诊断类别最多 128 字节，消息最多
-4096 字节；执行诊断会在 UTF-8 字符边界裁剪。SQLite 同时只执行一个阻塞
-数据库操作。开始关闭后服务拒绝新的写入，SQLite 所有权释放后旧句柄不能写入。
 
 ## 贡献
 

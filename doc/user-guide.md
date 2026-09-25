@@ -214,9 +214,8 @@ into the builder. The service publishes `TaskEvent` values after state changes.
 Publishing is best effort: a publish error does not roll back a task transition.
 Events may be repeated, delayed, or missing, so consumers should compare
 `state_version` and query the service for authoritative state.
-This release pins `qubit-event-bus` 0.12 to revision
-`319fffb85c150c0d2b2f83655ee06799b19ef035`; the publisher classifies that
-revision's `PublishAcknowledgement` directly and does not depend on newer
+This release depends on `qubit-event-bus` 0.12. The publisher classifies that
+version's `PublishAcknowledgement` directly and does not depend on newer
 admission-check APIs.
 
 The service owns one serial publisher thread and a bounded notification queue.
