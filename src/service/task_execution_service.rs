@@ -124,6 +124,7 @@ pub(crate) struct ServiceCore {
     pub(crate) local_finalizations: Mutex<HashMap<TaskId, oneshot::Sender<Result<TaskState, LocalTaskResultError>>>>,
     pub(crate) cancellations: Mutex<HashMap<TaskId, RunningCancellation>>,
     pub(crate) changed: Notify,
+    pub(crate) transition_event_lock: tokio::sync::RwLock<()>,
     pub(super) admission: AdmissionGate,
     pub(crate) owner: Option<OwnerEpoch>,
     pub(crate) store_fault: Mutex<Option<String>>,
@@ -455,7 +456,6 @@ impl TaskExecutionService {
                         current.signal.store(true, Ordering::Release);
                     }
                     self.core.changed.notify_waiters();
-                    publish_record(&self.core, &updated);
                     if let Some(sender) = local_sender {
                         let _ = sender.send(Ok(TaskState::Cancelled));
                     }
@@ -522,7 +522,6 @@ impl TaskExecutionService {
             bypasses: 0,
         });
         self.core.changed.notify_one();
-        publish_record(&self.core, &updated);
         Ok(updated)
     }
 
@@ -574,7 +573,7 @@ impl TaskExecutionService {
     /// idle.
     async fn coordinate_shutdown(&self) -> Result<(), TaskServiceError> {
         self.core.admission.wait_idle().await;
-        loop {
+        let transition_guard = loop {
             let notified = self.core.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -583,10 +582,14 @@ impl TaskExecutionService {
             }
             let stats = self.stats().await?;
             if stats.queued == 0 && stats.running == 0 {
-                break;
+                let transition_guard = self.core.transition_event_lock.write().await;
+                let settled_stats = self.stats().await?;
+                if settled_stats.queued == 0 && settled_stats.running == 0 {
+                    break transition_guard;
+                }
             }
             notified.await;
-        }
+        };
         if let Some(epoch) = self.core.owner
             && let Err(error) = self.core.store.release_owner(epoch).await
         {
@@ -597,6 +600,7 @@ impl TaskExecutionService {
         if let Some(publisher) = &self.core.event_bus {
             publisher.close().await;
         }
+        drop(transition_guard);
         Ok(())
     }
 
@@ -733,7 +737,6 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
             };
             release_core_queue_slot(&core);
-            publish_record(&core, &running);
             if core.store_fault.lock().is_some() {
                 return;
             }
@@ -925,7 +928,6 @@ async fn finish_attempt(
                     });
                 }
                 core.changed.notify_waiters();
-                publish_record(&core, &updated);
                 if !matches!(updated.state, TaskState::Queued | TaskState::Running) {
                     finalize_local(&core, updated.id, Ok(updated.state));
                 }
@@ -956,7 +958,6 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -
     )
     .await?;
     core.changed.notify_waiters();
-    publish_record(core, &updated);
     finalize_local(core, updated.id, Ok(updated.state));
     Ok(())
 }
@@ -1027,7 +1028,9 @@ async fn transition(
     assigned_resources: Vec<String>,
     cancel_requested: bool,
 ) -> Result<TaskRecord, StoreError> {
-    core.store
+    let _guard = core.transition_event_lock.read().await;
+    let updated = core
+        .store
         .transition(TransitionCommand {
             id: record.id,
             expected_version: record.state_version,
@@ -1037,7 +1040,9 @@ async fn transition(
             assigned_resources,
             cancel_requested,
         })
-        .await
+        .await?;
+    publish_record(core, &updated);
+    Ok(updated)
 }
 
 fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
