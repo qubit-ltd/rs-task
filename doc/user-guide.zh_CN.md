@@ -209,6 +209,23 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 
 ## 查询、取消和重试
 
+历史页使用 `(accepted_at_ms, id)` 复合游标，保证同一毫秒受理的任务也有稳定顺序。SQLite
+历史默认永久保留；调用方可显式调用
+`prune_terminal_before(accepted_before_ms, max_rows)` 清理受理时间早于阈值的终态记录，
+每次最多删除 `max_rows` 条。排队、运行中和 `Blocked` 记录不会被删除。清理会同时移除
+幂等键，因此该键之后可以重新受理。需要归档时，请在清理前备份持久历史。Builder 的
+`runtime_handle(Handle)` 指定服务后台任务使用的 runtime；该 runtime 须存活到
+`shutdown()` 返回。
+
+~~~rust,no_run
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+let service = TaskExecutionServiceBuilder::in_memory()
+    .runtime_handle(tokio::runtime::Handle::current())
+    .build()
+    .await?;
+~~~
+
 使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它会持久化 `cancel_requested` 并在 `TaskContext` 中设置协作取消信号；这只是取消请求。处理器必须返回 `TaskRunOutcome::Cancelled`，服务才会以 `TaskState::Cancelled` 确认取消。如果处理器返回成功或失败，那个结果仍是权威结果。协作取消集成测试覆盖了这一契约。
 
 处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`，panic 进入 `Panicked`。可重试错误最多自动尝试三次（可通过构建器调整）；如果重试时有界等待队列已满，任务会因队列容量进入 `Blocked`，不会突破队列上限。队列有空位后调用 `retry_blocked` 可再次入队。
@@ -221,6 +238,11 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 失败消息和阻塞原因等诊断内容。关闭开始后服务会拒绝写操作。SQLite 写入受存储
 所有权 fencing 保护，旧 store 句柄也不能绕过。SQLite 同时只执行一个阻塞数据库
 操作；调用方须在 Tokio runtime 中轮询 store 操作。
+
+历史分页的 `TaskQuery.after` 和 `TaskPage.next` 已改为
+`TaskCursor { accepted_at_ms, id }`。第三方 `SchedulingPolicy` 收到的 `QueuedTask`
+现在包含 `resources`，不再包含完整 `TaskRequest`。`TaskStore` 新增
+`prune_terminal_before`；默认实现返回 `UnsupportedCapability`。
 
 ## 排障
 

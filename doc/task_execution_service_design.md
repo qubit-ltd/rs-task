@@ -46,7 +46,7 @@
 
 基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；`cancel_requested` 只表示发起了请求。只有处理器实际退出并返回 `TaskRunOutcome::Cancelled` 才进入 `Cancelled`；返回成功或失败时保留该业务结果。`LocalTaskHandle::result()` 等待权威终态写入后，才返回类型化结果、业务错误或明确的取消错误。`max_attempts` 是同一 TaskId 跨进程启动的总次数；恢复时达到上限的 Queued/Running 任务转为 Blocked，人工重试也不能重置预算。`test_shutdown_keeps_scheduler_running_for_retry_after_close` 用信号控制首次执行并验证关闭受理后的自动重试，调度器仅在关闭协调器确认队列和运行任务均为空后退出。
 
-提供按 `TaskId` 查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。`stats()` 通过一次 `TaskStore::count_states()` 聚合查询得到所有保留状态计数，再读取执行引擎资源快照；二者相邻读取但不是同一事务中的原子快照。存储统计失败向调用方传播，查询成本不随历史页数增长。当前 `list()` 游标按 `TaskId` 排序，不提供受理时间范围过滤。等待中的任务进入 `Blocked` 时，等待接口返回需要干预的结果，不能无限等待。`get` 对不存在或已过期的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储仅限制终态历史数量；SQLite 当前不清理持久历史。持久化后端分页读取明细历史，不要求将全量历史载入内存。
+提供按 `TaskId` 查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。`stats()` 通过一次 `TaskStore::count_states()` 聚合查询得到所有保留状态计数，再读取执行引擎资源快照；二者相邻读取但不是同一事务中的原子快照。历史页按 `(accepted_at_ms ASC, id ASC)` 排序，以复合游标稳定处理同毫秒受理的记录；游标不提供并发写入或清理期间的全局快照。存储统计失败向调用方传播，查询成本不随历史页数增长。`get` 对不存在或已清理的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储限制终态历史数量；SQLite 历史默认不自动清理，显式有界清理只删除早于受理时间阈值的终态记录，并同步移除其幂等键。
 
 ## 4. 服务接口与职责划分
 
@@ -181,7 +181,7 @@ TaskExecutionService
 
 `TaskExecutionService::notification_stats()` 在配置总线时返回统计快照，未配置时返回 `None`。`enqueued` 统计进入本地队列的事件，`queue_full` 与 `queue_closed` 统计对应的丢弃；`accepted` 表示至少一个已报告目的地接受，`partial_rejection` 表示同一事件同时有接受和拒绝目的地，`opaque_accepted` 表示 provider 接受但未暴露目的地，`unaccepted` 表示没有可见目的地接受（含空列表和 interceptor drop），`publish_error` 记录发布错误，`worker_panicked` 记录线程 panic。计数为单调饱和值；它们只描述本地排队、provider 的接纳回执和 worker 状态，不代表 subscriber handler 已完成。
 
-`shutdown()` 在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker，但同步 provider 若一直阻塞，显式 shutdown 仍可能无限等待。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
+`TaskExecutionServiceBuilder::runtime_handle` 可指定服务自有 admission、scheduler、completion、shutdown 和发布器关闭等待使用的 Tokio runtime；默认使用进程级 runtime。调用方须保证注入 runtime 存活到 `shutdown()` 返回。`shutdown()` 在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker，但同步 provider 若一直阻塞，显式 shutdown 仍可能无限等待。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
 
 ## 7. 关键操作顺序与不变量
 

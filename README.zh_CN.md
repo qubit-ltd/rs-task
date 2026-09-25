@@ -78,6 +78,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 测试
 
+历史分页使用 `TaskCursor { accepted_at_ms, id }`，按受理时间、再按任务 ID
+排序。SQLite 历史默认保留；调用方可显式调用 `prune_terminal_before`，并为每次
+清理指定最大行数。被删除记录的幂等键可以重新使用。公开调度策略中的
+`QueuedTask` 现在保存 `resources`，不再保存完整请求。应用可通过
+`TaskExecutionServiceBuilder::runtime_handle` 指定服务后台任务使用的 runtime，
+并须保证它至少存活到 `shutdown()` 返回。
+
 ```bash
 # 使用默认 feature 集运行测试
 cargo test

@@ -267,6 +267,26 @@ A `Blocked` record is queryable and carries a reason for intervention, such as a
 
 ## Query, cancel, and retry
 
+History pages use a composite cursor ordered by `(accepted_at_ms, id)`, so
+records accepted in the same millisecond remain in a stable order. SQLite
+keeps history indefinitely by default. Call
+`prune_terminal_before(accepted_before_ms, max_rows)` explicitly to remove
+terminal records accepted before the cutoff; each call deletes at most
+`max_rows`, and queued, running, and blocked records remain. Pruning also
+removes the records' idempotency keys, making those keys available again. Back
+up persistent history first if the application needs an archive. The builder's
+`runtime_handle(Handle)` selects the runtime for service-owned background tasks;
+keep it alive until `shutdown()` returns.
+
+~~~rust,no_run
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+let service = TaskExecutionServiceBuilder::in_memory()
+    .runtime_handle(tokio::runtime::Handle::current())
+    .build()
+    .await?;
+~~~
+
 Use `get(TaskId)` for the current record and `list(TaskQuery)` for bounded
 history pages. `wait(TaskId)` resolves when the task is terminal and returns a
 blocked-task error when intervention is needed. `cancel(TaskId)` can cancel a
@@ -325,6 +345,12 @@ reasons. Service writes are rejected after shutdown starts. SQLite writes are
 fenced by store ownership, including direct calls through an old store handle.
 SQLite runs one blocking database operation at a time; callers must poll store
 operations from a Tokio runtime.
+
+History pagination now uses `TaskCursor { accepted_at_ms, id }` instead of a
+`TaskId` cursor. Third-party `SchedulingPolicy` implementations receive
+`QueuedTask.resources` instead of a full `TaskRequest`. `TaskStore` gains
+`prune_terminal_before`; its default implementation reports
+`UnsupportedCapability`.
 
 ## Troubleshooting
 

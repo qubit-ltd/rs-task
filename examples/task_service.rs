@@ -48,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
     runtime.block_on(async {
         let service = TaskExecutionServiceBuilder::in_memory()
+            .runtime_handle(tokio::runtime::Handle::current())
             .register_handler(Arc::new(EchoV1))?
             .build()
             .await?;
