@@ -89,6 +89,15 @@ a UTF-8 boundary. SQLite runs one blocking database operation at a time.
 Shutdown rejects new service writes, and a SQLite handle cannot write after
 releasing its ownership.
 
+History pages use `TaskCursor { accepted_at_ms, id }` and are ordered by
+acceptance time, then task ID. SQLite history is retained until explicitly
+pruned with `prune_terminal_before`; each call has a caller supplied row limit,
+and deleted idempotency keys become available for reuse. The scheduler policy's
+public `QueuedTask` now contains `resources` rather than the full request.
+Applications may select the runtime for service background tasks with
+`TaskExecutionServiceBuilder::runtime_handle`; that runtime must stay alive
+until `shutdown()` returns.
+
 ## Testing
 
 ```bash
