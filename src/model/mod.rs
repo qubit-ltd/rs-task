@@ -21,6 +21,7 @@ pub use task_record::OwnerEpoch;
 pub use task_record::StoreCapabilities;
 pub use task_record::StoredTask;
 pub use task_record::StoredTaskPage;
+pub use task_record::TaskCursor;
 pub use task_record::TaskPage;
 pub use task_record::TaskQuery;
 pub use task_record::TaskRecord;

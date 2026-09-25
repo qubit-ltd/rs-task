@@ -63,6 +63,23 @@ mod sqlite_tests {
             .expect("task reaches requested state")
     }
 
+    /// Inserts one task under a caller-selected identifier for cursor tests.
+    async fn insert_with_id(store: &dyn TaskStore, id: TaskId) -> TaskRecord {
+        let outcome = store
+            .accept(id, TaskRequest::new("cursor-test", "1", Vec::new()))
+            .await
+            .expect("task is accepted");
+        let AcceptOutcome::Accepted(record) = outcome else {
+            panic!("the test identifier is new");
+        };
+        record
+    }
+
+    /// Parses a fixed UUID so timestamp order can differ from identifier order.
+    fn fixed_task_id(value: &str) -> TaskId {
+        serde_json::from_str(&format!("\"{value}\"")).expect("fixed task ID is valid")
+    }
+
     /// Removes only database files created by the SQLite test.
     fn remove_database(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
@@ -244,6 +261,78 @@ mod sqlite_tests {
         );
 
         drop(memory);
+        drop(sqlite);
+        remove_database(&path);
+    }
+
+    #[tokio::test]
+    async fn test_memory_and_sqlite_pages_follow_acceptance_time() {
+        let path = std::env::temp_dir().join(format!("qubit-task-time-cursor-{}.sqlite", TaskId::generate()));
+        let memory = MemoryTaskStore::new(16);
+        let sqlite = SqliteTaskStore::open(&path).expect("SQLite store opens");
+        let ids = [
+            fixed_task_id("00000000-0000-0000-0000-000000000003"),
+            fixed_task_id("00000000-0000-0000-0000-000000000002"),
+            fixed_task_id("00000000-0000-0000-0000-000000000001"),
+        ];
+        let mut memory_records = Vec::new();
+        let mut sqlite_records = Vec::new();
+        for (index, id) in ids.into_iter().enumerate() {
+            memory_records.push(insert_with_id(&memory, id).await);
+            sqlite_records.push(insert_with_id(&sqlite, id).await);
+            if index < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+            }
+        }
+
+        for store in [&memory as &dyn TaskStore, &sqlite as &dyn TaskStore] {
+            let first = store
+                .list(TaskQuery {
+                    limit: 1,
+                    ..TaskQuery::default()
+                })
+                .await
+                .expect("first page loads");
+            assert_eq!(first.records[0].id, ids[0]);
+            let second = store
+                .list(TaskQuery {
+                    after: first.next,
+                    limit: 1,
+                    ..TaskQuery::default()
+                })
+                .await
+                .expect("second page loads");
+            assert_eq!(second.records[0].id, ids[1]);
+            let third = store
+                .list(TaskQuery {
+                    after: second.next,
+                    limit: 1,
+                    ..TaskQuery::default()
+                })
+                .await
+                .expect("third page loads");
+            assert_eq!(third.records[0].id, ids[2]);
+        }
+        assert!(memory_records[0].accepted_at_ms < memory_records[1].accepted_at_ms);
+        assert!(sqlite_records[0].accepted_at_ms < sqlite_records[1].accepted_at_ms);
+        drop(sqlite);
+        remove_database(&path);
+    }
+
+    #[tokio::test]
+    async fn history_page_limit_overflow_is_rejected_by_both_stores() {
+        let path = std::env::temp_dir().join(format!("qubit-task-page-overflow-{}.sqlite", TaskId::generate()));
+        let memory = MemoryTaskStore::new(8);
+        let sqlite = SqliteTaskStore::open(&path).expect("SQLite store opens");
+        for store in [&memory as &dyn TaskStore, &sqlite as &dyn TaskStore] {
+            let result = store
+                .list(TaskQuery {
+                    limit: usize::MAX,
+                    ..TaskQuery::default()
+                })
+                .await;
+            assert!(matches!(result, Err(qubit_task::store::StoreError::InvalidRequest(_))));
+        }
         drop(sqlite);
         remove_database(&path);
     }

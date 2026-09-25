@@ -12,6 +12,7 @@ mod memory;
 mod sqlite;
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 
 pub use memory::MemoryTaskStore;
@@ -66,6 +67,16 @@ pub trait TaskStore: Send + Sync {
     /// Counts every retained lifecycle state in one store snapshot, including
     /// terminal records. Returns a storage error if aggregation fails.
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>>;
+    /// Deletes at most `max_rows` terminal records accepted before the supplied
+    /// timestamp. The default reports `UnsupportedCapability`.
+    fn prune_terminal_before<'a>(
+        &'a self,
+        accepted_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        let _ = (accepted_before_ms, max_rows);
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
     /// Acquires exclusive ownership before a recoverable service starts.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>>;
     /// Scans one bounded page of unfinished tasks during recovery.
@@ -74,13 +85,12 @@ pub trait TaskStore: Send + Sync {
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>>;
 }
 
-/// Storage errors distinguish unsupported recovery from ordinary persistence
-/// failures.
+/// Storage errors distinguish unsupported capabilities from ordinary
+/// persistence failures.
 #[derive(Debug, Error)]
 pub enum StoreError {
-    /// The operation requires restart recovery, which this store does not
-    /// provide.
-    #[error("the selected task store does not support restart recovery")]
+    /// The operation requires a capability that this store does not provide.
+    #[error("the selected task store does not support the requested capability")]
     UnsupportedCapability,
     /// A task ID already belongs to a different accepted request.
     #[error("task identifier already exists")]

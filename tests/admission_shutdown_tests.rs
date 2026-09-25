@@ -255,6 +255,14 @@ impl TaskStore for ControlledStore {
         }
     }
 
+    fn prune_terminal_before<'a>(
+        &'a self,
+        _accepted_before_ms: u64,
+        _max_rows: std::num::NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         Box::pin(async { Ok(OwnerEpoch(1)) })
     }
@@ -625,6 +633,72 @@ async fn test_shutdown_waits_for_inflight_acceptance_and_rejects_new_admission()
         record.state.is_terminal(),
         "accepted work must settle before shutdown returns"
     );
+}
+
+#[tokio::test]
+async fn test_service_uses_injected_runtime_when_called_from_another_runtime() {
+    let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+    let (runtime_shutdown_tx, runtime_shutdown_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        let service_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("rs-task-injected")
+            .enable_all()
+            .build()
+            .expect("service runtime builds");
+        handle_tx
+            .send(service_runtime.handle().clone())
+            .expect("test receives service runtime handle");
+        runtime_shutdown_rx.recv().expect("test releases service runtime");
+        drop(service_runtime);
+    });
+    let service_runtime_handle = handle_rx.recv().expect("service runtime is ready");
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(service_runtime_handle)
+        .build()
+        .await
+        .expect("service builds with an injected runtime");
+    let service_for_caller = service.clone();
+    let (thread_name_tx, thread_name_rx) = std::sync::mpsc::channel();
+    let caller = std::thread::spawn(move || {
+        let caller_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("caller runtime builds");
+        caller_runtime.block_on(async move {
+            let handle = service_for_caller
+                .submit_local(move |_| {
+                    thread_name_tx
+                        .send(std::thread::current().name().unwrap_or("unnamed").to_owned())
+                        .expect("test receiver remains open");
+                    LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+                        value: (),
+                        summary: TaskOutput::default(),
+                    }
+                })
+                .await
+                .expect("submission succeeds from caller runtime");
+            service_for_caller
+                .wait(handle.task_id())
+                .await
+                .expect("task completes on service runtime");
+            service_for_caller.shutdown().await.expect("service shuts down");
+        });
+    });
+
+    let thread_name = thread_name_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("handler starts on a service worker");
+    assert!(
+        thread_name.starts_with("rs-task-injected"),
+        "handler ran on {thread_name}"
+    );
+    caller.join().expect("caller thread completes");
+    drop(service);
+    runtime_shutdown_tx
+        .send(())
+        .expect("service runtime thread remains open");
+    runtime_thread.join().expect("service runtime stops after shutdown");
 }
 
 #[tokio::test]

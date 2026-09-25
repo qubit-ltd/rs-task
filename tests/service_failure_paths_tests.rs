@@ -78,6 +78,14 @@ impl TaskStore for FailFirstGetStore {
         self.inner.count_states()
     }
 
+    fn prune_terminal_before<'a>(
+        &'a self,
+        _accepted_before_ms: u64,
+        _max_rows: std::num::NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         self.inner.acquire_owner()
     }

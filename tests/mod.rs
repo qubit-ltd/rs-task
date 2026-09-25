@@ -538,10 +538,11 @@ impl SchedulingPolicy for TwoRoundBlockingPolicy {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
     let gate = Arc::new(TwoRoundPolicyGate::default());
     let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(tokio::runtime::Handle::current())
         .register_handler(Arc::new(EchoHandler))
         .expect("handler registration succeeds")
         .policy(Arc::new(TwoRoundBlockingPolicy { gate: gate.clone() }))
@@ -879,13 +880,13 @@ fn test_memory_store_reports_non_recovery_capabilities() {
 fn test_fair_fifo_policy_orders_fit_candidates_before_unschedulable_head() {
     let make_task = |name: &str, bypasses| QueuedTask {
         id: qubit_task::TaskId::generate(),
-        request: TaskRequest::new(name, "1", Vec::new()),
+        resources: TaskRequest::new(name, "1", Vec::new()).resources,
         bypasses,
     };
     let head = make_task("gpu", 3);
     let small = make_task("cpu", 0);
     let mut head = head;
-    head.request.resources.gpu_count = 1;
+    head.resources.gpu_count = 1;
     let snapshot = QueueSnapshot {
         tasks: vec![head.clone(), small.clone()],
         scan_budget: 8,
@@ -1006,15 +1007,22 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
         .await
         .unwrap();
     assert_eq!(filtered.records.len(), 1);
+    let first_record = store.get(first_id).await.unwrap().expect("first record exists");
+    let after_cursor = qubit_task::model::TaskCursor::from(&first_record);
     let after = store
         .list(TaskQuery {
             limit: 8,
-            after: Some(first_id),
+            after: Some(after_cursor),
             ..TaskQuery::default()
         })
         .await
         .unwrap();
-    assert!(after.records.iter().all(|record| record.id > first_id));
+    assert!(
+        after
+            .records
+            .iter()
+            .all(|record| { (record.accepted_at_ms, record.id) > (after_cursor.accepted_at_ms, after_cursor.id) })
+    );
 
     assert!(matches!(
         store
@@ -1373,6 +1381,7 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
         )
         .expect("topic subscription succeeds");
     let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(tokio::runtime::Handle::current())
         .event_bus(bus.clone())
         .event_bus_buffer_capacity(std::num::NonZeroUsize::new(256).expect("nonzero capacity"))
         .build()

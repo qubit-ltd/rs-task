@@ -116,14 +116,14 @@ impl TaskEventPublisher {
     }
 
     /// Stops enqueue, drains accepted events, and waits for the worker to exit.
-    pub(super) async fn close(&self) {
+    pub(super) async fn close(&self, runtime_handle: &tokio::runtime::Handle) {
         self.sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         let finished = Arc::clone(&self.finished);
         let worker = Arc::clone(&self.worker);
-        let _ = super::task_execution_service::runtime()
+        let _ = runtime_handle
             .spawn_blocking(move || {
                 let (lock, changed) = &*finished;
                 let mut done = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -428,7 +428,7 @@ mod tests {
         third.join().expect("third enqueue thread");
         assert!(nonblocking, "full-queue enqueue returned without waiting for publish");
         assert_eq!(publisher.stats().queue_full, 1);
-        publisher.close().await;
+        publisher.close(&tokio::runtime::Handle::current()).await;
         assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
         assert_eq!(publisher.stats().enqueued, 2);
         assert_eq!(publisher.stats().opaque_accepted, 2);
@@ -446,7 +446,7 @@ mod tests {
         ] {
             let publisher = publisher(FakeSpi::new(false, outcome), 1);
             publisher.enqueue(event(1));
-            publisher.close().await;
+            publisher.close(&tokio::runtime::Handle::current()).await;
             let stats = publisher.stats();
             match outcome {
                 Outcome::AllRejected | Outcome::Empty | Outcome::Dropped => {
@@ -476,6 +476,7 @@ mod tests {
     async fn test_task_event_publisher_concurrent_close_waits_for_drain() {
         let spi = FakeSpi::new(true, Outcome::Opaque);
         let publisher = Arc::new(publisher(spi.clone(), 1));
+        let runtime_handle = tokio::runtime::Handle::current();
         publisher.enqueue(event(1));
         while spi.entered.load(Ordering::Acquire) == 0 {
             tokio::task::yield_now().await;
@@ -483,11 +484,13 @@ mod tests {
         publisher.enqueue(event(2));
         let first = {
             let publisher = publisher.clone();
-            tokio::spawn(async move { publisher.close().await })
+            let runtime_handle = runtime_handle.clone();
+            tokio::spawn(async move { publisher.close(&runtime_handle).await })
         };
         let second = {
             let publisher = publisher.clone();
-            tokio::spawn(async move { publisher.close().await })
+            let runtime_handle = runtime_handle.clone();
+            tokio::spawn(async move { publisher.close(&runtime_handle).await })
         };
         tokio::task::yield_now().await;
         assert!(!first.is_finished());

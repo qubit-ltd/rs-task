@@ -244,10 +244,46 @@ pub struct TaskRecord {
     pub cancel_requested: bool,
 }
 
+/// Stable cursor into task history ordered by acceptance time and task ID.
+///
+/// Both fields are required because multiple tasks can be accepted during the
+/// same millisecond. The ID provides a deterministic tie-breaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TaskCursor {
+    /// Acceptance timestamp in Unix epoch milliseconds.
+    pub accepted_at_ms: u64,
+    /// Task ID used to order tasks with the same acceptance timestamp.
+    pub id: TaskId,
+}
+
+impl TaskCursor {
+    /// Creates a cursor for the supplied history position.
+    ///
+    /// # Parameters
+    ///
+    /// * `accepted_at_ms` - Acceptance timestamp stored in the task record.
+    /// * `id` - Task ID that breaks ties at the same timestamp.
+    ///
+    /// # Returns
+    ///
+    /// A cursor suitable for `TaskQuery::after`.
+    #[must_use]
+    pub fn new(accepted_at_ms: u64, id: TaskId) -> Self {
+        Self { accepted_at_ms, id }
+    }
+}
+
+impl From<&TaskRecord> for TaskCursor {
+    /// Creates a cursor at the supplied record's history position.
+    fn from(record: &TaskRecord) -> Self {
+        Self::new(record.accepted_at_ms, record.id)
+    }
+}
+
 /// Filters and bounds a task history query.
 ///
 /// Empty `states` matches every state. A zero `limit` is treated as one
-/// record, and `after` is an exclusive task-ID cursor.
+/// record, and `after` is an exclusive `(accepted_at_ms, id)` cursor.
 ///
 /// # Examples
 ///
@@ -263,16 +299,16 @@ pub struct TaskQuery {
     pub states: Vec<TaskStateKind>,
     /// Maximum number of records to return.
     pub limit: usize,
-    /// Opaque cursor represented by a task ID.
-    pub after: Option<TaskId>,
+    /// Exclusive cursor after which history records are returned.
+    pub after: Option<TaskCursor>,
     /// Optional exact business correlation key.
     pub correlation_key: Option<String>,
 }
 
 /// One bounded page of task history.
 ///
-/// `next` is present only when another page may exist; pass it as the next
-/// query's exclusive `after` cursor.
+/// Records are ordered by `(accepted_at_ms, id)`. `next` is present only when
+/// another page may exist; pass it as the next query's exclusive cursor.
 ///
 /// # Examples
 ///
@@ -287,7 +323,7 @@ pub struct TaskPage {
     /// Records selected by the query.
     pub records: Vec<TaskRecord>,
     /// Cursor for the next page, when more data may exist.
-    pub next: Option<TaskId>,
+    pub next: Option<TaskCursor>,
 }
 
 /// Aggregate task counts suitable for service monitoring.

@@ -7,6 +7,7 @@
 // =============================================================================
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
@@ -122,6 +123,7 @@ pub(crate) struct ServiceCore {
     pub(crate) store: Arc<dyn TaskStore>,
     pub(crate) engine: Arc<dyn TaskExecutionEngine>,
     pub(crate) policy: Arc<dyn SchedulingPolicy>,
+    pub(crate) runtime_handle: tokio::runtime::Handle,
     pub(crate) handlers: TaskHandlerRegistry,
     pub(crate) queue_capacity: usize,
     pub(crate) scan_budget: usize,
@@ -204,7 +206,12 @@ impl TaskExecutionService {
     /// Accepts a reconstructable request and returns its stable task record.
     pub async fn submit(&self, request: TaskRequest) -> Result<TaskRecord, TaskServiceError> {
         let service = self.clone();
-        await_admission(runtime().spawn(async move { service.submit_admitted(request).await })).await
+        await_admission(
+            self.core
+                .runtime_handle
+                .spawn(async move { service.submit_admitted(request).await }),
+        )
+        .await
     }
 
     /// Finishes request acceptance in a background worker that holds an
@@ -249,7 +256,7 @@ impl TaskExecutionService {
             AcceptOutcome::Accepted(record) => {
                 self.core.queue.lock().push_back(QueuedTask {
                     id: record.id,
-                    request,
+                    resources: request.resources,
                     bypasses: 0,
                 });
                 self.core.changed.notify_one();
@@ -272,7 +279,12 @@ impl TaskExecutionService {
         E: std::fmt::Display + Send + 'static,
     {
         let service = self.clone();
-        await_admission(runtime().spawn(async move { service.submit_local_admitted(task).await })).await
+        await_admission(
+            self.core
+                .runtime_handle
+                .spawn(async move { service.submit_local_admitted(task).await }),
+        )
+        .await
     }
 
     /// Registers a local closure and retains it through acceptance and queue
@@ -290,7 +302,6 @@ impl TaskExecutionService {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
         let _permit = self.core.admission.enter()?;
-        self.reserve_queue_slot()?;
         let id = TaskId::generate();
         let descriptor = TaskHandlerDescriptor {
             task_type: format!("local:{id}"),
@@ -314,6 +325,9 @@ impl TaskExecutionService {
             idempotency_key: None,
             metadata: Default::default(),
         };
+        let capacity = self.core.engine.capacity().capacity;
+        validate_request(&request, &capacity)?;
+        self.reserve_queue_slot()?;
         {
             let fault = self.core.store_fault.lock();
             if let Some(error) = fault.as_ref() {
@@ -332,7 +346,7 @@ impl TaskExecutionService {
                 self.core.local_handlers.lock().insert(id, handler);
                 self.core.queue.lock().push_back(QueuedTask {
                     id,
-                    request,
+                    resources: request.resources,
                     bypasses: 0,
                 });
                 drop(finalizations);
@@ -400,6 +414,39 @@ impl TaskExecutionService {
         self.core
             .store
             .list(query)
+            .await
+            .map_err(|error| self.handle_store_error(error))
+    }
+
+    /// Deletes a bounded number of terminal records accepted before a cutoff.
+    ///
+    /// # Parameters
+    ///
+    /// * `accepted_before_ms` - Exclusive Unix epoch millisecond cutoff.
+    /// * `max_rows` - Maximum number of terminal records to delete in this
+    ///   call.
+    ///
+    /// # Returns
+    ///
+    /// The number of records deleted by the selected store.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ShuttingDown` after service shutdown starts, `Store` when the
+    /// store rejects pruning or encounters an error, or `StoreUnavailable` if
+    /// a previous store failure suspended the service.
+    pub async fn prune_terminal_before(
+        &self,
+        accepted_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> Result<usize, TaskServiceError> {
+        if let Some(error) = self.last_store_error() {
+            return Err(TaskServiceError::StoreUnavailable(error));
+        }
+        let _permit = self.core.admission.enter()?;
+        self.core
+            .store
+            .prune_terminal_before(accepted_before_ms, max_rows)
             .await
             .map_err(|error| self.handle_store_error(error))
     }
@@ -519,7 +566,12 @@ impl TaskExecutionService {
     /// Requeues a blocked task after external intervention.
     pub async fn retry_blocked(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
         let service = self.clone();
-        await_admission(runtime().spawn(async move { service.retry_blocked_admitted(id).await })).await
+        await_admission(
+            self.core
+                .runtime_handle
+                .spawn(async move { service.retry_blocked_admitted(id).await }),
+        )
+        .await
     }
 
     /// Requeues a blocked task while holding a permit through persistence and
@@ -555,7 +607,7 @@ impl TaskExecutionService {
         };
         self.core.queue.lock().push_back(QueuedTask {
             id,
-            request: updated.request.clone(),
+            resources: updated.request.resources.clone(),
             bypasses: 0,
         });
         self.core.changed.notify_one();
@@ -594,7 +646,7 @@ impl TaskExecutionService {
         if self.core.admission.close() {
             self.core.changed.notify_waiters();
             let service = self.clone();
-            runtime().spawn(async move {
+            self.core.runtime_handle.spawn(async move {
                 let result = service.coordinate_shutdown().await;
                 service
                     .core
@@ -635,7 +687,7 @@ impl TaskExecutionService {
         }
         #[cfg(feature = "event-bus")]
         if let Some(publisher) = &self.core.event_bus {
-            publisher.close().await;
+            publisher.close(&self.core.runtime_handle).await;
         }
         drop(transition_guard);
         Ok(())
@@ -645,7 +697,7 @@ impl TaskExecutionService {
     pub(crate) fn start(core: ServiceCore) -> Self {
         let service = Self { core: Arc::new(core) };
         let weak = Arc::downgrade(&service.core);
-        runtime().spawn(scheduler_loop(weak));
+        service.core.runtime_handle.spawn(scheduler_loop(weak));
         service
     }
 }
@@ -670,7 +722,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
         }
         let order = core.policy.order(
             &QueueSnapshot {
-                tasks: queue.clone(),
+                tasks: queue.iter().take(core.scan_budget.max(1)).cloned().collect(),
                 scan_budget: core.scan_budget,
             },
             &core.engine.capacity(),
@@ -715,7 +767,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             }
             let handler = core.local_handlers.lock().get(&id).cloned().or_else(|| {
                 core.handlers
-                    .resolve(&task.request.task_type, &task.request.handler_version)
+                    .resolve(&record.request.task_type, &record.request.handler_version)
             });
             let Some(handler) = handler else {
                 release_core_queue_slot(&core);
@@ -724,7 +776,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     &record,
                     format!(
                         "missing handler {}@{}",
-                        task.request.task_type, task.request.handler_version
+                        record.request.task_type, record.request.handler_version
                     ),
                 )
                 .await
@@ -741,7 +793,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 queue.push(task);
                 break;
             };
-            let prepared = match core.engine.prepare(id, task.request.resources.clone()).await {
+            let prepared = match core.engine.prepare(id, record.request.resources.clone()).await {
                 Ok(value) => value,
                 Err(EngineError::TemporarilyUnavailable) => {
                     queue.push(task);
@@ -788,7 +840,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             let context = TaskContext::new(id, running.attempt, assigned, cancelled);
             match core
                 .engine
-                .activate(prepared, handler, task.request.payload.clone(), context)
+                .activate(prepared, handler, record.request.payload.clone(), context)
                 .await
             {
                 Ok(handle) => {
@@ -816,7 +868,8 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                         }
                     }
                     let weak = Arc::downgrade(&core);
-                    runtime().spawn(finish_attempt(weak, running, handle.receiver, running_permit));
+                    core.runtime_handle
+                        .spawn(finish_attempt(weak, running, handle.receiver, running_permit));
                     started = true;
                 }
                 Err(error) => {
@@ -968,7 +1021,7 @@ async fn finish_attempt(
                 if matches!(final_state, TaskState::Queued) {
                     core.queue.lock().push_back(QueuedTask {
                         id: updated.id,
-                        request: updated.request.clone(),
+                        resources: updated.request.resources.clone(),
                         bypasses: 0,
                     });
                 }
@@ -1040,7 +1093,8 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
     }
     if core.admission.close() {
         let core = Arc::clone(core);
-        runtime().spawn(async move {
+        let runtime_handle = core.runtime_handle.clone();
+        runtime_handle.spawn(async move {
             core.admission.wait_idle().await;
             core.admission.finish_close(Err(diagnostic));
             core.changed.notify_waiters();
