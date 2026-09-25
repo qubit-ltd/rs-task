@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-#[cfg(feature = "event-bus")]
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -19,12 +18,13 @@ use crate::engine::TaskExecutionEngine;
 use crate::handler::TaskHandler;
 use crate::handler::TaskHandlerRegistry;
 use crate::model::ResourceCapacity;
+use crate::model::StoredTask;
+use crate::model::TaskId;
 use crate::model::TaskState;
 use crate::scheduling::FairFifoPolicy;
 use crate::scheduling::QueuedTask;
 use crate::scheduling::SchedulingPolicy;
 use crate::store::MemoryTaskStore;
-use crate::store::StoreError;
 use crate::store::TaskStore;
 
 /// Service construction error, including unsupported or unavailable recovery.
@@ -38,13 +38,25 @@ pub enum TaskServiceBuildError {
     RecoveryRequired,
     /// Store initialization or recovery scan failed.
     #[error(transparent)]
-    Store(#[from] StoreError),
+    Store(#[from] crate::store::StoreError),
     /// Two handlers claimed the same task type and version.
     #[error("{0}")]
     HandlerConflict(String),
     /// SQLite support is disabled for this crate build.
     #[error("SQLite support requires the `sqlite` feature")]
     SqliteFeatureDisabled,
+    /// Existing unfinished work is larger than the configured recovery bound.
+    #[error("unfinished task count exceeds recovery capacity {limit}")]
+    RecoveryCapacityExceeded {
+        /// Maximum unfinished task count accepted by this configuration.
+        limit: usize,
+    },
+    /// A task store returned an invalid recovery page.
+    #[error("invalid recovery page: {0}")]
+    InvalidRecoveryPage(String),
+    /// The selected queue and running capacities overflow the supported range.
+    #[error("invalid service configuration: {0}")]
+    InvalidConfiguration(String),
     /// The dedicated lifecycle event publisher thread could not start.
     #[cfg(feature = "event-bus")]
     #[error("failed to start task event publisher thread: {0}")]
@@ -75,6 +87,7 @@ pub struct TaskExecutionServiceBuilder {
     handlers: TaskHandlerRegistry,
     capacity: ResourceCapacity,
     queue_capacity: usize,
+    max_running_tasks: NonZeroUsize,
     scan_budget: usize,
     max_attempts: u32,
     require_recovery: bool,
@@ -97,6 +110,7 @@ impl Default for TaskExecutionServiceBuilder {
                 ..ResourceCapacity::default()
             },
             queue_capacity: 1024,
+            max_running_tasks: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
             scan_budget: 128,
             max_attempts: 3,
             require_recovery: false,
@@ -183,6 +197,13 @@ impl TaskExecutionServiceBuilder {
         self
     }
 
+    /// Sets the maximum number of task attempts that may run simultaneously.
+    #[must_use]
+    pub fn max_running_tasks(mut self, limit: NonZeroUsize) -> Self {
+        self.max_running_tasks = limit;
+        self
+    }
+
     /// Sets the maximum number of candidates inspected in each scheduler cycle.
     #[must_use]
     pub fn scan_budget(mut self, budget: usize) -> Self {
@@ -234,25 +255,24 @@ impl TaskExecutionServiceBuilder {
             .engine
             .unwrap_or_else(|| Arc::new(LocalTaskExecutionEngine::new(self.capacity.clone())));
         let policy = self.policy.unwrap_or_else(|| Arc::new(FairFifoPolicy::default()));
+        let recovery_limit = self
+            .queue_capacity
+            .checked_add(self.max_running_tasks.get())
+            .ok_or_else(|| {
+                TaskServiceBuildError::InvalidConfiguration("queue_capacity + max_running_tasks overflows usize".into())
+            })?;
         let owner = if store_capabilities.restart_recovery {
             Some(store.acquire_owner().await?)
         } else {
             None
         };
         let recovered_result = async {
-            let mut recovered = Vec::new();
             if store_capabilities.restart_recovery {
-                let mut cursor = None;
-                loop {
-                    let page = store.scan_unfinished(cursor).await?;
-                    recovered.extend(page.tasks);
-                    cursor = page.next;
-                    if cursor.is_none() {
-                        break;
-                    }
-                }
+                count_recovery_records(&store, recovery_limit).await?;
+                restore_tasks_paged(&store, &self.handlers, self.max_attempts, recovery_limit).await
+            } else {
+                Ok(std::collections::VecDeque::new())
             }
-            restore_tasks(&store, &self.handlers, recovered).await
         }
         .await;
         let queue = match recovered_result {
@@ -261,7 +281,7 @@ impl TaskExecutionServiceBuilder {
                 if let Some(epoch) = owner {
                     let _ = store.release_owner(epoch).await;
                 }
-                return Err(error.into());
+                return Err(error);
             }
         };
         let queue_count = queue.len();
@@ -284,6 +304,7 @@ impl TaskExecutionServiceBuilder {
             policy,
             handlers: self.handlers,
             queue_capacity: self.queue_capacity,
+            running_slots: Arc::new(tokio::sync::Semaphore::new(self.max_running_tasks.get())),
             scan_budget: self.scan_budget,
             max_attempts: self.max_attempts,
             queue: parking_lot::Mutex::new(queue),
@@ -304,34 +325,76 @@ impl TaskExecutionServiceBuilder {
     }
 }
 
+const RECOVERY_PAGE_LIMIT: usize = 256;
+
+async fn count_recovery_records(store: &Arc<dyn TaskStore>, limit: usize) -> Result<(), TaskServiceBuildError> {
+    let mut count = 0_usize;
+    let mut cursor = None;
+    loop {
+        let page = store.scan_unfinished(cursor).await?;
+        validate_recovery_page(&page.tasks, cursor, page.next)?;
+        count = count.checked_add(page.tasks.len()).ok_or_else(|| {
+            TaskServiceBuildError::InvalidConfiguration("unfinished task count overflows usize".into())
+        })?;
+        if count > limit {
+            return Err(TaskServiceBuildError::RecoveryCapacityExceeded { limit });
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            return Ok(());
+        }
+    }
+}
+
+fn validate_recovery_page(
+    tasks: &[StoredTask],
+    previous: Option<TaskId>,
+    next: Option<TaskId>,
+) -> Result<(), TaskServiceBuildError> {
+    if tasks.len() > RECOVERY_PAGE_LIMIT {
+        return Err(TaskServiceBuildError::InvalidRecoveryPage(format!(
+            "page contains {} records; maximum is {RECOVERY_PAGE_LIMIT}",
+            tasks.len()
+        )));
+    }
+    if next.is_some() && tasks.is_empty() {
+        return Err(TaskServiceBuildError::InvalidRecoveryPage(
+            "empty page returned a next cursor".into(),
+        ));
+    }
+    if let Some(next) = next
+        && previous.is_some_and(|previous| next <= previous)
+    {
+        return Err(TaskServiceBuildError::InvalidRecoveryPage(
+            "cursor did not advance".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Resets interrupted attempts and queues recoverable tasks with available
-/// handlers.
-async fn restore_tasks(
+/// handlers, retaining only one store page at a time.
+async fn restore_tasks_paged(
     store: &Arc<dyn TaskStore>,
     handlers: &TaskHandlerRegistry,
-    recovered: Vec<crate::model::StoredTask>,
-) -> Result<std::collections::VecDeque<QueuedTask>, StoreError> {
+    max_attempts: u32,
+    limit: usize,
+) -> Result<std::collections::VecDeque<QueuedTask>, TaskServiceBuildError> {
     let mut queue = std::collections::VecDeque::new();
-    for stored in recovered {
-        let mut record = stored.record;
-        if matches!(record.state, TaskState::Running) {
-            record = store
-                .transition(crate::model::TransitionCommand {
-                    id: record.id,
-                    expected_version: record.state_version,
-                    expected_attempt: record.attempt,
-                    state: TaskState::Queued,
-                    output: None,
-                    assigned_resources: Vec::new(),
-                    cancel_requested: false,
-                })
-                .await?;
+    let mut cursor = None;
+    let mut count = 0_usize;
+    loop {
+        let page = store.scan_unfinished(cursor).await?;
+        validate_recovery_page(&page.tasks, cursor, page.next)?;
+        count = count.checked_add(page.tasks.len()).ok_or_else(|| {
+            TaskServiceBuildError::InvalidConfiguration("unfinished task count overflows usize".into())
+        })?;
+        if count > limit {
+            return Err(TaskServiceBuildError::RecoveryCapacityExceeded { limit });
         }
-        if matches!(record.state, TaskState::Queued) {
-            if handlers
-                .resolve(&record.request.task_type, &record.request.handler_version)
-                .is_none()
-            {
+        for stored in page.tasks {
+            let mut record = stored.record;
+            if matches!(record.state, TaskState::Queued | TaskState::Running) && record.attempt >= max_attempts {
                 store
                     .transition(crate::model::TransitionCommand {
                         id: record.id,
@@ -339,23 +402,297 @@ async fn restore_tasks(
                         expected_attempt: record.attempt,
                         state: TaskState::Blocked {
                             reason: format!(
-                                "missing handler {}@{} during recovery",
-                                record.request.task_type, record.request.handler_version
+                                "retry limit reached during recovery: {}/{} attempts used",
+                                record.attempt, max_attempts
                             ),
                         },
+                        output: None,
+                        assigned_resources: Vec::new(),
+                        cancel_requested: record.cancel_requested,
+                    })
+                    .await?;
+                continue;
+            }
+            if matches!(record.state, TaskState::Running) {
+                record = store
+                    .transition(crate::model::TransitionCommand {
+                        id: record.id,
+                        expected_version: record.state_version,
+                        expected_attempt: record.attempt,
+                        state: TaskState::Queued,
                         output: None,
                         assigned_resources: Vec::new(),
                         cancel_requested: false,
                     })
                     .await?;
-            } else {
-                queue.push_back(QueuedTask {
-                    id: record.id,
-                    request: record.request.clone(),
-                    bypasses: 0,
-                });
             }
+            if matches!(record.state, TaskState::Queued) {
+                if handlers
+                    .resolve(&record.request.task_type, &record.request.handler_version)
+                    .is_none()
+                {
+                    store
+                        .transition(crate::model::TransitionCommand {
+                            id: record.id,
+                            expected_version: record.state_version,
+                            expected_attempt: record.attempt,
+                            state: TaskState::Blocked {
+                                reason: format!(
+                                    "missing handler {}@{} during recovery",
+                                    record.request.task_type, record.request.handler_version
+                                ),
+                            },
+                            output: None,
+                            assigned_resources: Vec::new(),
+                            cancel_requested: false,
+                        })
+                        .await?;
+                } else {
+                    queue.push_back(QueuedTask {
+                        id: record.id,
+                        request: record.request.clone(),
+                        bypasses: 0,
+                    });
+                }
+            }
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
         }
     }
     Ok(queue)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use super::TaskExecutionService;
+    use super::TaskExecutionServiceBuilder;
+    use super::TaskServiceBuildError;
+    use crate::engine::LocalTaskExecutionEngine;
+    use crate::handler::TaskContext;
+    use crate::handler::TaskHandler;
+    use crate::handler::TaskHandlerRegistry;
+    use crate::handler::TaskRunOutcome;
+    use crate::model::ResourceCapacity;
+    use crate::model::TaskId;
+    use crate::model::TaskOutput;
+    use crate::model::TaskRunError;
+    use crate::model::TaskState;
+    use crate::scheduling::FairFifoPolicy;
+    use crate::store::MemoryTaskStore;
+
+    struct Echo;
+
+    impl TaskHandler for Echo {
+        fn descriptor(&self) -> crate::handler::TaskHandlerDescriptor {
+            crate::handler::TaskHandlerDescriptor {
+                task_type: "builder-test".into(),
+                version: "1".into(),
+            }
+        }
+
+        fn run<'a>(
+            &'a self,
+            _payload: &'a [u8],
+            _context: TaskContext,
+        ) -> crate::store::TaskFuture<'a, crate::handler::TaskRunResult> {
+            Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
+        }
+    }
+
+    struct RetryOnce(AtomicUsize);
+
+    impl TaskHandler for RetryOnce {
+        fn descriptor(&self) -> crate::handler::TaskHandlerDescriptor {
+            crate::handler::TaskHandlerDescriptor {
+                task_type: "retry-once".into(),
+                version: "1".into(),
+            }
+        }
+
+        fn run<'a>(
+            &'a self,
+            _payload: &'a [u8],
+            _context: TaskContext,
+        ) -> crate::store::TaskFuture<'a, crate::handler::TaskRunResult> {
+            Box::pin(async move {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(TaskRunError {
+                        category: "test".into(),
+                        message: "retry once".into(),
+                        retryable: true,
+                    })
+                } else {
+                    Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_public_builder_and_service_lifecycle_contracts() {
+        let mut registry = TaskHandlerRegistry::new();
+        registry.register(Arc::new(Echo)).unwrap();
+        registry.register(Arc::new(RetryOnce(AtomicUsize::new(0)))).unwrap();
+        let capacity = ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        };
+        let builder = TaskExecutionServiceBuilder::from_components(
+            Arc::new(MemoryTaskStore::new(16)),
+            Arc::new(LocalTaskExecutionEngine::new(capacity.clone())),
+            Arc::new(FairFifoPolicy::default()),
+        )
+        .register_handler(Arc::new(Echo))
+        .unwrap()
+        .handlers(registry)
+        .capacity(capacity)
+        .queue_capacity(8)
+        .max_running_tasks(NonZeroUsize::new(2).unwrap())
+        .scan_budget(8)
+        .max_attempts(2)
+        .require_recovery(false);
+        #[cfg(feature = "event-bus")]
+        let builder = builder
+            .event_bus(
+                qubit_event_bus::EventBus::local(qubit_event_bus::local::LocalEventBusConfig::default()).unwrap(),
+            )
+            .event_bus_buffer_capacity(NonZeroUsize::new(4).unwrap());
+        let service = builder.build().await.unwrap();
+        #[cfg(feature = "event-bus")]
+        assert!(service.notification_stats().is_some());
+        assert!(!service.capabilities().store.restart_recovery);
+        assert_eq!(service.last_store_error(), None);
+        assert!(service.get(TaskId::generate()).await.unwrap().is_none());
+
+        let accepted = service
+            .submit(crate::model::TaskRequest::new("builder-test", "1", Vec::new()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.wait(accepted.id).await.unwrap().state,
+            TaskState::Succeeded
+        ));
+        assert!(service.get(accepted.id).await.unwrap().is_some());
+        assert_eq!(
+            service
+                .list(crate::model::TaskQuery::default())
+                .await
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(service.stats().await.unwrap().terminal, 1);
+        assert!(matches!(
+            service.cancel(accepted.id).await.unwrap(),
+            crate::service::CancelOutcome::AlreadyTerminal
+        ));
+
+        let local = service
+            .submit_local(|_| crate::service::LocalTaskOutcome::<u8, String>::Succeeded {
+                value: 7,
+                summary: TaskOutput::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(local.task_id(), service.get(local.task_id()).await.unwrap().unwrap().id);
+        assert!(format!("{local:?}").contains("LocalTaskHandle"));
+        assert_eq!(local.result().await.unwrap().unwrap(), 7);
+
+        let retrying = service
+            .submit(crate::model::TaskRequest::new("retry-once", "1", Vec::new()))
+            .await
+            .unwrap();
+        let retried = service.wait(retrying.id).await.unwrap();
+        assert_eq!(retried.attempt, 2);
+        assert!(matches!(retried.state, TaskState::Succeeded));
+
+        let blocked = service
+            .submit(crate::model::TaskRequest::new("missing", "1", Vec::new()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.wait(blocked.id).await,
+            Err(crate::service::TaskServiceError::Blocked)
+        ));
+        service.retry_blocked(blocked.id).await.unwrap();
+        assert!(matches!(
+            service.wait(blocked.id).await,
+            Err(crate::service::TaskServiceError::Blocked)
+        ));
+        assert!(matches!(
+            service.cancel(blocked.id).await.unwrap(),
+            crate::service::CancelOutcome::CancelledBeforeStart
+        ));
+        assert!(matches!(
+            service.cancel(TaskId::generate()).await,
+            Err(crate::service::TaskServiceError::Store(
+                crate::store::StoreError::NotFound
+            ))
+        ));
+        service.shutdown().await.unwrap();
+
+        let memory_service = TaskExecutionService::in_memory().await.unwrap();
+        memory_service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_overflowing_recovery_capacity_configuration() {
+        let result = TaskExecutionServiceBuilder::in_memory()
+            .queue_capacity(usize::MAX)
+            .max_running_tasks(NonZeroUsize::MIN)
+            .build()
+            .await;
+        assert!(matches!(result, Err(TaskServiceBuildError::InvalidConfiguration(_))));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_builder_recovers_unfinished_records() {
+        use crate::model::AcceptOutcome;
+        use crate::store::SqliteTaskStore;
+        use crate::store::TaskStore;
+
+        let path = std::env::temp_dir().join(format!("qubit-task-unit-recovery-{}.sqlite", TaskId::generate()));
+        let store = SqliteTaskStore::open(&path).unwrap();
+        let id = TaskId::generate();
+        let request = crate::model::TaskRequest::new("builder-test", "1", Vec::new());
+        assert!(store.find_idempotent(request.clone()).await.unwrap().is_none());
+        assert!(matches!(
+            store.accept(id, request).await.unwrap(),
+            AcceptOutcome::Accepted(_)
+        ));
+        assert_eq!(
+            store
+                .list(crate::model::TaskQuery::default())
+                .await
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+        drop(store);
+
+        let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+            .unwrap()
+            .register_handler(Arc::new(Echo))
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        assert!(matches!(service.wait(id).await.unwrap().state, TaskState::Succeeded));
+        service.shutdown().await.unwrap();
+        drop(service);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
 }

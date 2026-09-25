@@ -80,6 +80,14 @@ pub enum TaskServiceError {
     /// The requested task is blocked pending intervention.
     #[error("task is blocked and requires intervention")]
     Blocked,
+    /// The task used all configured execution attempts and cannot be requeued.
+    #[error("task exhausted its execution attempt budget ({attempts}/{limit})")]
+    AttemptsExhausted {
+        /// Number of attempts already started.
+        attempts: u32,
+        /// Maximum attempts configured for the service.
+        limit: u32,
+    },
     /// New task submissions have been stopped.
     #[error("task execution service is shutting down")]
     ShuttingDown,
@@ -118,6 +126,7 @@ pub(crate) struct ServiceCore {
     pub(crate) queue_capacity: usize,
     pub(crate) scan_budget: usize,
     pub(crate) max_attempts: u32,
+    pub(crate) running_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) queue: Mutex<VecDeque<QueuedTask>>,
     pub(crate) queue_count: AtomicUsize,
     pub(crate) local_handlers: Mutex<HashMap<TaskId, Arc<dyn TaskHandler>>>,
@@ -530,6 +539,12 @@ impl TaskExecutionService {
         if !matches!(record.state, TaskState::Blocked { .. }) {
             return Err(TaskServiceError::Blocked);
         }
+        if record.attempt >= self.core.max_attempts {
+            return Err(TaskServiceError::AttemptsExhausted {
+                attempts: record.attempt,
+                limit: self.core.max_attempts,
+            });
+        }
         self.reserve_queue_slot()?;
         let updated = match transition(&self.core, &record, TaskState::Queued, None, Vec::new(), false).await {
             Ok(updated) => updated,
@@ -722,6 +737,10 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
                 continue;
             };
+            let Ok(running_permit) = core.running_slots.clone().try_acquire_owned() else {
+                queue.push(task);
+                break;
+            };
             let prepared = match core.engine.prepare(id, task.request.resources.clone()).await {
                 Ok(value) => value,
                 Err(EngineError::TemporarilyUnavailable) => {
@@ -797,7 +816,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                         }
                     }
                     let weak = Arc::downgrade(&core);
-                    runtime().spawn(finish_attempt(weak, running, handle.receiver));
+                    runtime().spawn(finish_attempt(weak, running, handle.receiver, running_permit));
                     started = true;
                 }
                 Err(error) => {
@@ -859,6 +878,7 @@ async fn finish_attempt(
     core_ref: std::sync::Weak<ServiceCore>,
     running: TaskRecord,
     receiver: tokio::sync::oneshot::Receiver<crate::handler::TaskRunResult>,
+    _running_permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     let result = receiver.await.unwrap_or_else(|_| {
         Err(crate::model::TaskRunError {
