@@ -26,6 +26,7 @@ use crate::store::TaskFuture;
 type Allocation = (u32, Vec<String>, BTreeMap<String, u64>);
 type AllocationLedger = HashMap<u64, Allocation>;
 
+/// Mutable aggregate of resources currently reserved by active attempts.
 #[derive(Default)]
 struct Usage {
     cpu: u32,
@@ -158,6 +159,7 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
     }
 }
 
+/// Releases a prepared reservation when its execution worker exits or unwinds.
 struct ReservationGuard(Option<Box<dyn FnOnce() + Send>>);
 impl Drop for ReservationGuard {
     fn drop(&mut self) {
@@ -167,6 +169,7 @@ impl Drop for ReservationGuard {
     }
 }
 
+/// Removes one reservation and returns its resources to the shared counters.
 fn release(token: u64, allocations: &Mutex<AllocationLedger>, usage: &Mutex<Usage>) {
     if let Some((cpu, gpus, custom)) = allocations.lock().remove(&token) {
         let mut current = usage.lock();

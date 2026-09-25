@@ -35,6 +35,19 @@ use crate::model::TransitionCommand;
 pub type TaskFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Persistent task history implementation contract.
+///
+/// Implementations must make acceptance and version-checked transitions
+/// atomic. Recoverable stores additionally serialize service ownership and
+/// provide bounded scans of unfinished requests.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::store::{MemoryTaskStore, TaskStore};
+///
+/// let store = MemoryTaskStore::new(100);
+/// assert!(!store.capabilities().restart_recovery);
+/// ```
 pub trait TaskStore: Send + Sync {
     /// Reports whether history and unfinished task descriptions survive
     /// restart.

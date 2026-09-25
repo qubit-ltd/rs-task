@@ -12,6 +12,20 @@ use std::sync::atomic::Ordering;
 use crate::model::TaskId;
 
 /// Per-attempt metadata and cooperative cancellation signal.
+///
+/// The service creates this context for each started attempt. Handlers can
+/// inspect resource assignments and poll or share the cancellation flag.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::handler::TaskHandler;
+/// use qubit_task::handler::TaskContext;
+///
+/// fn observe_attempt(handler: &dyn TaskHandler, payload: &[u8], context: TaskContext) {
+///     let _ = handler.run(payload, context);
+/// }
+/// ```
 #[derive(Clone)]
 pub struct TaskContext {
     id: TaskId,
@@ -22,6 +36,9 @@ pub struct TaskContext {
 
 impl TaskContext {
     /// Creates context for one service-managed execution attempt.
+    ///
+    /// The cancellation flag is shared with the service and engine. Resource
+    /// assignments are copied into immutable shared storage for the handler.
     pub(crate) fn new(id: TaskId, attempt: u32, assigned_resources: Vec<String>, cancelled: Arc<AtomicBool>) -> Self {
         Self {
             id,

@@ -234,6 +234,8 @@ impl TaskStore for MemoryTaskStore {
     }
 }
 
+/// Reads the current Unix epoch time in milliseconds, defaulting on clock
+/// error.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

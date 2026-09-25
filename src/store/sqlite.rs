@@ -110,6 +110,8 @@ impl SqliteTaskStore {
         })
     }
 
+    /// Runs one connection operation on the blocking pool through its serial
+    /// slot.
     fn run<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
     where
         T: Send + 'static,
@@ -135,7 +137,8 @@ impl SqliteTaskStore {
         })
     }
 
-    /// Runs a write only while this store still owns its process lock.
+    /// Runs one serialized write only while this store still owns its process
+    /// lock.
     fn run_write<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
     where
         T: Send + 'static,
@@ -407,6 +410,7 @@ impl TaskStore for SqliteTaskStore {
     }
 }
 
+/// Builds the initial queued record before the SQLite acceptance transaction.
 fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
     TaskRecord {
         id,
@@ -423,16 +427,20 @@ fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
     }
 }
 
+/// Maps a lifecycle state to its stable SQLite index key.
 fn state_kind(state: &TaskState) -> &'static str {
     state.kind().as_str()
 }
 
+/// Reads the current Unix epoch time in milliseconds, defaulting on clock
+/// error.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }
+/// Converts a SQLite, filesystem, or serialization diagnostic to store failure.
 fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }

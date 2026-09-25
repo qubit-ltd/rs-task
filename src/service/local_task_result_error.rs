@@ -6,6 +6,18 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 /// Failure to obtain a typed local result after a task was accepted.
+///
+/// These errors distinguish task outcomes from failures to persist or deliver
+/// the process-local value.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::service::LocalTaskResultError;
+///
+/// let error = LocalTaskResultError::Cancelled;
+/// assert_eq!(error.to_string(), "local task was cancelled");
+/// ```
 #[derive(Debug, thiserror::Error)]
 pub enum LocalTaskResultError {
     /// Execution was cancelled before or during the handler.

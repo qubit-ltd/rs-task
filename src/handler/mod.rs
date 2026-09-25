@@ -13,6 +13,7 @@ mod context;
 mod registry;
 
 pub use context::TaskContext;
+pub use registry::RegistryError;
 pub use registry::TaskHandlerDescriptor;
 pub use registry::TaskHandlerRegistry;
 pub use registry::TaskRunOutcome;
@@ -83,6 +84,41 @@ pub trait TaskHandlerProvider: Send + Sync {
 }
 
 /// Async function contract used by handler implementations.
+///
+/// Handlers receive an opaque payload and per-attempt context. Long blocking
+/// work must run on a blocking pool or dedicated backend so the async runtime
+/// can continue scheduling other tasks.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use qubit_task::handler::TaskContext;
+/// use qubit_task::handler::TaskHandler;
+/// use qubit_task::handler::TaskHandlerDescriptor;
+/// use qubit_task::handler::TaskHandlerRegistry;
+/// use qubit_task::handler::TaskRunOutcome;
+/// use qubit_task::handler::TaskRunResult;
+/// use qubit_task::model::TaskOutput;
+/// use qubit_task::store::TaskFuture;
+///
+/// struct Echo;
+///
+/// impl TaskHandler for Echo {
+///     fn descriptor(&self) -> TaskHandlerDescriptor {
+///         TaskHandlerDescriptor { task_type: "echo".into(), version: "1".into() }
+///     }
+///
+///     fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+///         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
+///     }
+/// }
+///
+/// let mut registry = TaskHandlerRegistry::new();
+/// registry.register(Arc::new(Echo)).unwrap();
+/// assert!(registry.resolve("echo", "1").is_some());
+/// ```
 pub trait TaskHandler: Send + Sync {
     /// Identifies the exact task type and payload version this handler accepts.
     fn descriptor(&self) -> TaskHandlerDescriptor;

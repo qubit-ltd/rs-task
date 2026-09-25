@@ -68,6 +68,7 @@ impl SchedulingPolicy for FairFifoPolicy {
     }
 }
 
+/// Reports whether configured capacity can ever satisfy the task's request.
 fn can_fit_capacity(task: &QueuedTask, capacity: &ResourceCapacity) -> bool {
     let request = &task.request.resources;
     request.cpu_slots <= capacity.cpu_slots
@@ -83,6 +84,7 @@ fn can_fit_capacity(task: &QueuedTask, capacity: &ResourceCapacity) -> bool {
             .all(|(name, amount)| capacity.custom.get(name).is_some_and(|limit| amount <= limit))
 }
 
+/// Reports whether currently unreserved resources appear sufficient for a task.
 fn likely_fits(task: &QueuedTask, resources: &ResourceSnapshot) -> bool {
     let request = &task.request.resources;
     request.cpu_slots <= resources.capacity.cpu_slots.saturating_sub(resources.used_cpu_slots)
