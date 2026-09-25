@@ -14,8 +14,7 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use qubit_event_bus::EventBus;
-use qubit_event_bus::model::AdmissionStatus;
-use qubit_event_bus::model::PublishAcknowledgement;
+use qubit_event_bus::model::AdmissionOutcome;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::Topic;
 
@@ -65,7 +64,7 @@ impl TaskEventPublisher {
                     while let Ok(event) = receiver.recv() {
                         match PublishRequest::new(topic.clone(), event) {
                             Ok(request) => match bus.publish(request) {
-                                Ok(receipt) => record_admission(&worker_counters, receipt.acknowledgement()),
+                                Ok(receipt) => record_admission(&worker_counters, receipt.admission_outcome()),
                                 Err(_) => increment(&worker_counters.publish_error),
                             },
                             Err(_) => increment(&worker_counters.publish_error),
@@ -140,26 +139,17 @@ fn worker_main(work_counters: &Counters, finished: &(Mutex<bool>, Condvar), work
     changed.notify_all();
 }
 
-fn record_admission(counters: &Counters, acknowledgement: &PublishAcknowledgement) {
-    match acknowledgement {
-        PublishAcknowledgement::Accepted { .. } => increment(&counters.opaque_accepted),
-        PublishAcknowledgement::DestinationAdmissions(admissions) => {
-            let accepted = admissions
-                .iter()
-                .any(|admission| matches!(admission.status(), AdmissionStatus::Accepted));
-            let rejected = admissions
-                .iter()
-                .any(|admission| matches!(admission.status(), AdmissionStatus::Rejected(_)));
-            if accepted {
-                increment(&counters.accepted);
-                if rejected {
-                    increment(&counters.partial_rejection);
-                }
-            } else {
-                increment(&counters.unaccepted);
-            }
+fn record_admission(counters: &Counters, outcome: AdmissionOutcome) {
+    match outcome {
+        AdmissionOutcome::OpaqueAccepted => increment(&counters.opaque_accepted),
+        AdmissionOutcome::Accepted(_) => increment(&counters.accepted),
+        AdmissionOutcome::PartiallyAccepted(_) => {
+            increment(&counters.accepted);
+            increment(&counters.partial_rejection);
         }
-        PublishAcknowledgement::DroppedByInterceptor => increment(&counters.unaccepted),
+        AdmissionOutcome::NoneAccepted(_) | AdmissionOutcome::NoDestinations | AdmissionOutcome::Dropped => {
+            increment(&counters.unaccepted);
+        }
         _ => increment(&counters.unaccepted),
     }
 }
@@ -176,7 +166,9 @@ mod tests {
     use qubit_event_bus::EventBus;
     use qubit_event_bus::SubscribeError;
     use qubit_event_bus::error::SpiError;
+    use qubit_event_bus::model::AdmissionOutcome;
     use qubit_event_bus::model::AdmissionStatus;
+    use qubit_event_bus::model::AdmissionSummary;
     use qubit_event_bus::model::DestinationAdmission;
     use qubit_event_bus::model::ProviderId;
     use qubit_event_bus::model::PublishAcknowledgement;
@@ -202,6 +194,7 @@ mod tests {
 
     use super::Counters;
     use super::TaskEventPublisher;
+    use super::record_admission;
     use super::worker_main;
     use crate::event::TaskEvent;
     use crate::model::TaskId;
@@ -333,6 +326,43 @@ mod tests {
     fn publisher(spi: Arc<FakeSpi>, capacity: usize) -> TaskEventPublisher {
         let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
         TaskEventPublisher::new(bus, NonZeroUsize::new(capacity).expect("nonzero capacity")).expect("publisher starts")
+    }
+
+    #[test]
+    fn test_task_event_publisher_maps_each_admission_outcome_to_one_counter() {
+        let counters = Counters::default();
+        let summary = AdmissionSummary {
+            accepted: 1,
+            filtered: 0,
+            rejected: 0,
+        };
+
+        record_admission(&counters, AdmissionOutcome::OpaqueAccepted);
+        record_admission(&counters, AdmissionOutcome::Accepted(summary));
+        record_admission(
+            &counters,
+            AdmissionOutcome::PartiallyAccepted(AdmissionSummary {
+                accepted: 1,
+                filtered: 0,
+                rejected: 1,
+            }),
+        );
+        record_admission(
+            &counters,
+            AdmissionOutcome::NoneAccepted(AdmissionSummary {
+                accepted: 0,
+                filtered: 1,
+                rejected: 0,
+            }),
+        );
+        record_admission(&counters, AdmissionOutcome::NoDestinations);
+        record_admission(&counters, AdmissionOutcome::Dropped);
+
+        assert_eq!(1, counters.opaque_accepted.load(Ordering::Acquire));
+        assert_eq!(2, counters.accepted.load(Ordering::Acquire));
+        assert_eq!(1, counters.partial_rejection.load(Ordering::Acquire));
+        assert_eq!(3, counters.unaccepted.load(Ordering::Acquire));
+        assert_eq!(0, counters.publish_error.load(Ordering::Acquire));
     }
 
     #[test]

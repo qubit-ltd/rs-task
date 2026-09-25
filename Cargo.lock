@@ -418,7 +418,7 @@ dependencies = [
 [[package]]
 name = "qubit-event-bus"
 version = "0.12.0"
-source = "git+https://github.com/qubit-ltd/rs-event-bus?rev=319fffb85c150c0d2b2f83655ee06799b19ef035#319fffb85c150c0d2b2f83655ee06799b19ef035"
+source = "git+https://github.com/qubit-ltd/rs-event-bus?rev=1ad85d9c68e1675e3967904a640033c48561b3b3#1ad85d9c68e1675e3967904a640033c48561b3b3"
 dependencies = [
  "qubit-argument",
  "qubit-clock",
