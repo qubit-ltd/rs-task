@@ -283,7 +283,23 @@ state counts in one aggregate operation. These are intentional source-breaking
 changes; update downstream implementations and call sites together. No current
 `rs-*` crate in this workspace consumes `rs-task` directly.
 
+`TaskQuery.states` is now `Vec<TaskStateKind>`; matching compares lifecycle
+categories and ignores diagnostics such as failure messages and blocked
+reasons. Service writes are rejected after shutdown starts. SQLite writes are
+fenced by store ownership, including direct calls through an old store handle.
+SQLite runs one blocking database operation at a time; callers must poll store
+operations from a Tokio runtime.
+
 ## Operational limits
+
+Request limits use UTF-8 byte lengths: `task_type` 128, `handler_version` 64,
+`correlation_key` and `idempotency_key` 256 each; metadata has at most 32
+entries, 128-byte keys, 4096-byte values, and 16384 combined key/value bytes.
+Oversized requests fail before acceptance. Persisted diagnostic categories are
+limited to 128 bytes; blocked reasons, panic messages, and other diagnostic
+messages are limited to 4096 bytes. Execution diagnostics are truncated at a
+valid UTF-8 boundary, while a `LocalTaskHandle` retains the original typed
+result and error values.
 
 This release schedules tasks within one service process. It does not provide
 multi-node leasing, distributed resource discovery, workflow dependencies,

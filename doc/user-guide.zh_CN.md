@@ -182,6 +182,17 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 
 本次重设计移除调用方提供的 ID、`submit` 闭包、线程池专属 builder 选项和旧的 `TaskHandle<R, E>`。这里没有通用的持久化句柄：`submit_local` 现在为进程内闭包返回 `LocalTaskHandle<R, E>`；需要重建的任务仍使用 `TaskRequest` 和服务生成的 `TaskId`。第三方 `TaskStore` 需要新增 `count_states()`，一次聚合返回所有保留状态的计数。这些是有意的源码破坏性变更，下游实现和调用点应一起迁移。当前工作区中没有 `rs-*` crate 直接依赖 `rs-task`。
 
+`TaskQuery.states` 现在是 `Vec<TaskStateKind>`；筛选只比较生命周期类别，忽略
+失败消息和阻塞原因等诊断内容。关闭开始后服务会拒绝写操作。SQLite 写入受存储
+所有权 fencing 保护，旧 store 句柄也不能绕过。SQLite 同时只执行一个阻塞数据库
+操作；调用方须在 Tokio runtime 中轮询 store 操作。
+
 ## 运行限制
+
+请求上限按 UTF-8 字节数计算：`task_type` 128、`handler_version` 64、
+`correlation_key` 和 `idempotency_key` 各 256；metadata 最多 32 项，键 128、
+值 4096、键值合计 16384。超限请求在受理前被拒绝。持久化诊断类别最多 128
+字节；阻塞原因、panic 消息和其他诊断消息最多 4096 字节。执行诊断会在有效的
+UTF-8 字符边界裁剪；`LocalTaskHandle` 仍保留原始类型化结果和错误值。
 
 本版本只在单个服务进程内调度任务，不提供多节点租约、分布式资源发现、工作流依赖、定时任务、任意代码强制中断或业务副作用恰好一次保证。未来的分布式执行实现可以实现相同的 `TaskExecutionEngine` 接口，而不要求更改服务门面。
