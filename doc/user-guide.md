@@ -257,8 +257,11 @@ however, a synchronous provider that never returns can keep that thread busy
 and make `shutdown()` wait indefinitely. Dropping the service without calling
 `shutdown()` closes the sender and lets the worker drain queued notifications
 before exiting, subject to the same provider behavior. If the worker panics,
-`worker_panicked` records it and shutdown still observes worker completion, but
-notifications remaining in its queue may be lost.
+`worker_panicked` records it, queued notifications may be lost, and
+`shutdown()` returns `TaskServiceError::NotificationClose`. A failure to join
+the blocking close task returns the same error. These notification failures do
+not roll back task state. Concurrent and later shutdown callers receive the
+same stored close result.
 
 ## Errors and diagnostics
 

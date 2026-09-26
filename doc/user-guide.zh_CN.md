@@ -198,7 +198,7 @@ SQLite 以事务方式保存任务请求和状态变化。版本 0 数据库在�
 这些值表示队列接纳、provider 回执或线程状态，不代表订阅者 handler 已处理完成。
 计数单调递增并在 `u64::MAX` 饱和；同一快照的各字段不保证来自完全相同的时刻。
 
-调用 `shutdown()` 时，服务先停止新的受理并等待进行中的提交完成受理，再等待已受理任务结束；随后关闭通知入队并排空队列中的事件，然后返回。它不会关闭由应用持有的事件总线。同步 provider 在专用操作系统线程上运行，不会占用 Tokio runtime worker；但如果 provider 永不返回，该线程就无法完成发布，`shutdown()` 也可能无限等待。不调用 `shutdown()` 而直接丢弃服务时，发送端关闭后发布线程仍会排空已入队通知再退出，同样受 provider 是否返回的影响。若发布线程发生 panic，`worker_panicked` 会记录此情况，shutdown 仍可观察到线程退出，但队列中尚未处理的通知可能丢失。
+调用 `shutdown()` 时，服务先停止新的受理并等待进行中的提交完成受理，再等待已受理任务结束；随后关闭通知入队并排空队列中的事件。通知线程在此期间发生 panic 时，`worker_panicked` 会记录故障，尚未处理的通知可能丢失，`shutdown()` 会返回 `TaskServiceError::NotificationClose`。等待 blocking close 任务失败时也返回这一错误。通知关闭失败不会回滚任务状态；并发或后续的 shutdown 调用会收到相同的关闭结果。该方法不会关闭由应用持有的事件总线。同步 provider 在专用操作系统线程上运行，不会占用 Tokio runtime worker；但如果 provider 永不返回，该线程就无法完成发布，`shutdown()` 仍可能无限等待。不调用 `shutdown()` 而直接丢弃服务时，发送端关闭后发布线程仍会排空已入队通知再退出，同样受 provider 是否返回的影响。
 
 ## 错误与诊断
 
