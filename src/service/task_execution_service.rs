@@ -773,15 +773,17 @@ impl TaskExecutionService {
             self.core.changed.notify_waiters();
             let service = self.clone();
             self.core.runtime_handle.spawn(async move {
-                let result = service.coordinate_shutdown().await;
+                let primary = service.coordinate_shutdown().await;
+                let result = combine_shutdown_results(primary, close_notification_publisher(&service.core).await);
                 service.core.admission.finish_close(result);
                 service.core.changed.notify_waiters();
             });
         }
     }
 
-    /// Drains accepted work, releases store ownership, and closes publishers
-    /// after the admission gate is idle.
+    /// Drains accepted work and releases store ownership after the admission
+    /// gate is idle. The shutdown coordinator closes the notification worker
+    /// after this convergence step returns.
     async fn coordinate_shutdown(&self) -> Result<(), TaskServiceError> {
         self.core.admission.wait_idle().await;
         let transition_guard = loop {
@@ -806,13 +808,6 @@ impl TaskExecutionService {
         {
             record_store_fault(&self.core, error.to_string());
             return Err(error.into());
-        }
-        #[cfg(feature = "event-bus")]
-        if let Some(publisher) = &self.core.event_bus {
-            publisher
-                .close(&self.core.runtime_handle)
-                .await
-                .map_err(|error| TaskServiceError::NotificationClose(error.to_string()))?;
         }
         drop(transition_guard);
         Ok(())
@@ -1296,13 +1291,58 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
         let runtime_handle = core.runtime_handle.clone();
         runtime_handle.spawn(async move {
             core.admission.wait_idle().await;
-            core.admission
-                .finish_close(Err(TaskServiceError::StoreUnavailable(diagnostic)));
+            let notification = close_notification_publisher(&core).await;
+            let result = combine_shutdown_results(Err(TaskServiceError::StoreUnavailable(diagnostic)), notification);
+            core.admission.finish_close(result);
             core.changed.notify_waiters();
         });
     }
     core.changed.notify_waiters();
     core.wait_registry.notify_all();
+}
+
+/// Stops and drains the service-owned notification worker before shutdown
+/// publishes its shared result.
+///
+/// With the `event-bus` feature, this blocks on the publisher's worker through
+/// `spawn_blocking`; a provider that never returns can therefore keep the
+/// service shutdown coordinator alive. The injected `EventBus` remains owned
+/// by the application and is not shut down here.
+///
+/// # Errors
+/// Returns `NotificationClose` when the worker fails to join or panics.
+async fn close_notification_publisher(core: &Arc<ServiceCore>) -> Result<(), TaskServiceError> {
+    #[cfg(feature = "event-bus")]
+    if let Some(publisher) = &core.event_bus {
+        publisher
+            .close(&core.runtime_handle)
+            .await
+            .map_err(|error| TaskServiceError::NotificationClose(error.to_string()))?;
+    }
+    #[cfg(not(feature = "event-bus"))]
+    let _ = core;
+    Ok(())
+}
+
+/// Combines service convergence and notification worker shutdown results.
+///
+/// A notification close failure becomes the close result when task
+/// convergence succeeded. If both fail, the service error stays primary and
+/// the notification error is appended to its diagnostic.
+fn combine_shutdown_results(
+    primary: Result<(), TaskServiceError>,
+    notification: Result<(), TaskServiceError>,
+) -> Result<(), TaskServiceError> {
+    match (primary, notification) {
+        (Ok(()), result) => result,
+        (Err(primary), Ok(())) => Err(primary),
+        (Err(TaskServiceError::StoreUnavailable(store)), Err(TaskServiceError::NotificationClose(close))) => Err(
+            TaskServiceError::StoreUnavailable(format!("{store}; notification close failed: {close}")),
+        ),
+        (Err(primary), Err(close)) => Err(TaskServiceError::StoreUnavailable(format!(
+            "{primary}; notification close failed: {close}"
+        ))),
+    }
 }
 
 /// Preserves an admission worker after caller cancellation and reports a
@@ -1462,5 +1502,48 @@ mod retry_deadline_tests {
         assert_eq!(retry_deadline_ms(100, policy, 2), 150);
         assert_eq!(retry_deadline_ms(u64::MAX, policy, 1), u64::MAX);
         assert!(now_ms() > 0);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_result_tests {
+    use super::TaskServiceError;
+    use super::combine_shutdown_results;
+
+    #[test]
+    fn combines_shutdown_and_notification_results() {
+        assert!(combine_shutdown_results(Ok(()), Ok(())).is_ok());
+        assert!(matches!(
+            combine_shutdown_results(
+                Ok(()),
+                Err(TaskServiceError::NotificationClose("close failed".into()))
+            ),
+            Err(TaskServiceError::NotificationClose(message)) if message == "close failed"
+        ));
+        assert!(matches!(
+            combine_shutdown_results(
+                Err(TaskServiceError::StoreUnavailable("store failed".into())),
+                Ok(())
+            ),
+            Err(TaskServiceError::StoreUnavailable(message)) if message == "store failed"
+        ));
+        let combined_store_error = combine_shutdown_results(
+            Err(TaskServiceError::StoreUnavailable("store failed".into())),
+            Err(TaskServiceError::NotificationClose("close failed".into())),
+        )
+        .expect_err("combined store and notification failures are retained");
+        assert_eq!(
+            combined_store_error.to_string(),
+            "task execution service is paused after a task store failure: store failed; notification close failed: close failed"
+        );
+        let combined_other_error = combine_shutdown_results(
+            Err(TaskServiceError::QueueFull),
+            Err(TaskServiceError::NotificationClose("close failed".into())),
+        )
+        .expect_err("other primary errors are represented as store unavailable");
+        assert_eq!(
+            combined_other_error.to_string(),
+            "task execution service is paused after a task store failure: task queue is full; notification close failed: task notification publisher failed to close: close failed"
+        );
     }
 }
