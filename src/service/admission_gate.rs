@@ -12,6 +12,12 @@ use tokio::sync::Notify;
 
 use super::task_execution_service::TaskServiceError;
 
+#[derive(Clone)]
+enum CloseFailure {
+    Other(String),
+    NotificationClose(String),
+}
+
 enum Phase {
     Open,
     Closing,
@@ -21,7 +27,7 @@ enum Phase {
 struct GateState {
     phase: Phase,
     active: usize,
-    close_result: Option<Result<(), String>>,
+    close_result: Option<Result<(), CloseFailure>>,
 }
 
 /// Serializes admission against shutdown and tracks operations already inside.
@@ -88,12 +94,16 @@ impl AdmissionGate {
     }
 
     /// Publishes the coordinator result exactly once and wakes all waiters.
-    pub(super) fn finish_close(&self, result: Result<(), String>) {
+    pub(super) fn finish_close(&self, result: Result<(), TaskServiceError>) {
         let mut state = self.state.lock();
         if matches!(state.phase, Phase::Closed) {
             return;
         }
-        state.close_result = Some(result);
+        state.close_result = Some(result.map_err(|error| match error {
+            TaskServiceError::NotificationClose(message) => CloseFailure::NotificationClose(message),
+            TaskServiceError::StoreUnavailable(message) => CloseFailure::Other(message),
+            other => CloseFailure::Other(other.to_string()),
+        }));
         state.phase = Phase::Closed;
         self.changed.notify_waiters();
     }
@@ -105,7 +115,10 @@ impl AdmissionGate {
             tokio::pin!(notified);
             notified.as_mut().enable();
             if let Some(result) = self.state.lock().close_result.clone() {
-                return result.map_err(TaskServiceError::StoreUnavailable);
+                return result.map_err(|error| match error {
+                    CloseFailure::Other(message) => TaskServiceError::StoreUnavailable(message),
+                    CloseFailure::NotificationClose(message) => TaskServiceError::NotificationClose(message),
+                });
             }
             notified.await;
         }
@@ -117,5 +130,33 @@ impl Drop for AdmissionPermit<'_> {
         let mut state = self.gate.state.lock();
         state.active -= 1;
         self.gate.changed.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdmissionGate;
+    use crate::service::TaskServiceError;
+
+    #[tokio::test]
+    async fn test_wait_closed_preserves_notification_close_failure_for_all_callers() {
+        let gate = AdmissionGate::new();
+        assert!(gate.close());
+        gate.finish_close(Err(TaskServiceError::NotificationClose("worker panicked".into())));
+
+        for _ in 0..2 {
+            let error = gate.wait_closed().await.expect_err("close failure is retained");
+            assert!(matches!(error, TaskServiceError::NotificationClose(message) if message == "worker panicked"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_closed_keeps_other_failures_as_store_unavailable() {
+        let gate = AdmissionGate::new();
+        assert!(gate.close());
+        gate.finish_close(Err(TaskServiceError::StoreUnavailable("store failed".into())));
+
+        let error = gate.wait_closed().await.expect_err("close failure is retained");
+        assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message == "store failed"));
     }
 }

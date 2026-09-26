@@ -98,6 +98,9 @@ pub enum TaskServiceError {
     /// A persistence failure suspended task acceptance and scheduling.
     #[error("task execution service is paused after a task store failure: {0}")]
     StoreUnavailable(String),
+    /// The task notification publisher failed while draining during shutdown.
+    #[error("task notification publisher failed to close: {0}")]
+    NotificationClose(String),
     /// No handler matches the submitted type and exact version.
     #[error("no handler registered for `{task_type}` version `{version}`")]
     MissingHandler {
@@ -659,10 +662,7 @@ impl TaskExecutionService {
             let service = self.clone();
             self.core.runtime_handle.spawn(async move {
                 let result = service.coordinate_shutdown().await;
-                service
-                    .core
-                    .admission
-                    .finish_close(result.map_err(|error| error.to_string()));
+                service.core.admission.finish_close(result);
                 service.core.changed.notify_waiters();
             });
         }
@@ -698,7 +698,10 @@ impl TaskExecutionService {
         }
         #[cfg(feature = "event-bus")]
         if let Some(publisher) = &self.core.event_bus {
-            publisher.close(&self.core.runtime_handle).await;
+            publisher
+                .close(&self.core.runtime_handle)
+                .await
+                .map_err(|error| TaskServiceError::NotificationClose(error.to_string()))?;
         }
         drop(transition_guard);
         Ok(())
@@ -1149,7 +1152,8 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
         let runtime_handle = core.runtime_handle.clone();
         runtime_handle.spawn(async move {
             core.admission.wait_idle().await;
-            core.admission.finish_close(Err(diagnostic));
+            core.admission
+                .finish_close(Err(TaskServiceError::StoreUnavailable(diagnostic)));
             core.changed.notify_waiters();
         });
     }

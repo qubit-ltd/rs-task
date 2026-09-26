@@ -91,9 +91,16 @@ impl TaskEventPublisher {
     }
 
     /// Stops enqueue, drains accepted events, and waits for the worker to exit.
-    pub(super) async fn close(&self, runtime_handle: &tokio::runtime::Handle) {
+    ///
+    /// # Errors
+    /// Returns an error when the blocking close task fails to join or the
+    /// notification publisher worker panicked.
+    pub(super) async fn close(&self, runtime_handle: &tokio::runtime::Handle) -> io::Result<()> {
         let publisher = Arc::clone(&self.publisher);
-        let _ = runtime_handle.spawn_blocking(move || publisher.close()).await;
+        runtime_handle
+            .spawn_blocking(move || publisher.close())
+            .await
+            .map_err(io::Error::other)?
     }
 }
 
@@ -121,6 +128,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     use qubit_event_bus::EventBus;
     use qubit_event_bus::SubscribeError;
@@ -376,7 +384,10 @@ mod tests {
         third.join().expect("third enqueue thread");
         assert!(nonblocking, "full-queue enqueue returned without waiting for publish");
         assert_eq!(publisher.stats().queue_full, 1);
-        publisher.close(&tokio::runtime::Handle::current()).await;
+        publisher
+            .close(&tokio::runtime::Handle::current())
+            .await
+            .expect("publisher closes after queue-full coverage");
         assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
         assert_eq!(publisher.stats().enqueued, 2);
         assert_eq!(publisher.stats().opaque_accepted, 2);
@@ -394,21 +405,52 @@ mod tests {
         ] {
             let publisher = publisher(FakeSpi::new(false, outcome), 1);
             publisher.enqueue(event(1));
-            publisher.close(&tokio::runtime::Handle::current()).await;
+            let close_result = publisher.close(&tokio::runtime::Handle::current()).await;
             let stats = publisher.stats();
             match outcome {
                 Outcome::AllRejected | Outcome::Empty | Outcome::Dropped => {
-                    assert_eq!(stats.unaccepted, 1)
+                    assert_eq!(stats.unaccepted, 1);
+                    close_result.expect("non-panicking worker closes successfully");
                 }
                 Outcome::Partial => {
                     assert_eq!(stats.accepted, 1);
                     assert_eq!(stats.partial_rejection, 1);
+                    close_result.expect("non-panicking worker closes successfully");
                 }
-                Outcome::Error => assert_eq!(stats.publish_error, 1),
-                Outcome::Panic => assert_eq!(stats.publish_error + stats.worker_panicked, 1),
+                Outcome::Error => {
+                    assert_eq!(stats.publish_error, 1);
+                    close_result.expect("publish errors do not panic the worker");
+                }
+                Outcome::Panic => {
+                    assert_eq!(stats.publish_error, 1);
+                    assert_eq!(stats.worker_panicked, 0);
+                    close_result.expect("SPI publish panics are converted to publish errors");
+                }
                 Outcome::Opaque => unreachable!(),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_task_event_publisher_close_reports_blocking_join_failure() {
+        let publisher = publisher(FakeSpi::new(false, Outcome::Opaque), 1);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("separate runtime builds");
+        let stopped_handle = runtime.handle().clone();
+        runtime.shutdown_background();
+
+        let close_result = tokio::time::timeout(Duration::from_secs(2), publisher.close(&stopped_handle))
+            .await
+            .expect("close task join returns");
+        assert!(
+            close_result.is_err(),
+            "failure to join the blocking close task must be reported"
+        );
+        publisher
+            .close(&tokio::runtime::Handle::current())
+            .await
+            .expect("current runtime can close the worker");
     }
 
     #[tokio::test]
@@ -435,8 +477,8 @@ mod tests {
         assert!(!first.is_finished());
         assert!(!second.is_finished());
         spi.release();
-        first.await.expect("first close");
-        second.await.expect("second close");
+        first.await.expect("first close task").expect("first close succeeds");
+        second.await.expect("second close task").expect("second close succeeds");
         publisher.enqueue(event(3));
         assert_eq!(publisher.stats().queue_closed, 1);
         assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
