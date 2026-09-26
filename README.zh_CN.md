@@ -67,6 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API 与存储契约
 
+自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite 版本 0 数据库会在打开时迁移到 schema 版本 1。
+
 服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
 
 `TaskQuery.states` 使用 `TaskStateKind`；此前用带诊断内容的 `TaskState`

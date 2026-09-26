@@ -170,7 +170,7 @@ let service = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sql
     .build().await?;
 ~~~
 
-SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁确保同一数据库不会同时由多个服务进程执行。构建器取得所有权并扫描未完成任务后才返回。数据库被占用或所选能力不支持恢复时，服务启动失败，不会自动回退到内存。找不到历史任务对应的处理器时，任务保留在存储中并置为 `Blocked`，构建仍可成功。
+SQLite 以事务方式保存任务请求和状态变化。版本 0 数据库在打开时保留任务与幂等索引并自动迁移至 schema 版本 1；更高的未知 schema 版本或未知记录格式会明确报错。操作系统文件锁确保同一数据库不会同时由多个服务进程执行。构建器取得所有权并扫描未完成任务后才返回。数据库被占用或所选能力不支持恢复时，服务启动失败，不会自动回退到内存。找不到历史任务对应的处理器时，任务保留在存储中并置为 `Blocked`，构建仍可成功。
 
 `capabilities()` 会报告实际装配的存储能力 `persistent_history` 和 `restart_recovery`。第三方存储也可以持久化历史，但不支持恢复任务。每个 `TaskStore` 实现都必须提供 `count_states()`，在一次聚合中统计所有保留记录。`stats()` 只调用一次该方法，并向调用者传播统计失败。状态计数和执行引擎资源快照先后读取，因此是时间相邻但非原子的两个快照。统计成本是一次聚合查询，不随历史分页数增长。
 
@@ -228,7 +228,7 @@ let service = TaskExecutionServiceBuilder::in_memory()
 
 使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它会持久化 `cancel_requested` 并在 `TaskContext` 中设置协作取消信号；这只是取消请求。处理器必须返回 `TaskRunOutcome::Cancelled`，服务才会以 `TaskState::Cancelled` 确认取消。如果处理器返回成功或失败，那个结果仍是权威结果。协作取消集成测试覆盖了这一契约。
 
-处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`，panic 进入 `Panicked`。可重试错误最多自动尝试三次（可通过构建器调整）；如果重试时有界等待队列已满，任务会因队列容量进入 `Blocked`，不会突破队列上限。队列有空位后调用 `retry_blocked` 可再次入队。
+处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`；执行引擎报告的 panic 进入 `Panicked`，不再根据业务错误类别字符串推断。自动重试默认采用 1 秒起步、逐次翻倍、最高 60 秒的退避，可用 `TaskExecutionServiceBuilder::retry_policy(RetryPolicy::new(initial, maximum)?)` 配置。到期时间与排队状态一同持久化，重启后不会提前执行；`retry_blocked` 会清除到期时间并立即使任务可运行。队列满时任务进入 `Blocked`，不会突破队列上限。
 
 ## 从旧版 API 迁移
 
