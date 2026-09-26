@@ -523,6 +523,19 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        if limit > i64::MAX as usize {
+            return Box::pin(async { Ok(false) });
+        }
+        self.run(move |connection| {
+            let mut statement = connection
+                .prepare("SELECT 1 FROM tasks WHERE state_kind IN ('Queued','Running') LIMIT 1 OFFSET ?1")
+                .map_err(failure)?;
+            let mut rows = statement.query([limit as i64]).map_err(failure)?;
+            Ok(rows.next().map_err(failure)?.is_some())
+        })
+    }
+
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         self.run(move |connection| {
             let mut statement = connection.prepare("SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_json,lifecycle_json FROM tasks WHERE state_kind IN ('Queued','Running') AND (?1 IS NULL OR id > ?1) ORDER BY id LIMIT 257").map_err(failure)?;

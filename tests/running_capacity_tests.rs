@@ -100,6 +100,52 @@ async fn test_zero_cpu_tasks_obey_independent_running_limit() {
     service.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn test_zero_cpu_tasks_still_obey_max_running_tasks() {
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let handler = Arc::new(HoldingHandler {
+        started: started_tx,
+        release: release.clone(),
+        active: Arc::new(AtomicUsize::new(0)),
+        peak: Arc::new(AtomicUsize::new(0)),
+    });
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .max_running_tasks(NonZeroUsize::new(1).unwrap())
+        .register_handler(handler)
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let mut first = TaskRequest::new("hold", "1", Vec::new());
+    first.resources.cpu_slots = 0;
+    let first = service.submit(test_keyed(first)).await.unwrap();
+    let mut second = TaskRequest::new("hold", "1", Vec::new());
+    second.resources.cpu_slots = 0;
+    let second = service.submit(test_keyed(second)).await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        service.get(second.id).await.unwrap().unwrap().state,
+        qubit_task::model::TaskState::Queued
+    ));
+    release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(2), service.wait(first.id))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    release.add_permits(1);
+    service.wait(second.id).await.unwrap();
+    service.shutdown().await.unwrap();
+}
+
 struct PanicThenSucceed(AtomicUsize);
 
 impl TaskHandler for PanicThenSucceed {

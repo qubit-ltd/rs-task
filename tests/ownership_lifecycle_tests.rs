@@ -10,6 +10,29 @@ use qubit_task::model::TaskRequest;
 use qubit_task::service::TaskServiceError;
 
 #[tokio::test]
+async fn test_dropping_one_clone_keeps_service_open() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .build()
+        .await
+        .expect("in-memory service builds");
+    let retained = service.clone();
+
+    drop(service);
+
+    let handle = retained
+        .submit_local(
+            |_| qubit_task::service::LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+                value: (),
+                summary: qubit_task::model::TaskOutput::default(),
+            },
+        )
+        .await
+        .expect("retained clone can still accept work");
+    handle.result().await.expect("task finalizes").expect("task succeeds");
+    retained.shutdown().await.expect("retained clone closes service");
+}
+
+#[tokio::test]
 async fn test_cancel_after_shutdown_is_rejected() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -41,6 +64,7 @@ async fn test_cancel_after_shutdown_is_rejected() {
 
 #[cfg(feature = "sqlite")]
 mod sqlite_tests {
+    use qubit_task::TaskExecutionServiceBuilder;
     use qubit_task::model::AcceptOutcome;
     use qubit_task::model::OwnerEpoch;
     use qubit_task::model::TaskId;
@@ -120,6 +144,32 @@ mod sqlite_tests {
             .release_owner(replacement_epoch)
             .await
             .expect("replacement owner released");
+        drop(replacement);
+        remove_database(&path);
+    }
+
+    #[tokio::test]
+    async fn test_drop_last_service_handle_releases_sqlite_owner() {
+        let path = test_database_path();
+        let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+            .expect("recoverable service config")
+            .build()
+            .await
+            .expect("recoverable service builds");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        drop(service);
+
+        let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(store) = SqliteTaskStore::open(&path) {
+                    break store;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("last service handle drop releases SQLite ownership");
         drop(replacement);
         remove_database(&path);
     }

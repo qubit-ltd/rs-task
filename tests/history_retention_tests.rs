@@ -236,6 +236,13 @@ async fn test_task_store_default_pruning_reports_unsupported_capability() {
             self.0.acquire_owner()
         }
 
+        fn has_unfinished_over_limit<'a>(
+            &'a self,
+            limit: usize,
+        ) -> qubit_task::store::TaskFuture<'a, Result<bool, StoreError>> {
+            self.0.has_unfinished_over_limit(limit)
+        }
+
         fn scan_unfinished<'a>(
             &'a self,
             cursor: Option<TaskId>,

@@ -11,8 +11,17 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::engine::EngineError;
+use qubit_task::engine::ExecutionHandle;
+use qubit_task::engine::PreparedExecution;
+use qubit_task::engine::TaskExecutionEngine;
+use qubit_task::handler::TaskContext;
+use qubit_task::handler::TaskHandler;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::ResourceCapacity;
+use qubit_task::model::ResourceRequest;
+use qubit_task::model::ResourceSnapshot;
 use qubit_task::model::StoreCapabilities;
 use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
@@ -30,6 +39,38 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+
+struct PanickingPrepareEngine;
+
+impl TaskExecutionEngine for PanickingPrepareEngine {
+    fn capacity(&self) -> ResourceSnapshot {
+        ResourceSnapshot {
+            capacity: ResourceCapacity {
+                cpu_slots: 1,
+                ..ResourceCapacity::default()
+            },
+            ..ResourceSnapshot::default()
+        }
+    }
+
+    fn prepare<'a>(
+        &'a self,
+        _id: TaskId,
+        _request: ResourceRequest,
+    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
+        panic!("injected prepare panic");
+    }
+
+    fn activate<'a>(
+        &'a self,
+        _prepared: PreparedExecution,
+        _handler: Arc<dyn TaskHandler>,
+        _payload: Vec<u8>,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
+        unreachable!("prepare panic prevents activation");
+    }
+}
 
 struct FailFirstGetStore {
     inner: MemoryTaskStore,
@@ -88,6 +129,10 @@ impl TaskStore for FailFirstGetStore {
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         self.inner.acquire_owner()
+    }
+
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        self.inner.has_unfinished_over_limit(limit)
     }
 
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
@@ -149,6 +194,39 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
     assert!(matches!(
         service.shutdown().await,
         Err(TaskServiceError::StoreUnavailable(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_engine_prepare_panic_is_reported_as_scheduler_unavailable() {
+    let service = TaskExecutionServiceBuilder::default()
+        .store(Arc::new(MemoryTaskStore::new(16)))
+        .engine(Arc::new(PanickingPrepareEngine))
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("task is accepted before engine preparation");
+    let id = handle.task_id();
+
+    let result = tokio::time::timeout(Duration::from_secs(1), handle.result())
+        .await
+        .expect("local waiter is woken by scheduler failure");
+    assert!(
+        matches!(result, Err(LocalTaskResultError::Infrastructure(message)) if message.contains("injected prepare panic"))
+    );
+    assert!(matches!(
+        service.wait(id).await,
+        Err(TaskServiceError::SchedulerUnavailable(message)) if message.contains("injected prepare panic")
+    ));
+    assert!(matches!(
+        service.shutdown().await,
+        Err(TaskServiceError::SchedulerUnavailable(_))
     ));
 }
 

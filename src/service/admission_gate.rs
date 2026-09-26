@@ -15,6 +15,8 @@ use super::task_execution_service::TaskServiceError;
 #[derive(Clone)]
 enum CloseFailure {
     Other(String),
+    Store(String),
+    Scheduler(String),
     NotificationClose(String),
 }
 
@@ -101,7 +103,8 @@ impl AdmissionGate {
         }
         state.close_result = Some(result.map_err(|error| match error {
             TaskServiceError::NotificationClose(message) => CloseFailure::NotificationClose(message),
-            TaskServiceError::StoreUnavailable(message) => CloseFailure::Other(message),
+            TaskServiceError::StoreUnavailable(message) => CloseFailure::Store(message),
+            TaskServiceError::SchedulerUnavailable(message) => CloseFailure::Scheduler(message),
             other => CloseFailure::Other(other.to_string()),
         }));
         state.phase = Phase::Closed;
@@ -116,7 +119,10 @@ impl AdmissionGate {
             notified.as_mut().enable();
             if let Some(result) = self.state.lock().close_result.clone() {
                 return result.map_err(|error| match error {
-                    CloseFailure::Other(message) => TaskServiceError::StoreUnavailable(message),
+                    CloseFailure::Other(message) | CloseFailure::Store(message) => {
+                        TaskServiceError::StoreUnavailable(message)
+                    }
+                    CloseFailure::Scheduler(message) => TaskServiceError::SchedulerUnavailable(message),
                     CloseFailure::NotificationClose(message) => TaskServiceError::NotificationClose(message),
                 });
             }

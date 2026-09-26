@@ -394,6 +394,22 @@ impl TaskStore for MemoryTaskStore {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        Box::pin(async move {
+            let state = self.state.lock();
+            let mut count = 0_usize;
+            for record in state.records.values() {
+                if matches!(record.state, TaskState::Queued | TaskState::Running) {
+                    count = count.saturating_add(1);
+                    if count > limit {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        })
+    }
+
     fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
