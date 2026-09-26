@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::handler::TaskContext;
@@ -147,17 +149,25 @@ async fn test_recovery_blocks_exhausted_attempts_and_manual_retry_preserves_reco
 #[tokio::test]
 async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
     let path = temp_db();
-    let store = SqliteTaskStore::open(&path).unwrap();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
     let mut ids = Vec::new();
     for _ in 0..4 {
-        ids.push(accept(&store).await.id);
+        ids.push(accept(&inner).await.id);
     }
-    drop(store);
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::Normal,
+        stored: Mutex::new(None),
+        cursor: TaskId::generate(),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+    });
 
-    let result = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
-        .unwrap()
+    let result = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
         .queue_capacity(2)
         .max_running_tasks(std::num::NonZeroUsize::new(1).unwrap())
+        .require_recovery(true)
         .build()
         .await;
     let error = match result {
@@ -168,6 +178,9 @@ async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
         error,
         TaskServiceBuildError::RecoveryCapacityExceeded { limit: 3 }
     ));
+    assert_eq!(store.precheck_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.scan_calls.load(Ordering::Relaxed), 0);
+    drop(store);
 
     let check = SqliteTaskStore::open(&path).unwrap();
     for id in &ids {
@@ -271,6 +284,7 @@ async fn test_retry_blocked_rejects_exhausted_budget_without_mutation() {
 
 #[derive(Clone, Copy)]
 enum BadPage {
+    Normal,
     EmptyWithNext,
     StuckCursor,
     TooManyRecords,
@@ -281,6 +295,8 @@ struct BadScanStore {
     mode: BadPage,
     stored: Mutex<Option<StoredTask>>,
     cursor: TaskId,
+    precheck_calls: AtomicUsize,
+    scan_calls: AtomicUsize,
 }
 
 impl TaskStore for BadScanStore {
@@ -326,9 +342,16 @@ impl TaskStore for BadScanStore {
         self.inner.release_owner(epoch)
     }
 
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        self.precheck_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.has_unfinished_over_limit(limit)
+    }
+
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+        self.scan_calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move {
             match self.mode {
+                BadPage::Normal => self.inner.scan_unfinished(cursor).await,
                 BadPage::EmptyWithNext => Ok(StoredTaskPage {
                     tasks: Vec::new(),
                     next: Some(self.cursor),
@@ -370,6 +393,8 @@ async fn test_invalid_recovery_pages_fail_without_looping() {
             mode,
             stored: Mutex::new(None),
             cursor: TaskId::generate(),
+            precheck_calls: AtomicUsize::new(0),
+            scan_calls: AtomicUsize::new(0),
         });
         let result = TaskExecutionServiceBuilder::default()
             .store(store.clone())
@@ -384,6 +409,38 @@ async fn test_invalid_recovery_pages_fail_without_looping() {
         drop(reopened);
         cleanup(&path);
     }
+}
+
+#[tokio::test]
+async fn test_recovery_prechecks_once_then_scans_each_page_once() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    for _ in 0..257 {
+        accept(&inner).await;
+    }
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::Normal,
+        stored: Mutex::new(None),
+        cursor: TaskId::generate(),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .queue_capacity(255)
+        .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap())
+        .require_recovery(true)
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(store.precheck_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.scan_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(service.stats().await.unwrap().blocked, 257);
+    service.shutdown().await.unwrap();
+    drop(service);
+    drop(store);
+    cleanup(&path);
 }
 
 #[tokio::test]

@@ -79,6 +79,8 @@ use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TransitionCommand;
+use qubit_task::scheduling::QueueSnapshot;
+use qubit_task::scheduling::SchedulingPolicy;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::LocalTaskResultError;
 use qubit_task::service::TaskExecutionService;
@@ -89,6 +91,141 @@ use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
+
+struct PanickingPolicy;
+
+impl SchedulingPolicy for PanickingPolicy {
+    fn order(&self, _queue: &QueueSnapshot, _resources: &qubit_task::model::ResourceSnapshot) -> Vec<TaskId> {
+        panic!("injected policy panic");
+    }
+}
+
+struct PanicAfterFirstPolicy(AtomicUsize);
+
+impl SchedulingPolicy for PanicAfterFirstPolicy {
+    fn order(&self, queue: &QueueSnapshot, _resources: &qubit_task::model::ResourceSnapshot) -> Vec<TaskId> {
+        if self.0.fetch_add(1, Ordering::AcqRel) > 0 {
+            panic!("injected later policy panic");
+        }
+        queue.tasks.iter().map(|task| task.id).collect()
+    }
+}
+
+struct HeldHandler {
+    started: Mutex<Option<oneshot::Sender<()>>>,
+    release: Arc<Semaphore>,
+}
+
+impl TaskHandler for HeldHandler {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
+            task_type: "held-after-panic".into(),
+            version: "1".into(),
+        }
+    }
+
+    fn run<'a>(
+        &'a self,
+        _payload: &'a [u8],
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        Box::pin(async move {
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            self.release
+                .acquire()
+                .await
+                .expect("test release semaphore remains open")
+                .forget();
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_injected_policy_panic_is_reported_as_scheduler_unavailable() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .policy(Arc::new(PanickingPolicy))
+        .build()
+        .await
+        .expect("service builds");
+    let record = service
+        .submit(test_keyed(TaskRequest::new("panic-policy", "1", Vec::new())))
+        .await
+        .expect("task is accepted before policy runs");
+
+    let wait = tokio::time::timeout(Duration::from_secs(1), service.wait(record.id)).await;
+    assert!(matches!(
+        wait,
+        Ok(Err(TaskServiceError::SchedulerUnavailable(message)))
+            if message.contains("injected policy panic")
+    ));
+    assert!(service.last_store_error().is_none());
+    assert!(matches!(
+        service.shutdown().await,
+        Err(TaskServiceError::SchedulerUnavailable(message))
+            if message.contains("injected policy panic")
+    ));
+}
+
+#[tokio::test]
+async fn test_scheduler_panic_retains_owner_until_started_attempt_finishes() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let release = Arc::new(Semaphore::new(0));
+    let handler = Arc::new(HeldHandler {
+        started: Mutex::new(Some(started_tx)),
+        release: release.clone(),
+    });
+    let mut controlled_store = ControlledStore::new();
+    controlled_store.recoverable = true;
+    let store = Arc::new(controlled_store);
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .max_running_tasks(NonZeroUsize::new(1).unwrap())
+        .policy(Arc::new(PanicAfterFirstPolicy(AtomicUsize::new(0))))
+        .register_handler(handler)
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    service
+        .submit(test_keyed(TaskRequest::new("held-after-panic", "1", Vec::new())))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("execution starts")
+        .expect("handler signals start");
+    service
+        .submit(test_keyed(TaskRequest::new("held-after-panic", "1", Vec::new())))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.last_scheduler_error().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scheduler panic is latched");
+    assert_eq!(store.release_count.load(Ordering::Acquire), 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), service.shutdown())
+            .await
+            .is_err()
+    );
+    assert_eq!(store.release_count.load(Ordering::Acquire), 0);
+
+    release.add_permits(1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), service.shutdown())
+            .await
+            .expect("shutdown finishes after attempt finalization"),
+        Err(TaskServiceError::SchedulerUnavailable(_))
+    ));
+    assert_eq!(store.release_count.load(Ordering::Acquire), 1);
+}
 
 struct ControlledStore {
     inner: Arc<MemoryTaskStore>,
@@ -364,6 +501,10 @@ impl TaskStore for ControlledStore {
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         Box::pin(async { Ok(OwnerEpoch(1)) })
+    }
+
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        self.inner.has_unfinished_over_limit(limit)
     }
 
     fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
@@ -944,6 +1085,57 @@ async fn test_aborted_keyed_submission_can_be_recovered_after_detached_accept_fi
         recovered.request.idempotency_key.as_deref(),
         Some("cancelled-submit-key")
     );
+}
+
+#[tokio::test]
+async fn test_last_handle_drop_waits_for_detached_accept_before_releasing_owner() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        accept_entered: Mutex::new(Some(entered_tx)),
+        detached_accept: true,
+        recoverable: true,
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("recoverable service builds");
+    let submitting_service = service.clone();
+    let submission = tokio::spawn(async move {
+        let mut request = TaskRequest::new("drop-during-accept", "1", Vec::new());
+        request.idempotency_key = Some("drop-during-accept-key".into());
+        submitting_service.submit(request).await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("detached accept entered")
+        .expect("accept entry signalled");
+    submission.abort();
+    let _ = submission.await.expect_err("submission caller is cancelled");
+    drop(service);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        store.release_count.load(Ordering::Acquire),
+        0,
+        "ownership stays held while detached acceptance is blocked"
+    );
+    store.accept_release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while store.release_count.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("last internal handle closes after acceptance and drain");
+    let accepted = store
+        .inner
+        .get_by_idempotency_key("drop-during-accept-key")
+        .await
+        .expect("record lookup succeeds")
+        .expect("detached acceptance committed before ownership release");
+    assert!(matches!(accepted.state, TaskState::Blocked { .. }));
 }
 
 #[tokio::test]

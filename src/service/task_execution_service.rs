@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+use futures::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
@@ -122,6 +123,9 @@ pub enum TaskServiceError {
     /// A persistence failure suspended task acceptance and scheduling.
     #[error("task execution service is paused after a task store failure: {0}")]
     StoreUnavailable(String),
+    /// The scheduler panicked and cannot accept or start more work.
+    #[error("task execution scheduler is unavailable: {0}")]
+    SchedulerUnavailable(String),
     /// The task notification publisher failed while draining during shutdown.
     #[error("task notification publisher failed to close: {0}")]
     NotificationClose(String),
@@ -172,6 +176,9 @@ pub(crate) struct ServiceCore {
     pub(super) admission_budget: Arc<AdmissionBudget>,
     pub(crate) owner: Option<OwnerEpoch>,
     pub(crate) store_fault: Mutex<Option<String>>,
+    pub(crate) scheduler_fault: Mutex<Option<String>>,
+    pub(crate) attempts_in_flight: AtomicUsize,
+    pub(crate) attempts_changed: Notify,
     #[cfg(feature = "event-bus")]
     pub(super) event_bus: Option<TaskEventPublisher>,
 }
@@ -182,11 +189,27 @@ pub(crate) struct RunningCancellation {
     signal: Arc<AtomicBool>,
 }
 
+/// Tracks the lifetime of all public service handles and their admission
+/// workers.
+struct ServiceHandleLease {
+    core: std::sync::Weak<ServiceCore>,
+}
+
+impl Drop for ServiceHandleLease {
+    /// Starts asynchronous service shutdown when the last handle lease is gone.
+    fn drop(&mut self) {
+        if let Some(core) = self.core.upgrade() {
+            begin_shutdown_core(core);
+        }
+    }
+}
+
 /// Single service facade over volatile or restart-recoverable components.
 ///
-/// The service owns admission and scheduling for its components. Call
-/// [`shutdown`](Self::shutdown) before dropping the application runtime when
-/// accepted work must be drained.
+/// The service owns admission and scheduling for its components. Dropping the
+/// last handle starts an asynchronous drain; call [`shutdown`](Self::shutdown)
+/// when the caller must observe its result. Keep an injected runtime alive
+/// until that drain finishes.
 ///
 /// # Examples
 ///
@@ -202,6 +225,8 @@ pub(crate) struct RunningCancellation {
 /// ```
 #[derive(Clone)]
 pub struct TaskExecutionService {
+    // This field must drop before `core`, so the lease can upgrade its weak ref.
+    _lease: Arc<ServiceHandleLease>,
     pub(crate) core: Arc<ServiceCore>,
 }
 
@@ -226,6 +251,12 @@ impl TaskExecutionService {
     #[must_use]
     pub fn last_store_error(&self) -> Option<String> {
         self.core.store_fault.lock().clone()
+    }
+
+    /// Returns the diagnostic from a scheduler panic, if one occurred.
+    #[must_use]
+    pub fn last_scheduler_error(&self) -> Option<String> {
+        self.core.scheduler_fault.lock().clone()
     }
 
     /// Returns lifecycle notification admission counters when a bus is
@@ -260,6 +291,9 @@ impl TaskExecutionService {
         request: TaskRequest,
         reservation: AdmissionReservation,
     ) -> Result<TaskRecord, TaskServiceError> {
+        if let Some(error) = self.last_scheduler_error() {
+            return Err(TaskServiceError::SchedulerUnavailable(error));
+        }
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
@@ -364,6 +398,9 @@ impl TaskExecutionService {
         R: Send + 'static,
         E: std::fmt::Display + Send + 'static,
     {
+        if let Some(error) = self.last_scheduler_error() {
+            return Err(TaskServiceError::SchedulerUnavailable(error));
+        }
         if self.core.store.capabilities().restart_recovery {
             return Err(TaskServiceError::UnsupportedCapability);
         }
@@ -565,24 +602,9 @@ impl TaskExecutionService {
 
     /// Counts visible task states and reports current resource use.
     pub async fn stats(&self) -> Result<TaskStats, TaskServiceError> {
-        let TaskStateCounts {
-            queued,
-            running,
-            blocked,
-            terminal,
-        } = self
-            .core
-            .store
-            .count_states()
-            .await
-            .map_err(|error| self.handle_store_error(error))?;
-        let resources = self.core.engine.capacity();
-        Ok(TaskStats {
-            queued,
-            running,
-            blocked,
-            terminal,
-            resources,
+        task_stats(&self.core).await.map_err(|error| match error {
+            TaskServiceError::Store(store_error) => self.handle_store_error(store_error),
+            other => other,
         })
     }
 
@@ -687,6 +709,9 @@ impl TaskExecutionService {
     /// Requeues a blocked task while holding a permit through persistence and
     /// queue publication.
     async fn retry_blocked_admitted(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+        if let Some(error) = self.last_scheduler_error() {
+            return Err(TaskServiceError::SchedulerUnavailable(error));
+        }
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
@@ -736,6 +761,9 @@ impl TaskExecutionService {
             if let Some(error) = self.last_store_error() {
                 return Err(TaskServiceError::StoreUnavailable(error));
             }
+            if let Some(error) = self.last_scheduler_error() {
+                return Err(TaskServiceError::SchedulerUnavailable(error));
+            }
             let record = self
                 .core
                 .store
@@ -755,69 +783,145 @@ impl TaskExecutionService {
 
     /// Stops accepting new work and waits for all accepted work to settle.
     pub async fn shutdown(&self) -> Result<(), TaskServiceError> {
-        self.begin_shutdown();
+        begin_shutdown_core(Arc::clone(&self.core));
         self.core.admission.wait_closed().await
     }
 
     /// Stops accepting work and waits until `deadline`; the shared shutdown
     /// coordinator continues draining if this caller times out.
     pub async fn shutdown_until(&self, deadline: tokio::time::Instant) -> Result<(), TaskServiceError> {
-        self.begin_shutdown();
+        begin_shutdown_core(Arc::clone(&self.core));
         tokio::time::timeout_at(deadline, self.core.admission.wait_closed())
             .await
             .map_err(|_| TaskServiceError::ShutdownTimedOut)?
     }
+}
 
-    fn begin_shutdown(&self) {
-        if self.core.admission.close() {
-            self.core.changed.notify_waiters();
-            let service = self.clone();
-            self.core.runtime_handle.spawn(async move {
-                let primary = service.coordinate_shutdown().await;
-                let result = combine_shutdown_results(primary, close_notification_publisher(&service.core).await);
-                service.core.admission.finish_close(result);
-                service.core.changed.notify_waiters();
-            });
-        }
+/// Closes admission once and starts the shared asynchronous drain coordinator.
+fn begin_shutdown_core(core: Arc<ServiceCore>) {
+    if core.admission.close() {
+        core.changed.notify_waiters();
+        let runtime_handle = core.runtime_handle.clone();
+        runtime_handle.spawn(async move {
+            let primary = coordinate_shutdown(Arc::clone(&core)).await;
+            let notification = close_notification_publisher(&core).await;
+            let result = combine_shutdown_results(primary, notification);
+            core.admission.finish_close(result);
+            core.changed.notify_waiters();
+        });
     }
+}
 
-    /// Drains accepted work and releases store ownership after the admission
-    /// gate is idle. The shutdown coordinator closes the notification worker
-    /// after this convergence step returns.
-    async fn coordinate_shutdown(&self) -> Result<(), TaskServiceError> {
-        self.core.admission.wait_idle().await;
-        let transition_guard = loop {
-            let notified = self.core.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(error) = self.last_store_error() {
-                return Err(TaskServiceError::StoreUnavailable(error));
-            }
-            let stats = self.stats().await?;
-            if stats.queued == 0 && stats.running == 0 {
-                let transition_guard = self.core.transition_event_lock.write().await;
-                let settled_stats = self.stats().await?;
-                if settled_stats.queued == 0 && settled_stats.running == 0 {
-                    break transition_guard;
-                }
-            }
-            notified.await;
-        };
-        if let Some(epoch) = self.core.owner
-            && let Err(error) = self.core.store.release_owner(epoch).await
+/// Drains accepted work and releases store ownership after admission becomes
+/// idle.
+async fn coordinate_shutdown(core: Arc<ServiceCore>) -> Result<(), TaskServiceError> {
+    core.admission.wait_idle().await;
+    let scheduler_fault = { core.scheduler_fault.lock().clone() };
+    if let Some(error) = scheduler_fault {
+        wait_for_attempts(&core).await;
+        if let Some(epoch) = core.owner
+            && let Err(error) = core.store.release_owner(epoch).await
         {
-            record_store_fault(&self.core, error.to_string());
-            return Err(error.into());
+            record_store_fault(&core, error.to_string());
+            return Err(TaskServiceError::Store(error));
         }
-        drop(transition_guard);
-        Ok(())
+        return Err(TaskServiceError::SchedulerUnavailable(error));
     }
+    let transition_guard = loop {
+        let notified = core.changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(error) = core.store_fault.lock().clone() {
+            return Err(TaskServiceError::StoreUnavailable(error));
+        }
+        let scheduler_fault = { core.scheduler_fault.lock().clone() };
+        if let Some(error) = scheduler_fault {
+            wait_for_attempts(&core).await;
+            if let Some(epoch) = core.owner
+                && let Err(store_error) = core.store.release_owner(epoch).await
+            {
+                record_store_fault(&core, store_error.to_string());
+                return Err(TaskServiceError::Store(store_error));
+            }
+            return Err(TaskServiceError::SchedulerUnavailable(error));
+        }
+        let stats = task_stats(&core).await.inspect_err(|error| {
+            if let TaskServiceError::Store(store_error) = error
+                && matches!(store_error, StoreError::Failure(_))
+            {
+                record_store_fault(&core, store_error.to_string());
+            }
+        })?;
+        if stats.queued == 0 && stats.running == 0 {
+            let transition_guard = core.transition_event_lock.write().await;
+            let settled_stats = task_stats(&core).await.inspect_err(|error| {
+                if let TaskServiceError::Store(store_error) = error
+                    && matches!(store_error, StoreError::Failure(_))
+                {
+                    record_store_fault(&core, store_error.to_string());
+                }
+            })?;
+            let scheduler_fault = { core.scheduler_fault.lock().clone() };
+            if let Some(error) = scheduler_fault {
+                drop(transition_guard);
+                wait_for_attempts(&core).await;
+                if let Some(epoch) = core.owner
+                    && let Err(store_error) = core.store.release_owner(epoch).await
+                {
+                    record_store_fault(&core, store_error.to_string());
+                    return Err(TaskServiceError::Store(store_error));
+                }
+                return Err(TaskServiceError::SchedulerUnavailable(error));
+            }
+            if settled_stats.queued == 0 && settled_stats.running == 0 {
+                break transition_guard;
+            }
+        }
+        notified.await;
+    };
+    if let Some(epoch) = core.owner
+        && let Err(error) = core.store.release_owner(epoch).await
+    {
+        record_store_fault(&core, error.to_string());
+        return Err(error.into());
+    }
+    drop(transition_guard);
+    Ok(())
+}
 
+/// Waits until every engine handle already returned by activation is finalized.
+async fn wait_for_attempts(core: &ServiceCore) {
+    loop {
+        let notified = core.attempts_changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if core.attempts_in_flight.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        notified.await;
+    }
+}
+
+impl TaskExecutionService {
     /// Starts the background scheduler and wraps its shared service state.
     pub(crate) fn start(core: ServiceCore) -> Self {
-        let service = Self { core: Arc::new(core) };
+        let core = Arc::new(core);
+        let service = Self {
+            _lease: Arc::new(ServiceHandleLease {
+                core: Arc::downgrade(&core),
+            }),
+            core,
+        };
         let weak = Arc::downgrade(&service.core);
-        service.core.runtime_handle.spawn(scheduler_loop(weak));
+        let supervisor_weak = weak.clone();
+        service.core.runtime_handle.spawn(async move {
+            let result = std::panic::AssertUnwindSafe(scheduler_loop(weak)).catch_unwind().await;
+            if let Err(payload) = result
+                && let Some(core) = supervisor_weak.upgrade()
+            {
+                record_scheduler_fault(&core, panic_message(payload));
+            }
+        });
         service
     }
 }
@@ -1022,21 +1126,27 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 .await
             {
                 Ok(handle) => {
-                    activated_positions.push(original_positions[&id]);
+                    let cancellation_signal = Arc::clone(&handle.cancelled);
                     core.cancellations.lock().insert(
                         id,
                         RunningCancellation {
                             attempt: running.attempt,
-                            signal: handle.cancelled.clone(),
+                            signal: Arc::clone(&cancellation_signal),
                         },
                     );
+                    core.attempts_in_flight.fetch_add(1, Ordering::AcqRel);
+                    let weak = Arc::downgrade(&core);
+                    core.runtime_handle
+                        .spawn(finish_attempt(weak, running.clone(), handle.receiver, running_permit));
+                    activated_positions.push(original_positions[&id]);
+                    started = true;
                     match core.store.get(id).await {
                         Ok(Some(record))
                             if record.attempt == running.attempt
                                 && matches!(record.state, TaskState::Running)
                                 && record.cancel_requested =>
                         {
-                            handle.cancelled.store(true, Ordering::Release);
+                            cancellation_signal.store(true, Ordering::Release);
                         }
                         Ok(Some(_)) | Ok(None) => {}
                         Err(error) => {
@@ -1045,10 +1155,6 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                             return;
                         }
                     }
-                    let weak = Arc::downgrade(&core);
-                    core.runtime_handle
-                        .spawn(finish_attempt(weak, running, handle.receiver, running_permit));
-                    started = true;
                 }
                 Err(error) => {
                     let reason = format!("engine activation failed: {error}");
@@ -1118,6 +1224,9 @@ async fn finish_attempt(
     receiver: tokio::sync::oneshot::Receiver<ExecutionOutcome>,
     _running_permit: tokio::sync::OwnedSemaphorePermit,
 ) {
+    let _attempt_guard = AttemptInFlightGuard {
+        core_ref: core_ref.clone(),
+    };
     let outcome = receiver
         .await
         .unwrap_or_else(|_| ExecutionOutcome::WorkerStopped("execution worker stopped".into()));
@@ -1238,6 +1347,21 @@ async fn finish_attempt(
     }
 }
 
+/// Decrements the tracked execution-attempt count when finalization exits.
+struct AttemptInFlightGuard {
+    core_ref: std::sync::Weak<ServiceCore>,
+}
+
+impl Drop for AttemptInFlightGuard {
+    /// Wakes scheduler-failure shutdown when the last attempt finalizes.
+    fn drop(&mut self) {
+        if let Some(core) = self.core_ref.upgrade() {
+            core.attempts_in_flight.fetch_sub(1, Ordering::AcqRel);
+            core.attempts_changed.notify_waiters();
+        }
+    }
+}
+
 /// Persists a blocked state and completes any local handle waiting on it.
 async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -> Result<(), StoreError> {
     let updated = transition(
@@ -1301,6 +1425,57 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
     core.wait_registry.notify_all();
 }
 
+/// Records the first scheduler panic and starts the shared shutdown
+/// coordinator.
+fn record_scheduler_fault(core: &Arc<ServiceCore>, diagnostic: String) {
+    let (diagnostic, finalizations) = {
+        let mut fault = core.scheduler_fault.lock();
+        let diagnostic = fault.get_or_insert(diagnostic).clone();
+        let finalizations = core
+            .local_finalizations
+            .lock()
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect::<Vec<_>>();
+        (diagnostic, finalizations)
+    };
+    core.local_handlers.lock().clear();
+    for sender in finalizations {
+        let _ = sender.send(Err(LocalTaskResultError::Infrastructure(diagnostic.clone())));
+    }
+    core.changed.notify_waiters();
+    core.wait_registry.notify_all();
+    begin_shutdown_core(Arc::clone(core));
+}
+
+/// Extracts a useful diagnostic from a caught scheduler panic payload.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_owned()
+    } else {
+        "scheduler panicked with a non-string payload".into()
+    }
+}
+
+/// Reads store state counts and the current execution resource snapshot.
+async fn task_stats(core: &ServiceCore) -> Result<TaskStats, TaskServiceError> {
+    let TaskStateCounts {
+        queued,
+        running,
+        blocked,
+        terminal,
+    } = core.store.count_states().await.map_err(TaskServiceError::Store)?;
+    Ok(TaskStats {
+        queued,
+        running,
+        blocked,
+        terminal,
+        resources: core.engine.capacity(),
+    })
+}
+
 /// Stops and drains the service-owned notification worker before shutdown
 /// publishes its shared result.
 ///
@@ -1339,6 +1514,11 @@ fn combine_shutdown_results(
         (Err(TaskServiceError::StoreUnavailable(store)), Err(TaskServiceError::NotificationClose(close))) => Err(
             TaskServiceError::StoreUnavailable(format!("{store}; notification close failed: {close}")),
         ),
+        (Err(TaskServiceError::SchedulerUnavailable(scheduler)), Err(TaskServiceError::NotificationClose(close))) => {
+            Err(TaskServiceError::SchedulerUnavailable(format!(
+                "{scheduler}; notification close failed: {close}"
+            )))
+        }
         (Err(primary), Err(close)) => Err(TaskServiceError::StoreUnavailable(format!(
             "{primary}; notification close failed: {close}"
         ))),

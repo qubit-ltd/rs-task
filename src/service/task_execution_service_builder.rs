@@ -317,7 +317,9 @@ impl TaskExecutionServiceBuilder {
         };
         let recovered_result = async {
             if store_capabilities.restart_recovery {
-                count_recovery_records(&store, recovery_limit).await?;
+                if store.has_unfinished_over_limit(recovery_limit).await? {
+                    return Err(TaskServiceBuildError::RecoveryCapacityExceeded { limit: recovery_limit });
+                }
                 restore_tasks_paged(&store, &self.handlers, self.max_attempts, recovery_limit).await
             } else {
                 Ok(std::collections::VecDeque::new())
@@ -380,6 +382,9 @@ impl TaskExecutionServiceBuilder {
             )),
             owner,
             store_fault: parking_lot::Mutex::new(None),
+            scheduler_fault: parking_lot::Mutex::new(None),
+            attempts_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            attempts_changed: tokio::sync::Notify::new(),
             #[cfg(feature = "event-bus")]
             event_bus,
         };
@@ -389,25 +394,6 @@ impl TaskExecutionServiceBuilder {
 }
 
 const RECOVERY_PAGE_LIMIT: usize = 256;
-
-async fn count_recovery_records(store: &Arc<dyn TaskStore>, limit: usize) -> Result<(), TaskServiceBuildError> {
-    let mut count = 0_usize;
-    let mut cursor = None;
-    loop {
-        let page = store.scan_unfinished(cursor).await?;
-        validate_recovery_page(&page.tasks, cursor, page.next)?;
-        count = count.checked_add(page.tasks.len()).ok_or_else(|| {
-            TaskServiceBuildError::InvalidConfiguration("unfinished task count overflows usize".into())
-        })?;
-        if count > limit {
-            return Err(TaskServiceBuildError::RecoveryCapacityExceeded { limit });
-        }
-        cursor = page.next;
-        if cursor.is_none() {
-            return Ok(());
-        }
-    }
-}
 
 fn validate_recovery_page(
     tasks: &[StoredTask],

@@ -81,6 +81,12 @@ pub trait TaskStore: Send + Sync {
     }
     /// Acquires exclusive ownership before a recoverable service starts.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>>;
+    /// Returns true only when queued or running records strictly exceed
+    /// `limit`.
+    ///
+    /// Implementations must check the result in one store consistency boundary
+    /// without loading or decoding request payloads.
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>>;
     /// Scans one bounded page of unfinished tasks during recovery.
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>>;
     /// Releases ownership after the service has stopped accepting work.

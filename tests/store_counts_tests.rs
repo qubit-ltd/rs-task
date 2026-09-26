@@ -76,6 +76,10 @@ impl TaskStore for FailListStore {
         self.inner.acquire_owner()
     }
 
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        self.inner.has_unfinished_over_limit(limit)
+    }
+
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         self.inner.scan_unfinished(cursor)
     }
@@ -163,6 +167,8 @@ async fn check_all_state_categories(store: &dyn TaskStore) {
             terminal: 4,
         }
     );
+    assert!(store.has_unfinished_over_limit(1).await.expect("precheck succeeds"));
+    assert!(!store.has_unfinished_over_limit(2).await.expect("precheck succeeds"));
     transition(store, &running, TaskState::Cancelled).await;
     assert_eq!(
         store.count_states().await.expect("updated state counts"),

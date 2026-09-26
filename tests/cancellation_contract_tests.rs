@@ -151,6 +151,10 @@ impl TaskStore for HoldTerminalStore {
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         self.inner.acquire_owner()
     }
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        self.inner.has_unfinished_over_limit(limit)
+    }
+
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         self.inner.scan_unfinished(cursor)
     }
