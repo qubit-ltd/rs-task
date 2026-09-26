@@ -525,6 +525,12 @@ async fn test_missing_handler_transitions_task_to_blocked() {
         .expect("query succeeds")
         .expect("record remains");
     assert!(matches!(record.state, TaskState::Blocked { .. }));
+    let summary = service
+        .get_summary(accepted.id)
+        .await
+        .expect("summary query succeeds")
+        .expect("summary remains");
+    assert!(matches!(summary.state, TaskState::Blocked { .. }));
     let retried = service
         .retry_blocked(accepted.id)
         .await

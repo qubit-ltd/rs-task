@@ -31,6 +31,7 @@ use crate::model::TaskQuery;
 use crate::model::TaskRecord;
 use crate::model::TaskRequest;
 use crate::model::TaskStateCounts;
+use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
 
 /// Sendable boxed future used by object-safe asynchronous component APIs.
@@ -61,7 +62,18 @@ pub trait TaskStore: Send + Sync {
     /// consuming queue capacity.
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
     /// Applies a lifecycle transition only when its expected revision matches.
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>>;
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>>;
+    /// Loads lifecycle metadata without reading or copying the payload.
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>>;
+    /// Cancels a blocked record only when its revision still matches.
+    fn abandon_blocked<'a>(
+        &'a self,
+        id: TaskId,
+        expected_version: u64,
+    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+        let _ = (id, expected_version);
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
     /// Loads one task record by its stable identifier.
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
     /// Lists a bounded page of task history.

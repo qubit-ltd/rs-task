@@ -315,8 +315,15 @@ impl TaskStore for BadScanStore {
     fn transition<'a>(
         &'a self,
         command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskRecord, StoreError>> {
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
         self.inner.transition(command)
+    }
+
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+        self.inner.get_summary(id)
     }
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskRecord>, StoreError>> {
         self.inner.get(id)

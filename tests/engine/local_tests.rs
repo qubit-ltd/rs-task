@@ -61,7 +61,7 @@ async fn run_handler(behavior: HandlerBehavior) -> (TaskState, u32) {
     let record = match result {
         Ok(record) => record,
         Err(qubit_task::service::TaskServiceError::Blocked) => service
-            .get(accepted.id)
+            .get_summary(accepted.id)
             .await
             .expect("task query succeeds")
             .expect("task record remains retained"),

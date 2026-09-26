@@ -82,7 +82,10 @@ impl TaskStore for PauseEvictedGetStore {
         self.inner.get_by_idempotency_key(key)
     }
 
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+    fn transition<'a>(
+        &'a self,
+        command: TransitionCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
         Box::pin(async move {
             let cancel = matches!(command.state, TaskState::Cancelled);
             let updated = self.inner.transition(command).await?;
@@ -98,6 +101,13 @@ impl TaskStore for PauseEvictedGetStore {
             }
             Ok(updated)
         })
+    }
+
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+        self.inner.get_summary(id)
     }
 
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
@@ -169,8 +179,18 @@ impl TaskStore for PauseAfterAcceptStore {
         self.inner.get_by_idempotency_key(key)
     }
 
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+    fn transition<'a>(
+        &'a self,
+        command: TransitionCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
         self.inner.transition(command)
+    }
+
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+        self.inner.get_summary(id)
     }
 
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {

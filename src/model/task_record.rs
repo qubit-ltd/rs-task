@@ -25,6 +25,7 @@ use super::ResourceRequest;
 use super::TaskId;
 use super::TaskOutput;
 use super::TaskRequest;
+use super::TaskRequestInfo;
 
 /// Observable lifecycle state for an accepted task.
 ///
@@ -197,6 +198,7 @@ impl TaskStateKind {
     /// Returns the stable SQLite state key for this lifecycle category.
     #[must_use]
     #[inline]
+    #[cfg(feature = "sqlite")]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "Queued",
@@ -262,6 +264,61 @@ pub struct TaskRecord {
     pub cancel_requested: bool,
 }
 
+/// Payload-free lifecycle snapshot for listing and waiting on tasks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSummary {
+    /// Stable service-generated identity.
+    pub id: TaskId,
+    /// Immutable request fields without the execution payload.
+    pub request: TaskRequestInfo,
+    /// Current lifecycle state.
+    pub state: TaskState,
+    /// Monotonically increasing state revision.
+    pub state_version: u64,
+    /// Number of execution attempts started.
+    pub attempt: u32,
+    /// Earliest Unix epoch millisecond when a queued retry may start.
+    pub retry_not_before_ms: Option<u64>,
+    /// Milliseconds since Unix epoch when accepted.
+    pub accepted_at_ms: u64,
+    /// Milliseconds since Unix epoch when execution last started.
+    pub started_at_ms: Option<u64>,
+    /// Milliseconds since Unix epoch when execution became terminal.
+    pub finished_at_ms: Option<u64>,
+    /// Actual resources assigned to the current or last attempt.
+    pub assigned_resources: Vec<String>,
+    /// Small output summary for successful work.
+    pub output: Option<TaskOutput>,
+    /// True after cooperative cancellation has been requested.
+    pub cancel_requested: bool,
+}
+
+impl TaskRecord {
+    /// Copies lifecycle and immutable request metadata without its payload.
+    ///
+    /// # Returns
+    ///
+    /// A `TaskSummary` containing every record field except the request
+    /// payload.
+    #[must_use]
+    pub fn summary(&self) -> TaskSummary {
+        TaskSummary {
+            id: self.id,
+            request: TaskRequestInfo::from(&self.request),
+            state: self.state.clone(),
+            state_version: self.state_version,
+            attempt: self.attempt,
+            retry_not_before_ms: self.retry_not_before_ms,
+            accepted_at_ms: self.accepted_at_ms,
+            started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+            assigned_resources: self.assigned_resources.clone(),
+            output: self.output.clone(),
+            cancel_requested: self.cancel_requested,
+        }
+    }
+}
+
 /// Stable cursor into task history ordered by acceptance time and task ID.
 ///
 /// Both fields are required because multiple tasks can be accepted during the
@@ -294,6 +351,12 @@ impl TaskCursor {
 impl From<&TaskRecord> for TaskCursor {
     /// Creates a cursor at the supplied record's history position.
     fn from(record: &TaskRecord) -> Self {
+        Self::new(record.accepted_at_ms, record.id)
+    }
+}
+
+impl From<&TaskSummary> for TaskCursor {
+    fn from(record: &TaskSummary) -> Self {
         Self::new(record.accepted_at_ms, record.id)
     }
 }
@@ -339,7 +402,7 @@ pub struct TaskQuery {
 #[derive(Debug, Clone, Default)]
 pub struct TaskPage {
     /// Records selected by the query.
-    pub records: Vec<TaskRecord>,
+    pub records: Vec<TaskSummary>,
     /// Cursor for the next page, when more data may exist.
     pub next: Option<TaskCursor>,
 }

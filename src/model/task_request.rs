@@ -71,6 +71,36 @@ pub struct TaskRequest {
     pub metadata: BTreeMap<String, String>,
 }
 
+/// Payload-free immutable fields used in task history and lifecycle reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRequestInfo {
+    /// Stable task family understood by registered handlers.
+    pub task_type: String,
+    /// Exact handler version required to decode the payload.
+    pub handler_version: String,
+    /// Resource budget required during execution.
+    pub resources: ResourceRequest,
+    /// Optional caller-defined value used to find related tasks.
+    pub correlation_key: Option<String>,
+    /// Optional key used to deduplicate identical submissions.
+    pub idempotency_key: Option<String>,
+    /// Small values attached to the task for filtering and diagnostics.
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl From<&TaskRequest> for TaskRequestInfo {
+    fn from(request: &TaskRequest) -> Self {
+        Self {
+            task_type: request.task_type.clone(),
+            handler_version: request.handler_version.clone(),
+            resources: request.resources.clone(),
+            correlation_key: request.correlation_key.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            metadata: request.metadata.clone(),
+        }
+    }
+}
+
 impl TaskRequest {
     /// Checks the size limits used by both the service and task stores.
     ///

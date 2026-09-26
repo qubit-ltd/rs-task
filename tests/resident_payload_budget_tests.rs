@@ -208,12 +208,7 @@ async fn test_concurrent_accepts_cannot_exceed_payload_budget() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        retained
-            .records
-            .iter()
-            .map(|record| record.request.payload.len())
-            .sum::<usize>(),
-        4
-    );
+    assert_eq!(retained.records.len(), 1);
+    let detail = store.get(retained.records[0].id).await.unwrap().unwrap();
+    assert_eq!(detail.request.payload.len(), 4);
 }

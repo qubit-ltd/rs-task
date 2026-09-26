@@ -87,7 +87,10 @@ impl TaskStore for HoldTerminalStore {
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         self.inner.get_by_idempotency_key(key)
     }
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+    fn transition<'a>(
+        &'a self,
+        command: TransitionCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
         Box::pin(async move {
             if matches!(command.state, TaskState::Running)
                 && command.cancel_requested
@@ -122,6 +125,22 @@ impl TaskStore for HoldTerminalStore {
             Ok(updated)
         })
     }
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+        Box::pin(async move {
+            let summary = self.inner.get_summary(id).await?;
+            if summary
+                .as_ref()
+                .is_some_and(|value| value.attempt == 2 && matches!(value.state, TaskState::Running))
+            {
+                self.second_registered.notify_one();
+            }
+            Ok(summary)
+        })
+    }
+
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move {
             let record = self.inner.get(id).await?;
