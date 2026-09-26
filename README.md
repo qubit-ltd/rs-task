@@ -21,6 +21,8 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 This named preset keeps task state in memory. Pending tasks are lost when the
 process exits; completed history is bounded to 1024 records.
+The default in-memory store also caps nonterminal records at 2048, including
+`Blocked` tasks. History queries return at most 256 records per page.
 
 ```rust,no_run
 use qubit_task::TaskExecutionService;
@@ -84,7 +86,7 @@ continue in the background, but the caller loses that handle and cannot recover
 the original typed result. Use keyed `submit` when the caller must find work
 after its request stops waiting.
 
-Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite version 0 databases migrate to schema version 1 on open.
+Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite schema 0 and 1 databases migrate transactionally to schema 2 on open. SQLite keeps the immutable request JSON separate from lifecycle JSON so state transitions do not rewrite large payloads.
 
 The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; startup fails with records preserved if that recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
 

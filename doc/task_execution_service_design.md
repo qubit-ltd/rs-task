@@ -38,7 +38,7 @@
 
 提交时验证请求的每项需求不超过配置容量，无法满足的任务立即拒绝。通过验证但当前没有空闲额度的任务进入有界队列。调度器选择候选任务，`TaskExecutionEngine` 原子预约全部资源并安排执行；任务实际结束后释放预约。不能先占用部分资源再等待其余部分，以免产生资源死锁。容量变更本期仅在重建服务时生效。
 
-队列默认按受理顺序扫描，允许后续较小任务越过暂时无法运行的任务。达到可配置的最大越过次数后，调度器优先为被越过的任务留出所需资源，停止启动会继续占用这些资源的后续任务。在运行任务最终退出、资源正确归还的前提下，这避免大任务被持续插队。队列容量、运行并发上限和扫描预算均可配置；队列满时明确拒绝并允许调用方重试，不无限堆积内存。默认受理 worker 数量上限为 64，受理中 payload 总额度为 64 MiB；预留额度随后台 `accept` 完成后释放，即使调用方取消等待也不会提前释放。
+队列默认按受理顺序扫描，允许后续较小任务越过暂时无法运行的任务。每轮只从 ready 队列和已到期的 retry deadline 中取至多 `scan_budget` 个候选；远期重试任务按截止时间放在独立有序队列中。队列锁只保护队列操作，不跨越策略、store 或 engine 调用。达到可配置的最大越过次数后，调度器优先为被越过的任务留出所需资源，停止启动会继续占用这些资源的后续任务。在运行任务最终退出、资源正确归还的前提下，这避免大任务被持续插队。队列容量、运行并发上限和扫描预算均可配置；队列满时明确拒绝并允许调用方重试，不无限堆积内存。默认受理 worker 数量上限为 64，受理中 payload 总额度为 64 MiB；预留额度随后台 `accept` 完成后释放，即使调用方取消等待也不会提前释放。
 
 ### 3.3 状态与查询
 
@@ -46,7 +46,7 @@
 
 基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；`cancel_requested` 只表示发起了请求。只有处理器实际退出并返回 `TaskRunOutcome::Cancelled` 才进入 `Cancelled`；返回成功或失败时保留该业务结果。`LocalTaskHandle::result()` 等待权威终态写入后，才返回类型化结果、业务错误或明确的取消错误。`max_attempts` 是同一 TaskId 跨进程启动的总次数；恢复时达到上限的 Queued/Running 任务转为 Blocked，人工重试也不能重置预算。`test_shutdown_keeps_scheduler_running_for_retry_after_close` 用信号控制首次执行并验证关闭受理后的自动重试，调度器仅在关闭协调器确认队列和运行任务均为空后退出。
 
-提供按 `TaskId` 和幂等键查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。`stats()` 通过一次 `TaskStore::count_states()` 聚合查询得到所有保留状态计数，再读取执行引擎资源快照；二者相邻读取但不是同一事务中的原子快照。历史页按 `(accepted_at_ms ASC, id ASC)` 排序，以复合游标稳定处理同毫秒受理的记录；游标不提供并发写入或清理期间的全局快照。存储统计失败向调用方传播，查询成本不随历史页数增长。`get` 与按键查询对不存在或已清理的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储限制终态历史数量且默认最多保留 64 MiB payload；空间不足时先按终态完成顺序淘汰终态记录及幂等映射，仍不足则返回容量错误，非终态记录不得淘汰。可用 `with_payload_budget` 与 builder 预设配置额度。SQLite 历史默认不自动清理，显式有界清理只删除早于受理时间阈值的终态记录，并同步移除其幂等键。
+提供按 `TaskId` 和幂等键查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。`stats()` 通过一次 `TaskStore::count_states()` 聚合查询得到所有保留状态计数，再读取执行引擎资源快照；二者相邻读取但不是同一事务中的原子快照。历史页按 `(accepted_at_ms ASC, id ASC)` 排序，以复合游标稳定处理同毫秒受理的记录；`TaskQuery.limit` 最大为 256，0 按 1 处理，服务和内置 store 执行相同校验。内存 store 用最多 `limit+1` 个排序键选页，再按 ID 克隆结果，额外选择空间为 O(limit)；游标不提供并发写入或清理期间的全局快照。存储统计失败向调用方传播，查询成本不随历史页数增长。`get` 与按键查询对不存在或已清理的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储限制终态历史数量且默认最多保留 64 MiB payload，并最多保留 2048 条非终态记录（包括 `Blocked`）；空间不足时先按终态完成顺序淘汰终态记录及幂等映射，仍不足则返回容量错误，非终态记录不得淘汰。可用 `with_limits` 与 builder 预设配置额度。SQLite 历史默认不自动清理，显式有界清理只删除早于受理时间阈值的终态记录，并同步移除其幂等键。
 
 ## 4. 服务接口与职责划分
 
@@ -98,7 +98,7 @@ TaskExecutionService
 
 `TaskScheduler` 使用 `SchedulingPolicy` 从待执行任务中选择候选项，再向 `TaskExecutionEngine` 请求原子分配和启动。资源账本归执行引擎所有，避免调度器与执行器对剩余资源有不同认识。本期 `LocalTaskExecutionEngine` 在服务所在机器执行；今后替换为分布式实现时，提交与查询模型不必重写。`TaskStore` 是状态依据；不得由协调器或执行引擎另建一套相互竞争的权威状态。
 
-执行引擎必须把处理器的返回错误、panic 和基础设施启动失败区分开。启动失败时释放资源、记录可诊断原因，并按明确的有限重试策略重新排队或标记失败；不能让任务永久占有资源。业务返回错误默认是终态 `Failed`，本期不自动重试，避免无意重复副作用。处理器可以主动返回可重试的基础设施错误。自动重试按 1 秒起步、指数翻倍、最高 60 秒执行，可由 `RetryPolicy` 配置；`retry_not_before_ms` 与 `Queued` 状态原子持久化，到期前调度器不启动任务，恢复会保留到期时间。`ExecutionOutcome` 显式区分业务返回、panic 与 worker 停止，panic 不再依赖错误类别字符串。SQLite 使用 `PRAGMA user_version` 管理 schema，并在每条记录上保存 `record_format_version`；旧 schema 自动迁移，未知版本拒绝打开或读取。
+执行引擎必须把处理器的返回错误、panic 和基础设施启动失败区分开。启动失败时释放资源、记录可诊断原因，并按明确的有限重试策略重新排队或标记失败；不能让任务永久占有资源。业务返回错误默认是终态 `Failed`，本期不自动重试，避免无意重复副作用。处理器可以主动返回可重试的基础设施错误。自动重试按 1 秒起步、指数翻倍、最高 60 秒执行，可由 `RetryPolicy` 配置；`retry_not_before_ms` 与 `Queued` 状态原子持久化，到期前调度器不启动任务，恢复会保留到期时间。`ExecutionOutcome` 显式区分业务返回、panic 与 worker 停止，panic 不再依赖错误类别字符串。SQLite 使用 `PRAGMA user_version` 管理 schema；schema 2 将不可变 `request_json` 与仅含生命周期字段的 `lifecycle_json` 分列，状态转换只更新状态索引列和生命周期 JSON。schema 0/1 在单个事务内逐行验证并迁移，损坏记录会回滚整个迁移；未知 schema 或记录格式拒绝打开或读取。
 
 ### 4.1 使用 rs-spi 发现和装配扩展模块
 
@@ -120,7 +120,7 @@ TaskExecutionService
 
 | 入口 | 默认装配 | 适用场景 |
 | --- | --- | --- |
-| `TaskExecutionService::in_memory()` | `MemoryTaskStore`、默认公平调度策略、`LocalTaskExecutionEngine`；不启用事件总线 | 明确接受进程重启丢失未完成任务 |
+| `TaskExecutionService::in_memory()` | `MemoryTaskStore`、默认公平调度策略、`LocalTaskExecutionEngine`；终态历史 1024 条、非终态记录默认 2048 条，不启用事件总线 | 明确接受进程重启丢失未完成任务 |
 | `TaskExecutionServiceBuilder::in_memory()` | 在内存预设上覆盖资源、容量、策略、存储以外的组件和处理器 | 局部定制内存服务，无需使用 SPI |
 | `TaskExecutionServiceBuilder::in_memory_with_payload_budget(limit)` | 设置内存存储的常驻 payload 字节上限 | 调整内存保留预算 |
 | `TaskExecutionServiceBuilder::recoverable_sqlite(path)` | 可选 SQLite `TaskStore`、默认调度策略、本机执行引擎；强制要求恢复能力 | 单节点重启恢复；构建前须注册稳定的处理器 |
