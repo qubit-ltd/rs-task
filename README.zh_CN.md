@@ -80,6 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
 
+丢弃最后一个服务句柄会启动异步排空；需要观察排空结果时调用 `shutdown()`。调度器 panic 会返回 `SchedulerUnavailable`，且不会自动重启。自定义引擎契约和零 CPU I/O 配置见[用户指南](doc/user-guide.zh_CN.md)。
+
 `TaskQuery.states` 使用 `TaskStateKind`；此前用带诊断内容的 `TaskState`
 构造筛选条件的调用方需要迁移。请求文本上限按 UTF-8 字节计算：`task_type`
 128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键
@@ -94,7 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 清理指定最大行数。被删除记录的幂等键可以重新使用。公开调度策略中的
 `QueuedTask` 现在保存 `resources`，不再保存完整请求。应用可通过
 `TaskExecutionServiceBuilder::runtime_handle` 指定服务后台任务使用的 runtime，
-并须保证它至少存活到 `shutdown()` 返回。
+并须保证它至少存活到排空完成。第三方 `TaskStore` 必须实现
+`has_unfinished_over_limit(limit)`，以便恢复预检无需解码 payload。最后句柄析构和调度器故障细节见用户指南。
 
 ```bash
 # 使用默认 feature 集运行测试

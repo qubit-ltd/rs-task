@@ -1,5 +1,15 @@
 # qubit-task：资源感知的异步任务执行服务设计
 
+## 运行时可靠性补充
+
+公开 `TaskExecutionService` 句柄共享一个 lease。最后一个 lease 析构时调用统一的关闭入口，后台协调器排空已受理工作、关闭通知发布器并释放可恢复存储的 owner；析构本身不等待，也不能报告关闭错误。需要确认关闭结果的调用方必须显式等待 `shutdown()`。注入的 Tokio runtime 必须存活到异步排空完成。
+
+调度循环由 panic 监督器包装。策略或引擎 panic 被转换为 `TaskServiceError::SchedulerUnavailable`，该故障唤醒任务等待者、关闭受理并阻止后续重试；调度循环不会自动重启。已经由引擎返回执行句柄的尝试由独立任务跟踪，协调器等待这些尝试完成后再释放存储 owner。自定义引擎必须保证执行副作用开始后返回可追踪句柄；若在开始副作用后 panic 且没有返回句柄，服务不能证明工作已停止，应用必须终止进程并通过外部监督器恢复。
+
+恢复容量检查由 `TaskStore::has_unfinished_over_limit(limit)` 执行，只统计 `Queued` 和 `Running`，严格判断是否超过上限，且不读取任务 payload。SQLite 使用状态索引执行带 offset 的存在性查询；之后分页恢复仍再次计数并校验页游标，以处理预检与恢复之间的存储变化。第三方 `TaskStore` 必须实现该方法及 `count_states()`。
+
+`ResourceRequest.cpu_slots = 0` 适用于异步 I/O 工作，但不会绕过 `max_running_tasks`。CPU 密集工作应请求至少一个 CPU 槽，并在 `spawn_blocking` 或专用后端运行阻塞代码。
+
 ## 1. 目标与边界
 
 `qubit-task` 面向业务系统提交后不能立即完成的任务。提交者得到任务标识，之后通过查询或事件了解排队、运行和完成情况；服务依据本机可用的 CPU、GPU 和业务自定义资源安排执行。

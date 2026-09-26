@@ -190,6 +190,22 @@ bounded number of passes. The queue itself remains bounded; a full queue returns
 full is stored as `Blocked` and can be explicitly retried after capacity is
 available; it never exceeds the queue limit.
 
+I/O-bound handlers can request zero CPU slots, but still count toward
+`max_running_tasks`. Set that limit explicitly to bound concurrent network or
+disk operations. CPU-bound handlers should request at least one slot and run
+blocking work through `spawn_blocking` or a dedicated execution backend.
+
+~~~rust,no_run
+use std::num::NonZeroUsize;
+use qubit_task::model::TaskRequest;
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+let builder = TaskExecutionServiceBuilder::in_memory()
+    .max_running_tasks(NonZeroUsize::new(64).expect("positive limit"));
+let mut request = TaskRequest::new("http-fetch", "1", Vec::new());
+request.resources.cpu_slots = 0;
+~~~
+
 ## Enable restart recovery with SQLite
 
 Enable the optional feature and configure a durable path:
@@ -290,6 +306,16 @@ the blocking close task returns the same error. These notification failures do
 not roll back task state. Concurrent and later shutdown callers receive the
 same stored close result.
 
+Dropping the last service handle starts an asynchronous drain. It cannot report
+the result to the caller, so call `shutdown()` when completion must be
+confirmed. A custom runtime supplied with `runtime_handle` must remain alive
+until that drain finishes. A scheduler panic wakes waiters and is reported as
+`TaskServiceError::SchedulerUnavailable`; a storage failure remains
+`StoreUnavailable`. The scheduler is not restarted automatically. Custom
+engines must return a trackable execution handle whenever activation starts
+work; if an engine panics after starting untracked side effects, terminate and
+restart the process through the application supervisor.
+
 ## Errors and diagnostics
 
 `TaskRunError` distinguishes a handler failure by category, diagnostic text, and retryability. Non-retryable errors settle as `Failed`; a handler panic settles as `Panicked`. Stored diagnostic text is bounded, so keep the original application error in the application's own logs or result store when more detail is needed. `LocalTaskHandle<R, E>` preserves the original typed error for process-local work.
@@ -387,8 +413,9 @@ operations from a Tokio runtime.
 History pagination now uses `TaskCursor { accepted_at_ms, id }` instead of a
 `TaskId` cursor. Third-party `SchedulingPolicy` implementations receive
 `QueuedTask.resources` instead of a full `TaskRequest`. `TaskStore` gains
-`prune_terminal_before`; its default implementation reports
-`UnsupportedCapability`.
+`prune_terminal_before` and the required `has_unfinished_over_limit(limit)`
+recovery precheck. Custom stores must implement the precheck without decoding
+payloads. The default pruning implementation reports `UnsupportedCapability`.
 
 ## Troubleshooting
 

@@ -90,6 +90,8 @@ Automatic retries persist their next eligible time and use exponential backoff (
 
 The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; startup fails with records preserved if that recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
 
+Dropping the last service handle starts an asynchronous drain; call `shutdown()` to observe completion. Scheduler panics surface as `SchedulerUnavailable` and are not restarted automatically. See the [user guide](doc/user-guide.md) for the custom engine contract and zero-CPU I/O configuration.
+
 ## Project documents
 
 - [User guide](doc/user-guide.md)
@@ -114,9 +116,12 @@ acceptance time, then task ID. SQLite history is retained until explicitly
 pruned with `prune_terminal_before`; each call has a caller supplied row limit,
 and deleted idempotency keys become available for reuse. The scheduler policy's
 public `QueuedTask` now contains `resources` rather than the full request.
+Third-party `TaskStore` implementations must provide
+`has_unfinished_over_limit(limit)` for payload-free recovery prechecks.
 Applications may select the runtime for service background tasks with
 `TaskExecutionServiceBuilder::runtime_handle`; that runtime must stay alive
-until `shutdown()` returns.
+until shutdown and any asynchronous drain complete. See the user guide for
+last-handle drop behavior and scheduler failure reporting.
 
 ## Testing
 
