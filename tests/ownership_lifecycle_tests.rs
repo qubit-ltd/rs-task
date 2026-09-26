@@ -16,7 +16,7 @@ async fn test_cancel_after_shutdown_is_rejected() {
         .await
         .expect("in-memory service builds");
     let accepted = service
-        .submit(TaskRequest::new("missing", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("missing", "1", Vec::new())))
         .await
         .expect("task is accepted");
     assert!(matches!(
@@ -123,4 +123,16 @@ mod sqlite_tests {
         drop(replacement);
         remove_database(&path);
     }
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

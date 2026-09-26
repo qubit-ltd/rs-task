@@ -54,8 +54,8 @@ impl TaskStore for FailFirstGetStore {
         self.inner.accept(id, request)
     }
 
-    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
-        self.inner.find_idempotent(request)
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        self.inner.get_by_idempotency_key(key)
     }
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {

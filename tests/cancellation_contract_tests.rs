@@ -84,8 +84,8 @@ impl TaskStore for HoldTerminalStore {
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         self.inner.accept(id, request)
     }
-    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
-        self.inner.find_idempotent(request)
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        self.inner.get_by_idempotency_key(key)
     }
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
         Box::pin(async move {
@@ -330,7 +330,7 @@ async fn test_blocked_task_can_be_cancelled_directly() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("missing", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("missing", "1", Vec::new())))
         .await
         .expect("task accepted");
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -380,7 +380,7 @@ async fn test_late_cancel_response_does_not_signal_next_attempt() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("retry-once", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("retry-once", "1", Vec::new())))
         .await
         .expect("task accepted");
     tokio::time::timeout(Duration::from_secs(2), handler.first_started.notified())
@@ -416,4 +416,16 @@ async fn test_late_cancel_response_does_not_signal_next_attempt() {
     assert_eq!(final_record.state, TaskState::Succeeded);
     assert_eq!(final_record.attempt, 2);
     service.shutdown().await.expect("service shuts down");
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

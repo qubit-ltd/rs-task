@@ -78,7 +78,7 @@ async fn test_zero_cpu_tasks_obey_independent_running_limit() {
     for _ in 0..4 {
         let mut request = TaskRequest::new("hold", "1", Vec::new());
         request.resources.cpu_slots = 0;
-        ids.push(service.submit(request).await.unwrap().id);
+        ids.push(service.submit(test_keyed(request)).await.unwrap().id);
     }
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         started_rx.recv().await.unwrap();
@@ -136,11 +136,11 @@ async fn test_running_permit_is_returned_after_panicked_attempt() {
         .await
         .unwrap();
     let first = service
-        .submit(TaskRequest::new("panic-once", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("panic-once", "1", Vec::new())))
         .await
         .unwrap();
     let second = service
-        .submit(TaskRequest::new("panic-once", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("panic-once", "1", Vec::new())))
         .await
         .unwrap();
     assert!(matches!(
@@ -152,4 +152,16 @@ async fn test_running_permit_is_returned_after_panicked_attempt() {
         qubit_task::model::TaskState::Succeeded
     ));
     service.shutdown().await.unwrap();
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

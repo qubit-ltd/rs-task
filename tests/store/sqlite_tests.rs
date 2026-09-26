@@ -92,7 +92,7 @@ async fn test_sqlite_open_migrates_legacy_records_without_loss() {
     assert_eq!(record.retry_not_before_ms, None);
     assert_eq!(
         store
-            .find_idempotent(request.clone())
+            .get_by_idempotency_key("legacy-key")
             .await
             .expect("idempotency lookup succeeds")
             .unwrap()
@@ -110,7 +110,10 @@ async fn test_sqlite_open_migrates_legacy_records_without_loss() {
             .retry_not_before_ms,
         None
     );
-    assert_eq!(reopened.find_idempotent(request).await.unwrap().unwrap().id, id);
+    assert_eq!(
+        reopened.get_by_idempotency_key("legacy-key").await.unwrap().unwrap().id,
+        id
+    );
     drop(reopened);
     remove_database(&path);
 }
@@ -174,7 +177,7 @@ async fn test_sqlite_reads_reject_unknown_row_format_everywhere() {
     assert!(store.get(id).await.is_err());
     assert!(store.list(TaskQuery::default()).await.is_err());
     assert!(store.scan_unfinished(None).await.is_err());
-    assert!(store.find_idempotent(request).await.is_err());
+    assert!(store.get_by_idempotency_key("unknown-format-key").await.is_err());
     drop(store);
     remove_database(&path);
 }
