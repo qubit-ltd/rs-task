@@ -47,6 +47,43 @@ fn local_task_handler_returns_its_declared_descriptor() {
     assert_eq!(handler.descriptor(), descriptor);
 }
 
+#[tokio::test]
+async fn local_task_handler_rejects_a_second_run() {
+    let descriptor = TaskHandlerDescriptor {
+        task_type: "one-shot".into(),
+        version: "1".into(),
+    };
+    let handler = Arc::new(LocalTaskHandler::new(descriptor, |_| {
+        Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+    }));
+    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+        .register_handler(handler)
+        .expect("handler registers")
+        .build()
+        .await
+        .expect("service builds");
+    let request = || TaskRequest::new("one-shot", "1", Vec::new());
+    let first = service.submit(request()).await.expect("first task submits");
+    let second = service.submit(request()).await.expect("second task submits");
+    let first = service.wait(first.id).await.expect("first task finishes");
+    let second = service.wait(second.id).await.expect("second task finishes");
+    let states = [first.state, second.state];
+
+    assert_eq!(
+        states
+            .iter()
+            .filter(|state| matches!(state, qubit_task::model::TaskState::Succeeded))
+            .count(),
+        1
+    );
+    assert!(states.iter().any(|state| matches!(
+        state,
+        qubit_task::model::TaskState::Failed { category, message }
+            if category == "local_handler" && message.contains("ran more than once")
+    )));
+    service.shutdown().await.expect("service shuts down");
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_find_idempotent_handles_missing_matching_and_conflicting_requests() {
@@ -86,4 +123,42 @@ async fn sqlite_find_idempotent_handles_missing_matching_and_conflicting_request
     let _ = std::fs::remove_file(path.with_extension("owner.lock"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
+    use qubit_task::store::SqliteTaskStore;
+    use qubit_task::store::TaskStore;
+
+    let path = std::env::temp_dir().join(format!(
+        "qubit-task-invalid-request-{}.sqlite",
+        TaskId::generate()
+    ));
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+    let request = TaskRequest::new("", "v1", Vec::new());
+
+    assert!(matches!(
+        store.accept(TaskId::generate(), request).await,
+        Err(qubit_task::store::StoreError::InvalidRequest(_))
+    ));
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_open_reports_a_non_directory_parent() {
+    use qubit_task::store::SqliteTaskStore;
+
+    let parent = std::env::temp_dir().join(format!(
+        "qubit-task-not-directory-{}",
+        TaskId::generate()
+    ));
+    std::fs::write(&parent, b"not a directory").expect("parent fixture is created");
+    let result = SqliteTaskStore::open(parent.join("tasks.sqlite"));
+
+    assert!(matches!(result, Err(qubit_task::store::StoreError::Failure(_))));
+    std::fs::remove_file(parent).expect("parent fixture is removed");
 }
