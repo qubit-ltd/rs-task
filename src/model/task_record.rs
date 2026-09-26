@@ -8,6 +8,19 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::store::StoreError;
+
+/// Maximum number of records returned by one task history query.
+pub const MAX_TASK_QUERY_LIMIT: usize = 256;
+
+/// Validates a history page size and normalizes zero to one.
+pub(crate) fn checked_page_size(limit: usize) -> Result<usize, StoreError> {
+    if limit > MAX_TASK_QUERY_LIMIT {
+        return Err(StoreError::InvalidRequest("task history page limit exceeds 256"));
+    }
+    Ok(limit.max(1))
+}
+
 use super::ResourceRequest;
 use super::TaskId;
 use super::TaskOutput;

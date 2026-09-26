@@ -41,8 +41,8 @@ use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 
 mod engine;
+mod model;
 mod service;
-#[cfg(feature = "sqlite")]
 mod store;
 
 struct EchoHandler;
@@ -653,7 +653,10 @@ async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
         .expect("D fills the sole free slot");
     let e = service.submit(test_keyed(request())).await;
     gate.release(2);
-    service.shutdown().await.expect("remaining tasks drain");
+    tokio::time::timeout(std::time::Duration::from_secs(5), service.shutdown())
+        .await
+        .expect("remaining tasks drain before the test timeout")
+        .expect("service shuts down");
     assert!(matches!(e, Err(qubit_task::service::TaskServiceError::QueueFull)));
 }
 
@@ -1288,7 +1291,7 @@ async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
     rusqlite::Connection::open(&bad_path)
         .unwrap()
         .execute(
-            "UPDATE tasks SET record_json='not-json' WHERE id=?1",
+            "UPDATE tasks SET lifecycle_json='not-json' WHERE id=?1",
             [bad_record.id.to_string()],
         )
         .unwrap();
