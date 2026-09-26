@@ -14,6 +14,7 @@ mod local_task_outcome;
 mod local_task_result_error;
 mod retry_policy;
 mod retry_policy_error;
+mod scheduler_queue;
 #[cfg(feature = "event-bus")]
 mod task_event_notification_stats;
 #[cfg(feature = "event-bus")]

@@ -6,7 +6,6 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -26,6 +25,7 @@ use super::local_task_outcome::LocalTaskOutcome;
 use super::local_task_outcome::adapt_local_outcome;
 use super::local_task_result_error::LocalTaskResultError;
 use super::retry_policy::RetryPolicy;
+use super::scheduler_queue::SchedulerQueue;
 #[cfg(feature = "event-bus")]
 use super::task_event_notification_stats::TaskEventNotificationStats;
 #[cfg(feature = "event-bus")]
@@ -54,6 +54,7 @@ use crate::model::TaskState;
 use crate::model::TaskStateCounts;
 use crate::model::TaskStats;
 use crate::model::TransitionCommand;
+use crate::model::checked_page_size;
 use crate::scheduling::QueueSnapshot;
 use crate::scheduling::QueuedTask;
 use crate::scheduling::SchedulingPolicy;
@@ -159,7 +160,7 @@ pub(crate) struct ServiceCore {
     pub(crate) max_attempts: u32,
     pub(crate) retry_policy: RetryPolicy,
     pub(crate) running_slots: Arc<tokio::sync::Semaphore>,
-    pub(crate) queue: Mutex<VecDeque<QueuedTask>>,
+    pub(crate) queue: Mutex<SchedulerQueue>,
     pub(crate) queue_count: AtomicUsize,
     pub(crate) local_handlers: Mutex<HashMap<TaskId, Arc<dyn TaskHandler>>>,
     pub(crate) local_finalizations: Mutex<HashMap<TaskId, oneshot::Sender<Result<TaskState, LocalTaskResultError>>>>,
@@ -315,7 +316,7 @@ impl TaskExecutionService {
         };
         match outcome {
             AcceptOutcome::Accepted(record) => {
-                self.core.queue.lock().push_back(QueuedTask {
+                self.core.queue.lock().push(QueuedTask {
                     id: record.id,
                     resources,
                     retry_not_before_ms: None,
@@ -415,7 +416,7 @@ impl TaskExecutionService {
                     return Ok(LocalTaskHandle::new(record.id, typed_receiver, final_receiver));
                 }
                 self.core.local_handlers.lock().insert(id, handler);
-                self.core.queue.lock().push_back(QueuedTask {
+                self.core.queue.lock().push(QueuedTask {
                     id,
                     resources,
                     retry_not_before_ms: None,
@@ -521,6 +522,7 @@ impl TaskExecutionService {
 
     /// Returns a bounded page of retained history.
     pub async fn list(&self, query: TaskQuery) -> Result<TaskPage, TaskServiceError> {
+        checked_page_size(query.limit)?;
         self.core
             .store
             .list(query)
@@ -628,10 +630,8 @@ impl TaskExecutionService {
                         None
                     };
                     if queued {
-                        let mut queue = self.core.queue.lock();
-                        let previous_len = queue.len();
-                        queue.retain(|task| task.id != id);
-                        if queue.len() < previous_len {
+                        let removed = self.core.queue.lock().remove(id);
+                        if removed {
                             self.release_queue_slot();
                         }
                     }
@@ -715,7 +715,7 @@ impl TaskExecutionService {
                 return Err(self.handle_store_error(error));
             }
         };
-        self.core.queue.lock().push_back(QueuedTask {
+        self.core.queue.lock().push(QueuedTask {
             id,
             resources: updated.request.resources.clone(),
             retry_not_before_ms: None,
@@ -827,6 +827,40 @@ impl TaskExecutionService {
     }
 }
 
+/// Restores unprocessed tasks when a scheduler round exits early.
+struct QueueWindowGuard {
+    core: Arc<ServiceCore>,
+    tasks: Option<Vec<QueuedTask>>,
+}
+
+impl QueueWindowGuard {
+    /// Owns one bounded scheduler window until it is restored.
+    fn new(core: Arc<ServiceCore>, tasks: Vec<QueuedTask>) -> Self {
+        Self {
+            core,
+            tasks: Some(tasks),
+        }
+    }
+
+    /// Borrows the current window for policy ordering and execution.
+    fn tasks_mut(&mut self) -> &mut Vec<QueuedTask> {
+        self.tasks.as_mut().expect("scheduler window is active")
+    }
+
+    /// Returns all unprocessed work to the front of the shared queue.
+    fn restore(&mut self) {
+        if let Some(tasks) = self.tasks.take() {
+            self.core.queue.lock().restore_front(tasks);
+        }
+    }
+}
+
+impl Drop for QueueWindowGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
 /// Selects queued work, reserves resources, and starts eligible task attempts.
 async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
     loop {
@@ -836,33 +870,29 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
         if core.store_fault.lock().is_some() {
             return;
         }
-        let mut queue = core.queue.lock().drain(..).collect::<Vec<_>>();
+        let now = now_ms();
+        let window_tasks = core.queue.lock().take_window(core.scan_budget, now);
+        let mut window = QueueWindowGuard::new(Arc::clone(&core), window_tasks);
+        let queue = window.tasks_mut();
         if queue.is_empty() {
-            if core.admission.is_closed() {
+            if core.admission.is_closed() && core.queue.lock().is_empty() {
                 return;
             }
-            drop(core);
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let notified = core.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let deadline = core.queue.lock().next_deadline();
+            let wait = deadline.map(|value| std::time::Duration::from_millis(value.saturating_sub(now_ms())));
+            if let Some(wait) = wait {
+                let _ = futures::future::select(Box::pin(notified), Box::pin(tokio::time::sleep(wait))).await;
+            } else {
+                notified.await;
+            }
             continue;
         }
-        let now = now_ms();
-        let mut eligible = Vec::new();
-        let mut deferred = Vec::new();
-        let mut next_deadline = None;
-        let drained = std::mem::take(&mut queue);
-        for task in drained {
-            match task.retry_not_before_ms {
-                Some(deadline) if deadline > now => {
-                    next_deadline = Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
-                    deferred.push(task);
-                }
-                _ => eligible.push(task),
-            }
-        }
-        let mut queue = eligible;
         let order = core.policy.order(
             &QueueSnapshot {
-                tasks: queue.iter().take(core.scan_budget.max(1)).cloned().collect(),
+                tasks: queue.to_vec(),
                 scan_budget: core.scan_budget,
             },
             &core.engine.capacity(),
@@ -890,11 +920,13 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     continue;
                 }
                 Err(error) => {
+                    queue.push(task);
                     pause_on_store_fault(&core, error);
                     return;
                 }
             };
             if core.store_fault.lock().is_some() {
+                queue.push(task);
                 return;
             }
             if matches!(record.state, TaskState::Queued)
@@ -902,7 +934,6 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             {
                 let deadline = record.retry_not_before_ms.expect("deadline checked above");
                 task.retry_not_before_ms = Some(deadline);
-                next_deadline = Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
                 queue.push(task);
                 continue;
             }
@@ -919,7 +950,6 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     .resolve(&record.request.task_type, &record.request.handler_version)
             });
             let Some(handler) = handler else {
-                release_core_queue_slot(&core);
                 match mark_blocked(
                     &core,
                     &record,
@@ -930,8 +960,10 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 )
                 .await
                 {
-                    Ok(()) | Err(StoreError::Conflict | StoreError::NotFound) => {}
+                    Ok(()) | Err(StoreError::NotFound) => release_core_queue_slot(&core),
+                    Err(StoreError::Conflict) => queue.push(task),
                     Err(error) => {
+                        queue.push(task);
                         pause_on_store_fault(&core, error);
                         return;
                     }
@@ -949,10 +981,11 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     continue;
                 }
                 Err(EngineError::Unsatisfiable) => {
-                    release_core_queue_slot(&core);
                     match mark_blocked(&core, &record, "resource request is unsatisfiable".into()).await {
-                        Ok(()) | Err(StoreError::Conflict | StoreError::NotFound) => {}
+                        Ok(()) | Err(StoreError::NotFound) => release_core_queue_slot(&core),
+                        Err(StoreError::Conflict) => queue.push(task),
                         Err(error) => {
+                            queue.push(task);
                             pause_on_store_fault(&core, error);
                             return;
                         }
@@ -965,6 +998,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
             };
             if core.store_fault.lock().is_some() {
+                queue.push(task);
                 return;
             }
             let assigned = prepared.assigned_resources().to_vec();
@@ -975,7 +1009,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     continue;
                 }
                 Err(error) => {
-                    release_core_queue_slot(&core);
+                    queue.push(task);
                     pause_on_store_fault(&core, error);
                     return;
                 }
@@ -1049,8 +1083,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
             }
         }
-        queue.extend(deferred);
-        for item in &mut queue {
+        for item in queue.iter_mut() {
             let Some(position) = original_positions.get(&item.id) else {
                 continue;
             };
@@ -1062,14 +1095,14 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             }
         }
         {
-            let mut retained = core.queue.lock();
-            for item in queue.into_iter().rev() {
-                retained.push_front(item);
-            }
+            window.restore();
         }
         if !started {
-            let wait =
-                next_deadline.map(|deadline| std::time::Duration::from_millis(deadline.saturating_sub(now_ms())));
+            let wait = core
+                .queue
+                .lock()
+                .next_deadline()
+                .map(|deadline| std::time::Duration::from_millis(deadline.saturating_sub(now_ms())));
             let notified = core.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -1185,7 +1218,7 @@ async fn finish_attempt(
         {
             Ok(updated) => {
                 if matches!(final_state, TaskState::Queued) {
-                    core.queue.lock().push_back(QueuedTask {
+                    core.queue.lock().push(QueuedTask {
                         id: updated.id,
                         resources: updated.request.resources.clone(),
                         retry_not_before_ms: updated.retry_not_before_ms,

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use super::admission_budget::AdmissionBudget;
 use super::admission_gate::AdmissionGate;
 use super::retry_policy::RetryPolicy;
+use super::scheduler_queue::SchedulerQueue;
 #[cfg(feature = "event-bus")]
 use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service::ServiceCore;
@@ -333,6 +334,10 @@ impl TaskExecutionServiceBuilder {
             }
         };
         let queue_count = queue.len();
+        let mut scheduler_queue = SchedulerQueue::new();
+        for task in queue {
+            scheduler_queue.push(task);
+        }
         let runtime_handle = self
             .runtime_handle
             .unwrap_or_else(|| super::task_execution_service::runtime().handle().clone());
@@ -360,7 +365,7 @@ impl TaskExecutionServiceBuilder {
             scan_budget: self.scan_budget,
             max_attempts: self.max_attempts,
             retry_policy: self.retry_policy,
-            queue: parking_lot::Mutex::new(queue),
+            queue: parking_lot::Mutex::new(scheduler_queue),
             queue_count: std::sync::atomic::AtomicUsize::new(queue_count),
             local_handlers: parking_lot::Mutex::new(Default::default()),
             local_finalizations: parking_lot::Mutex::new(Default::default()),
