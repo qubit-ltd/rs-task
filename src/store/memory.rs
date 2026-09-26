@@ -92,6 +92,7 @@ impl TaskStore for MemoryTaskStore {
                 state: TaskState::Queued,
                 state_version: 0,
                 attempt: 0,
+                retry_not_before_ms: None,
                 accepted_at_ms: now,
                 started_at_ms: None,
                 finished_at_ms: None,
@@ -130,8 +131,14 @@ impl TaskStore for MemoryTaskStore {
             if !record.state.allows_transition_to(&command.state) {
                 return Err(StoreError::InvalidTransition);
             }
+            if command.retry_not_before_ms.is_some() && !matches!(command.state, TaskState::Queued) {
+                return Err(StoreError::InvalidRequest(
+                    "only queued tasks may have a retry deadline",
+                ));
+            }
             let starting = !matches!(record.state, TaskState::Running) && matches!(command.state, TaskState::Running);
             record.state = command.state;
+            record.retry_not_before_ms = command.retry_not_before_ms;
             record.state_version += 1;
             if starting {
                 record.attempt += 1;

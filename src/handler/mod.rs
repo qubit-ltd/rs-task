@@ -53,15 +53,15 @@ impl TaskHandler for LocalTaskHandler {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
             match closure {
-                Some(closure) => tokio::task::spawn_blocking(move || closure(context))
-                    .await
-                    .unwrap_or_else(|error| {
-                        Err(crate::model::TaskRunError {
-                            category: "panic".into(),
-                            message: error.to_string(),
-                            retryable: false,
-                        })
+                Some(closure) => match tokio::task::spawn_blocking(move || closure(context)).await {
+                    Ok(result) => result,
+                    Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                    Err(error) => Err(crate::model::TaskRunError {
+                        category: "engine".into(),
+                        message: error.to_string(),
+                        retryable: true,
                     }),
+                },
                 None => Err(crate::model::TaskRunError {
                     category: "local_handler".into(),
                     message: "one-shot local closure ran more than once".into(),

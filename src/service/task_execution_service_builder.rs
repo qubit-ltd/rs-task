@@ -9,6 +9,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use super::admission_gate::AdmissionGate;
+use super::retry_policy::RetryPolicy;
 #[cfg(feature = "event-bus")]
 use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service::ServiceCore;
@@ -90,6 +91,7 @@ pub struct TaskExecutionServiceBuilder {
     max_running_tasks: NonZeroUsize,
     scan_budget: usize,
     max_attempts: u32,
+    retry_policy: RetryPolicy,
     require_recovery: bool,
     runtime_handle: Option<tokio::runtime::Handle>,
     #[cfg(feature = "event-bus")]
@@ -114,6 +116,7 @@ impl Default for TaskExecutionServiceBuilder {
             max_running_tasks: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
             scan_budget: 128,
             max_attempts: 3,
+            retry_policy: RetryPolicy::default(),
             require_recovery: false,
             runtime_handle: None,
             #[cfg(feature = "event-bus")]
@@ -217,6 +220,13 @@ impl TaskExecutionServiceBuilder {
     #[must_use]
     pub fn max_attempts(mut self, attempts: u32) -> Self {
         self.max_attempts = attempts.max(1);
+        self
+    }
+
+    /// Sets the exponential delay applied between retryable attempts.
+    #[must_use]
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
         self
     }
 
@@ -324,12 +334,14 @@ impl TaskExecutionServiceBuilder {
             running_slots: Arc::new(tokio::sync::Semaphore::new(self.max_running_tasks.get())),
             scan_budget: self.scan_budget,
             max_attempts: self.max_attempts,
+            retry_policy: self.retry_policy,
             queue: parking_lot::Mutex::new(queue),
             queue_count: std::sync::atomic::AtomicUsize::new(queue_count),
             local_handlers: parking_lot::Mutex::new(Default::default()),
             local_finalizations: parking_lot::Mutex::new(Default::default()),
             cancellations: parking_lot::Mutex::new(Default::default()),
             changed: tokio::sync::Notify::new(),
+            wait_registry: Arc::new(super::task_wait_registry::TaskWaitRegistry::default()),
             transition_event_lock: tokio::sync::RwLock::new(()),
             admission: AdmissionGate::new(),
             owner,
@@ -423,6 +435,7 @@ async fn restore_tasks_paged(
                                 record.attempt, max_attempts
                             ),
                         },
+                        retry_not_before_ms: None,
                         output: None,
                         assigned_resources: Vec::new(),
                         cancel_requested: record.cancel_requested,
@@ -437,6 +450,7 @@ async fn restore_tasks_paged(
                         expected_version: record.state_version,
                         expected_attempt: record.attempt,
                         state: TaskState::Queued,
+                        retry_not_before_ms: None,
                         output: None,
                         assigned_resources: Vec::new(),
                         cancel_requested: false,
@@ -459,6 +473,7 @@ async fn restore_tasks_paged(
                                     record.request.task_type, record.request.handler_version
                                 ),
                             },
+                            retry_not_before_ms: None,
                             output: None,
                             assigned_resources: Vec::new(),
                             cancel_requested: false,
@@ -468,6 +483,7 @@ async fn restore_tasks_paged(
                     queue.push_back(QueuedTask {
                         id: record.id,
                         resources: record.request.resources.clone(),
+                        retry_not_before_ms: record.retry_not_before_ms,
                         bypasses: 0,
                     });
                 }

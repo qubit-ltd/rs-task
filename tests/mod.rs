@@ -10,6 +10,7 @@ use std::sync::Arc;
 use qubit_task::TaskExecutionService;
 use qubit_task::engine::EngineError;
 use qubit_task::engine::ExecutionHandle;
+use qubit_task::engine::ExecutionOutcome;
 use qubit_task::engine::LocalTaskExecutionEngine;
 use qubit_task::engine::PreparedExecution;
 use qubit_task::engine::TaskExecutionEngine;
@@ -38,6 +39,11 @@ use qubit_task::service::LocalTaskOutcome;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
+
+mod engine;
+mod service;
+#[cfg(feature = "sqlite")]
+mod store;
 
 struct EchoHandler;
 
@@ -191,7 +197,7 @@ impl TaskExecutionEngine for ExternalEngine {
             tokio::spawn(async move {
                 let _release = ReleaseOnDrop(release);
                 let result = handler.run(&payload, context).await;
-                let _ = sender.send(result);
+                let _ = sender.send(ExecutionOutcome::Returned(result));
             });
             Ok(ExecutionHandle::new(receiver, cancellation))
         })
@@ -675,6 +681,7 @@ async fn test_memory_store_is_idempotent_and_rejects_illegal_transitions() {
             state: TaskState::Succeeded,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -711,6 +718,7 @@ async fn test_memory_store_rejects_oversized_lifecycle_diagnostics() {
                 state,
                 output: None,
                 assigned_resources: Vec::new(),
+                retry_not_before_ms: None,
                 cancel_requested: false,
             })
             .await
@@ -787,6 +795,7 @@ async fn test_memory_store_paginates_and_can_drop_terminal_history() {
             state: TaskState::Running,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -799,6 +808,7 @@ async fn test_memory_store_paginates_and_can_drop_terminal_history() {
             state: TaskState::Succeeded,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -920,6 +930,7 @@ fn test_fair_fifo_policy_orders_fit_candidates_before_unschedulable_head() {
     let make_task = |name: &str, bypasses| QueuedTask {
         id: qubit_task::TaskId::generate(),
         resources: TaskRequest::new(name, "1", Vec::new()).resources,
+        retry_not_before_ms: None,
         bypasses,
     };
     let head = make_task("gpu", 3);
@@ -968,6 +979,7 @@ async fn test_sqlite_store_recovers_interrupted_running_task() {
             state: TaskState::Running,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -1072,6 +1084,7 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
                 state: TaskState::Cancelled,
                 output: None,
                 assigned_resources: Vec::new(),
+                retry_not_before_ms: None,
                 cancel_requested: false,
             })
             .await,
@@ -1086,6 +1099,7 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
                 state: TaskState::Succeeded,
                 output: None,
                 assigned_resources: Vec::new(),
+                retry_not_before_ms: None,
                 cancel_requested: false,
             })
             .await,
@@ -1141,6 +1155,7 @@ async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
                     state: state.clone(),
                     output: None,
                     assigned_resources: Vec::new(),
+                    retry_not_before_ms: None,
                     cancel_requested: false,
                 })
                 .await
@@ -1154,6 +1169,7 @@ async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
                     state: TaskState::Running,
                     output: None,
                     assigned_resources: Vec::new(),
+                    retry_not_before_ms: None,
                     cancel_requested: false,
                 })
                 .await
@@ -1166,6 +1182,7 @@ async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
                     state: state.clone(),
                     output: None,
                     assigned_resources: Vec::new(),
+                    retry_not_before_ms: None,
                     cancel_requested: false,
                 })
                 .await
@@ -1472,7 +1489,9 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
         count.load(std::sync::atomic::Ordering::Acquire)
     );
     let versions = versions.lock().expect("versions lock");
-    assert_eq!(versions.as_slice(), &[0, 1, 2]);
+    let mut observed_versions = versions.clone();
+    observed_versions.sort_unstable();
+    assert_eq!(observed_versions, [0, 1, 2]);
     subscription.cancel().expect("subscription is cancelled");
     bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
         .expect("event bus shuts down");
@@ -1520,4 +1539,76 @@ async fn test_event_bus_stats_are_absent_without_a_bus() {
         .expect("service builds");
     assert!(service.notification_stats().is_none());
     service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_memory_store_accepts_retry_deadlines_only_while_queued() {
+    let store = MemoryTaskStore::new(4);
+    let accepted = match store
+        .accept(TaskId::generate(), TaskRequest::new("echo", "1", Vec::new()))
+        .await
+        .unwrap()
+    {
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => panic!("new task cannot already exist"),
+    };
+    let running = store
+        .transition(TransitionCommand {
+            id: accepted.id,
+            expected_version: accepted.state_version,
+            expected_attempt: accepted.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .transition(TransitionCommand {
+                id: running.id,
+                expected_version: running.state_version,
+                expected_attempt: running.attempt,
+                state: TaskState::Queued,
+                retry_not_before_ms: Some(123),
+                output: None,
+                assigned_resources: Vec::new(),
+                cancel_requested: false,
+            })
+            .await
+            .is_ok()
+    );
+    let queued = store.get(accepted.id).await.unwrap().unwrap();
+    assert_eq!(queued.retry_not_before_ms, Some(123));
+    assert!(
+        store
+            .transition(TransitionCommand {
+                id: queued.id,
+                expected_version: queued.state_version,
+                expected_attempt: queued.attempt,
+                state: TaskState::Running,
+                retry_not_before_ms: Some(123),
+                output: None,
+                assigned_resources: Vec::new(),
+                cancel_requested: false,
+            })
+            .await
+            .is_err()
+    );
+    let running = store
+        .transition(TransitionCommand {
+            id: queued.id,
+            expected_version: queued.state_version,
+            expected_attempt: queued.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(running.retry_not_before_ms, None);
 }

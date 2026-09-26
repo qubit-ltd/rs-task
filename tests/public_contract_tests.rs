@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use qubit_task::engine::ExecutionHandle;
+use qubit_task::engine::ExecutionOutcome;
 use qubit_task::handler::LocalTaskHandler;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
@@ -16,13 +17,12 @@ use qubit_task::handler::TaskRunOutcome;
 #[cfg(feature = "sqlite")]
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::TaskRequest;
 
 #[test]
 fn execution_handle_cancellation_signal_is_a_shared_clone() {
     let cancellation = Arc::new(AtomicBool::new(false));
-    let (sender, receiver) = tokio::sync::oneshot::channel::<qubit_task::handler::TaskRunResult>();
+    let (sender, receiver) = tokio::sync::oneshot::channel::<ExecutionOutcome>();
     let handle = ExecutionHandle::new(receiver, cancellation.clone());
 
     let signal = handle.cancellation_signal();
@@ -131,10 +131,7 @@ async fn sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
     use qubit_task::store::SqliteTaskStore;
     use qubit_task::store::TaskStore;
 
-    let path = std::env::temp_dir().join(format!(
-        "qubit-task-invalid-request-{}.sqlite",
-        TaskId::generate()
-    ));
+    let path = std::env::temp_dir().join(format!("qubit-task-invalid-request-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     let request = TaskRequest::new("", "v1", Vec::new());
 
@@ -152,10 +149,7 @@ async fn sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
 fn sqlite_open_reports_a_non_directory_parent() {
     use qubit_task::store::SqliteTaskStore;
 
-    let parent = std::env::temp_dir().join(format!(
-        "qubit-task-not-directory-{}",
-        TaskId::generate()
-    ));
+    let parent = std::env::temp_dir().join(format!("qubit-task-not-directory-{}", TaskId::generate()));
     std::fs::write(&parent, b"not a directory").expect("parent fixture is created");
     let result = SqliteTaskStore::open(parent.join("tasks.sqlite"));
 

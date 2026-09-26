@@ -230,6 +230,9 @@ pub struct TaskRecord {
     pub state_version: u64,
     /// Number of execution attempts started.
     pub attempt: u32,
+    /// Earliest Unix epoch millisecond when a queued retry may start.
+    #[serde(default)]
+    pub retry_not_before_ms: Option<u64>,
     /// Milliseconds since Unix epoch when accepted.
     pub accepted_at_ms: u64,
     /// Milliseconds since Unix epoch when execution last started.
@@ -399,6 +402,7 @@ pub struct TaskStats {
 ///         state: TaskState::Queued,
 ///         state_version: 0,
 ///         attempt: 0,
+///         retry_not_before_ms: None,
 ///         accepted_at_ms: 0,
 ///         started_at_ms: None,
 ///         finished_at_ms: None,
@@ -452,6 +456,7 @@ pub struct StoreCapabilities {
 ///     state: TaskState::Queued,
 ///     state_version: 0,
 ///     attempt: 0,
+///     retry_not_before_ms: None,
 ///     accepted_at_ms: 0,
 ///     started_at_ms: None,
 ///     finished_at_ms: None,
@@ -487,6 +492,7 @@ pub enum AcceptOutcome {
 ///     expected_version: 0,
 ///     expected_attempt: 0,
 ///     state: qubit_task::model::TaskState::Running,
+///     retry_not_before_ms: None,
 ///     output: None,
 ///     assigned_resources: Vec::new(),
 ///     cancel_requested: false,
@@ -503,6 +509,8 @@ pub struct TransitionCommand {
     pub expected_attempt: u32,
     /// New observable state.
     pub state: TaskState,
+    /// Earliest start time for a queued retry, if delayed.
+    pub retry_not_before_ms: Option<u64>,
     /// Optional result summary.
     pub output: Option<TaskOutput>,
     /// Assigned device identifiers.

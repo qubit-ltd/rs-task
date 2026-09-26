@@ -89,6 +89,7 @@ async fn test_recovery_blocks_exhausted_attempts_and_manual_retry_preserves_reco
             state: TaskState::Running,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -102,6 +103,7 @@ async fn test_recovery_blocks_exhausted_attempts_and_manual_retry_preserves_reco
             state: TaskState::Running,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -114,6 +116,7 @@ async fn test_recovery_blocks_exhausted_attempts_and_manual_retry_preserves_reco
             state: TaskState::Queued,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -226,6 +229,7 @@ async fn test_retry_blocked_rejects_exhausted_budget_without_mutation() {
             state: TaskState::Running,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -238,6 +242,7 @@ async fn test_retry_blocked_rejects_exhausted_budget_without_mutation() {
             state: TaskState::Blocked { reason: "test".into() },
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -394,6 +399,7 @@ async fn test_recovery_retries_running_attempt_below_limit() {
             state: TaskState::Running,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await
@@ -411,6 +417,104 @@ async fn test_recovery_retries_running_attempt_below_limit() {
     assert_eq!(running.attempt, 1);
     assert_eq!(finished.attempt, 2);
     assert!(matches!(finished.state, TaskState::Succeeded));
+    service.shutdown().await.unwrap();
+    drop(service);
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn test_recovery_preserves_retry_deadline_for_queued_record() {
+    let path = temp_db();
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let accepted = accept(&store).await;
+    let running = store
+        .transition(TransitionCommand {
+            id: accepted.id,
+            expected_version: accepted.state_version,
+            expected_attempt: accepted.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 350;
+    let queued = store
+        .transition(TransitionCommand {
+            id: running.id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Queued,
+            retry_not_before_ms: Some(deadline),
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let later = accept(&store).await;
+    let later_running = store
+        .transition(TransitionCommand {
+            id: later.id,
+            expected_version: later.state_version,
+            expected_attempt: later.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let later_deadline = deadline + 50;
+    let later_queued = store
+        .transition(TransitionCommand {
+            id: later_running.id,
+            expected_version: later_running.state_version,
+            expected_attempt: later_running.attempt,
+            state: TaskState::Queued,
+            retry_not_before_ms: Some(later_deadline),
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    drop(store);
+
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .register_handler(Arc::new(Echo))
+        .unwrap()
+        .max_attempts(2)
+        .build()
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let waiting = service.get(queued.id).await.unwrap().unwrap();
+    assert_eq!(waiting.retry_not_before_ms, Some(deadline));
+    assert_eq!(waiting.attempt, 1);
+    let later_waiting = service.get(later_queued.id).await.unwrap().unwrap();
+    assert_eq!(later_waiting.retry_not_before_ms, Some(later_deadline));
+    assert_eq!(later_waiting.attempt, 1);
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(2), service.wait(queued.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.attempt, 2);
+    assert!(matches!(finished.state, TaskState::Succeeded));
+    let later_finished = tokio::time::timeout(std::time::Duration::from_secs(2), service.wait(later_queued.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(later_finished.attempt, 2);
+    assert!(matches!(later_finished.state, TaskState::Succeeded));
     service.shutdown().await.unwrap();
     drop(service);
     cleanup(&path);
