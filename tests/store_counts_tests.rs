@@ -21,6 +21,7 @@ use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
+use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
@@ -46,8 +47,18 @@ impl TaskStore for FailListStore {
         self.inner.get_by_idempotency_key(key)
     }
 
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+    fn transition<'a>(
+        &'a self,
+        command: TransitionCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
         self.inner.transition(command)
+    }
+
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+        self.inner.get_summary(id)
     }
 
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
@@ -90,19 +101,19 @@ impl TaskStore for FailListStore {
 }
 
 /// Accepts one task through the public store contract.
-async fn accept(store: &dyn TaskStore) -> TaskRecord {
+async fn accept(store: &dyn TaskStore) -> TaskSummary {
     let outcome = store
         .accept(TaskId::generate(), TaskRequest::new("count", "1", Vec::new()))
         .await
         .expect("store accepts task");
     match outcome {
-        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Accepted(record) => record.summary(),
         AcceptOutcome::Existing(_) => panic!("fresh request has no idempotency key"),
     }
 }
 
 /// Advances a record with its current revision and attempt.
-async fn transition(store: &dyn TaskStore, record: &TaskRecord, state: TaskState) -> TaskRecord {
+async fn transition(store: &dyn TaskStore, record: &TaskSummary, state: TaskState) -> TaskSummary {
     store
         .transition(TransitionCommand {
             id: record.id,

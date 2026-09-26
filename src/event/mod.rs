@@ -11,8 +11,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::model::TaskId;
-use crate::model::TaskRecord;
 use crate::model::TaskState;
+use crate::model::TaskSummary;
 
 /// Immutable status-change event suitable for duplicate-aware consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,8 +27,8 @@ pub struct TaskEvent {
     pub correlation_key: Option<String>,
 }
 
-impl From<&TaskRecord> for TaskEvent {
-    fn from(record: &TaskRecord) -> Self {
+impl From<&TaskSummary> for TaskEvent {
+    fn from(record: &TaskSummary) -> Self {
         Self {
             task_id: record.id,
             state_version: record.state_version,

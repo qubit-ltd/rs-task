@@ -28,6 +28,7 @@ use crate::model::TaskRecord;
 use crate::model::TaskRequest;
 use crate::model::TaskState;
 use crate::model::TaskStateCounts;
+use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
 use crate::model::checked_page_size;
 
@@ -216,7 +217,7 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             command
                 .state
@@ -259,7 +260,7 @@ impl TaskStore for MemoryTaskStore {
             record.output = command.output;
             if becomes_terminal {
                 record.finished_at_ms = Some(now_ms());
-                let updated = record.clone();
+                let updated = record.summary();
                 if was_unfinished {
                     debug_assert!(state.unfinished_records > 0);
                     state.unfinished_records -= 1;
@@ -272,7 +273,11 @@ impl TaskStore for MemoryTaskStore {
                 }
                 return Ok(updated);
             }
-            state.records.get(&command.id).cloned().ok_or(StoreError::NotFound)
+            state
+                .records
+                .get(&command.id)
+                .map(TaskRecord::summary)
+                .ok_or(StoreError::NotFound)
         })
     }
 
@@ -288,6 +293,43 @@ impl TaskStore for MemoryTaskStore {
 
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().records.get(&id).cloned()) })
+    }
+
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        Box::pin(async move { Ok(self.state.lock().records.get(&id).map(TaskRecord::summary)) })
+    }
+
+    fn abandon_blocked<'a>(
+        &'a self,
+        id: TaskId,
+        expected_version: u64,
+    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock();
+            let record = state.records.get_mut(&id).ok_or(StoreError::NotFound)?;
+            if record.state_version != expected_version {
+                return Err(StoreError::Conflict);
+            }
+            if !matches!(record.state, TaskState::Blocked { .. }) {
+                return Err(StoreError::InvalidTransition);
+            }
+            record.state = TaskState::Cancelled;
+            record.state_version += 1;
+            record.retry_not_before_ms = None;
+            record.finished_at_ms = Some(now_ms());
+            record.cancel_requested = false;
+            record.assigned_resources.clear();
+            let summary = record.summary();
+            debug_assert!(state.unfinished_records > 0);
+            state.unfinished_records -= 1;
+            state.terminal_order.push_back(id);
+            while state.terminal_order.len() > self.history_capacity {
+                if let Some(oldest) = state.terminal_order.front().copied() {
+                    state.remove_record(oldest);
+                }
+            }
+            Ok(summary)
+        })
     }
 
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
@@ -338,7 +380,13 @@ impl TaskStore for MemoryTaskStore {
                 .flatten();
             let records = candidates
                 .into_iter()
-                .map(|(_, id)| state.records.get(&id).expect("page candidate remains retained").clone())
+                .map(|(_, id)| {
+                    state
+                        .records
+                        .get(&id)
+                        .expect("page candidate remains retained")
+                        .summary()
+                })
                 .collect::<Vec<_>>();
             Ok(TaskPage { records, next })
         })

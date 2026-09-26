@@ -34,7 +34,7 @@ async fn accept(store: &dyn TaskStore, idempotency_key: Option<&str>) -> TaskRec
 }
 
 /// Applies a transition using the record's current revision.
-async fn transition(store: &dyn TaskStore, record: &TaskRecord, state: TaskState) -> TaskRecord {
+async fn transition(store: &dyn TaskStore, record: &TaskRecord, state: TaskState) -> qubit_task::model::TaskSummary {
     store
         .transition(TransitionCommand {
             id: record.id,
@@ -50,8 +50,28 @@ async fn transition(store: &dyn TaskStore, record: &TaskRecord, state: TaskState
         .expect("store transitions task")
 }
 
+async fn transition_summary(
+    store: &dyn TaskStore,
+    record: &qubit_task::model::TaskSummary,
+    state: TaskState,
+) -> qubit_task::model::TaskSummary {
+    store
+        .transition(TransitionCommand {
+            id: record.id,
+            expected_version: record.state_version,
+            expected_attempt: record.attempt,
+            state,
+            output: None,
+            assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
+            cancel_requested: false,
+        })
+        .await
+        .unwrap()
+}
+
 /// Creates a terminal record and returns its final snapshot.
-async fn terminal(store: &dyn TaskStore, idempotency_key: Option<&str>) -> TaskRecord {
+async fn terminal(store: &dyn TaskStore, idempotency_key: Option<&str>) -> qubit_task::model::TaskSummary {
     let record = accept(store, idempotency_key).await;
     transition(store, &record, TaskState::Cancelled).await
 }
@@ -150,6 +170,135 @@ async fn test_memory_store_prunes_only_bounded_expired_terminal_records() {
     check_pruning_contract(&store).await;
 }
 
+async fn check_abandon_blocked_contract(store: &dyn TaskStore) {
+    let original = accept(store, Some("abandon-version")).await;
+    let blocked = transition(store, &original, TaskState::Blocked { reason: "stuck".into() }).await;
+    let cancelled = store.abandon_blocked(blocked.id, blocked.state_version).await.unwrap();
+    assert!(matches!(cancelled.state, TaskState::Cancelled));
+    assert_eq!(cancelled.state_version, blocked.state_version + 1);
+    assert!(matches!(
+        store.abandon_blocked(blocked.id, blocked.state_version).await,
+        Err(StoreError::Conflict)
+    ));
+    assert_eq!(store.count_states().await.unwrap().terminal, 1);
+
+    let queued = accept(store, None).await;
+    let blocked = transition(
+        store,
+        &queued,
+        TaskState::Blocked {
+            reason: "retry race".into(),
+        },
+    )
+    .await;
+    let retried = transition_summary(store, &blocked, TaskState::Queued).await;
+    assert!(matches!(
+        store.abandon_blocked(retried.id, blocked.state_version).await,
+        Err(StoreError::Conflict)
+    ));
+    assert!(matches!(
+        store.get(retried.id).await.unwrap().unwrap().state,
+        TaskState::Queued
+    ));
+}
+
+#[tokio::test]
+async fn test_memory_store_abandons_blocked_only_at_expected_version() {
+    let store = MemoryTaskStore::new(16);
+    check_abandon_blocked_contract(&store).await;
+    let limited = MemoryTaskStore::with_limits(4, NonZeroUsize::new(1024).unwrap(), NonZeroUsize::new(1).unwrap());
+    let first = accept(&limited, None).await;
+    let blocked = transition(&limited, &first, TaskState::Blocked { reason: "old".into() }).await;
+    assert!(matches!(
+        limited
+            .accept(TaskId::generate(), TaskRequest::new("retention", "1", Vec::new()))
+            .await,
+        Err(StoreError::UnfinishedRecordLimitExceeded { .. })
+    ));
+    limited
+        .abandon_blocked(blocked.id, blocked.state_version)
+        .await
+        .unwrap();
+    assert!(
+        limited
+            .accept(TaskId::generate(), TaskRequest::new("retention", "1", Vec::new()))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn test_service_abandon_blocked_uses_the_observed_revision() {
+    use std::sync::Arc;
+
+    use qubit_task::TaskExecutionServiceBuilder;
+    use qubit_task::service::TaskServiceError;
+
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store)
+        .build()
+        .await
+        .unwrap();
+    let accepted = service
+        .submit(TaskRequest::new("no-handler", "1", b"payload".to_vec()).with_idempotency_key("service-abandon"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.wait(accepted.id).await,
+        Err(TaskServiceError::Blocked)
+    ));
+    let blocked = service.get_summary(accepted.id).await.unwrap().unwrap();
+    let page = service
+        .list(qubit_task::model::TaskQuery {
+            states: vec![qubit_task::model::TaskStateKind::Blocked],
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.records, vec![blocked.clone()]);
+    assert_eq!(
+        service.get(accepted.id).await.unwrap().unwrap().request.payload,
+        b"payload"
+    );
+    let cancelled = service
+        .abandon_blocked(blocked.id, blocked.state_version)
+        .await
+        .unwrap();
+    assert!(matches!(cancelled.state, TaskState::Cancelled));
+    assert_eq!(service.wait(accepted.id).await.unwrap(), cancelled);
+    assert!(matches!(
+        service.abandon_blocked(blocked.id, blocked.state_version).await,
+        Err(TaskServiceError::Store(StoreError::Conflict))
+    ));
+    let not_blocked = service
+        .abandon_blocked(blocked.id, cancelled.state_version)
+        .await
+        .expect_err("terminal tasks cannot be abandoned as blocked");
+    assert_eq!(
+        not_blocked.to_string(),
+        "task is not blocked (current state: Cancelled)"
+    );
+    assert!(matches!(
+        not_blocked,
+        TaskServiceError::NotBlocked {
+            actual: qubit_task::model::TaskStateKind::Cancelled
+        }
+    ));
+    service.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_store_abandons_blocked_only_at_expected_version() {
+    let path = std::env::temp_dir().join(format!("qubit-task-abandon-{}.sqlite", TaskId::generate()));
+    let store = qubit_task::store::SqliteTaskStore::open(&path).unwrap();
+    check_abandon_blocked_contract(&store).await;
+    drop(store);
+    remove_database(&path);
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_store_prunes_only_bounded_expired_terminal_records() {
@@ -211,8 +360,15 @@ async fn test_task_store_default_pruning_reports_unsupported_capability() {
         fn transition<'a>(
             &'a self,
             command: TransitionCommand,
-        ) -> qubit_task::store::TaskFuture<'a, Result<TaskRecord, StoreError>> {
+        ) -> qubit_task::store::TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
             self.0.transition(command)
+        }
+
+        fn get_summary<'a>(
+            &'a self,
+            id: TaskId,
+        ) -> qubit_task::store::TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+            self.0.get_summary(id)
         }
 
         fn get<'a>(&'a self, id: TaskId) -> qubit_task::store::TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
@@ -259,6 +415,19 @@ async fn test_task_store_default_pruning_reports_unsupported_capability() {
     }
 
     let store = NonPrunableStore(MemoryTaskStore::new(8));
+    let blocked = accept(&store, None).await;
+    let blocked = transition(
+        &store,
+        &blocked,
+        TaskState::Blocked {
+            reason: "manual review".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        store.abandon_blocked(blocked.id, blocked.state_version).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
     assert!(matches!(
         store
             .prune_terminal_before(now_ms(), NonZeroUsize::new(1).expect("one is nonzero"))

@@ -16,6 +16,7 @@ mod sqlite_tests {
     use qubit_task::model::TaskRequest;
     use qubit_task::model::TaskState;
     use qubit_task::model::TaskStateKind;
+    use qubit_task::model::TaskSummary;
     use qubit_task::model::TransitionCommand;
     use qubit_task::store::MemoryTaskStore;
     use qubit_task::store::SqliteTaskStore;
@@ -23,15 +24,16 @@ mod sqlite_tests {
 
     /// Inserts a record and moves it to the requested state through store
     /// transitions.
-    async fn insert_state(store: &dyn TaskStore, state: TaskState) -> TaskRecord {
+    async fn insert_state(store: &dyn TaskStore, state: TaskState) -> TaskSummary {
         let id = TaskId::generate();
         let accepted = store
             .accept(id, TaskRequest::new("filter-test", "1", Vec::new()))
             .await
             .expect("task accepted");
-        let AcceptOutcome::Accepted(mut record) = accepted else {
+        let AcceptOutcome::Accepted(record) = accepted else {
             panic!("task ID is newly generated");
         };
+        let mut record = record.summary();
         if matches!(
             state,
             TaskState::Failed { .. } | TaskState::Panicked { .. } | TaskState::Succeeded

@@ -399,7 +399,10 @@ impl TaskStore for ControlledStore {
         }
     }
 
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>> {
+    fn transition<'a>(
+        &'a self,
+        command: TransitionCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
         if matches!(command.state, TaskState::Cancelled)
             && self.fail_next_cancel_transition.swap(false, Ordering::AcqRel)
         {
@@ -447,6 +450,13 @@ impl TaskStore for ControlledStore {
         } else {
             self.inner.transition(command)
         }
+    }
+
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+        Box::pin(async move { self.get(id).await.map(|record| record.map(|record| record.summary())) })
     }
 
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
@@ -1741,7 +1751,7 @@ async fn test_failed_queued_to_blocked_transition_pauses_service() {
 }
 
 #[tokio::test]
-async fn test_failed_post_activation_get_pauses_service() {
+async fn test_failed_detail_read_before_activation_pauses_service() {
     let (failed_tx, failed_rx) = oneshot::channel();
     let store = Arc::new(ControlledStore {
         fail_get_on_call: AtomicUsize::new(2),
@@ -1767,17 +1777,17 @@ async fn test_failed_post_activation_get_pauses_service() {
         .task_id();
     tokio::time::timeout(Duration::from_secs(2), failed_rx)
         .await
-        .expect("post-activation get is attempted")
+        .expect("detail read is attempted before execution")
         .expect("get failure signalled");
 
     let error = tokio::time::timeout(Duration::from_secs(2), service.wait(id))
         .await
-        .expect("wait resolves after post-activation get failure")
+        .expect("wait resolves after detail read failure")
         .expect_err("wait reports store fault");
     assert!(
         matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected scheduler get failure"))
     );
-    resume_tx.send(()).expect("handler is released");
+    let _ = resume_tx.send(());
 }
 
 #[tokio::test]
@@ -2161,10 +2171,18 @@ async fn test_shutdown_statistics_failure_wakes_waiter_with_store_diagnostic() {
         .expect("handler start signalled");
 
     store.fail_next_statistics.store(true, Ordering::Release);
+    let timeout = service
+        .shutdown_until(tokio::time::Instant::now() + Duration::from_millis(30))
+        .await;
+    assert!(matches!(timeout, Err(TaskServiceError::ShutdownTimedOut)));
+    assert!(service.last_store_error().is_some());
+    resume_tx
+        .send(())
+        .expect("blocked handler is released after caller timeout");
     let error = tokio::time::timeout(Duration::from_secs(2), service.shutdown())
         .await
-        .expect("shutdown returns statistics failure")
-        .expect_err("shutdown must fail");
+        .expect("shutdown returns after the tracked attempt exits")
+        .expect_err("shutdown reports the latched store failure");
     assert!(error.to_string().contains("injected statistics failure"));
     assert!(
         service
@@ -2179,7 +2197,6 @@ async fn test_shutdown_statistics_failure_wakes_waiter_with_store_diagnostic() {
     assert!(
         matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected statistics failure"))
     );
-    resume_tx.send(()).expect("blocked handler is released");
 }
 
 #[allow(dead_code)]

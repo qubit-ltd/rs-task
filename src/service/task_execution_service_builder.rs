@@ -385,6 +385,8 @@ impl TaskExecutionServiceBuilder {
             scheduler_fault: parking_lot::Mutex::new(None),
             attempts_in_flight: std::sync::atomic::AtomicUsize::new(0),
             attempts_changed: tokio::sync::Notify::new(),
+            scheduler_finished: std::sync::atomic::AtomicBool::new(false),
+            scheduler_finished_notify: tokio::sync::Notify::new(),
             #[cfg(feature = "event-bus")]
             event_bus,
         };
@@ -442,7 +444,7 @@ async fn restore_tasks_paged(
             return Err(TaskServiceBuildError::RecoveryCapacityExceeded { limit });
         }
         for stored in page.tasks {
-            let mut record = stored.record;
+            let mut record = stored.record.summary();
             if matches!(record.state, TaskState::Queued | TaskState::Running) && record.attempt >= max_attempts {
                 store
                     .transition(crate::model::TransitionCommand {

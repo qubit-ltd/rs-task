@@ -54,6 +54,7 @@ use crate::model::TaskRequest;
 use crate::model::TaskState;
 use crate::model::TaskStateCounts;
 use crate::model::TaskStats;
+use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
 use crate::model::checked_page_size;
 use crate::scheduling::QueueSnapshot;
@@ -106,6 +107,12 @@ pub enum TaskServiceError {
     /// The requested task is blocked pending intervention.
     #[error("task is blocked and requires intervention")]
     Blocked,
+    /// The expected record revision exists, but its lifecycle is not blocked.
+    #[error("task is not blocked (current state: {actual:?})")]
+    NotBlocked {
+        /// Lifecycle state observed when the operation was rejected.
+        actual: crate::model::TaskStateKind,
+    },
     /// The task used all configured execution attempts and cannot be requeued.
     #[error("task exhausted its execution attempt budget ({attempts}/{limit})")]
     AttemptsExhausted {
@@ -179,6 +186,8 @@ pub(crate) struct ServiceCore {
     pub(crate) scheduler_fault: Mutex<Option<String>>,
     pub(crate) attempts_in_flight: AtomicUsize,
     pub(crate) attempts_changed: Notify,
+    pub(crate) scheduler_finished: AtomicBool,
+    pub(crate) scheduler_finished_notify: Notify,
     #[cfg(feature = "event-bus")]
     pub(super) event_bus: Option<TaskEventPublisher>,
 }
@@ -357,7 +366,7 @@ impl TaskExecutionService {
                     bypasses: 0,
                 });
                 self.core.changed.notify_one();
-                publish_record(&self.core, &record);
+                publish_record(&self.core, &record.summary());
                 self.core.wait_registry.notify(record.id);
                 Ok(record)
             }
@@ -461,7 +470,7 @@ impl TaskExecutionService {
                 });
                 drop(finalizations);
                 self.core.changed.notify_one();
-                publish_record(&self.core, &record);
+                publish_record(&self.core, &record.summary());
                 self.core.wait_registry.notify(record.id);
                 Ok(LocalTaskHandle::new(record.id, typed_receiver, final_receiver))
             }
@@ -530,11 +539,29 @@ impl TaskExecutionService {
             });
     }
 
-    /// Loads the latest lifecycle state of a task.
+    /// Loads the complete retained task, including its payload.
     pub async fn get(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskServiceError> {
         self.core
             .store
             .get(id)
+            .await
+            .map_err(|error| self.handle_store_error(error))
+    }
+
+    /// Loads lifecycle metadata without retrieving the potentially large
+    /// payload.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable task identifier.
+    ///
+    /// # Returns
+    ///
+    /// The payload-free summary when the task is retained, or `None` otherwise.
+    pub async fn get_summary(&self, id: TaskId) -> Result<Option<TaskSummary>, TaskServiceError> {
+        self.core
+            .store
+            .get_summary(id)
             .await
             .map_err(|error| self.handle_store_error(error))
     }
@@ -617,7 +644,7 @@ impl TaskExecutionService {
         let mut record = self
             .core
             .store
-            .get(id)
+            .get_summary(id)
             .await
             .map_err(|error| self.handle_store_error(error))?
             .ok_or(StoreError::NotFound)?;
@@ -678,7 +705,7 @@ impl TaskExecutionService {
                     let latest = self
                         .core
                         .store
-                        .get(id)
+                        .get_summary(id)
                         .await
                         .map_err(|error| self.handle_store_error(error))?
                         .ok_or(StoreError::NotFound)?;
@@ -696,7 +723,7 @@ impl TaskExecutionService {
     }
 
     /// Requeues a blocked task after external intervention.
-    pub async fn retry_blocked(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+    pub async fn retry_blocked(&self, id: TaskId) -> Result<TaskSummary, TaskServiceError> {
         let service = self.clone();
         await_admission(
             self.core
@@ -706,9 +733,58 @@ impl TaskExecutionService {
         .await
     }
 
+    /// Cancels an operator-selected blocked task if its state revision is
+    /// unchanged.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identifier of the blocked task.
+    /// * `expected_version` - State version observed during operator review.
+    ///
+    /// # Returns
+    ///
+    /// The committed cancelled summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Store(Conflict)` if the record changed after review,
+    /// `NotBlocked` if the matching revision is not blocked, or a store or
+    /// shutdown error if the operation cannot be completed.
+    pub async fn abandon_blocked(&self, id: TaskId, expected_version: u64) -> Result<TaskSummary, TaskServiceError> {
+        if let Some(error) = self.last_store_error() {
+            return Err(TaskServiceError::StoreUnavailable(error));
+        }
+        let _permit = self.core.admission.enter()?;
+        let record = self
+            .core
+            .store
+            .get_summary(id)
+            .await
+            .map_err(|error| self.handle_store_error(error))?
+            .ok_or(StoreError::NotFound)?;
+        if record.state_version != expected_version {
+            return Err(StoreError::Conflict.into());
+        }
+        if !matches!(record.state, TaskState::Blocked { .. }) {
+            return Err(TaskServiceError::NotBlocked {
+                actual: record.state.kind(),
+            });
+        }
+        let updated = self
+            .core
+            .store
+            .abandon_blocked(id, expected_version)
+            .await
+            .map_err(|error| self.handle_store_error(error))?;
+        publish_record(&self.core, &updated);
+        self.core.changed.notify_waiters();
+        self.core.wait_registry.notify(id);
+        Ok(updated)
+    }
+
     /// Requeues a blocked task while holding a permit through persistence and
     /// queue publication.
-    async fn retry_blocked_admitted(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+    async fn retry_blocked_admitted(&self, id: TaskId) -> Result<TaskSummary, TaskServiceError> {
         if let Some(error) = self.last_scheduler_error() {
             return Err(TaskServiceError::SchedulerUnavailable(error));
         }
@@ -719,7 +795,7 @@ impl TaskExecutionService {
         let record = self
             .core
             .store
-            .get(id)
+            .get_summary(id)
             .await
             .map_err(|error| self.handle_store_error(error))?
             .ok_or(StoreError::NotFound)?;
@@ -752,7 +828,7 @@ impl TaskExecutionService {
 
     /// Resolves when the task becomes terminal; returns an error if it becomes
     /// blocked.
-    pub async fn wait(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+    pub async fn wait(&self, id: TaskId) -> Result<TaskSummary, TaskServiceError> {
         let subscription = self.core.wait_registry.subscribe(id);
         loop {
             let notified = subscription.notified();
@@ -767,7 +843,7 @@ impl TaskExecutionService {
             let record = self
                 .core
                 .store
-                .get(id)
+                .get_summary(id)
                 .await
                 .map_err(|error| self.handle_store_error(error))?
                 .ok_or(StoreError::NotFound)?;
@@ -816,14 +892,20 @@ fn begin_shutdown_core(core: Arc<ServiceCore>) {
 /// idle.
 async fn coordinate_shutdown(core: Arc<ServiceCore>) -> Result<(), TaskServiceError> {
     core.admission.wait_idle().await;
+    let initial_store_fault = { core.store_fault.lock().clone() };
+    if let Some(error) = initial_store_fault {
+        return finish_failed_shutdown(&core, TaskServiceError::StoreUnavailable(error)).await;
+    }
     let scheduler_fault = { core.scheduler_fault.lock().clone() };
     if let Some(error) = scheduler_fault {
+        wait_scheduler_finished(&core).await;
         wait_for_attempts(&core).await;
         if let Some(epoch) = core.owner
-            && let Err(error) = core.store.release_owner(epoch).await
+            && let Err(release_error) = core.store.release_owner(epoch).await
         {
-            record_store_fault(&core, error.to_string());
-            return Err(TaskServiceError::Store(error));
+            return Err(TaskServiceError::SchedulerUnavailable(format!(
+                "{error}; owner release failed: {release_error}"
+            )));
         }
         return Err(TaskServiceError::SchedulerUnavailable(error));
     }
@@ -831,11 +913,13 @@ async fn coordinate_shutdown(core: Arc<ServiceCore>) -> Result<(), TaskServiceEr
         let notified = core.changed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if let Some(error) = core.store_fault.lock().clone() {
-            return Err(TaskServiceError::StoreUnavailable(error));
+        let store_fault = { core.store_fault.lock().clone() };
+        if let Some(error) = store_fault {
+            return finish_failed_shutdown(&core, TaskServiceError::StoreUnavailable(error)).await;
         }
         let scheduler_fault = { core.scheduler_fault.lock().clone() };
         if let Some(error) = scheduler_fault {
+            wait_scheduler_finished(&core).await;
             wait_for_attempts(&core).await;
             if let Some(epoch) = core.owner
                 && let Err(store_error) = core.store.release_owner(epoch).await
@@ -845,25 +929,39 @@ async fn coordinate_shutdown(core: Arc<ServiceCore>) -> Result<(), TaskServiceEr
             }
             return Err(TaskServiceError::SchedulerUnavailable(error));
         }
-        let stats = task_stats(&core).await.inspect_err(|error| {
+        let stats_result = task_stats(&core).await.inspect_err(|error| {
             if let TaskServiceError::Store(store_error) = error
                 && matches!(store_error, StoreError::Failure(_))
             {
                 record_store_fault(&core, store_error.to_string());
             }
-        })?;
+        });
+        let stats = match stats_result {
+            Ok(stats) => stats,
+            Err(_error) if core.store_fault.lock().is_some() => continue,
+            Err(error) => return Err(error),
+        };
         if stats.queued == 0 && stats.running == 0 {
             let transition_guard = core.transition_event_lock.write().await;
-            let settled_stats = task_stats(&core).await.inspect_err(|error| {
+            let settled_result = task_stats(&core).await.inspect_err(|error| {
                 if let TaskServiceError::Store(store_error) = error
                     && matches!(store_error, StoreError::Failure(_))
                 {
                     record_store_fault(&core, store_error.to_string());
                 }
-            })?;
+            });
+            let settled_stats = match settled_result {
+                Ok(stats) => stats,
+                Err(_error) if core.store_fault.lock().is_some() => {
+                    drop(transition_guard);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let scheduler_fault = { core.scheduler_fault.lock().clone() };
             if let Some(error) = scheduler_fault {
                 drop(transition_guard);
+                wait_scheduler_finished(&core).await;
                 wait_for_attempts(&core).await;
                 if let Some(epoch) = core.owner
                     && let Err(store_error) = core.store.release_owner(epoch).await
@@ -883,7 +981,9 @@ async fn coordinate_shutdown(core: Arc<ServiceCore>) -> Result<(), TaskServiceEr
         && let Err(error) = core.store.release_owner(epoch).await
     {
         record_store_fault(&core, error.to_string());
-        return Err(error.into());
+        wait_scheduler_finished(&core).await;
+        wait_for_attempts(&core).await;
+        return Err(TaskServiceError::StoreUnavailable(error.to_string()));
     }
     drop(transition_guard);
     Ok(())
@@ -902,6 +1002,33 @@ async fn wait_for_attempts(core: &ServiceCore) {
     }
 }
 
+async fn wait_scheduler_finished(core: &ServiceCore) {
+    loop {
+        let notified = core.scheduler_finished_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if core.scheduler_finished.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn finish_failed_shutdown(core: &Arc<ServiceCore>, primary: TaskServiceError) -> Result<(), TaskServiceError> {
+    wait_scheduler_finished(core).await;
+    wait_for_attempts(core).await;
+    if let Some(epoch) = core.owner
+        && let Err(release_error) = core.store.release_owner(epoch).await
+    {
+        let diagnostic = core.store_fault.lock().clone().unwrap_or_else(|| primary.to_string());
+        record_store_fault(core, format!("{diagnostic}; owner release failed: {release_error}"));
+        return Err(TaskServiceError::StoreUnavailable(format!(
+            "{diagnostic}; owner release failed: {release_error}"
+        )));
+    }
+    Err(primary)
+}
+
 impl TaskExecutionService {
     /// Starts the background scheduler and wraps its shared service state.
     pub(crate) fn start(core: ServiceCore) -> Self {
@@ -916,10 +1043,12 @@ impl TaskExecutionService {
         let supervisor_weak = weak.clone();
         service.core.runtime_handle.spawn(async move {
             let result = std::panic::AssertUnwindSafe(scheduler_loop(weak)).catch_unwind().await;
-            if let Err(payload) = result
-                && let Some(core) = supervisor_weak.upgrade()
-            {
-                record_scheduler_fault(&core, panic_message(payload));
+            if let Some(core) = supervisor_weak.upgrade() {
+                if let Err(payload) = result {
+                    record_scheduler_fault(&core, panic_message(payload));
+                }
+                core.scheduler_finished.store(true, Ordering::Release);
+                core.scheduler_finished_notify.notify_waiters();
             }
         });
         service
@@ -1011,7 +1140,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 continue;
             };
             let mut task = queue.remove(index);
-            let record = match core.store.get(id).await {
+            let record = match core.store.get_summary(id).await {
                 Ok(Some(record)) => record,
                 Ok(None) => {
                     release_core_queue_slot(&core);
@@ -1100,6 +1229,23 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 queue.push(task);
                 return;
             }
+            let current = match core.store.get(id).await {
+                Ok(Some(current))
+                    if current.state_version == record.state_version
+                        && current.attempt == record.attempt
+                        && matches!(current.state, TaskState::Queued) =>
+                {
+                    current
+                }
+                Ok(Some(_)) | Ok(None) => {
+                    release_core_queue_slot(&core);
+                    continue;
+                }
+                Err(error) => {
+                    pause_on_store_fault(&core, error);
+                    return;
+                }
+            };
             let assigned = prepared.assigned_resources().to_vec();
             let running = match transition(&core, &record, TaskState::Running, None, assigned.clone(), false).await {
                 Ok(value) => value,
@@ -1113,16 +1259,41 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     return;
                 }
             };
+            let mut running_record = current.clone();
+            running_record.state = running.state.clone();
+            running_record.state_version = running.state_version;
+            running_record.attempt = running.attempt;
+            running_record.started_at_ms = running.started_at_ms;
+            running_record.assigned_resources = running.assigned_resources.clone();
             release_core_queue_slot(&core);
             if core.store_fault.lock().is_some() {
                 return;
+            }
+            match core.store.get_summary(id).await {
+                Ok(Some(latest))
+                    if latest.state_version == running.state_version
+                        && latest.attempt == running.attempt
+                        && matches!(latest.state, TaskState::Running)
+                        && !latest.cancel_requested => {}
+                Ok(Some(latest)) if latest.attempt == running.attempt && matches!(latest.state, TaskState::Running) => {
+                    match transition(&core, &latest, TaskState::Cancelled, None, Vec::new(), false).await {
+                        Ok(cancelled) => finalize_local(&core, id, Ok(cancelled.state)),
+                        Err(error) => pause_on_store_fault(&core, error),
+                    }
+                    continue;
+                }
+                Ok(Some(_)) | Ok(None) => continue,
+                Err(error) => {
+                    pause_on_store_fault(&core, error);
+                    return;
+                }
             }
             core.local_handlers.lock().remove(&id);
             let cancelled = Arc::new(AtomicBool::new(false));
             let context = TaskContext::new(id, running.attempt, assigned, cancelled);
             match core
                 .engine
-                .activate(prepared, handler, record.request.payload.clone(), context)
+                .activate(prepared, handler, current.request.payload.clone(), context)
                 .await
             {
                 Ok(handle) => {
@@ -1137,10 +1308,10 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     core.attempts_in_flight.fetch_add(1, Ordering::AcqRel);
                     let weak = Arc::downgrade(&core);
                     core.runtime_handle
-                        .spawn(finish_attempt(weak, running.clone(), handle.receiver, running_permit));
+                        .spawn(finish_attempt(weak, running_record, handle.receiver, running_permit));
                     activated_positions.push(original_positions[&id]);
                     started = true;
-                    match core.store.get(id).await {
+                    match core.store.get_summary(id).await {
                         Ok(Some(record))
                             if record.attempt == running.attempt
                                 && matches!(record.state, TaskState::Running)
@@ -1158,11 +1329,11 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
                 Err(error) => {
                     let reason = format!("engine activation failed: {error}");
-                    let mut latest = running;
+                    let mut latest = running_record.summary();
                     loop {
                         match mark_blocked(&core, &latest, reason.clone()).await {
                             Ok(()) => break,
-                            Err(StoreError::Conflict) => match core.store.get(id).await {
+                            Err(StoreError::Conflict) => match core.store.get_summary(id).await {
                                 Ok(Some(record))
                                     if record.attempt == latest.attempt
                                         && matches!(record.state, TaskState::Running) =>
@@ -1298,7 +1469,7 @@ async fn finish_attempt(
         }
     }
     loop {
-        let latest = match core.store.get(running.id).await {
+        let latest = match core.store.get_summary(running.id).await {
             Ok(Some(record)) if matches!(record.state, TaskState::Running) && record.attempt == running.attempt => {
                 record
             }
@@ -1363,7 +1534,7 @@ impl Drop for AttemptInFlightGuard {
 }
 
 /// Persists a blocked state and completes any local handle waiting on it.
-async fn mark_blocked(core: &ServiceCore, record: &TaskRecord, reason: String) -> Result<(), StoreError> {
+async fn mark_blocked(core: &ServiceCore, record: &TaskSummary, reason: String) -> Result<(), StoreError> {
     let updated = transition(
         core,
         record,
@@ -1410,17 +1581,7 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
     for sender in finalizations {
         let _ = sender.send(Err(LocalTaskResultError::StoreUnavailable(diagnostic.clone())));
     }
-    if core.admission.close() {
-        let core = Arc::clone(core);
-        let runtime_handle = core.runtime_handle.clone();
-        runtime_handle.spawn(async move {
-            core.admission.wait_idle().await;
-            let notification = close_notification_publisher(&core).await;
-            let result = combine_shutdown_results(Err(TaskServiceError::StoreUnavailable(diagnostic)), notification);
-            core.admission.finish_close(result);
-            core.changed.notify_waiters();
-        });
-    }
+    begin_shutdown_core(Arc::clone(core));
     core.changed.notify_waiters();
     core.wait_registry.notify_all();
 }
@@ -1537,7 +1698,7 @@ async fn await_admission<T>(
 }
 
 /// Enqueues a best-effort lifecycle event when event-bus support is enabled.
-fn publish_record(core: &ServiceCore, record: &TaskRecord) {
+fn publish_record(core: &ServiceCore, record: &TaskSummary) {
     #[cfg(feature = "event-bus")]
     if let Some(bus) = &core.event_bus {
         bus.enqueue(crate::event::TaskEvent::from(record));
@@ -1549,24 +1710,24 @@ fn publish_record(core: &ServiceCore, record: &TaskRecord) {
 /// Applies a version-checked store transition and publishes its new revision.
 async fn transition(
     core: &ServiceCore,
-    record: &TaskRecord,
+    record: &TaskSummary,
     state: TaskState,
     output: Option<crate::model::TaskOutput>,
     assigned_resources: Vec<String>,
     cancel_requested: bool,
-) -> Result<TaskRecord, StoreError> {
+) -> Result<TaskSummary, StoreError> {
     transition_with_deadline(core, record, state, None, output, assigned_resources, cancel_requested).await
 }
 
 async fn transition_with_deadline(
     core: &ServiceCore,
-    record: &TaskRecord,
+    record: &TaskSummary,
     state: TaskState,
     retry_not_before_ms: Option<u64>,
     output: Option<crate::model::TaskOutput>,
     assigned_resources: Vec<String>,
     cancel_requested: bool,
-) -> Result<TaskRecord, StoreError> {
+) -> Result<TaskSummary, StoreError> {
     let _guard = core.transition_event_lock.read().await;
     let updated = core
         .store

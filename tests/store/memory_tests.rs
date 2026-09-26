@@ -123,6 +123,49 @@ async fn test_memory_store_unfinished_limit_tracks_blocked_transitions() {
     ));
 }
 
+#[tokio::test]
+async fn test_memory_summary_reads_preserve_large_payload_and_lifecycle_metadata() {
+    let store = MemoryTaskStore::new(8);
+    let request =
+        TaskRequest::new("large-summary", "v1", vec![9; 1024 * 1024]).with_idempotency_key("large-summary-key");
+    let accepted = match store.accept(TaskId::generate(), request).await.unwrap() {
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => unreachable!(),
+    };
+    let summary = store.get_summary(accepted.id).await.unwrap().unwrap();
+    assert_eq!(summary.request.task_type, "large-summary");
+    assert_eq!(
+        store
+            .list(TaskQuery {
+                limit: 1,
+                ..TaskQuery::default()
+            })
+            .await
+            .unwrap()
+            .records[0],
+        summary
+    );
+    let running = store
+        .transition(TransitionCommand {
+            id: accepted.id,
+            expected_version: summary.state_version,
+            expected_attempt: summary.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: vec!["cpu-0".into()],
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(running.state, TaskState::Running));
+    assert_eq!(running.state_version, summary.state_version + 1);
+    assert_eq!(
+        store.get(accepted.id).await.unwrap().unwrap().request.payload,
+        vec![9; 1024 * 1024]
+    );
+}
+
 /// Applies the documented default cap to zero-payload nonterminal records.
 #[tokio::test]
 async fn test_memory_store_default_unfinished_limit() {
