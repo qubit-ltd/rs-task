@@ -37,6 +37,9 @@ use crate::model::TaskState;
 use crate::model::TaskStateCounts;
 use crate::model::TransitionCommand;
 
+const SCHEMA_VERSION: i64 = 1;
+const RECORD_FORMAT_VERSION: i64 = 1;
+
 /// SQLite-backed history with an exclusive OS lock for one active service
 /// process.
 pub struct SqliteTaskStore {
@@ -95,11 +98,14 @@ impl SqliteTaskStore {
             .map_err(failure)?;
         lock.try_lock_exclusive()
             .map_err(|error| StoreError::Failure(format!("database is owned by another service: {error}")))?;
-        let connection = Connection::open(&path).map_err(failure)?;
+        let mut connection = Connection::open(&path).map_err(failure)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(failure)?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);").map_err(failure)?;
+        connection
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .map_err(failure)?;
+        initialize_schema(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             owner_state: Arc::new(Mutex::new(SqliteOwnerState {
@@ -173,9 +179,9 @@ impl TaskStore for SqliteTaskStore {
         self.run_write(move |connection| {
             let transaction = connection.unchecked_transaction().map_err(failure)?;
             if let Some(key) = &request.idempotency_key {
-                let stored = transaction.query_row("SELECT record_json FROM tasks WHERE idempotency_key=?1", [key], |row| row.get::<_, String>(0)).optional().map_err(failure)?;
-                if let Some(json) = stored {
-                    let record: TaskRecord = serde_json::from_str(&json).map_err(failure)?;
+                let stored = transaction.query_row("SELECT record_format_version, record_json FROM tasks WHERE idempotency_key=?1", [key], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).optional().map_err(failure)?;
+                if let Some((format_version, json)) = stored {
+                    let record = decode_record(format_version, &json)?;
                     if record.request != request { return Err(StoreError::IdempotencyConflict); }
                     transaction.commit().map_err(failure)?;
                     return Ok(AcceptOutcome::Existing(record));
@@ -183,7 +189,7 @@ impl TaskStore for SqliteTaskStore {
             }
             let request_json = serde_json::to_string(&request).map_err(failure)?;
             let record_json = serde_json::to_string(&initial).map_err(failure)?;
-            transaction.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_json) VALUES (?1,'Queued',?2,?3,?4,?5,?6)", rusqlite::params![id.to_string(), initial.accepted_at_ms, request.correlation_key, request.idempotency_key, request_json, record_json]).map_err(failure)?;
+            transaction.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,record_json) VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7)", rusqlite::params![id.to_string(), initial.accepted_at_ms, request.correlation_key, request.idempotency_key, request_json, RECORD_FORMAT_VERSION, record_json]).map_err(failure)?;
             transaction.commit().map_err(failure)?;
             Ok(AcceptOutcome::Accepted(initial))
         })
@@ -206,24 +212,30 @@ impl TaskStore for SqliteTaskStore {
         }
         self.run_write(move |connection| {
             let transaction = connection.unchecked_transaction().map_err(failure)?;
-            let json = transaction
+            let stored = transaction
                 .query_row(
-                    "SELECT record_json FROM tasks WHERE id=?1",
+                    "SELECT record_format_version, record_json FROM tasks WHERE id=?1",
                     [command.id.to_string()],
-                    |row| row.get::<_, String>(0),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
                 .map_err(failure)?
                 .ok_or(StoreError::NotFound)?;
-            let mut record: TaskRecord = serde_json::from_str(&json).map_err(failure)?;
+            let mut record = decode_record(stored.0, &stored.1)?;
             if record.state_version != command.expected_version || record.attempt != command.expected_attempt {
                 return Err(StoreError::Conflict);
             }
             if !record.state.allows_transition_to(&command.state) {
                 return Err(StoreError::InvalidTransition);
             }
+            if command.retry_not_before_ms.is_some() && !matches!(command.state, TaskState::Queued) {
+                return Err(StoreError::InvalidRequest(
+                    "only queued tasks may have a retry deadline",
+                ));
+            }
             let starting = !matches!(record.state, TaskState::Running) && matches!(command.state, TaskState::Running);
             record.state = command.state;
+            record.retry_not_before_ms = command.retry_not_before_ms;
             record.state_version += 1;
             if starting {
                 record.attempt += 1;
@@ -255,15 +267,17 @@ impl TaskStore for SqliteTaskStore {
             let Some(key) = request.idempotency_key.as_ref() else {
                 return Ok(None);
             };
-            let json = connection
-                .query_row("SELECT record_json FROM tasks WHERE idempotency_key=?1", [key], |row| {
-                    row.get::<_, String>(0)
-                })
+            let stored = connection
+                .query_row(
+                    "SELECT record_format_version, record_json FROM tasks WHERE idempotency_key=?1",
+                    [key],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
                 .optional()
                 .map_err(failure)?;
-            match json {
-                Some(json) => {
-                    let record: TaskRecord = serde_json::from_str(&json).map_err(failure)?;
+            match stored {
+                Some((format_version, json)) => {
+                    let record = decode_record(format_version, &json)?;
                     if record.request != request {
                         return Err(StoreError::IdempotencyConflict);
                     }
@@ -276,18 +290,19 @@ impl TaskStore for SqliteTaskStore {
 
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move {
-            let json = self
+            let stored = self
                 .run(move |connection| {
                     connection
-                        .query_row("SELECT record_json FROM tasks WHERE id=?1", [id.to_string()], |row| {
-                            row.get::<_, String>(0)
-                        })
+                        .query_row(
+                            "SELECT record_format_version, record_json FROM tasks WHERE id=?1",
+                            [id.to_string()],
+                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                        )
                         .optional()
                         .map_err(failure)
                 })
                 .await?;
-            json.map(|value| serde_json::from_str(&value).map_err(failure))
-                .transpose()
+            stored.map(|(version, json)| decode_record(version, &json)).transpose()
         })
     }
 
@@ -306,7 +321,7 @@ impl TaskStore for SqliteTaskStore {
                 .map_err(|_| StoreError::InvalidRequest("task history cursor timestamp is too large"))?;
             let state_kinds = query.states.iter().map(|kind| kind.as_str()).collect::<Vec<_>>();
             let mut sql = String::from(
-                "SELECT record_json FROM tasks WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2)) AND (?3 IS NULL OR correlation_key = ?3)",
+                "SELECT record_format_version, record_json FROM tasks WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2)) AND (?3 IS NULL OR correlation_key = ?3)",
             );
             if !state_kinds.is_empty() {
                 let placeholders = (4..4 + state_kinds.len())
@@ -336,9 +351,7 @@ impl TaskStore for SqliteTaskStore {
             let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(failure)?;
             let mut records = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
-                records.push(
-                    serde_json::from_str::<TaskRecord>(&row.get::<_, String>(0).map_err(failure)?).map_err(failure)?,
-                );
+                records.push(decode_record(row.get(0).map_err(failure)?, &row.get::<_, String>(1).map_err(failure)?)?);
             }
             let has_more = records.len() > page_size;
             if has_more {
@@ -442,10 +455,14 @@ impl TaskStore for SqliteTaskStore {
 
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         self.run(move |connection| {
-            let mut statement = connection.prepare("SELECT record_json FROM tasks WHERE state_kind IN ('Queued','Running') AND (?1 IS NULL OR id > ?1) ORDER BY id LIMIT 257").map_err(failure)?;
+            let mut statement = connection.prepare("SELECT record_format_version, record_json FROM tasks WHERE state_kind IN ('Queued','Running') AND (?1 IS NULL OR id > ?1) ORDER BY id LIMIT 257").map_err(failure)?;
             let mut rows = statement.query([cursor.map(|id| id.to_string())]).map_err(failure)?;
             let mut tasks = Vec::new();
-            while let Some(row) = rows.next().map_err(failure)? { tasks.push(StoredTask { record: serde_json::from_str(&row.get::<_, String>(0).map_err(failure)?).map_err(failure)? }); }
+            while let Some(row) = rows.next().map_err(failure)? {
+                tasks.push(StoredTask {
+                    record: decode_record(row.get(0).map_err(failure)?, &row.get::<_, String>(1).map_err(failure)?)?,
+                });
+            }
             let has_more = tasks.len() > 256;
             if has_more { tasks.truncate(256); }
             let next = has_more.then(|| tasks.last().map(|task| task.record.id)).flatten();
@@ -471,6 +488,78 @@ impl TaskStore for SqliteTaskStore {
     }
 }
 
+/// Initializes the current SQLite schema or upgrades a supported older schema.
+fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(failure)?;
+    if !(0..=SCHEMA_VERSION).contains(&version) {
+        return Err(StoreError::Failure(format!(
+            "unsupported SQLite task schema version {version}; supported version is {SCHEMA_VERSION}"
+        )));
+    }
+
+    let transaction = connection.transaction().map_err(failure)?;
+    let table_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if table_exists {
+        let columns = {
+            let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(failure)?;
+            rows.collect::<Result<std::collections::HashSet<_>, _>>()
+                .map_err(failure)?
+        };
+        for required in [
+            "id",
+            "state_kind",
+            "accepted_at",
+            "correlation_key",
+            "idempotency_key",
+            "request_json",
+            "record_json",
+        ] {
+            if !columns.contains(required) {
+                return Err(StoreError::Failure(format!(
+                    "SQLite task schema is missing required column `{required}`"
+                )));
+            }
+        }
+        if !columns.contains("record_format_version") {
+            transaction
+                .execute_batch("ALTER TABLE tasks ADD COLUMN record_format_version INTEGER NOT NULL DEFAULT 1")
+                .map_err(failure)?;
+        }
+    } else {
+        transaction
+            .execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 1, record_json TEXT NOT NULL);")
+            .map_err(failure)?;
+    }
+    transaction
+        .execute_batch("CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);")
+        .map_err(failure)?;
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(failure)?;
+    transaction.commit().map_err(failure)
+}
+
+/// Decodes a task record only when its persisted row format is supported.
+fn decode_record(format_version: i64, json: &str) -> Result<TaskRecord, StoreError> {
+    if format_version != RECORD_FORMAT_VERSION {
+        return Err(StoreError::Failure(format!(
+            "unsupported SQLite task record format version {format_version}; supported version is {RECORD_FORMAT_VERSION}"
+        )));
+    }
+    serde_json::from_str(json).map_err(failure)
+}
+
 /// Builds the initial queued record before the SQLite acceptance transaction.
 fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
     TaskRecord {
@@ -479,6 +568,7 @@ fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
         state: TaskState::Queued,
         state_version: 0,
         attempt: 0,
+        retry_not_before_ms: None,
         accepted_at_ms: now_ms(),
         started_at_ms: None,
         finished_at_ms: None,

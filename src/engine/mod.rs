@@ -76,9 +76,20 @@ impl Drop for PreparedExecution {
     }
 }
 
+/// Outcome reported by an execution backend for one started attempt.
+#[derive(Debug)]
+pub enum ExecutionOutcome {
+    /// The handler returned a result, including a classified application error.
+    Returned(TaskRunResult),
+    /// The handler panicked while constructing or polling its future.
+    Panicked(String),
+    /// The execution worker stopped before it could report a handler result.
+    WorkerStopped(String),
+}
+
 /// Completion notification returned when an attempt has started.
 pub struct ExecutionHandle {
-    pub(crate) receiver: tokio::sync::oneshot::Receiver<TaskRunResult>,
+    pub(crate) receiver: tokio::sync::oneshot::Receiver<ExecutionOutcome>,
     pub(crate) cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -86,7 +97,7 @@ impl ExecutionHandle {
     /// Creates a handle for a custom engine implementation.
     #[must_use]
     pub fn new(
-        receiver: tokio::sync::oneshot::Receiver<TaskRunResult>,
+        receiver: tokio::sync::oneshot::Receiver<ExecutionOutcome>,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self { receiver, cancelled }

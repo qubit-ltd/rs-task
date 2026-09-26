@@ -44,6 +44,7 @@ mod sqlite_tests {
                     state: TaskState::Running,
                     output: None,
                     assigned_resources: Vec::new(),
+                    retry_not_before_ms: None,
                     cancel_requested: false,
                 })
                 .await
@@ -57,6 +58,7 @@ mod sqlite_tests {
                 state,
                 output: None,
                 assigned_resources: Vec::new(),
+                retry_not_before_ms: None,
                 cancel_requested: false,
             })
             .await

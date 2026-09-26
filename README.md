@@ -68,6 +68,8 @@ A request handler can submit an import, return a task ID, and let a versioned ha
 
 The crate provides bounded queues, resource-aware scheduling, local or pluggable execution, query and cancellation APIs, and optional SQLite recovery and lifecycle notifications. It does not provide distributed multi-node scheduling, workflow dependencies, cron scheduling, forced interruption of arbitrary code, or exactly-once business side effects.
 
+Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite version 0 databases migrate to schema version 1 on open.
+
 The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; startup fails with records preserved if that recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
 
 ## Project documents

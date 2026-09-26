@@ -17,7 +17,6 @@ use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
-use qubit_task::model::TaskRunError;
 
 struct HoldingHandler {
     started: tokio::sync::mpsc::UnboundedSender<()>,
@@ -118,11 +117,7 @@ impl TaskHandler for PanicThenSucceed {
     ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                Err(TaskRunError {
-                    category: "panic".into(),
-                    message: "injected panic result".into(),
-                    retryable: false,
-                })
+                panic!("injected panic");
             } else {
                 Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
             }

@@ -24,6 +24,8 @@ pub use handler::TaskHandler;
 pub use model::TaskId;
 pub use model::TaskRecord;
 pub use model::TaskRequest;
+pub use service::RetryPolicy;
+pub use service::RetryPolicyError;
 pub use service::TaskExecutionService;
 pub use service::TaskExecutionServiceBuilder;
 pub use store::TaskStore;

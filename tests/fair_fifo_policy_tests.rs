@@ -13,6 +13,7 @@ fn queued_task(name: &str) -> QueuedTask {
     QueuedTask {
         id: TaskId::generate(),
         resources: TaskRequest::new(name, "1", Vec::new()).resources,
+        retry_not_before_ms: None,
         bypasses: 0,
     }
 }
