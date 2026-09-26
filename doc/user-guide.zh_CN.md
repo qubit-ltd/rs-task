@@ -38,6 +38,8 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 `in_memory()` 会在调用位置明确表示易失语义。它使用本机执行引擎、系统可用 CPU 并行度（无法获取时为 1）、最多 1024 个等待任务，以及最多 1024 条终态历史。它不会探测 GPU。`submit_local` 接收进程内闭包并返回类型化的 `LocalTaskHandle<R, E>`；闭包在 Tokio 阻塞线程池运行。句柄提供闭包的进程内返回值或原始错误，而 `TaskRecord.output` 只保留较小的 `TaskOutput` 摘要。自定义异步处理器应自行把长时间 CPU 运算或阻塞 I/O 移出异步工作线程。
 
+内存 store 默认最多保留 2048 条非终态记录，`Blocked` 也计入上限。可将 `MemoryTaskStore::with_limits(history_capacity, payload_budget, unfinished_limit)` 的结果通过 `TaskExecutionServiceBuilder::store(Arc::new(...))` 注入以定制上限；达到上限会返回 `UnfinishedRecordLimitExceeded`，已有记录的幂等重放仍可成功。
+
 ~~~rust,no_run
 use qubit_task::TaskExecutionService;
 use qubit_task::model::TaskOutput;
@@ -181,7 +183,7 @@ let service = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sql
     .build().await?;
 ~~~
 
-SQLite 以事务方式保存任务请求和状态变化。版本 0 数据库在打开时保留任务与幂等索引并自动迁移至 schema 版本 1；更高的未知 schema 版本或未知记录格式会明确报错。操作系统文件锁确保同一数据库不会同时由多个服务进程执行。构建器取得所有权并扫描未完成任务后才返回。数据库被占用或所选能力不支持恢复时，服务启动失败，不会自动回退到内存。找不到历史任务对应的处理器时，任务保留在存储中并置为 `Blocked`，构建仍可成功。
+SQLite 将不可变请求与生命周期状态分开保存，状态更新只写生命周期 JSON，不会重复写入大型 payload。schema 0/1 数据库在打开时以单个事务迁移到 schema 2，并保留任务与幂等索引；更高的未知 schema 版本或未知记录格式会明确报错。操作系统文件锁确保同一数据库不会同时由多个服务进程执行。构建器取得所有权并扫描未完成任务后才返回。数据库被占用或所选能力不支持恢复时，服务启动失败，不会自动回退到内存。找不到历史任务对应的处理器时，任务保留在存储中并置为 `Blocked`，构建仍可成功。
 
 `capabilities()` 会报告实际装配的存储能力 `persistent_history` 和 `restart_recovery`。第三方存储也可以持久化历史，但不支持恢复任务。每个 `TaskStore` 实现都必须提供 `count_states()`，在一次聚合中统计所有保留记录。`stats()` 只调用一次该方法，并向调用者传播统计失败。状态计数和执行引擎资源快照先后读取，因此是时间相邻但非原子的两个快照。统计成本是一次聚合查询，不随历史分页数增长。
 
@@ -226,6 +228,8 @@ SQLite 以事务方式保存任务请求和状态变化。版本 0 数据库在�
 幂等键，因此该键之后可以重新受理。需要归档时，请在清理前备份持久历史。Builder 的
 `runtime_handle(Handle)` 指定服务后台任务使用的 runtime；该 runtime 须存活到
 `shutdown()` 返回。
+服务与两种内置 store 都将 `TaskQuery.limit` 限制为 256；超过上限返回
+`InvalidRequest`，`limit=0` 按 1 处理。内存 store 的分页选择额外空间随页长有界增长。
 
 ~~~rust,no_run
 use qubit_task::service::TaskExecutionServiceBuilder;

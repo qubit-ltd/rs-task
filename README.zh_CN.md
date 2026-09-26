@@ -19,7 +19,7 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 ## 从易失型本机任务开始
 
-这个具名预设把任务状态保存在内存中。进程退出时未完成任务会丢失，终态历史最多保留 1024 条。
+这个具名预设把任务状态保存在内存中。进程退出时未完成任务会丢失，终态历史最多保留 1024 条；非终态记录默认最多 2048 条，`Blocked` 也占用名额。每页历史查询最多返回 256 条。
 
 ```rust,no_run
 use qubit_task::TaskExecutionService;
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API 与存储契约
 
-自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite 版本 0 数据库会在打开时迁移到 schema 版本 1。
+自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite schema 0/1 数据库会在打开时事务性迁移到 schema 2。SQLite 将不可变请求 JSON 与生命周期 JSON 分开保存，状态变化不会重写大型 payload。
 
 服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
 

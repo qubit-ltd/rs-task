@@ -48,6 +48,13 @@ GPUs. `submit_local` accepts an in-process closure and returns a typed
 the closure's in-process value or original error, while `TaskRecord.output`
 retains only the small `TaskOutput` summary. Custom async handlers must move
 long CPU-bound or blocking work off async runtime workers themselves.
+The default memory store retains at most 2048 nonterminal records, including
+`Blocked` records. Configure a different limit by supplying a
+`MemoryTaskStore::with_limits(history_capacity, payload_budget, unfinished_limit)`
+to `TaskExecutionServiceBuilder::store(Arc::new(...))`; `history_capacity`
+may be zero, while payload and unfinished limits use `NonZeroUsize`.
+Reaching the unfinished limit returns `UnfinishedRecordLimitExceeded`, while
+idempotent replays of retained tasks continue to work.
 
 ~~~rust,no_run
 use qubit_task::TaskExecutionService;
@@ -199,7 +206,7 @@ let service = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sql
     .build().await?;
 ~~~
 
-SQLite stores accepted task descriptions and state changes transactionally. Opening a version 0 database migrates it in place to schema version 1 while retaining tasks and idempotency indexes. Newer schema versions and unknown record format versions are rejected with an explicit error. An
+SQLite stores immutable requests separately from lifecycle state. State transitions update only lifecycle JSON, so large payloads are not rewritten. Opening a schema 0 or 1 database migrates it transactionally to schema 2 while retaining tasks and idempotency indexes. Newer schema versions and unknown record format versions are rejected with an explicit error. An
 operating-system lock prevents two service processes from executing the same
 database at once. The builder acquires ownership and scans unfinished work
 before returning. A database lock conflict, missing provider, or unsupported
@@ -298,6 +305,9 @@ removes the records' idempotency keys, making those keys available again. Back
 up persistent history first if the application needs an archive. The builder's
 `runtime_handle(Handle)` selects the runtime for service-owned background tasks;
 keep it alive until `shutdown()` returns.
+Every service and built-in store rejects a `TaskQuery.limit` above 256 with
+`InvalidRequest`; zero is treated as a one-record page. The memory store scans
+history with extra selection space bounded by the requested page size.
 
 ~~~rust,no_run
 use qubit_task::service::TaskExecutionServiceBuilder;
