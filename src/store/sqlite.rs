@@ -262,11 +262,9 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
-    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        let key = key.to_owned();
         self.run(move |connection| {
-            let Some(key) = request.idempotency_key.as_ref() else {
-                return Ok(None);
-            };
             let stored = connection
                 .query_row(
                     "SELECT record_format_version, record_json FROM tasks WHERE idempotency_key=?1",
@@ -275,16 +273,9 @@ impl TaskStore for SqliteTaskStore {
                 )
                 .optional()
                 .map_err(failure)?;
-            match stored {
-                Some((format_version, json)) => {
-                    let record = decode_record(format_version, &json)?;
-                    if record.request != request {
-                        return Err(StoreError::IdempotencyConflict);
-                    }
-                    Ok(Some(record))
-                }
-                None => Ok(None),
-            }
+            stored
+                .map(|(format_version, json)| decode_record(format_version, &json))
+                .transpose()
         })
     }
 

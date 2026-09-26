@@ -8,6 +8,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use super::admission_budget::AdmissionBudget;
 use super::admission_gate::AdmissionGate;
 use super::retry_policy::RetryPolicy;
 #[cfg(feature = "event-bus")]
@@ -88,6 +89,8 @@ pub struct TaskExecutionServiceBuilder {
     handlers: TaskHandlerRegistry,
     capacity: ResourceCapacity,
     queue_capacity: usize,
+    max_inflight_payload_bytes: NonZeroUsize,
+    max_inflight_submissions: NonZeroUsize,
     max_running_tasks: NonZeroUsize,
     scan_budget: usize,
     max_attempts: u32,
@@ -113,6 +116,8 @@ impl Default for TaskExecutionServiceBuilder {
                 ..ResourceCapacity::default()
             },
             queue_capacity: 1024,
+            max_inflight_payload_bytes: NonZeroUsize::new(64 * 1024 * 1024).expect("default payload budget is nonzero"),
+            max_inflight_submissions: NonZeroUsize::new(64).expect("default submission limit is nonzero"),
             max_running_tasks: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
             scan_budget: 128,
             max_attempts: 3,
@@ -132,6 +137,12 @@ impl TaskExecutionServiceBuilder {
     #[must_use]
     pub fn in_memory() -> Self {
         Self::default().store(Arc::new(MemoryTaskStore::new(1024)))
+    }
+
+    /// Selects volatile storage with an explicit retained payload budget.
+    #[must_use]
+    pub fn in_memory_with_payload_budget(limit: NonZeroUsize) -> Self {
+        Self::default().store(Arc::new(MemoryTaskStore::with_payload_budget(1024, limit)))
     }
 
     /// Selects a restart-recoverable SQLite store when enabled.
@@ -199,6 +210,20 @@ impl TaskExecutionServiceBuilder {
     #[must_use]
     pub fn queue_capacity(mut self, capacity: usize) -> Self {
         self.queue_capacity = capacity;
+        self
+    }
+
+    /// Sets the maximum payload bytes retained by in-flight admission workers.
+    #[must_use]
+    pub fn max_inflight_payload_bytes(mut self, limit: NonZeroUsize) -> Self {
+        self.max_inflight_payload_bytes = limit;
+        self
+    }
+
+    /// Sets the maximum number of in-flight admission workers.
+    #[must_use]
+    pub fn max_inflight_submissions(mut self, limit: NonZeroUsize) -> Self {
+        self.max_inflight_submissions = limit;
         self
     }
 
@@ -344,6 +369,10 @@ impl TaskExecutionServiceBuilder {
             wait_registry: Arc::new(super::task_wait_registry::TaskWaitRegistry::default()),
             transition_event_lock: tokio::sync::RwLock::new(()),
             admission: AdmissionGate::new(),
+            admission_budget: Arc::new(AdmissionBudget::new(
+                self.max_inflight_payload_bytes,
+                self.max_inflight_submissions,
+            )),
             owner,
             store_fault: parking_lot::Mutex::new(None),
             #[cfg(feature = "event-bus")]
@@ -605,7 +634,10 @@ mod tests {
         assert!(service.get(TaskId::generate()).await.unwrap().is_none());
 
         let accepted = service
-            .submit(crate::model::TaskRequest::new("builder-test", "1", Vec::new()))
+            .submit(
+                crate::model::TaskRequest::new("builder-test", "1", Vec::new())
+                    .with_idempotency_key("builder-test-submit"),
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -640,7 +672,10 @@ mod tests {
         assert_eq!(local.result().await.unwrap().unwrap(), 7);
 
         let retrying = service
-            .submit(crate::model::TaskRequest::new("retry-once", "1", Vec::new()))
+            .submit(
+                crate::model::TaskRequest::new("retry-once", "1", Vec::new())
+                    .with_idempotency_key("builder-retry-once"),
+            )
             .await
             .unwrap();
         let retried = service.wait(retrying.id).await.unwrap();
@@ -648,7 +683,10 @@ mod tests {
         assert!(matches!(retried.state, TaskState::Succeeded));
 
         let blocked = service
-            .submit(crate::model::TaskRequest::new("missing", "1", Vec::new()))
+            .submit(
+                crate::model::TaskRequest::new("missing", "1", Vec::new())
+                    .with_idempotency_key("builder-missing-handler"),
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -697,7 +735,13 @@ mod tests {
         let store = SqliteTaskStore::open(&path).unwrap();
         let id = TaskId::generate();
         let request = crate::model::TaskRequest::new("builder-test", "1", Vec::new());
-        assert!(store.find_idempotent(request.clone()).await.unwrap().is_none());
+        assert!(
+            store
+                .get_by_idempotency_key("builder-test-key")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(matches!(
             store.accept(id, request).await.unwrap(),
             AcceptOutcome::Accepted(_)
