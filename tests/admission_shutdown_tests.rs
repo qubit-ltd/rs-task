@@ -14,6 +14,44 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::EventBus;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::error::SpiError;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::model::ProviderId;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::model::PublishAcknowledgement;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::DelayedDeliveryCapability;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::DurabilityCapability;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::EventBusCapabilities;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::EventBusSpi;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::EventSubscriptionSpi;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::OrderingCapability;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::OutboundMessage;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::PayloadModes;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::PublishGuarantee;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::PublishVisibility;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::ReplayCapability;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::SettlementCapabilities;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::ShutdownMode;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::ShutdownOutcome;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::engine::EngineError;
 use qubit_task::engine::ExecutionHandle;
@@ -107,6 +145,65 @@ impl ControlledStore {
             running_transition_release: Arc::new(Semaphore::new(0)),
             fail_release: false,
         }
+    }
+}
+
+#[cfg(feature = "event-bus")]
+struct BlockingPublisherSpi {
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(feature = "event-bus")]
+impl BlockingPublisherSpi {
+    fn new(entered: std::sync::mpsc::Sender<()>, release: std::sync::mpsc::Receiver<()>) -> Self {
+        Self {
+            entered: Mutex::new(Some(entered)),
+            release: std::sync::Mutex::new(release),
+        }
+    }
+}
+
+#[cfg(feature = "event-bus")]
+impl EventBusSpi for BlockingPublisherSpi {
+    fn capabilities(&self) -> EventBusCapabilities {
+        EventBusCapabilities::new(
+            PayloadModes::Native,
+            SettlementCapabilities::None,
+            OrderingCapability::None,
+            DelayedDeliveryCapability::None,
+            DurabilityCapability::Ephemeral,
+            false,
+            ReplayCapability::None,
+            PublishGuarantee::Accepted,
+            PublishVisibility::Opaque,
+        )
+    }
+
+    fn publish(&self, _message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
+        if let Some(entered) = self.entered.lock().take() {
+            let _ = entered.send(());
+            let _ = self.release.lock().expect("publish release lock").recv();
+        }
+        Ok(PublishAcknowledgement::Accepted {
+            provider_message_id: None,
+            metadata: Default::default(),
+        })
+    }
+
+    fn subscribe(&self, request: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
+        Err(SpiError::Operation {
+            provider_id: "blocking-test".into(),
+            operation: "subscribe",
+            resource: Some(request.topic().as_str().into()),
+            kind: "unsupported",
+            retryable: Some(false),
+            source: Box::new(std::io::Error::other("subscriptions are not used")),
+        })
+    }
+
+    fn shutdown(&self, _mode: ShutdownMode) -> Result<ShutdownOutcome, SpiError> {
+        Ok(ShutdownOutcome::Complete)
     }
 }
 
@@ -1342,6 +1439,77 @@ async fn test_store_fault_wakes_waiter_with_diagnostic() {
     assert!(
         matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected scheduler get failure"))
     );
+}
+
+#[cfg(feature = "event-bus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_store_fault_shutdown_waits_for_notification_publisher_to_drain() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let spi = Arc::new(BlockingPublisherSpi::new(entered_tx, release_rx));
+    let bus = EventBus::from_spi(ProviderId::new("blocking-test").expect("valid provider"), spi);
+    let store = Arc::new(ControlledStore {
+        fail_next_get: AtomicBool::new(true),
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store)
+        .runtime_handle(tokio::runtime::Handle::current())
+        .event_bus(bus)
+        .build()
+        .await
+        .expect("service builds");
+
+    service
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("task is accepted");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || entered_rx.recv()),
+    )
+    .await
+    .expect("notification enters provider publish")
+    .expect("provider wait task completes")
+    .expect("provider signals publish entry");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.last_store_error().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scheduler store fault is recorded");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+    let timeout_error = service
+        .shutdown_until(deadline)
+        .await
+        .expect_err("bounded shutdown expires while notification is publishing");
+    assert!(matches!(timeout_error, TaskServiceError::ShutdownTimedOut));
+    release_tx.send(()).expect("provider publish is released");
+    let first_error = service
+        .shutdown()
+        .await
+        .expect_err("store fault is reported after publisher drain");
+    assert!(matches!(
+        &first_error,
+        TaskServiceError::StoreUnavailable(message)
+            if message.contains("injected scheduler get failure")
+    ));
+    let repeated_error = service
+        .shutdown()
+        .await
+        .expect_err("later shutdown observes the shared store failure");
+    assert_eq!(first_error.to_string(), repeated_error.to_string());
+
+    let stats = service
+        .notification_stats()
+        .expect("publisher statistics remain available");
+    assert!(stats.enqueued > 0);
+    assert_eq!(stats.enqueued, stats.opaque_accepted);
 }
 
 #[tokio::test]
