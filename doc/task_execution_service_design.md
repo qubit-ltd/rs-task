@@ -179,13 +179,13 @@ TaskExecutionService
 
 启用 `event-bus` feature 后，应用可以向服务注入 `rs-event-bus` 提供的 `EventBus` 门面。服务向 `task.lifecycle` 主题发布 `TaskEvent`，事件包含 `TaskId`、状态版本、状态和业务关联键，不携带大 payload；不配置事件总线时仍可使用查询接口。这里不另设事件发布 trait、适配器或 SPI 服务族。
 
-当前 Cargo 配置依赖 `qubit-event-bus` 0.13。通用 `NotificationPublisher` 返回 provider receipt；本服务按 `AdmissionOutcome` 映射到原有业务统计字段。
+当前 Cargo 配置依赖 `qubit-event-bus` 0.14。通用 `NotificationPublisher` 返回 provider receipt；本服务按 `AdmissionOutcome` 映射到原有业务统计字段。
 
 服务使用 `rs-event-bus` 的 `NotificationPublisher` 维护有界串行队列，默认容量为 256，可用 `TaskExecutionServiceBuilder::event_bus_buffer_capacity(NonZeroUsize)` 配置。任务状态转移只尝试非阻塞入队，不等待同步 provider；队列满时丢弃新通知。队列关闭后的入队尝试也会丢弃。通知失败不会回滚已提交的任务状态，通知可能丢失、重复或延迟。消费者按 `TaskId` 和状态版本去重，再查询服务取得权威状态。不同并发状态转移按实际入队顺序串行发布，不保证跨生产者按 `state_version` 全局排序。
 
 `TaskExecutionService::notification_stats()` 在配置总线时返回统计快照，未配置时返回 `None`。`enqueued` 统计进入本地队列的事件，`queue_full` 与 `queue_closed` 统计对应的丢弃；`accepted` 表示至少一个已报告目的地接受，`partial_rejection` 表示同一事件同时有接受和拒绝目的地，`opaque_accepted` 表示 provider 接受但未暴露目的地，`unaccepted` 表示没有可见目的地接受（含空列表和 interceptor drop），`publish_error` 记录发布错误，`worker_panicked` 记录线程 panic。计数为单调饱和值；它们只描述本地排队、provider 的接纳回执和 worker 状态，不代表 subscriber handler 已完成。
 
-`TaskExecutionServiceBuilder::runtime_handle` 可指定服务自有 admission、scheduler、completion、shutdown 和发布器关闭等待使用的 Tokio runtime；默认使用进程级 runtime。调用方须保证注入 runtime 存活到关闭协调器完成。`shutdown()` 等待最终关闭结果；`shutdown_until(deadline)` 先启动或复用同一协调器，再限制当前调用者的等待时间。到期返回 `ShutdownTimedOut` 不会取消任务、释放存储所有权或终止事件发布器；后续 `shutdown()` 可继续等待共享结果。关闭在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker，但同步 provider 若一直阻塞，显式 shutdown 仍可能无限等待。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
+`TaskExecutionServiceBuilder::runtime_handle` 可指定服务自有 admission、scheduler、completion、shutdown 和发布器关闭等待使用的 Tokio runtime；默认使用进程级 runtime。调用方须保证注入 runtime 存活到关闭协调器完成。`shutdown()` 等待最终关闭结果；`shutdown_until(deadline)` 先启动或复用同一协调器，再限制当前调用者的等待时间。到期返回 `ShutdownTimedOut` 不会取消任务、释放存储所有权或终止事件发布器；后续 `shutdown()` 可继续等待共享结果。关闭在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；存储故障路径在服务取得关闭协调权后也执行通知收尾。服务自有 `NotificationPublisher` 占用一条发布线程；服务不订阅时不会产生订阅接收线程。服务不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker，但同步 provider 若一直阻塞，显式 shutdown 仍可能无限等待。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
 
 ## 7. 关键操作顺序与不变量
 

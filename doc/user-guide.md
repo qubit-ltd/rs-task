@@ -246,7 +246,7 @@ into the builder. The service publishes `TaskEvent` values after state changes.
 Publishing is best effort: a publish error does not roll back a task transition.
 Events may be repeated, delayed, or missing, so consumers should compare
 `state_version` and query the service for authoritative state.
-This release uses `qubit-event-bus` 0.13. The shared `NotificationPublisher`
+This release uses `qubit-event-bus` 0.14. The shared `NotificationPublisher`
 reports the provider receipt; this service maps its admission outcome to the
 existing task notification counters.
 
@@ -274,8 +274,11 @@ represent the exact same instant.
 
 `shutdown()` closes new admission, waits for in-flight submissions to finish
 acceptance, then waits for accepted task work to settle. It closes notification
-enqueue, then drains notifications already in the queue before returning. It
-does not shut down the application-owned event bus. Publication runs on a
+enqueue, then drains notifications already in the queue before returning. A
+store fault follows the same drain path once the service owns shutdown
+coordination. The service has one publisher thread and creates no subscription
+receiver thread when it has no subscriptions. It does not shut down the
+application-owned event bus. Publication runs on a
 dedicated OS thread, keeping a synchronous provider off Tokio runtime workers;
 however, a synchronous provider that never returns can keep that thread busy
 and make `shutdown()` wait indefinitely. Dropping the service without calling
