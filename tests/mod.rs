@@ -683,6 +683,45 @@ async fn test_memory_store_is_idempotent_and_rejects_illegal_transitions() {
 }
 
 #[tokio::test]
+async fn test_memory_store_rejects_oversized_lifecycle_diagnostics() {
+    let store = MemoryTaskStore::new(1);
+    let id = TaskId::generate();
+    store
+        .accept(id, TaskRequest::new("diagnostic", "1", Vec::new()))
+        .await
+        .expect("task is accepted");
+
+    for state in [
+        TaskState::Blocked {
+            reason: "x".repeat(4097),
+        },
+        TaskState::Failed {
+            category: "failure".into(),
+            message: "x".repeat(4097),
+        },
+        TaskState::Panicked {
+            message: "x".repeat(4097),
+        },
+    ] {
+        let error = store
+            .transition(TransitionCommand {
+                id,
+                expected_version: 0,
+                expected_attempt: 0,
+                state,
+                output: None,
+                assigned_resources: Vec::new(),
+                cancel_requested: false,
+            })
+            .await
+            .expect_err("oversized diagnostic is rejected");
+        assert!(matches!(error, StoreError::InvalidRequest(_)));
+    }
+
+    assert!(TaskState::Running.allows_transition_to(&TaskState::Succeeded));
+}
+
+#[tokio::test]
 async fn test_task_state_and_record_resource_contracts() {
     let queued = TaskState::Queued;
     assert!(queued.allows_transition_to(&TaskState::Running));
