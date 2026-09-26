@@ -107,6 +107,7 @@ async fn transition(store: &dyn TaskStore, record: &TaskRecord, state: TaskState
             state,
             output: None,
             assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
             cancel_requested: false,
         })
         .await

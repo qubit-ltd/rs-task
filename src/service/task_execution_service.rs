@@ -22,12 +22,15 @@ use super::local_task_handle::LocalTaskHandle;
 use super::local_task_outcome::LocalTaskOutcome;
 use super::local_task_outcome::adapt_local_outcome;
 use super::local_task_result_error::LocalTaskResultError;
+use super::retry_policy::RetryPolicy;
 #[cfg(feature = "event-bus")]
 use super::task_event_notification_stats::TaskEventNotificationStats;
 #[cfg(feature = "event-bus")]
 use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
+use super::task_wait_registry::TaskWaitRegistry;
 use crate::engine::EngineError;
+use crate::engine::ExecutionOutcome;
 use crate::engine::TaskExecutionEngine;
 use crate::handler::LocalTaskHandler;
 use crate::handler::TaskContext;
@@ -128,6 +131,7 @@ pub(crate) struct ServiceCore {
     pub(crate) queue_capacity: usize,
     pub(crate) scan_budget: usize,
     pub(crate) max_attempts: u32,
+    pub(crate) retry_policy: RetryPolicy,
     pub(crate) running_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) queue: Mutex<VecDeque<QueuedTask>>,
     pub(crate) queue_count: AtomicUsize,
@@ -135,6 +139,7 @@ pub(crate) struct ServiceCore {
     pub(crate) local_finalizations: Mutex<HashMap<TaskId, oneshot::Sender<Result<TaskState, LocalTaskResultError>>>>,
     pub(crate) cancellations: Mutex<HashMap<TaskId, RunningCancellation>>,
     pub(crate) changed: Notify,
+    pub(super) wait_registry: Arc<TaskWaitRegistry>,
     pub(crate) transition_event_lock: tokio::sync::RwLock<()>,
     pub(super) admission: AdmissionGate,
     pub(crate) owner: Option<OwnerEpoch>,
@@ -257,10 +262,12 @@ impl TaskExecutionService {
                 self.core.queue.lock().push_back(QueuedTask {
                     id: record.id,
                     resources: request.resources,
+                    retry_not_before_ms: None,
                     bypasses: 0,
                 });
                 self.core.changed.notify_one();
                 publish_record(&self.core, &record);
+                self.core.wait_registry.notify(record.id);
                 Ok(record)
             }
             AcceptOutcome::Existing(record) => {
@@ -347,11 +354,13 @@ impl TaskExecutionService {
                 self.core.queue.lock().push_back(QueuedTask {
                     id,
                     resources: request.resources,
+                    retry_not_before_ms: None,
                     bypasses: 0,
                 });
                 drop(finalizations);
                 self.core.changed.notify_one();
                 publish_record(&self.core, &record);
+                self.core.wait_registry.notify(record.id);
                 Ok(LocalTaskHandle::new(record.id, typed_receiver, final_receiver))
             }
             Ok(AcceptOutcome::Existing(record)) => {
@@ -608,6 +617,7 @@ impl TaskExecutionService {
         self.core.queue.lock().push_back(QueuedTask {
             id,
             resources: updated.request.resources.clone(),
+            retry_not_before_ms: None,
             bypasses: 0,
         });
         self.core.changed.notify_one();
@@ -617,8 +627,9 @@ impl TaskExecutionService {
     /// Resolves when the task becomes terminal; returns an error if it becomes
     /// blocked.
     pub async fn wait(&self, id: TaskId) -> Result<TaskRecord, TaskServiceError> {
+        let subscription = self.core.wait_registry.subscribe(id);
         loop {
-            let notified = self.core.changed.notified();
+            let notified = subscription.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if let Some(error) = self.last_store_error() {
@@ -720,6 +731,21 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             continue;
         }
+        let now = now_ms();
+        let mut eligible = Vec::new();
+        let mut deferred = Vec::new();
+        let mut next_deadline = None;
+        let drained = std::mem::take(&mut queue);
+        for task in drained {
+            match task.retry_not_before_ms {
+                Some(deadline) if deadline > now => {
+                    next_deadline = Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
+                    deferred.push(task);
+                }
+                _ => eligible.push(task),
+            }
+        }
+        let mut queue = eligible;
         let order = core.policy.order(
             &QueueSnapshot {
                 tasks: queue.iter().take(core.scan_budget.max(1)).cloned().collect(),
@@ -741,7 +767,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             let Some(index) = queue.iter().position(|task| task.id == id) else {
                 continue;
             };
-            let task = queue.remove(index);
+            let mut task = queue.remove(index);
             let record = match core.store.get(id).await {
                 Ok(Some(record)) => record,
                 Ok(None) => {
@@ -756,6 +782,15 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             };
             if core.store_fault.lock().is_some() {
                 return;
+            }
+            if matches!(record.state, TaskState::Queued)
+                && record.retry_not_before_ms.is_some_and(|deadline| deadline > now_ms())
+            {
+                let deadline = record.retry_not_before_ms.expect("deadline checked above");
+                task.retry_not_before_ms = Some(deadline);
+                next_deadline = Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
+                queue.push(task);
+                continue;
             }
             if !matches!(record.state, TaskState::Queued) {
                 release_core_queue_slot(&core);
@@ -900,6 +935,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
             }
         }
+        queue.extend(deferred);
         for item in &mut queue {
             let Some(position) = original_positions.get(&item.id) else {
                 continue;
@@ -918,8 +954,15 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             }
         }
         if !started {
-            drop(core);
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let wait =
+                next_deadline.map(|deadline| std::time::Duration::from_millis(deadline.saturating_sub(now_ms())));
+            let notified = core.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let sleep_for = wait.unwrap_or(std::time::Duration::from_millis(40));
+            let notified = Box::pin(notified);
+            let timer = Box::pin(tokio::time::sleep(sleep_for));
+            let _ = futures::future::select(notified, timer).await;
         } else {
             core.changed.notify_waiters();
         }
@@ -930,16 +973,12 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
 async fn finish_attempt(
     core_ref: std::sync::Weak<ServiceCore>,
     running: TaskRecord,
-    receiver: tokio::sync::oneshot::Receiver<crate::handler::TaskRunResult>,
+    receiver: tokio::sync::oneshot::Receiver<ExecutionOutcome>,
     _running_permit: tokio::sync::OwnedSemaphorePermit,
 ) {
-    let result = receiver.await.unwrap_or_else(|_| {
-        Err(crate::model::TaskRunError {
-            category: "engine".into(),
-            message: "execution worker stopped".into(),
-            retryable: true,
-        })
-    });
+    let outcome = receiver
+        .await
+        .unwrap_or_else(|_| ExecutionOutcome::WorkerStopped("execution worker stopped".into()));
     let Some(core) = core_ref.upgrade() else {
         return;
     };
@@ -952,26 +991,32 @@ async fn finish_attempt(
             cancellations.remove(&running.id);
         }
     }
-    let state = match &result {
-        Ok(TaskRunOutcome::Succeeded(_)) => TaskState::Succeeded,
-        Ok(TaskRunOutcome::Cancelled) => TaskState::Cancelled,
-        Err(error) if error.category == "panic" => TaskState::Panicked {
-            message: truncate_utf8(&error.message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES),
+    let state = match &outcome {
+        ExecutionOutcome::Panicked(message) => TaskState::Panicked {
+            message: truncate_utf8(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES),
         },
-        Err(error) if error.retryable && running.attempt < core.max_attempts => TaskState::Queued,
-        Err(error) if error.retryable => TaskState::Blocked {
+        ExecutionOutcome::WorkerStopped(_) if running.attempt < core.max_attempts => TaskState::Queued,
+        ExecutionOutcome::WorkerStopped(_) => TaskState::Blocked {
+            reason: "execution worker stopped after retry limit".into(),
+        },
+        ExecutionOutcome::Returned(Ok(TaskRunOutcome::Succeeded(_))) => TaskState::Succeeded,
+        ExecutionOutcome::Returned(Ok(TaskRunOutcome::Cancelled)) => TaskState::Cancelled,
+        ExecutionOutcome::Returned(Err(error)) if error.retryable && running.attempt < core.max_attempts => {
+            TaskState::Queued
+        }
+        ExecutionOutcome::Returned(Err(error)) if error.retryable => TaskState::Blocked {
             reason: truncate_utf8(
                 &format!("retry limit reached: {}", error.message),
                 crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES,
             ),
         },
-        Err(error) => TaskState::Failed {
+        ExecutionOutcome::Returned(Err(error)) => TaskState::Failed {
             category: truncate_utf8(&error.category, crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES),
             message: truncate_utf8(&error.message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES),
         },
     };
-    let output = match result {
-        Ok(TaskRunOutcome::Succeeded(output)) => Some(output),
+    let output = match outcome {
+        ExecutionOutcome::Returned(Ok(TaskRunOutcome::Succeeded(output))) => Some(output),
         _ => None,
     };
     let mut final_state = if output
@@ -986,10 +1031,16 @@ async fn finish_attempt(
         state
     };
     let output = output.filter(|value| value.summary.len() <= crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES);
+    let mut retry_deadline = if matches!(final_state, TaskState::Queued) {
+        Some(retry_deadline_ms(now_ms(), core.retry_policy, running.attempt))
+    } else {
+        None
+    };
     let mut retry_slot_reserved = false;
     if matches!(final_state, TaskState::Queued) {
         retry_slot_reserved = try_reserve_core_queue_slot(&core);
         if !retry_slot_reserved {
+            retry_deadline = None;
             final_state = TaskState::Blocked {
                 reason: "retry queue is full; call retry_blocked when capacity is available".into(),
             };
@@ -1007,10 +1058,11 @@ async fn finish_attempt(
                 break;
             }
         };
-        match transition(
+        match transition_with_deadline(
             &core,
             &latest,
             final_state.clone(),
+            retry_deadline,
             output.clone(),
             latest.assigned_resources.clone(),
             latest.cancel_requested,
@@ -1022,6 +1074,7 @@ async fn finish_attempt(
                     core.queue.lock().push_back(QueuedTask {
                         id: updated.id,
                         resources: updated.request.resources.clone(),
+                        retry_not_before_ms: updated.retry_not_before_ms,
                         bypasses: 0,
                     });
                 }
@@ -1101,6 +1154,7 @@ fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
         });
     }
     core.changed.notify_waiters();
+    core.wait_registry.notify_all();
 }
 
 /// Preserves an admission worker after caller cancellation and reports a
@@ -1133,6 +1187,18 @@ async fn transition(
     assigned_resources: Vec<String>,
     cancel_requested: bool,
 ) -> Result<TaskRecord, StoreError> {
+    transition_with_deadline(core, record, state, None, output, assigned_resources, cancel_requested).await
+}
+
+async fn transition_with_deadline(
+    core: &ServiceCore,
+    record: &TaskRecord,
+    state: TaskState,
+    retry_not_before_ms: Option<u64>,
+    output: Option<crate::model::TaskOutput>,
+    assigned_resources: Vec<String>,
+    cancel_requested: bool,
+) -> Result<TaskRecord, StoreError> {
     let _guard = core.transition_event_lock.read().await;
     let updated = core
         .store
@@ -1141,13 +1207,25 @@ async fn transition(
             expected_version: record.state_version,
             expected_attempt: record.attempt,
             state,
+            retry_not_before_ms,
             output,
             assigned_resources,
             cancel_requested,
         })
         .await?;
     publish_record(core, &updated);
+    core.wait_registry.notify(updated.id);
     Ok(updated)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis().min(u64::MAX as u128) as u64)
+}
+
+fn retry_deadline_ms(now_ms: u64, policy: RetryPolicy, attempt: u32) -> u64 {
+    now_ms.saturating_add(policy.delay_for_attempt(attempt).as_millis().min(u64::MAX as u128) as u64)
 }
 
 /// Validates request limits and whether configured resources can satisfy it.
@@ -1220,4 +1298,21 @@ pub(super) fn runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("task service runtime must be created")
     })
+}
+
+#[cfg(test)]
+mod retry_deadline_tests {
+    use std::time::Duration;
+
+    use super::now_ms;
+    use super::retry_deadline_ms;
+    use crate::service::RetryPolicy;
+
+    #[test]
+    fn computes_retry_deadlines_with_saturating_milliseconds() {
+        let policy = RetryPolicy::new(Duration::from_millis(25), Duration::from_millis(100)).unwrap();
+        assert_eq!(retry_deadline_ms(100, policy, 2), 150);
+        assert_eq!(retry_deadline_ms(u64::MAX, policy, 1), u64::MAX);
+        assert!(now_ms() > 0);
+    }
 }

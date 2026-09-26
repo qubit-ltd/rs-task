@@ -325,12 +325,14 @@ fn protected_head_stays_first_until_resources_are_returned() {
     let mut large = qubit_task::scheduling::QueuedTask {
         id: TaskId::generate(),
         resources: qubit_task::model::TaskRequest::new("large", "1", Vec::new()).resources,
+        retry_not_before_ms: None,
         bypasses: 2,
     };
     large.resources.cpu_slots = 2;
     let later = qubit_task::scheduling::QueuedTask {
         id: TaskId::generate(),
         resources: qubit_task::model::TaskRequest::new("small", "1", Vec::new()).resources,
+        retry_not_before_ms: None,
         bypasses: 0,
     };
     let policy = FairFifoPolicy::new(2);

@@ -20,6 +20,8 @@ pub struct QueuedTask {
     pub id: TaskId,
     /// Resource requirements used to determine likely fit.
     pub resources: ResourceRequest,
+    /// Earliest Unix epoch millisecond when a retry may be considered.
+    pub retry_not_before_ms: Option<u64>,
     /// Number of scheduling cycles in which a later task started first.
     pub bypasses: u32,
 }
