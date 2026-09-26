@@ -392,7 +392,10 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
 
     let mut preoccupier = TaskRequest::new("fairness-gated", "1", b"P".to_vec());
     preoccupier.resources.cpu_slots = 1;
-    service.submit(preoccupier).await.expect("preoccupier is accepted");
+    service
+        .submit(test_keyed(preoccupier))
+        .await
+        .expect("preoccupier is accepted");
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), starts.recv())
             .await
@@ -402,11 +405,11 @@ async fn protected_large_task_starts_before_small_tasks_after_resources_return()
     );
     let mut large = TaskRequest::new("fairness-gated", "1", b"L".to_vec());
     large.resources.cpu_slots = 2;
-    let large = service.submit(large).await.expect("large task is accepted");
+    let large = service.submit(test_keyed(large)).await.expect("large task is accepted");
     for index in 0..9 {
         let mut small = TaskRequest::new("fairness-gated", "1", vec![b'0' + index]);
         small.resources.cpu_slots = 1;
-        service.submit(small).await.expect("small task is accepted");
+        service.submit(test_keyed(small)).await.expect("small task is accepted");
     }
 
     let mut observed_bypasses = 0;
@@ -464,7 +467,7 @@ async fn large_payloads_survive_bounded_resource_only_scheduler_snapshots() {
 
     let first_payload = vec![b'P'];
     service
-        .submit(TaskRequest::new("payload-copy", "1", first_payload.clone()))
+        .submit(test_keyed(TaskRequest::new("payload-copy", "1", first_payload.clone())))
         .await
         .expect("first task is accepted");
     assert_eq!(
@@ -480,7 +483,7 @@ async fn large_payloads_survive_bounded_resource_only_scheduler_snapshots() {
     for payload in &payloads {
         queued_ids.push(
             service
-                .submit(TaskRequest::new("payload-copy", "1", payload.clone()))
+                .submit(test_keyed(TaskRequest::new("payload-copy", "1", payload.clone())))
                 .await
                 .expect("large payload task is accepted")
                 .id,
@@ -523,7 +526,10 @@ async fn missing_handler_is_classified_without_bypass_counting() {
         .await
         .expect("service builds");
     let request = TaskRequest::new("missing-handler", "1", Vec::new());
-    let record = service.submit(request).await.expect("task is accepted for reporting");
+    let record = service
+        .submit(test_keyed(request))
+        .await
+        .expect("task is accepted for reporting");
     let task_id = record.id;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
@@ -552,4 +558,16 @@ async fn missing_handler_is_classified_without_bypass_counting() {
         snapshot.iter().find(|(id, _)| *id == task_id).map(|(_, count)| *count),
         Some(0)
     );
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

@@ -315,7 +315,7 @@ async fn test_versioned_handler_runs_reconstructable_request() {
         .await
         .expect("service builds");
     let request = TaskRequest::new("echo", "1", b"payload".to_vec());
-    let accepted = service.submit(request).await.expect("task accepted");
+    let accepted = service.submit(test_keyed(request)).await.expect("task accepted");
     let finished = service.wait(accepted.id).await.expect("task completes");
     assert_eq!(finished.state, TaskState::Succeeded);
     assert_eq!(finished.output.expect("output present").summary, b"payload");
@@ -337,11 +337,11 @@ async fn test_service_query_listing_stats_and_unknown_cancellation() {
     ));
 
     let first = service
-        .submit(TaskRequest::new("echo", "1", b"one".to_vec()))
+        .submit(test_keyed(TaskRequest::new("echo", "1", b"one".to_vec())))
         .await
         .unwrap();
     let second = service
-        .submit(TaskRequest::new("echo", "1", b"two".to_vec()))
+        .submit(test_keyed(TaskRequest::new("echo", "1", b"two".to_vec())))
         .await
         .unwrap();
     let page = service
@@ -378,7 +378,7 @@ async fn test_async_handler_panic_is_recorded_and_resources_are_released() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("panic", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("panic", "1", Vec::new())))
         .await
         .expect("task accepted");
     let finished = service.wait(accepted.id).await.expect("panic is terminal");
@@ -405,6 +405,86 @@ async fn test_service_idempotency_returns_the_original_task_id() {
 }
 
 #[tokio::test]
+async fn test_service_submit_requires_and_exposes_a_stable_idempotency_key() {
+    let service = TaskExecutionService::in_memory().await.expect("service builds");
+    let missing_key = service.submit(TaskRequest::new("keyed", "1", Vec::new())).await;
+    assert!(matches!(
+        missing_key,
+        Err(qubit_task::service::TaskServiceError::InvalidRequest(_))
+    ));
+    let empty_key = service
+        .submit(TaskRequest::new("keyed", "1", Vec::new()).with_idempotency_key(""))
+        .await;
+    assert!(matches!(
+        empty_key,
+        Err(qubit_task::service::TaskServiceError::InvalidRequest(_))
+    ));
+    assert!(service.list(TaskQuery::default()).await.unwrap().records.is_empty());
+
+    let mut request = TaskRequest::new("keyed", "1", Vec::new());
+    request.idempotency_key = Some("caller-stable-key".into());
+    let accepted = service.submit(request).await.expect("keyed request submits");
+    let recovered = service
+        .get_by_idempotency_key("caller-stable-key")
+        .await
+        .expect("key lookup succeeds")
+        .expect("accepted request is recoverable by key");
+    assert_eq!(recovered.id, accepted.id);
+    assert_eq!(
+        service
+            .get_by_idempotency_key("unknown-key")
+            .await
+            .expect("unknown key lookup succeeds"),
+        None
+    );
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_idempotency_conflict_precedes_queue_full() {
+    let store = Arc::new(MemoryTaskStore::new(8));
+    let request = TaskRequest::new("keyed", "1", b"original".to_vec()).with_idempotency_key("queue-full-key");
+    let id = TaskId::generate();
+    let accepted = store
+        .accept(id, request.clone())
+        .await
+        .expect("store accepts seed task");
+    let record = match accepted {
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => panic!("seed key is new"),
+    };
+    store
+        .transition(TransitionCommand {
+            id,
+            expected_version: record.state_version,
+            expected_attempt: record.attempt,
+            state: TaskState::Cancelled,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .expect("seed task becomes terminal");
+    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+        .store(store)
+        .queue_capacity(0)
+        .build()
+        .await
+        .expect("service builds");
+
+    let error = service
+        .submit(TaskRequest::new("keyed", "1", b"different".to_vec()).with_idempotency_key("queue-full-key"))
+        .await
+        .expect_err("key conflict wins while queue is full");
+    assert!(matches!(
+        error,
+        qubit_task::service::TaskServiceError::Store(StoreError::IdempotencyConflict)
+    ));
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
 async fn test_external_execution_engine_can_implement_public_contract() {
     let capacity = ResourceCapacity {
         cpu_slots: 1,
@@ -423,7 +503,7 @@ async fn test_external_execution_engine_can_implement_public_contract() {
     .await
     .expect("service builds with an external engine");
     let accepted = service
-        .submit(TaskRequest::new("echo", "1", b"external".to_vec()))
+        .submit(test_keyed(TaskRequest::new("echo", "1", b"external".to_vec())))
         .await
         .expect("request is accepted");
     let finished = service.wait(accepted.id).await.expect("task completes");
@@ -435,7 +515,7 @@ async fn test_external_execution_engine_can_implement_public_contract() {
 async fn test_missing_handler_transitions_task_to_blocked() {
     let service = TaskExecutionService::in_memory().await.expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("missing", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("missing", "1", Vec::new())))
         .await
         .expect("request accepted");
     assert!(service.wait(accepted.id).await.is_err());
@@ -468,7 +548,7 @@ async fn test_running_task_cancellation_is_cooperative_and_terminal() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("cooperative", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("cooperative", "1", Vec::new())))
         .await
         .expect("task accepted");
     loop {
@@ -557,18 +637,21 @@ async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
         .await
         .expect("service builds");
     let request = || TaskRequest::new("echo", "1", Vec::new());
-    let a = service.submit(request()).await.expect("A accepted");
+    let a = service.submit(test_keyed(request())).await.expect("A accepted");
     assert_eq!(gate.wait_for_round(1), vec![a.id]);
-    let b = service.submit(request()).await.expect("B accepted");
-    let c = service.submit(request()).await.expect("C accepted");
+    let b = service.submit(test_keyed(request())).await.expect("B accepted");
+    let c = service.submit(test_keyed(request())).await.expect("C accepted");
     assert_eq!(
         service.cancel(a.id).await.expect("A cancelled"),
         qubit_task::service::CancelOutcome::CancelledBeforeStart
     );
     gate.release(1);
     assert_eq!(gate.wait_for_round(2), vec![b.id, c.id]);
-    service.submit(request()).await.expect("D fills the sole free slot");
-    let e = service.submit(request()).await;
+    service
+        .submit(test_keyed(request()))
+        .await
+        .expect("D fills the sole free slot");
+    let e = service.submit(test_keyed(request())).await;
     gate.release(2);
     service.shutdown().await.expect("remaining tasks drain");
     assert!(matches!(e, Err(qubit_task::service::TaskServiceError::QueueFull)));
@@ -605,7 +688,7 @@ async fn test_retryable_completion_does_not_overfill_waiting_queue() {
     .expect("service builds");
 
     let retrying = service
-        .submit(TaskRequest::new("retry-queue", "1", b"retry".to_vec()))
+        .submit(test_keyed(TaskRequest::new("retry-queue", "1", b"retry".to_vec())))
         .await
         .expect("first task is accepted");
     tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
@@ -613,7 +696,7 @@ async fn test_retryable_completion_does_not_overfill_waiting_queue() {
         .expect("first attempt starts");
 
     let waiting = service
-        .submit(TaskRequest::new("retry-queue", "1", b"waiting".to_vec()))
+        .submit(test_keyed(TaskRequest::new("retry-queue", "1", b"waiting".to_vec())))
         .await
         .expect("one waiting task fills the queue");
     policy.paused.store(true, std::sync::atomic::Ordering::Release);
@@ -662,7 +745,7 @@ async fn test_memory_store_is_idempotent_and_rejects_illegal_transitions() {
     assert!(matches!(accepted, AcceptOutcome::Accepted(_)));
     assert!(
         store
-            .find_idempotent(request.clone())
+            .get_by_idempotency_key("request-1")
             .await
             .expect("lookup succeeds")
             .is_some()
@@ -670,7 +753,7 @@ async fn test_memory_store_is_idempotent_and_rejects_illegal_transitions() {
     let mut conflict = request.clone();
     conflict.payload = b"different".to_vec();
     assert!(matches!(
-        store.find_idempotent(conflict).await,
+        store.accept(TaskId::generate(), conflict).await,
         Err(StoreError::IdempotencyConflict)
     ));
     let error = store
@@ -773,7 +856,7 @@ async fn test_memory_store_paginates_and_can_drop_terminal_history() {
         store.accept(id, request.clone()).await,
         Err(StoreError::DuplicateTask)
     ));
-    assert_eq!(store.find_idempotent(request.clone()).await.unwrap(), None);
+    assert_eq!(store.get_by_idempotency_key("missing-key").await.unwrap(), None);
     assert_eq!(store.get(TaskId::generate()).await.unwrap(), None);
 
     let page = store
@@ -1706,4 +1789,16 @@ async fn test_memory_store_accepts_retry_deadlines_only_while_queued() {
         .await
         .unwrap();
     assert_eq!(running.retry_not_before_ms, None);
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

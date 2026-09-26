@@ -52,7 +52,7 @@ async fn run_handler(behavior: HandlerBehavior) -> (TaskState, u32) {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("panic-provenance", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("panic-provenance", "1", Vec::new())))
         .await
         .expect("task is accepted");
     let result = tokio::time::timeout(std::time::Duration::from_secs(3), service.wait(accepted.id))
@@ -95,4 +95,16 @@ async fn test_application_error_category_panic_remains_failed() {
 #[allow(dead_code)]
 fn successful_result() -> TaskRunResult {
     Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

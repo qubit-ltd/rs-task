@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::convert::Infallible;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
@@ -155,11 +157,11 @@ impl TaskStore for ControlledStore {
         })
     }
 
-    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         if self.fail_next_find.swap(false, Ordering::AcqRel) {
             Box::pin(async { Err(StoreError::Failure("injected idempotency lookup failure".into())) })
         } else {
-            self.inner.find_idempotent(request)
+            self.inner.get_by_idempotency_key(key)
         }
     }
 
@@ -296,7 +298,9 @@ async fn assert_operational_fault_is_latched(service: &TaskExecutionService, exp
         .expect_err("wait reports the store failure");
     assert!(matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains(expected)));
     assert!(matches!(
-        service.submit(TaskRequest::new("after-fault", "1", Vec::new())).await,
+        service
+            .submit(test_keyed(TaskRequest::new("after-fault", "1", Vec::new())))
+            .await,
         Err(TaskServiceError::StoreUnavailable(_))
     ));
 }
@@ -313,7 +317,7 @@ async fn test_idempotency_lookup_failure_pauses_admission() {
         .await
         .expect("service builds");
     let error = service
-        .submit(TaskRequest::new("lookup", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("lookup", "1", Vec::new())))
         .await
         .expect_err("lookup failure reaches caller");
     assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
@@ -332,7 +336,7 @@ async fn test_accept_failure_pauses_admission() {
         .await
         .expect("service builds");
     let error = service
-        .submit(TaskRequest::new("accept", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("accept", "1", Vec::new())))
         .await
         .expect_err("accept failure reaches caller");
     assert!(matches!(error, TaskServiceError::Store(StoreError::Failure(_))));
@@ -370,7 +374,7 @@ async fn test_retry_transition_failure_pauses_admission() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("missing-handler", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("missing-handler", "1", Vec::new())))
         .await
         .expect("task accepted");
     assert!(matches!(
@@ -469,7 +473,7 @@ async fn test_cancel_failure_on_transition_pauses_service() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("cancel-fault", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("cancel-fault", "1", Vec::new())))
         .await
         .expect("task accepted");
     tokio::time::timeout(Duration::from_secs(2), get_entered_rx)
@@ -595,7 +599,9 @@ async fn test_shutdown_waits_for_inflight_acceptance_and_rejects_new_admission()
     .expect("shutdown closes admission");
 
     assert!(matches!(
-        service.submit(TaskRequest::new("new", "1", Vec::new())).await,
+        service
+            .submit(test_keyed(TaskRequest::new("new", "1", Vec::new())))
+            .await,
         Err(TaskServiceError::ShuttingDown)
     ));
     assert!(matches!(
@@ -785,7 +791,7 @@ async fn test_shutdown_continues_after_first_caller_is_cancelled() {
 }
 
 #[tokio::test]
-async fn test_aborted_submission_keeps_permit_until_detached_store_accept_finishes() {
+async fn test_aborted_keyed_submission_can_be_recovered_after_detached_accept_finishes() {
     let (entered_tx, entered_rx) = oneshot::channel();
     let store = Arc::new(ControlledStore {
         accept_entered: Mutex::new(Some(entered_tx)),
@@ -799,12 +805,9 @@ async fn test_aborted_submission_keeps_permit_until_detached_store_accept_finish
         .expect("service builds");
     let submitting_service = service.clone();
     let submission = tokio::spawn(async move {
-        submitting_service
-            .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
-                value: (),
-                summary: TaskOutput::default(),
-            })
-            .await
+        let mut request = TaskRequest::new("cancelled-submit", "1", Vec::new());
+        request.idempotency_key = Some("cancelled-submit-key".into());
+        submitting_service.submit(test_keyed(request)).await
     });
     tokio::time::timeout(Duration::from_secs(2), entered_rx)
         .await
@@ -812,6 +815,14 @@ async fn test_aborted_submission_keeps_permit_until_detached_store_accept_finish
         .expect("accept entry signalled");
     submission.abort();
     let _ = submission.await.expect_err("submission caller was cancelled");
+
+    assert_eq!(
+        service
+            .get_by_idempotency_key("cancelled-submit-key")
+            .await
+            .expect("lookup before accept succeeds"),
+        None
+    );
 
     let closing_service = service.clone();
     let mut closing = tokio::spawn(async move { closing_service.shutdown().await });
@@ -827,7 +838,224 @@ async fn test_aborted_submission_keeps_permit_until_detached_store_accept_finish
         .expect("shutdown finishes after detached accept and scheduling")
         .expect("shutdown task joins")
         .expect("shutdown succeeds");
-    assert_eq!(service.stats().await.expect("stats load").terminal, 1);
+    let recovered = service
+        .get_by_idempotency_key("cancelled-submit-key")
+        .await
+        .expect("lookup after accept succeeds")
+        .expect("detached accepted task is discoverable");
+    assert_eq!(
+        recovered.request.idempotency_key.as_deref(),
+        Some("cancelled-submit-key")
+    );
+}
+
+#[tokio::test]
+async fn test_aborted_submit_keeps_payload_budget_until_accept_finishes() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        accept_entered: Mutex::new(Some(entered_tx)),
+        detached_accept: true,
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .max_inflight_payload_bytes(NonZeroUsize::new(8).expect("budget is nonzero"))
+        .max_inflight_submissions(NonZeroUsize::new(4).expect("limit is nonzero"))
+        .build()
+        .await
+        .expect("service builds");
+
+    let submitting_service = service.clone();
+    let submission = tokio::spawn(async move {
+        let mut request = TaskRequest::new("budget-first", "1", vec![0; 8]);
+        request.idempotency_key = Some("budget-first-key".into());
+        submitting_service.submit(test_keyed(request)).await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("store accept is entered")
+        .expect("accept entry is signalled");
+    submission.abort();
+    let _ = submission.await.expect_err("submission caller is cancelled");
+
+    let mut second = TaskRequest::new("budget-second", "1", vec![1]);
+    second.idempotency_key = Some("budget-second-key".into());
+    assert!(matches!(
+        service.submit(test_keyed(second.clone())).await,
+        Err(TaskServiceError::PayloadBudgetExceeded { .. })
+    ));
+
+    store.accept_release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if service
+                .get_by_idempotency_key("budget-first-key")
+                .await
+                .expect("key lookup succeeds")
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached accept commits");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match service.submit(test_keyed(second.clone())).await {
+                Ok(_) => break,
+                Err(TaskServiceError::PayloadBudgetExceeded { .. }) => tokio::task::yield_now().await,
+                result => panic!("unexpected retry result after detached accept: {result:?}"),
+            }
+        }
+    })
+    .await
+    .expect("admission budget releases after the worker finishes acceptance");
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_aborted_empty_payload_submit_obeys_inflight_submission_limit() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        accept_entered: Mutex::new(Some(entered_tx)),
+        detached_accept: true,
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .max_inflight_submissions(NonZeroUsize::new(1).expect("limit is nonzero"))
+        .build()
+        .await
+        .expect("service builds");
+
+    let submitting_service = service.clone();
+    let submission = tokio::spawn(async move {
+        let mut request = TaskRequest::new("count-first", "1", Vec::new());
+        request.idempotency_key = Some("count-first-key".into());
+        submitting_service.submit(test_keyed(request)).await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("store accept is entered")
+        .expect("accept entry is signalled");
+    submission.abort();
+    let _ = submission.await.expect_err("submission caller is cancelled");
+
+    let mut second = TaskRequest::new("count-second", "1", Vec::new());
+    second.idempotency_key = Some("count-second-key".into());
+    assert!(matches!(
+        service.submit(test_keyed(second.clone())).await,
+        Err(TaskServiceError::SubmissionLimitExceeded { .. })
+    ));
+
+    store.accept_release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if service
+                .get_by_idempotency_key("count-first-key")
+                .await
+                .expect("key lookup succeeds")
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached accept commits");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match service.submit(test_keyed(second.clone())).await {
+                Ok(_) => break,
+                Err(TaskServiceError::SubmissionLimitExceeded { .. }) => tokio::task::yield_now().await,
+                result => panic!("unexpected retry result after detached accept: {result:?}"),
+            }
+        }
+    })
+    .await
+    .expect("submission slot releases after accept");
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_same_key_duplicate_releases_submission_slot() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .max_inflight_submissions(NonZeroUsize::new(1).expect("limit is nonzero"))
+        .build()
+        .await
+        .expect("service builds");
+    let request = TaskRequest::new("missing-handler", "1", Vec::new()).with_idempotency_key("counted-duplicate");
+    let first = service
+        .submit(request.clone())
+        .await
+        .expect("first request is accepted");
+    let duplicate = service
+        .submit(request)
+        .await
+        .expect("identical request resolves while the only admission slot is released");
+    assert_eq!(first.id, duplicate.id);
+    let next = service
+        .submit(TaskRequest::new("missing-handler", "1", Vec::new()).with_idempotency_key("after-duplicate"))
+        .await
+        .expect("duplicate lookup releases its admission slot");
+    assert_ne!(first.id, next.id);
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_local_submission_obeys_inflight_submission_limit() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let store = Arc::new(ControlledStore {
+        accept_entered: Mutex::new(Some(entered_tx)),
+        detached_accept: true,
+        ..ControlledStore::new()
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .max_inflight_submissions(NonZeroUsize::new(1).expect("limit is nonzero"))
+        .build()
+        .await
+        .expect("service builds");
+
+    let submitting_service = service.clone();
+    let submission = tokio::spawn(async move {
+        submitting_service
+            .submit_local(|_| LocalTaskOutcome::<(), Infallible>::Succeeded {
+                value: (),
+                summary: TaskOutput::default(),
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("local store accept is entered")
+        .expect("accept entry is signalled");
+    assert!(matches!(
+        service
+            .submit(TaskRequest::new("other", "1", Vec::new()).with_idempotency_key("during-local-accept"))
+            .await,
+        Err(TaskServiceError::SubmissionLimitExceeded { .. })
+    ));
+
+    store.accept_release.add_permits(1);
+    let handle = tokio::time::timeout(Duration::from_secs(2), submission)
+        .await
+        .expect("local acceptance finishes")
+        .expect("submission worker joins")
+        .expect("local task is accepted");
+    handle
+        .result()
+        .await
+        .expect("local task completes")
+        .expect("local result succeeds");
+    service
+        .submit(TaskRequest::new("other", "1", Vec::new()).with_idempotency_key("after-local-accept"))
+        .await
+        .expect("local acceptance releases its submission slot");
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio::test]
@@ -846,7 +1074,7 @@ async fn test_shutdown_keeps_scheduler_running_for_retry_after_close() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("retry-after-close", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("retry-after-close", "1", Vec::new())))
         .await
         .expect("task accepted");
     tokio::time::timeout(Duration::from_secs(2), started_rx)
@@ -881,6 +1109,203 @@ async fn test_shutdown_keeps_scheduler_running_for_retry_after_close() {
         .expect("record exists");
     assert_eq!(finished.state, TaskState::Succeeded);
     assert_eq!(handler.attempts.load(Ordering::Acquire), 2);
+}
+
+#[tokio::test]
+async fn test_shutdown_until_times_out_without_stopping_drain_coordinator() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let handler = Arc::new(RetryAfterClosingHandler {
+        attempts: AtomicUsize::new(0),
+        started: Mutex::new(Some(started_tx)),
+        resume: Mutex::new(Some(resume_rx)),
+    });
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .register_handler(handler)
+        .expect("handler registers")
+        .build()
+        .await
+        .expect("service builds");
+    let accepted = service
+        .submit(test_keyed(
+            TaskRequest::new("retry-after-close", "1", Vec::new()).with_idempotency_key("shutdown-timeout"),
+        ))
+        .await
+        .expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("handler starts")
+        .expect("start signal arrives");
+
+    let error = service
+        .shutdown_until(tokio::time::Instant::now() + Duration::from_millis(20))
+        .await
+        .expect_err("blocked handler exceeds deadline");
+    assert!(matches!(error, TaskServiceError::ShutdownTimedOut));
+    assert!(matches!(
+        service
+            .submit(test_keyed(
+                TaskRequest::new("retry-after-close", "1", Vec::new()).with_idempotency_key("late")
+            ))
+            .await,
+        Err(TaskServiceError::ShuttingDown)
+    ));
+    assert_eq!(
+        service
+            .get(accepted.id)
+            .await
+            .expect("record remains readable")
+            .unwrap()
+            .state,
+        TaskState::Running
+    );
+
+    resume_tx.send(()).expect("handler is released");
+    tokio::time::timeout(Duration::from_secs(2), service.shutdown())
+        .await
+        .expect("shared shutdown coordinator finishes")
+        .expect("shutdown succeeds");
+}
+
+#[tokio::test]
+async fn test_shutdown_until_starts_closing_even_when_deadline_has_passed() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let handler = Arc::new(RetryAfterClosingHandler {
+        attempts: AtomicUsize::new(0),
+        started: Mutex::new(Some(started_tx)),
+        resume: Mutex::new(Some(resume_rx)),
+    });
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .register_handler(handler)
+        .expect("handler registers")
+        .build()
+        .await
+        .expect("service builds");
+    service
+        .submit(TaskRequest::new("retry-after-close", "1", Vec::new()).with_idempotency_key("expired-deadline"))
+        .await
+        .expect("task is accepted");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("handler starts")
+        .expect("start signal arrives");
+    let result = service
+        .shutdown_until(tokio::time::Instant::now() - Duration::from_millis(1))
+        .await;
+    assert!(matches!(result, Err(TaskServiceError::ShutdownTimedOut)));
+    assert!(matches!(
+        service
+            .submit(TaskRequest::new("late", "1", Vec::new()).with_idempotency_key("expired-deadline"))
+            .await,
+        Err(TaskServiceError::ShuttingDown)
+    ));
+    resume_tx.send(()).expect("handler is released");
+    service.shutdown().await.expect("coordinator completes normally");
+}
+
+#[tokio::test]
+async fn test_shutdown_until_callers_keep_independent_deadlines() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let handler = Arc::new(RetryAfterClosingHandler {
+        attempts: AtomicUsize::new(0),
+        started: Mutex::new(Some(started_tx)),
+        resume: Mutex::new(Some(resume_rx)),
+    });
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .register_handler(handler)
+        .expect("handler registers")
+        .build()
+        .await
+        .expect("service builds");
+    service
+        .submit(TaskRequest::new("retry-after-close", "1", Vec::new()).with_idempotency_key("independent-deadlines"))
+        .await
+        .expect("task is accepted");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("handler starts")
+        .expect("start signal arrives");
+
+    let short_service = service.clone();
+    let short_waiter = tokio::spawn(async move {
+        short_service
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_millis(20))
+            .await
+    });
+    let long_service = service.clone();
+    let long_waiter = tokio::spawn(async move {
+        long_service
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_secs(2))
+            .await
+    });
+    assert!(matches!(
+        short_waiter.await.expect("short waiter joins"),
+        Err(TaskServiceError::ShutdownTimedOut)
+    ));
+    resume_tx.send(()).expect("handler is released");
+    long_waiter
+        .await
+        .expect("long waiter joins")
+        .expect("long deadline observes successful shared shutdown");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_shutdown_until_keeps_sqlite_owner_until_drain_finishes() {
+    let path = std::env::temp_dir().join(format!("qubit-task-shutdown-until-{}.sqlite", TaskId::generate()));
+    let (started_tx, started_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let handler = Arc::new(RetryAfterClosingHandler {
+        attempts: AtomicUsize::new(0),
+        started: Mutex::new(Some(started_tx)),
+        resume: Mutex::new(Some(resume_rx)),
+    });
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .expect("SQLite store opens")
+        .register_handler(handler)
+        .expect("handler registers")
+        .build()
+        .await
+        .expect("service acquires database ownership");
+    let accepted = service
+        .submit(TaskRequest::new("retry-after-close", "1", Vec::new()).with_idempotency_key("sqlite-shutdown-until"))
+        .await
+        .expect("task is accepted");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("handler starts")
+        .expect("start signal arrives");
+
+    assert!(matches!(
+        service
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_millis(20))
+            .await,
+        Err(TaskServiceError::ShutdownTimedOut)
+    ));
+    assert!(TaskExecutionServiceBuilder::recoverable_sqlite(&path).is_err());
+    assert_eq!(
+        service
+            .get(accepted.id)
+            .await
+            .expect("running record remains readable")
+            .unwrap()
+            .state,
+        TaskState::Running
+    );
+
+    resume_tx.send(()).expect("handler is released");
+    service.shutdown().await.expect("shared drain completes");
+    let replacement = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .expect("ownership is released after drain")
+        .build()
+        .await
+        .expect("replacement service builds");
+    replacement.shutdown().await.expect("replacement service shuts down");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(path.with_extension("owner.lock.guard"));
 }
 
 #[tokio::test]
@@ -933,7 +1358,7 @@ async fn test_failed_queued_to_blocked_transition_pauses_service() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("missing-handler", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("missing-handler", "1", Vec::new())))
         .await
         .expect("task accepted before scheduler blocks it");
     tokio::time::timeout(Duration::from_secs(2), failed_rx)
@@ -1056,7 +1481,7 @@ async fn test_evicted_cancel_racing_blocked_transition_does_not_pause_service() 
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("missing-handler", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("missing-handler", "1", Vec::new())))
         .await
         .expect("task accepted");
     tokio::time::timeout(Duration::from_secs(2), entered_rx)
@@ -1395,4 +1820,16 @@ async fn test_shutdown_statistics_failure_wakes_waiter_with_store_diagnostic() {
         matches!(error, TaskServiceError::StoreUnavailable(message) if message.contains("injected statistics failure"))
     );
     resume_tx.send(()).expect("blocked handler is released");
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

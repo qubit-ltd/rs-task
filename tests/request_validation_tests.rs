@@ -67,7 +67,7 @@ async fn test_submit_rejects_empty_task_type() {
     let mut request = valid_request();
     request.task_type.clear();
 
-    let result = service.submit(request).await;
+    let result = service.submit(test_keyed(request)).await;
 
     assert!(matches!(
         result,
@@ -83,7 +83,7 @@ async fn test_submit_rejects_empty_handler_version() {
     let mut request = valid_request();
     request.handler_version.clear();
 
-    let result = service.submit(request).await;
+    let result = service.submit(test_keyed(request)).await;
 
     assert!(matches!(
         result,
@@ -130,7 +130,7 @@ async fn test_submit_rejects_payload_above_maximum_size() {
     let mut request = valid_request();
     request.payload = vec![0; MAX_TASK_PAYLOAD_BYTES + 1];
 
-    let result = service.submit(request).await;
+    let result = service.submit(test_keyed(request)).await;
 
     assert!(matches!(
         result,
@@ -146,7 +146,7 @@ async fn test_submit_rejects_empty_custom_resource_name() {
     let mut request = valid_request();
     request.resources.custom.insert(String::new(), 1);
 
-    let result = service.submit(request).await;
+    let result = service.submit(test_keyed(request)).await;
 
     assert!(matches!(
         result,
@@ -162,7 +162,7 @@ async fn test_submit_rejects_empty_gpu_label() {
     let mut request = valid_request();
     request.resources.gpu_labels.push(String::new());
 
-    let result = service.submit(request).await;
+    let result = service.submit(test_keyed(request)).await;
 
     assert!(matches!(
         result,
@@ -181,7 +181,7 @@ async fn test_submit_rejects_cpu_request_above_capacity() {
         ..ResourceRequest::default()
     };
 
-    let result = service.submit(request).await;
+    let result = service.submit(test_keyed(request)).await;
 
     assert!(matches!(result, Err(TaskServiceError::Unsatisfiable)));
     service.shutdown().await.expect("service shuts down");
@@ -191,7 +191,7 @@ async fn test_submit_rejects_cpu_request_above_capacity() {
 async fn test_submit_accepts_valid_request() {
     let service = create_service().await;
     let record = service
-        .submit(valid_request())
+        .submit(test_keyed(valid_request()))
         .await
         .expect("valid request is accepted");
 
@@ -237,7 +237,7 @@ async fn test_submit_rejects_oversized_metadata_before_accepting() {
         .expect("service builds");
 
     assert!(matches!(
-        service.submit(request_with_oversized_metadata_key()).await,
+        service.submit(test_keyed(request_with_oversized_metadata_key())).await,
         Err(TaskServiceError::InvalidRequest(_))
     ));
     assert_eq!(service.stats().await.expect("stats are available").queued, 0);
@@ -253,7 +253,7 @@ async fn test_terminal_diagnostics_are_bounded_on_a_utf8_boundary() {
         .await
         .expect("service builds");
     let accepted = service
-        .submit(TaskRequest::new("oversized-diagnostic", "1", Vec::new()))
+        .submit(test_keyed(TaskRequest::new("oversized-diagnostic", "1", Vec::new())))
         .await
         .expect("task is accepted");
     let record = service.wait(accepted.id).await.expect("task reaches terminal state");
@@ -289,14 +289,17 @@ async fn test_exact_request_limits_are_accepted() {
             .sum::<usize>(),
         16_384
     );
-    let accepted = service.submit(request).await.expect("boundary request is accepted");
+    let accepted = service
+        .submit(test_keyed(request))
+        .await
+        .expect("boundary request is accepted");
     assert_eq!(accepted.state, TaskState::Queued);
     assert!(service.wait(accepted.id).await.is_err());
 
     let mut metadata_boundary = TaskRequest::new("metadata", "1", Vec::new());
     metadata_boundary.metadata.insert("k".repeat(128), "v".repeat(4_096));
     let accepted = service
-        .submit(metadata_boundary)
+        .submit(test_keyed(metadata_boundary))
         .await
         .expect("metadata entry boundaries are accepted");
     assert!(service.wait(accepted.id).await.is_err());
@@ -338,10 +341,22 @@ async fn test_each_request_limit_is_enforced_before_acceptance() {
 
     for request in requests {
         assert!(matches!(
-            service.submit(request).await,
+            service.submit(test_keyed(request)).await,
             Err(TaskServiceError::InvalidRequest(_))
         ));
     }
     assert_eq!(service.stats().await.expect("stats are available").queued, 0);
     service.shutdown().await.expect("service shuts down");
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

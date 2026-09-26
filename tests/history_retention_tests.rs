@@ -201,11 +201,11 @@ async fn test_task_store_default_pruning_reports_unsupported_capability() {
             self.0.accept(id, request)
         }
 
-        fn find_idempotent<'a>(
+        fn get_by_idempotency_key<'a>(
             &'a self,
-            request: TaskRequest,
+            key: &'a str,
         ) -> qubit_task::store::TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
-            self.0.find_idempotent(request)
+            self.0.get_by_idempotency_key(key)
         }
 
         fn transition<'a>(

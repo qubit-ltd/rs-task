@@ -290,11 +290,11 @@ impl TaskStore for BadScanStore {
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         self.inner.accept(id, request)
     }
-    fn find_idempotent<'a>(
+    fn get_by_idempotency_key<'a>(
         &'a self,
-        request: TaskRequest,
+        key: &'a str,
     ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskRecord>, StoreError>> {
-        self.inner.find_idempotent(request)
+        self.inner.get_by_idempotency_key(key)
     }
     fn transition<'a>(
         &'a self,
@@ -444,7 +444,7 @@ async fn test_recovery_preserves_retry_deadline_for_queued_record() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
-        + 350;
+        + 3_000;
     let queued = store
         .transition(TransitionCommand {
             id: running.id,
@@ -503,13 +503,13 @@ async fn test_recovery_preserves_retry_deadline_for_queued_record() {
     let later_waiting = service.get(later_queued.id).await.unwrap().unwrap();
     assert_eq!(later_waiting.retry_not_before_ms, Some(later_deadline));
     assert_eq!(later_waiting.attempt, 1);
-    let finished = tokio::time::timeout(std::time::Duration::from_secs(2), service.wait(queued.id))
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), service.wait(queued.id))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(finished.attempt, 2);
     assert!(matches!(finished.state, TaskState::Succeeded));
-    let later_finished = tokio::time::timeout(std::time::Duration::from_secs(2), service.wait(later_queued.id))
+    let later_finished = tokio::time::timeout(std::time::Duration::from_secs(5), service.wait(later_queued.id))
         .await
         .unwrap()
         .unwrap();

@@ -63,8 +63,11 @@ async fn local_task_handler_rejects_a_second_run() {
         .await
         .expect("service builds");
     let request = || TaskRequest::new("one-shot", "1", Vec::new());
-    let first = service.submit(request()).await.expect("first task submits");
-    let second = service.submit(request()).await.expect("second task submits");
+    let first = service.submit(test_keyed(request())).await.expect("first task submits");
+    let second = service
+        .submit(test_keyed(request()))
+        .await
+        .expect("second task submits");
     let first = service.wait(first.id).await.expect("first task finishes");
     let second = service.wait(second.id).await.expect("second task finishes");
     let states = [first.state, second.state];
@@ -86,19 +89,17 @@ async fn local_task_handler_rejects_a_second_run() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_find_idempotent_handles_missing_matching_and_conflicting_requests() {
+async fn sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
     use qubit_task::store::SqliteTaskStore;
     use qubit_task::store::TaskStore;
 
     let path = std::env::temp_dir().join(format!("qubit-task-find-idempotent-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
 
-    let without_key = TaskRequest::new("thumbnail", "v3", b"source".to_vec());
-    assert_eq!(store.find_idempotent(without_key).await.unwrap(), None);
-
+    assert_eq!(store.get_by_idempotency_key("thumbnail-source-42").await.unwrap(), None);
     let mut request = TaskRequest::new("thumbnail", "v3", b"source".to_vec());
     request.idempotency_key = Some("thumbnail-source-42".into());
-    assert_eq!(store.find_idempotent(request.clone()).await.unwrap(), None);
+    assert_eq!(store.get_by_idempotency_key("thumbnail-source-42").await.unwrap(), None);
 
     let id = TaskId::generate();
     let accepted = store.accept(id, request.clone()).await.unwrap();
@@ -107,14 +108,14 @@ async fn sqlite_find_idempotent_handles_missing_matching_and_conflicting_request
         qubit_task::model::AcceptOutcome::Existing(_) => panic!("first request is newly accepted"),
     };
     assert_eq!(
-        store.find_idempotent(request.clone()).await.unwrap(),
+        store.get_by_idempotency_key("thumbnail-source-42").await.unwrap(),
         Some(accepted_record)
     );
 
     let mut conflicting = request;
     conflicting.payload = b"different source".to_vec();
     assert!(matches!(
-        store.find_idempotent(conflicting).await,
+        store.accept(TaskId::generate(), conflicting).await,
         Err(qubit_task::store::StoreError::IdempotencyConflict)
     ));
 
@@ -155,4 +156,16 @@ fn sqlite_open_reports_a_non_directory_parent() {
 
     assert!(matches!(result, Err(qubit_task::store::StoreError::Failure(_))));
     std::fs::remove_file(parent).expect("parent fixture is removed");
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }

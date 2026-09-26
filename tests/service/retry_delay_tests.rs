@@ -88,7 +88,11 @@ async fn test_retry_is_persisted_and_waits_until_deadline() {
     .await
     .unwrap();
     let accepted = service
-        .submit(qubit_task::model::TaskRequest::new("retry-delay", "1", Vec::new()))
+        .submit(test_keyed(qubit_task::model::TaskRequest::new(
+            "retry-delay",
+            "1",
+            Vec::new(),
+        )))
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -168,7 +172,11 @@ async fn test_delayed_retry_can_be_cancelled_before_its_next_attempt() {
     .await
     .unwrap();
     let accepted = service
-        .submit(qubit_task::model::TaskRequest::new("retry-delay", "1", Vec::new()))
+        .submit(test_keyed(qubit_task::model::TaskRequest::new(
+            "retry-delay",
+            "1",
+            Vec::new(),
+        )))
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -199,4 +207,16 @@ async fn test_delayed_retry_can_be_cancelled_before_its_next_attempt() {
     tokio::time::sleep(Duration::from_millis(350)).await;
     assert_eq!(handler.0.load(Ordering::SeqCst), 1);
     service.shutdown().await.unwrap();
+}
+
+#[allow(dead_code)]
+fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if request.idempotency_key.is_none() {
+        request.idempotency_key = Some(format!(
+            "test-request-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    request
 }
