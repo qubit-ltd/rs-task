@@ -73,6 +73,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `submit_local` is intentionally unavailable when the store declares restart
 recovery. A closure cannot be reconstructed from a database after process exit.
+If a caller cancels or times out while awaiting `submit_local`, its background
+acceptance may still finish, but the caller loses the returned handle and
+cannot retrieve the original typed value or error. Use keyed `submit` when the
+caller must recover the task after it stops waiting.
 For a cooperative cancellation, return `LocalTaskOutcome::Cancelled` after
 observing `TaskContext::is_cancelled()`; then `handle.result()` returns
 `LocalTaskResultError::Cancelled`. A successful `TaskRunOutcome` or
@@ -119,7 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionServiceBuilder::in_memory()
         .register_handler(Arc::new(ImportV1))?
         .build().await?;
-    let id = service.submit(TaskRequest::new("csv-import", "1", b"...".to_vec())).await?.id;
+    let request = TaskRequest::new("csv-import", "1", b"...".to_vec())
+        .with_idempotency_key("csv-import-request-42");
+    let id = service.submit(request).await?.id;
     let finished = service.wait(id).await?;
     assert!(finished.state.is_terminal());
     service.shutdown().await?;
@@ -132,6 +138,17 @@ the business application's own data store and return a bounded reference.
 Use `TaskRequest` with an exact handler version for work that must be
 reconstructed after restart; the existing SQLite restart-recovery test exercises
 that public service path.
+
+Every service-level `submit` requires a stable, non-empty key generated and
+saved before the first call. After a caller timeout, query
+`get_by_idempotency_key`; `None` is only a snapshot, so retry the identical
+request with the same key. The key can be reused after its task record is
+pruned or evicted. The in-memory preset retains up to 64 MiB of request payloads
+and defaults to 64 in-flight submissions sharing a 64 MiB admission payload
+budget. These budgets count payload bytes, not total process memory. Use SQLite
+or another persistent store when the recovery window must outlast in-memory
+retention. `shutdown_until(deadline)` starts the normal drain and only bounds
+that caller's wait; work and store ownership remain active until draining ends.
 
 ## Schedule CPU, GPU, and named resources
 
