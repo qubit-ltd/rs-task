@@ -87,6 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request = TaskRequest::new("echo", "1", b"versioned work".to_vec())
             .with_idempotency_key("echo-versioned-work-2026-09-26");
         let accepted = service.submit(request).await?;
+        let snapshot = service
+            .get_summary(accepted.id)
+            .await?
+            .expect("accepted task remains queryable");
+        assert_eq!(snapshot.request.task_type, "echo");
         let finished = service.wait(accepted.id).await?;
         assert!(matches!(finished.state, qubit_task::model::TaskState::Succeeded));
         assert_eq!(

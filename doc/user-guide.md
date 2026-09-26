@@ -222,7 +222,7 @@ let service = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sql
     .build().await?;
 ~~~
 
-SQLite stores immutable requests separately from lifecycle state. State transitions update only lifecycle JSON, so large payloads are not rewritten. Opening a schema 0 or 1 database migrates it transactionally to schema 2 while retaining tasks and idempotency indexes. Newer schema versions and unknown record format versions are rejected with an explicit error. An
+SQLite schema 3 stores request metadata, payload BLOB, and lifecycle JSON separately. Summary reads and state transitions never select or decode payloads. Opening a schema 0, 1, or 2 database migrates it transactionally to schema 3 while retaining task payloads, lifecycle values, and idempotency indexes. Newer schema versions and unknown record format versions are rejected with an explicit error. An
 operating-system lock prevents two service processes from executing the same
 database at once. The builder acquires ownership and scans unfinished work
 before returning. A database lock conflict, missing provider, or unsupported
@@ -416,6 +416,11 @@ History pagination now uses `TaskCursor { accepted_at_ms, id }` instead of a
 `prune_terminal_before` and the required `has_unfinished_over_limit(limit)`
 recovery precheck. Custom stores must implement the precheck without decoding
 payloads. The default pruning implementation reports `UnsupportedCapability`.
+The final `TaskStore` contract is source-breaking: `transition` returns
+`TaskSummary`, `list` pages contain summaries, and each store must implement
+`get_summary` without reading payload bytes. Stores may implement
+`abandon_blocked` with an atomic version and state check; the default reports
+`UnsupportedCapability`.
 
 ## Troubleshooting
 
@@ -448,3 +453,30 @@ business side effects. A future distributed engine can implement the same
 - [API documentation](https://docs.rs/qubit-task)
 - [中文用户指南](user-guide.zh_CN.md)
 - [Detailed service design](task_execution_service_design.md)
+
+## Payload-free status and blocked-task maintenance
+
+`TaskPage.records`, `wait`, and `retry_blocked` return `TaskSummary`. It includes
+request metadata, lifecycle state, and output summary, but has no payload
+field. Use `get_summary` for a single status read without loading the payload.
+Use `get` when application code needs the complete `TaskRecord` and its payload.
+SQLite schema 3 stores `request_info_json`, `payload BLOB`, and
+`lifecycle_json` separately; history, status waits, and transitions select only
+metadata and lifecycle columns. Schema 0, 1, and 2 are migrated in one
+transaction and retain task payloads, idempotency keys, and lifecycle values.
+
+Review old `Blocked` records with a state-filtered history page and an age
+threshold. Call `abandon_blocked(id, state_version)` only for records that an
+operator has selected for abandonment. The version check makes a concurrent
+`retry_blocked` safe: if the task changed after the page was read, abandonment
+returns `StoreError::Conflict`. The history cursor is not a snapshot across
+concurrent writes. After abandonment, call `prune_terminal_before` with a
+cutoff and a row limit to clean terminal history in bounded batches. See
+[`blocked_maintenance.rs`](../examples/blocked_maintenance.rs) for a complete
+operator flow.
+
+When a store fault occurs, `wait` and local task handles report it promptly.
+The shared shutdown result remains pending until the scheduler exits, tracked
+execution handles finish, and the store owner is released. A caller may use
+`shutdown_until` to bound its own wait; a timeout does not stop that background
+drain or release ownership early.
