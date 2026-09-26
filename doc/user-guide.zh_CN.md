@@ -147,6 +147,19 @@ let builder = TaskExecutionServiceBuilder::in_memory().capacity(capacity);
 
 服务会根据执行引擎公布的容量校验每个请求。超出已配置容量的请求会被拒绝；当前资源不足但以后可能满足的请求会继续排队。默认公平 FIFO 策略允许符合当前资源条件的任务越过队首，并在队首任务多次被越过后为其保留执行机会。等待队列有容量限制；队列满时返回 `QueueFull`，由调用方施加背压。自动重试遇到满队列时，任务会记录为 `Blocked`，等待容量恢复后可显式重试，不会突破队列上限。
 
+I/O handler 可以请求零 CPU 槽，但仍占用 `max_running_tasks` 名额。显式设置该上限可控制并发网络或磁盘操作。CPU 密集型 handler 应至少请求一个槽，并通过 `spawn_blocking` 或专用执行后端运行阻塞工作。
+
+~~~rust,no_run
+use std::num::NonZeroUsize;
+use qubit_task::model::TaskRequest;
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+let builder = TaskExecutionServiceBuilder::in_memory()
+    .max_running_tasks(NonZeroUsize::new(64).expect("limit must be positive"));
+let mut request = TaskRequest::new("http-fetch", "1", Vec::new());
+request.resources.cpu_slots = 0;
+~~~
+
 ### 限制运行并发与重启恢复
 
 资源槽位和任务并发数是两个独立上限。可用
@@ -227,7 +240,7 @@ SQLite 将不可变请求与生命周期状态分开保存，状态更新只写�
 每次最多删除 `max_rows` 条。排队、运行中和 `Blocked` 记录不会被删除。清理会同时移除
 幂等键，因此该键之后可以重新受理。需要归档时，请在清理前备份持久历史。Builder 的
 `runtime_handle(Handle)` 指定服务后台任务使用的 runtime；该 runtime 须存活到
-`shutdown()` 返回。
+`shutdown()` 返回。丢弃最后一个服务句柄会启动异步排空，但无法向调用方报告结果；需要确认任务和通知都已完成时应显式调用 `shutdown()`。通过 `runtime_handle` 注入的 runtime 必须保持运行，直到排空完成。调度器 panic 会唤醒等待者并返回 `TaskServiceError::SchedulerUnavailable`；存储故障仍返回 `StoreUnavailable`。调度器不会自动重启。自定义引擎一旦启动工作就必须返回可跟踪的执行句柄；如果引擎在启动未跟踪的副作用后 panic，应用应终止并由外部监督器重启进程。
 服务与两种内置 store 都将 `TaskQuery.limit` 限制为 256；超过上限返回
 `InvalidRequest`，`limit=0` 按 1 处理。内存 store 的分页选择额外空间随页长有界增长。
 
@@ -246,7 +259,7 @@ let service = TaskExecutionServiceBuilder::in_memory()
 
 ## 从旧版 API 迁移
 
-本次重设计移除调用方提供的 ID、`submit` 闭包、线程池专属 builder 选项和旧的 `TaskHandle<R, E>`。这里没有通用的持久化句柄：`submit_local` 现在为进程内闭包返回 `LocalTaskHandle<R, E>`；需要重建的任务仍使用 `TaskRequest` 和服务生成的 `TaskId`。第三方 `TaskStore` 需要新增 `count_states()`，一次聚合返回所有保留状态的计数。这些是有意的源码破坏性变更，下游实现和调用点应一起迁移。当前工作区中没有 `rs-*` crate 直接依赖 `rs-task`。
+本次重设计移除调用方提供的 ID、`submit` 闭包、线程池专属 builder 选项和旧的 `TaskHandle<R, E>`。这里没有通用的持久化句柄：`submit_local` 现在为进程内闭包返回 `LocalTaskHandle<R, E>`；需要重建的任务仍使用 `TaskRequest` 和服务生成的 `TaskId`。第三方 `TaskStore` 需要实现 `count_states()`，并新增 `has_unfinished_over_limit(limit)`；后者必须在一个一致性边界内判断 Queued/Running 记录是否严格超过上限，且不能读取 payload。这些是有意的源码破坏性变更，下游实现和调用点应一起迁移。当前工作区中没有 `rs-*` crate 直接依赖 `rs-task`。
 
 `TaskQuery.states` 现在是 `Vec<TaskStateKind>`；筛选只比较生命周期类别，忽略
 失败消息和阻塞原因等诊断内容。关闭开始后服务会拒绝写操作。SQLite 写入受存储
