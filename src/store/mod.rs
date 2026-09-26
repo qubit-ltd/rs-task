@@ -15,6 +15,7 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 
+pub use memory::DEFAULT_MAX_UNFINISHED_RECORDS;
 pub use memory::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteTaskStore;
@@ -107,6 +108,13 @@ pub enum StoreError {
         requested_bytes: usize,
         /// Bytes available after evicting eligible terminal records.
         available_bytes: usize,
+    },
+    /// The in-memory store already retains its configured maximum number of
+    /// nonterminal task records.
+    #[error("unfinished task record limit exceeded ({limit})")]
+    UnfinishedRecordLimitExceeded {
+        /// Maximum number of nonterminal records this store retains.
+        limit: usize,
     },
     /// The expected state revision or attempt no longer matches.
     #[error("task state changed before the requested transition")]

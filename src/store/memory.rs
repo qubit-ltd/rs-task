@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::BTreeMap;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
@@ -28,25 +29,38 @@ use crate::model::TaskRequest;
 use crate::model::TaskState;
 use crate::model::TaskStateCounts;
 use crate::model::TransitionCommand;
+use crate::model::checked_page_size;
 
 struct MemoryState {
     records: BTreeMap<TaskId, TaskRecord>,
     idempotency: HashMap<String, TaskId>,
     terminal_order: VecDeque<TaskId>,
     retained_payload_bytes: usize,
+    unfinished_records: usize,
 }
 
-/// Volatile task history with bounded retention for completed tasks.
+/// Default number of nonterminal records retained by a memory store.
+pub const DEFAULT_MAX_UNFINISHED_RECORDS: usize = 2_048;
+
+/// Volatile task history with bounded retention for completed and unfinished
+/// tasks.
 pub struct MemoryTaskStore {
     history_capacity: usize,
     max_payload_bytes: usize,
+    max_unfinished_records: usize,
     state: Mutex<MemoryState>,
 }
 
 impl MemoryState {
+    /// Removes a retained record and updates payload, key, and unfinished
+    /// accounting.
     fn remove_record(&mut self, id: TaskId) -> Option<TaskRecord> {
         let record = self.records.remove(&id)?;
         self.retained_payload_bytes -= record.request.payload.len();
+        if !record.state.is_terminal() {
+            debug_assert!(self.unfinished_records > 0);
+            self.unfinished_records -= 1;
+        }
         if let Some(key) = &record.request.idempotency_key {
             self.idempotency.remove(key);
         }
@@ -57,7 +71,7 @@ impl MemoryState {
 
 impl MemoryTaskStore {
     /// Creates an in-memory store retaining at most `history_capacity` terminal
-    /// records.
+    /// records and [`DEFAULT_MAX_UNFINISHED_RECORDS`] nonterminal records.
     #[must_use]
     pub fn new(history_capacity: usize) -> Self {
         Self::with_payload_budget(
@@ -66,17 +80,50 @@ impl MemoryTaskStore {
         )
     }
 
-    /// Creates an in-memory store with an explicit retained payload budget.
+    /// Creates an in-memory store with an explicit payload budget and the
+    /// default nonterminal-record limit.
     #[must_use]
     pub fn with_payload_budget(history_capacity: usize, max_payload_bytes: NonZeroUsize) -> Self {
+        Self::with_limits(
+            history_capacity,
+            max_payload_bytes,
+            NonZeroUsize::new(DEFAULT_MAX_UNFINISHED_RECORDS).expect("default unfinished record limit is nonzero"),
+        )
+    }
+
+    /// Creates an in-memory store with explicit history, payload, and
+    /// nonterminal-record limits.
+    ///
+    /// Nonterminal records include queued, running, and blocked tasks. When the
+    /// limit is reached, new distinct tasks are rejected until an existing
+    /// task becomes terminal. Idempotent replays of retained tasks remain
+    /// available.
+    ///
+    /// # Parameters
+    ///
+    /// * `history_capacity` - Maximum number of retained terminal records.
+    /// * `max_payload_bytes` - Maximum retained bytes across task payloads.
+    /// * `max_unfinished_records` - Maximum retained nonterminal records.
+    ///
+    /// # Returns
+    ///
+    /// A memory store with the supplied retention limits.
+    #[must_use]
+    pub fn with_limits(
+        history_capacity: usize,
+        max_payload_bytes: NonZeroUsize,
+        max_unfinished_records: NonZeroUsize,
+    ) -> Self {
         Self {
             history_capacity,
             max_payload_bytes: max_payload_bytes.get(),
+            max_unfinished_records: max_unfinished_records.get(),
             state: Mutex::new(MemoryState {
                 records: BTreeMap::new(),
                 idempotency: HashMap::new(),
                 terminal_order: VecDeque::new(),
                 retained_payload_bytes: 0,
+                unfinished_records: 0,
             }),
         }
     }
@@ -105,6 +152,11 @@ impl TaskStore for MemoryTaskStore {
             }
             if state.records.contains_key(&id) {
                 return Err(StoreError::DuplicateTask);
+            }
+            if state.unfinished_records >= self.max_unfinished_records {
+                return Err(StoreError::UnfinishedRecordLimitExceeded {
+                    limit: self.max_unfinished_records,
+                });
             }
             let requested_bytes = request.payload.len();
             let reclaimable_bytes = state
@@ -159,6 +211,7 @@ impl TaskStore for MemoryTaskStore {
             }
             state.retained_payload_bytes += requested_bytes;
             state.records.insert(id, record.clone());
+            state.unfinished_records += 1;
             Ok(AcceptOutcome::Accepted(record))
         })
     }
@@ -191,6 +244,8 @@ impl TaskStore for MemoryTaskStore {
                     "only queued tasks may have a retry deadline",
                 ));
             }
+            let was_unfinished = !record.state.is_terminal();
+            let becomes_terminal = command.state.is_terminal();
             let starting = !matches!(record.state, TaskState::Running) && matches!(command.state, TaskState::Running);
             record.state = command.state;
             record.retry_not_before_ms = command.retry_not_before_ms;
@@ -202,9 +257,13 @@ impl TaskStore for MemoryTaskStore {
             record.cancel_requested = command.cancel_requested;
             record.assigned_resources = command.assigned_resources;
             record.output = command.output;
-            if record.state.is_terminal() {
+            if becomes_terminal {
                 record.finished_at_ms = Some(now_ms());
                 let updated = record.clone();
+                if was_unfinished {
+                    debug_assert!(state.unfinished_records > 0);
+                    state.unfinished_records -= 1;
+                }
                 state.terminal_order.push_back(command.id);
                 while state.terminal_order.len() > self.history_capacity {
                     if let Some(oldest) = state.terminal_order.front().copied() {
@@ -233,35 +292,54 @@ impl TaskStore for MemoryTaskStore {
 
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         Box::pin(async move {
-            let page_size = query.limit.max(1);
+            let page_size = checked_page_size(query.limit)?;
             let fetch_limit = page_size
                 .checked_add(1)
                 .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
             let state = self.state.lock();
-            let mut records = state
-                .records
-                .values()
-                .filter(|record| {
-                    (query.states.is_empty() || query.states.contains(&record.state.kind()))
-                        && query
-                            .correlation_key
-                            .as_ref()
-                            .is_none_or(|key| record.request.correlation_key.as_ref() == Some(key))
-                        && query
-                            .after
-                            .is_none_or(|after| (record.accepted_at_ms, record.id) > (after.accepted_at_ms, after.id))
-                })
-                .collect::<Vec<_>>();
-            records.sort_by_key(|record| (record.accepted_at_ms, record.id));
-            records.truncate(fetch_limit);
-            let has_more = records.len() > page_size;
+            let mut candidates = BinaryHeap::with_capacity(fetch_limit);
+            for record in state.records.values().filter(|record| {
+                (query.states.is_empty() || query.states.contains(&record.state.kind()))
+                    && query
+                        .correlation_key
+                        .as_ref()
+                        .is_none_or(|key| record.request.correlation_key.as_ref() == Some(key))
+                    && query
+                        .after
+                        .is_none_or(|after| (record.accepted_at_ms, record.id) > (after.accepted_at_ms, after.id))
+            }) {
+                let key = (record.accepted_at_ms, record.id);
+                if candidates.len() < fetch_limit {
+                    candidates.push(key);
+                } else if candidates.peek().is_some_and(|largest| key < *largest) {
+                    candidates.pop();
+                    candidates.push(key);
+                }
+            }
+            let mut candidates = candidates.into_vec();
+            candidates.sort_unstable();
+            let has_more = candidates.len() > page_size;
             if has_more {
-                records.truncate(page_size);
+                candidates.truncate(page_size);
             }
             let next = has_more
-                .then(|| records.last().map(|record| TaskCursor::from(*record)))
+                .then(|| {
+                    candidates.last().map(|(_, id)| {
+                        TaskCursor::new(
+                            state
+                                .records
+                                .get(id)
+                                .expect("page candidate remains retained")
+                                .accepted_at_ms,
+                            *id,
+                        )
+                    })
+                })
                 .flatten();
-            let records = records.into_iter().cloned().collect::<Vec<_>>();
+            let records = candidates
+                .into_iter()
+                .map(|(_, id)| state.records.get(&id).expect("page candidate remains retained").clone())
+                .collect::<Vec<_>>();
             Ok(TaskPage { records, next })
         })
     }
