@@ -196,7 +196,7 @@ SQLite 将不可变请求与生命周期状态分开保存，状态更新只写�
 ## 发布状态事件
 
 启用 `event-bus` feature 后，可将 `qubit_event_bus::EventBus` 具体门面注入构建器。状态变化后，服务会发布 `TaskEvent`。通知采用尽力而为语义：发布失败不会回滚任务状态。事件可能重复、延迟或丢失，因此消费者应比较 `state_version`，并在需要权威状态时查询服务。
-当前版本依赖 `qubit-event-bus` 0.13。通用 `NotificationPublisher` 返回 provider receipt；服务再按 `AdmissionOutcome` 映射到现有任务通知统计。
+当前版本依赖 `qubit-event-bus` 0.14。通用 `NotificationPublisher` 返回 provider receipt；服务再按 `AdmissionOutcome` 映射到现有任务通知统计。
 
 服务使用 `rs-event-bus` 的 `NotificationPublisher` 管理串行发布线程和有界队列，默认容量为 256。可通过
 `event_bus_buffer_capacity(NonZeroUsize)` 设置其他正数容量。状态转移只调用
@@ -211,7 +211,7 @@ SQLite 将不可变请求与生命周期状态分开保存，状态更新只写�
 这些值表示队列接纳、provider 回执或线程状态，不代表订阅者 handler 已处理完成。
 计数单调递增并在 `u64::MAX` 饱和；同一快照的各字段不保证来自完全相同的时刻。
 
-调用 `shutdown()` 时，服务先停止新的受理并等待进行中的提交完成受理，再等待已受理任务结束；随后关闭通知入队并排空队列中的事件。通知线程在此期间发生 panic 时，`worker_panicked` 会记录故障，尚未处理的通知可能丢失，`shutdown()` 会返回 `TaskServiceError::NotificationClose`。等待 blocking close 任务失败时也返回这一错误。通知关闭失败不会回滚任务状态；并发或后续的 shutdown 调用会收到相同的关闭结果。该方法不会关闭由应用持有的事件总线。同步 provider 在专用操作系统线程上运行，不会占用 Tokio runtime worker；但如果 provider 永不返回，该线程就无法完成发布，`shutdown()` 仍可能无限等待。不调用 `shutdown()` 而直接丢弃服务时，发送端关闭后发布线程仍会排空已入队通知再退出，同样受 provider 是否返回的影响。
+调用 `shutdown()` 时，服务先停止新的受理并等待进行中的提交完成受理，再等待已受理任务结束；随后关闭通知入队并排空队列中的事件。存储故障路径在服务取得关闭协调权后也会执行相同的通知排空。服务自有发布器占用一条线程；服务不创建订阅时，不会产生订阅接收线程。通知线程在此期间发生 panic 时，`worker_panicked` 会记录故障，尚未处理的通知可能丢失，`shutdown()` 会返回 `TaskServiceError::NotificationClose`。等待 blocking close 任务失败时也返回这一错误。通知关闭失败不会回滚任务状态；并发或后续的 shutdown 调用会收到相同的关闭结果。该方法不会关闭由应用持有的事件总线。同步 provider 在专用操作系统线程上运行，不会占用 Tokio runtime worker；但如果 provider 永不返回，该线程就无法完成发布，`shutdown()` 仍可能无限等待。不调用 `shutdown()` 而直接丢弃服务时，发送端关闭后发布线程仍会排空已入队通知再退出，同样受 provider 是否返回的影响。
 
 ## 错误与诊断
 
