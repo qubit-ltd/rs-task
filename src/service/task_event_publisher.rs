@@ -10,19 +10,14 @@
 use std::io;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::Condvar;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::SyncSender;
-use std::sync::mpsc::TrySendError;
-use std::sync::mpsc::sync_channel;
-use std::thread;
-use std::thread::JoinHandle;
 
 use qubit_event_bus::EventBus;
+use qubit_event_bus::NotificationOutcome;
+use qubit_event_bus::NotificationPublisher;
+use qubit_event_bus::TryPublishError;
 use qubit_event_bus::model::AdmissionOutcome;
-use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::Topic;
 
 use super::task_event_notification_stats::TaskEventNotificationStats;
@@ -39,7 +34,6 @@ struct Counters {
     unaccepted: AtomicU64,
     partial_rejection: AtomicU64,
     publish_error: AtomicU64,
-    worker_panicked: AtomicU64,
 }
 
 /// Increments a counter without wrapping its accumulated diagnostic value.
@@ -51,51 +45,32 @@ fn increment(counter: &AtomicU64) {
 
 /// Owns one worker and one bounded queue for a service's event bus.
 pub(super) struct TaskEventPublisher {
-    sender: Mutex<Option<SyncSender<TaskEvent>>>,
+    publisher: Arc<NotificationPublisher<TaskEvent>>,
     counters: Arc<Counters>,
-    finished: Arc<(Mutex<bool>, Condvar)>,
-    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl TaskEventPublisher {
     /// Starts a dedicated worker before service scheduling begins.
     pub(super) fn new(bus: EventBus, capacity: NonZeroUsize) -> io::Result<Self> {
-        let (sender, receiver) = sync_channel(capacity.get());
         let counters = Arc::new(Counters::default());
-        let finished = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_counters = Arc::clone(&counters);
-        let worker_finished = Arc::clone(&finished);
-        let worker = thread::Builder::new()
-            .name("task-event-publisher".into())
-            .spawn(move || {
-                worker_main(&worker_counters, &worker_finished, || {
-                    let topic = Topic::<TaskEvent>::new("task.lifecycle").expect("fixed task lifecycle topic is valid");
-                    while let Ok(event) = receiver.recv() {
-                        match PublishRequest::new(topic.clone(), event) {
-                            Ok(request) => match bus.publish(request) {
-                                Ok(receipt) => record_admission(&worker_counters, receipt.admission_outcome()),
-                                Err(_) => increment(&worker_counters.publish_error),
-                            },
-                            Err(_) => increment(&worker_counters.publish_error),
-                        }
-                    }
-                });
-            })?;
+        let topic = Topic::<TaskEvent>::new("task.lifecycle").expect("fixed task lifecycle topic is valid");
+        let publisher = NotificationPublisher::new(bus, topic, capacity, move |outcome| match outcome {
+            NotificationOutcome::Published(receipt) => record_admission(&worker_counters, receipt.admission_outcome()),
+            _ => increment(&worker_counters.publish_error),
+        })?;
         Ok(Self {
-            sender: Mutex::new(Some(sender)),
+            publisher: Arc::new(publisher),
             counters,
-            finished,
-            worker: Arc::new(Mutex::new(Some(worker))),
         })
     }
 
     /// Attempts to enqueue without waiting for the worker or event bus.
     pub(super) fn enqueue(&self, event: TaskEvent) {
-        let sender = self.sender.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match sender.as_ref().map(|sender| sender.try_send(event)) {
-            Some(Ok(())) => increment(&self.counters.enqueued),
-            Some(Err(TrySendError::Full(_))) => increment(&self.counters.queue_full),
-            Some(Err(TrySendError::Disconnected(_))) | None => increment(&self.counters.queue_closed),
+        match self.publisher.try_publish(event) {
+            Ok(()) => increment(&self.counters.enqueued),
+            Err(TryPublishError::Full(_)) => increment(&self.counters.queue_full),
+            Err(TryPublishError::Closed(_)) => increment(&self.counters.queue_closed),
         }
     }
 
@@ -111,42 +86,15 @@ impl TaskEventPublisher {
             unaccepted: load(&self.counters.unaccepted),
             partial_rejection: load(&self.counters.partial_rejection),
             publish_error: load(&self.counters.publish_error),
-            worker_panicked: load(&self.counters.worker_panicked),
+            worker_panicked: self.publisher.stats().worker_panicked(),
         }
     }
 
     /// Stops enqueue, drains accepted events, and waits for the worker to exit.
     pub(super) async fn close(&self, runtime_handle: &tokio::runtime::Handle) {
-        self.sender
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let finished = Arc::clone(&self.finished);
-        let worker = Arc::clone(&self.worker);
-        let _ = runtime_handle
-            .spawn_blocking(move || {
-                let (lock, changed) = &*finished;
-                let mut done = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                while !*done {
-                    done = changed.wait(done).unwrap_or_else(std::sync::PoisonError::into_inner);
-                }
-                drop(done);
-                if let Some(handle) = worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
-                    let _ = handle.join();
-                }
-            })
-            .await;
+        let publisher = Arc::clone(&self.publisher);
+        let _ = runtime_handle.spawn_blocking(move || publisher.close()).await;
     }
-}
-
-/// Runs the publisher worker body and always signals shutdown waiters.
-fn worker_main(work_counters: &Counters, finished: &(Mutex<bool>, Condvar), work: impl FnOnce()) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
-        increment(&work_counters.worker_panicked);
-    }
-    let (lock, changed) = finished;
-    *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
-    changed.notify_all();
 }
 
 /// Adds one provider admission result to the corresponding observable counters.
@@ -206,7 +154,6 @@ mod tests {
     use super::Counters;
     use super::TaskEventPublisher;
     use super::record_admission;
-    use super::worker_main;
     use crate::event::TaskEvent;
     use crate::model::TaskId;
     use crate::model::TaskState;
@@ -335,7 +282,7 @@ mod tests {
     }
 
     fn publisher(spi: Arc<FakeSpi>, capacity: usize) -> TaskEventPublisher {
-        let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
+        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi);
         TaskEventPublisher::new(bus, NonZeroUsize::new(capacity).expect("nonzero capacity")).expect("publisher starts")
     }
 
@@ -379,11 +326,12 @@ mod tests {
     #[test]
     fn test_task_event_publisher_fake_spi_unsupported_subscription_is_reported() {
         let spi = FakeSpi::new(false, Outcome::Opaque);
-        let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
+        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi);
         let request = SubscribeRequest::new(
-            SubscriberId::new("task-observer").expect("subscriber ID"),
+            "task-observer",
             Topic::<TaskEvent>::new("task.lifecycle").expect("task lifecycle topic"),
-        );
+        )
+        .expect("subscribe request");
 
         let error = match bus.subscribe(request, |_| ()) {
             Ok(_) => panic!("fake SPI does not support subscriptions"),
@@ -401,7 +349,7 @@ mod tests {
     #[test]
     fn test_task_event_publisher_fake_spi_shutdown_is_complete() {
         let spi = FakeSpi::new(false, Outcome::Opaque);
-        let bus = EventBus::new(ProviderId::new("fake").expect("provider ID"), spi);
+        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi);
 
         let outcome = bus.shutdown(ShutdownMode::Immediate).expect("bus shutdown");
 
@@ -457,19 +405,10 @@ mod tests {
                     assert_eq!(stats.partial_rejection, 1);
                 }
                 Outcome::Error => assert_eq!(stats.publish_error, 1),
-                Outcome::Panic => assert_eq!(stats.publish_error, 1),
+                Outcome::Panic => assert_eq!(stats.publish_error + stats.worker_panicked, 1),
                 Outcome::Opaque => unreachable!(),
             }
         }
-    }
-
-    #[test]
-    fn test_task_event_publisher_worker_panic_is_counted_and_signalled() {
-        let counters = Counters::default();
-        let finished = (Mutex::new(false), Condvar::new());
-        worker_main(&counters, &finished, || panic!("scripted worker failure"));
-        assert_eq!(counters.worker_panicked.load(Ordering::Acquire), 1);
-        assert!(*finished.0.lock().expect("finished lock"));
     }
 
     #[tokio::test]

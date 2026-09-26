@@ -1394,7 +1394,6 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
     use qubit_event_bus::EventBus;
     use qubit_event_bus::local::LocalEventBusConfig;
     use qubit_event_bus::model::SubscribeRequest;
-    use qubit_event_bus::model::SubscriberId;
     use qubit_event_bus::model::Topic;
 
     let bus = EventBus::local(LocalEventBusConfig::default()).expect("local event bus starts");
@@ -1405,10 +1404,7 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
     let versions_ref = versions.clone();
     let subscription = bus
         .subscribe(
-            SubscribeRequest::new(
-                SubscriberId::new("task-test").expect("subscriber ID is valid"),
-                topic.clone(),
-            ),
+            SubscribeRequest::new("task-test", topic.clone()).expect("subscribe request is valid"),
             move |delivery| {
                 versions_ref
                     .lock()

@@ -222,13 +222,14 @@ into the builder. The service publishes `TaskEvent` values after state changes.
 Publishing is best effort: a publish error does not roll back a task transition.
 Events may be repeated, delayed, or missing, so consumers should compare
 `state_version` and query the service for authoritative state.
-This release depends on `qubit-event-bus` 0.12. The publisher classifies that
-version's `PublishAcknowledgement` directly and does not depend on newer
-admission-check APIs.
+This release uses `qubit-event-bus` 0.13. The shared `NotificationPublisher`
+reports the provider receipt; this service maps its admission outcome to the
+existing task notification counters.
 
-The service owns one serial publisher thread and a bounded notification queue.
+The service uses `rs-event-bus`'s `NotificationPublisher`, which owns one serial publisher thread and a bounded notification queue.
 The default capacity is 256; configure another positive capacity with
-`event_bus_buffer_capacity(NonZeroUsize)`. State transitions call `try_send`,
+`event_bus_buffer_capacity(NonZeroUsize)`. State transitions call
+`NotificationPublisher::try_publish`,
 so they do not wait for event-bus publication. If the queue is full, the new
 notification is dropped. Notifications attempted after shutdown closes the
 queue are also dropped. Neither case changes the task result.
