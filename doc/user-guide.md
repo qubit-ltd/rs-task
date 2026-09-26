@@ -182,7 +182,7 @@ let service = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sql
     .build().await?;
 ~~~
 
-SQLite stores accepted task descriptions and state changes transactionally. An
+SQLite stores accepted task descriptions and state changes transactionally. Opening a version 0 database migrates it in place to schema version 1 while retaining tasks and idempotency indexes. Newer schema versions and unknown record format versions are rejected with an explicit error. An
 operating-system lock prevents two service processes from executing the same
 database at once. The builder acquires ownership and scans unfinished work
 before returning. A database lock conflict, missing provider, or unsupported
@@ -289,8 +289,8 @@ let service = TaskExecutionServiceBuilder::in_memory()
 ~~~
 
 Use `get(TaskId)` for the current record and `list(TaskQuery)` for bounded
-history pages. `wait(TaskId)` resolves when the task is terminal and returns a
-blocked-task error when intervention is needed. `cancel(TaskId)` can cancel a
+history pages. `wait(TaskId)` wakes only waiters for that task within the current process,
+resolves when the task is terminal, and returns a blocked-task error when intervention is needed. `cancel(TaskId)` can cancel a
 queued task immediately. For running work it persists `cancel_requested` and
 sets the cancellation signal in `TaskContext`; this is only a request. The
 handler must return `TaskRunOutcome::Cancelled` for the service to confirm
@@ -299,11 +299,15 @@ result remains authoritative. This distinction is also exercised by the
 cooperative cancellation integration tests.
 
 Handlers return a `TaskRunError` with a category, diagnostic, and retryable
-flag. Non-retryable errors become `Failed`; panics become `Panicked`. Retryable
+flag. Non-retryable errors become `Failed`; engine-reported panics become `Panicked` regardless of where the handler panicked. A business error whose category happens to be `panic` remains a business error. Retryable
 errors are retried up to the configured maximum (three attempts by default).
-If the bounded waiting queue is full when a retry is due, the task becomes
-`Blocked` with a queue-capacity reason instead of exceeding the limit. After
-capacity becomes available, call `retry_blocked` to enqueue it again.
+Automatic retries use exponential backoff: one second initially, doubling to a
+sixty-second cap. Configure another range with
+`TaskExecutionServiceBuilder::retry_policy(RetryPolicy::new(initial, maximum)?)`.
+The due time is persisted with the queued record, so restart recovery does not
+start an attempt early. `retry_blocked` clears the due time and makes the task
+eligible immediately. If the bounded waiting queue is full when a retry is
+recorded, the task becomes `Blocked` with a queue-capacity reason.
 
 ### Bound running work and restart recovery
 

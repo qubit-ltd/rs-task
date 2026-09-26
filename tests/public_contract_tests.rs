@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use qubit_task::engine::ExecutionHandle;
+use qubit_task::engine::ExecutionOutcome;
 use qubit_task::handler::LocalTaskHandler;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
@@ -21,7 +22,7 @@ use qubit_task::model::TaskRequest;
 #[test]
 fn execution_handle_cancellation_signal_is_a_shared_clone() {
     let cancellation = Arc::new(AtomicBool::new(false));
-    let (sender, receiver) = tokio::sync::oneshot::channel::<qubit_task::handler::TaskRunResult>();
+    let (sender, receiver) = tokio::sync::oneshot::channel::<ExecutionOutcome>();
     let handle = ExecutionHandle::new(receiver, cancellation.clone());
 
     let signal = handle.cancellation_signal();

@@ -99,6 +99,7 @@ mod sqlite_tests {
                     state: TaskState::Cancelled,
                     output: None,
                     assigned_resources: Vec::new(),
+                    retry_not_before_ms: None,
                     cancel_requested: false,
                 })
                 .await,

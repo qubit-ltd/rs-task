@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use parking_lot::Mutex;
 
 use crate::engine::EngineError;
 use crate::engine::ExecutionHandle;
+use crate::engine::ExecutionOutcome;
 use crate::engine::PreparedExecution;
 use crate::engine::TaskExecutionEngine;
 use crate::handler::TaskContext;
@@ -142,20 +144,34 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
             let task_context = context;
             tokio::spawn(async move {
                 let _guard = ReservationGuard(release);
-                let result = std::panic::AssertUnwindSafe(handler.run(&payload, task_context))
-                    .catch_unwind()
-                    .await;
-                let mapped = result.unwrap_or_else(|_| {
-                    Err(crate::model::TaskRunError {
-                        category: "panic".into(),
-                        message: "task handler panicked".into(),
-                        retryable: false,
-                    })
-                });
-                let _ = sender.send(mapped);
+                let handler_future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handler.run(&payload, task_context)
+                })) {
+                    Ok(future) => future,
+                    Err(payload) => {
+                        let _ = sender.send(ExecutionOutcome::Panicked(panic_message(payload)));
+                        return;
+                    }
+                };
+                let outcome = match std::panic::AssertUnwindSafe(handler_future).catch_unwind().await {
+                    Ok(result) => ExecutionOutcome::Returned(result),
+                    Err(payload) => ExecutionOutcome::Panicked(panic_message(payload)),
+                };
+                let _ = sender.send(outcome);
             });
             Ok(ExecutionHandle { receiver, cancelled })
         })
+    }
+}
+
+/// Converts a panic payload to a diagnostic string.
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_owned()
+    } else {
+        "task handler panicked with a non-string payload".into()
     }
 }
 
