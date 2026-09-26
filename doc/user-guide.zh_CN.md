@@ -183,12 +183,11 @@ SQLite 以事务方式保存任务请求和状态变化。操作系统文件锁�
 ## 发布状态事件
 
 启用 `event-bus` feature 后，可将 `qubit_event_bus::EventBus` 具体门面注入构建器。状态变化后，服务会发布 `TaskEvent`。通知采用尽力而为语义：发布失败不会回滚任务状态。事件可能重复、延迟或丢失，因此消费者应比较 `state_version`，并在需要权威状态时查询服务。
-当前版本依赖 `qubit-event-bus` 0.12。发布器根据该版本的
-`PublishAcknowledgement` 统计结果，不依赖更新版本提供的接纳检查 API。
+当前版本依赖 `qubit-event-bus` 0.13。通用 `NotificationPublisher` 返回 provider receipt；服务再按 `AdmissionOutcome` 映射到现有任务通知统计。
 
-服务为通知创建一个串行发布线程和有界队列，默认容量为 256。可通过
+服务使用 `rs-event-bus` 的 `NotificationPublisher` 管理串行发布线程和有界队列，默认容量为 256。可通过
 `event_bus_buffer_capacity(NonZeroUsize)` 设置其他正数容量。状态转移只调用
-`try_send`，不会等待事件总线完成发布；队列已满时丢弃新通知。服务关闭并停止接收入队后，晚到的通知也会丢弃，这些丢弃都不会改变任务结果。
+`NotificationPublisher::try_publish`，不会等待事件总线完成发布；队列已满时丢弃新通知。服务关闭并停止接收入队后，晚到的通知也会丢弃，这些丢弃都不会改变任务结果。
 
 配置了事件总线时，`notification_stats()` 返回通知统计快照；未配置时返回
 `None`。`enqueued` 是成功进入本地队列的事件数，`queue_full` 和 `queue_closed`

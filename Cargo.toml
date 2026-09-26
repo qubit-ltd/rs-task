@@ -33,7 +33,7 @@ test = true
 futures = "^0.3"
 fs2 = { version = "^0.4", optional = true }
 parking_lot = "^0.12"
-qubit-event-bus = { version = "0.12", optional = true }
+qubit-event-bus = { version = "0.13", path = "../rs-event-bus", optional = true }
 qubit-id = { version = "0.6", features = ["uuid"] }
 qubit-spi = "0.13"
 rusqlite = { version = "^0.32", features = ["bundled"], optional = true }
