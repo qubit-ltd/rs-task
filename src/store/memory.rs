@@ -31,14 +31,28 @@ use crate::model::TransitionCommand;
 
 struct MemoryState {
     records: BTreeMap<TaskId, TaskRecord>,
-    idempotency: HashMap<String, (TaskRequest, TaskId)>,
+    idempotency: HashMap<String, TaskId>,
     terminal_order: VecDeque<TaskId>,
+    retained_payload_bytes: usize,
 }
 
 /// Volatile task history with bounded retention for completed tasks.
 pub struct MemoryTaskStore {
     history_capacity: usize,
+    max_payload_bytes: usize,
     state: Mutex<MemoryState>,
+}
+
+impl MemoryState {
+    fn remove_record(&mut self, id: TaskId) -> Option<TaskRecord> {
+        let record = self.records.remove(&id)?;
+        self.retained_payload_bytes -= record.request.payload.len();
+        if let Some(key) = &record.request.idempotency_key {
+            self.idempotency.remove(key);
+        }
+        self.terminal_order.retain(|terminal_id| *terminal_id != id);
+        Some(record)
+    }
 }
 
 impl MemoryTaskStore {
@@ -46,12 +60,23 @@ impl MemoryTaskStore {
     /// records.
     #[must_use]
     pub fn new(history_capacity: usize) -> Self {
+        Self::with_payload_budget(
+            history_capacity,
+            NonZeroUsize::new(64 * 1024 * 1024).expect("default budget is nonzero"),
+        )
+    }
+
+    /// Creates an in-memory store with an explicit retained payload budget.
+    #[must_use]
+    pub fn with_payload_budget(history_capacity: usize, max_payload_bytes: NonZeroUsize) -> Self {
         Self {
             history_capacity,
+            max_payload_bytes: max_payload_bytes.get(),
             state: Mutex::new(MemoryState {
                 records: BTreeMap::new(),
                 idempotency: HashMap::new(),
                 terminal_order: VecDeque::new(),
+                retained_payload_bytes: 0,
             }),
         }
     }
@@ -70,20 +95,49 @@ impl TaskStore for MemoryTaskStore {
             request.validate_limits().map_err(StoreError::InvalidRequest)?;
             let mut state = self.state.lock();
             if let Some(key) = &request.idempotency_key
-                && let Some((existing_request, existing_id)) = state.idempotency.get(key)
+                && let Some(existing_id) = state.idempotency.get(key)
             {
-                if existing_request != &request {
+                let existing = state.records.get(existing_id).ok_or(StoreError::NotFound)?;
+                if existing.request != request {
                     return Err(StoreError::IdempotencyConflict);
                 }
-                return state
-                    .records
-                    .get(existing_id)
-                    .cloned()
-                    .map(AcceptOutcome::Existing)
-                    .ok_or(StoreError::NotFound);
+                return Ok(AcceptOutcome::Existing(existing.clone()));
             }
             if state.records.contains_key(&id) {
                 return Err(StoreError::DuplicateTask);
+            }
+            let requested_bytes = request.payload.len();
+            let reclaimable_bytes = state
+                .terminal_order
+                .iter()
+                .filter_map(|terminal_id| {
+                    state
+                        .records
+                        .get(terminal_id)
+                        .map(|record| record.request.payload.len())
+                })
+                .sum::<usize>();
+            let minimum_retained = state.retained_payload_bytes.saturating_sub(reclaimable_bytes);
+            if minimum_retained
+                .checked_add(requested_bytes)
+                .is_none_or(|total| total > self.max_payload_bytes)
+            {
+                let available_bytes = self.max_payload_bytes.saturating_sub(minimum_retained);
+                return Err(StoreError::CapacityExceeded {
+                    requested_bytes,
+                    available_bytes,
+                });
+            }
+            while state.retained_payload_bytes > self.max_payload_bytes - requested_bytes {
+                let oldest = state
+                    .terminal_order
+                    .front()
+                    .copied()
+                    .ok_or(StoreError::CapacityExceeded {
+                        requested_bytes,
+                        available_bytes: self.max_payload_bytes.saturating_sub(state.retained_payload_bytes),
+                    })?;
+                state.remove_record(oldest);
             }
             let now = now_ms();
             let record = TaskRecord {
@@ -101,8 +155,9 @@ impl TaskStore for MemoryTaskStore {
                 cancel_requested: false,
             };
             if let Some(key) = &request.idempotency_key {
-                state.idempotency.insert(key.clone(), (request, id));
+                state.idempotency.insert(key.clone(), id);
             }
+            state.retained_payload_bytes += requested_bytes;
             state.records.insert(id, record.clone());
             Ok(AcceptOutcome::Accepted(record))
         })
@@ -152,11 +207,8 @@ impl TaskStore for MemoryTaskStore {
                 let updated = record.clone();
                 state.terminal_order.push_back(command.id);
                 while state.terminal_order.len() > self.history_capacity {
-                    if let Some(oldest) = state.terminal_order.pop_front()
-                        && let Some(removed) = state.records.remove(&oldest)
-                        && let Some(key) = removed.request.idempotency_key
-                    {
-                        state.idempotency.remove(&key);
+                    if let Some(oldest) = state.terminal_order.front().copied() {
+                        state.remove_record(oldest);
                     }
                 }
                 return Ok(updated);
@@ -165,15 +217,11 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
-    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move {
-            let Some(key) = request.idempotency_key.as_ref() else {
-                return Ok(None);
-            };
             let state = self.state.lock();
             match state.idempotency.get(key) {
-                Some((existing, id)) if existing == &request => Ok(state.records.get(id).cloned()),
-                Some(_) => Err(StoreError::IdempotencyConflict),
+                Some(id) => Ok(state.records.get(id).cloned()),
                 None => Ok(None),
             }
         })
@@ -258,13 +306,8 @@ impl TaskStore for MemoryTaskStore {
                 .map(|record| record.id)
                 .collect::<Vec<_>>();
             for id in &expired {
-                if let Some(record) = state.records.remove(id)
-                    && let Some(key) = record.request.idempotency_key
-                {
-                    state.idempotency.remove(&key);
-                }
+                state.remove_record(*id);
             }
-            state.terminal_order.retain(|id| !expired.contains(id));
             Ok(expired.len())
         })
     }

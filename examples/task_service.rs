@@ -84,7 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(LocalTaskResultError::Cancelled)
         ));
 
-        let request = TaskRequest::new("echo", "1", b"versioned work".to_vec());
+        let request = TaskRequest::new("echo", "1", b"versioned work".to_vec())
+            .with_idempotency_key("echo-versioned-work-2026-09-26");
         let accepted = service.submit(request).await?;
         let finished = service.wait(accepted.id).await?;
         assert!(matches!(finished.state, qubit_task::model::TaskState::Succeeded));

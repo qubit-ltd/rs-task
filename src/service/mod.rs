@@ -7,6 +7,7 @@
 // =============================================================================
 //! Unified task submission, status, scheduling, and lifecycle facade.
 
+mod admission_budget;
 mod admission_gate;
 mod local_task_handle;
 mod local_task_outcome;

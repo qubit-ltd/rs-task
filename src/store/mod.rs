@@ -56,8 +56,9 @@ pub trait TaskStore: Send + Sync {
     /// Atomically accepts a task or returns an existing identical idempotent
     /// task.
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>>;
-    /// Finds an accepted idempotency key without consuming queue capacity.
-    fn find_idempotent<'a>(&'a self, request: TaskRequest) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
+    /// Finds a retained task by its caller-supplied idempotency key without
+    /// consuming queue capacity.
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
     /// Applies a lifecycle transition only when its expected revision matches.
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskRecord, StoreError>>;
     /// Loads one task record by its stable identifier.
@@ -98,6 +99,15 @@ pub enum StoreError {
     /// An idempotency key was reused with a different request.
     #[error("idempotency key was reused with a different task request")]
     IdempotencyConflict,
+    /// The in-memory store cannot retain the request payload within its
+    /// configured budget.
+    #[error("task payload budget exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available")]
+    CapacityExceeded {
+        /// Bytes in the request that could not be retained.
+        requested_bytes: usize,
+        /// Bytes available after evicting eligible terminal records.
+        available_bytes: usize,
+    },
     /// The expected state revision or attempt no longer matches.
     #[error("task state changed before the requested transition")]
     Conflict,

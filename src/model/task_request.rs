@@ -151,6 +151,17 @@ impl TaskRequest {
             metadata: BTreeMap::new(),
         }
     }
+
+    /// Sets the caller-generated key used to recover the same accepted task.
+    ///
+    /// Create and durably retain this key before calling
+    /// [`TaskExecutionService::submit`](crate::service::TaskExecutionService::submit).
+    /// Reuse it only with the identical request.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
 }
 
 /// Small result summary saved with the task record.

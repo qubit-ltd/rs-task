@@ -17,6 +17,9 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
 
+use super::admission_budget::AdmissionBudget;
+use super::admission_budget::AdmissionBudgetError;
+use super::admission_budget::AdmissionReservation;
 use super::admission_gate::AdmissionGate;
 use super::local_task_handle::LocalTaskHandle;
 use super::local_task_outcome::LocalTaskOutcome;
@@ -75,6 +78,23 @@ pub enum TaskServiceError {
     /// The configured queue has no remaining waiting capacity.
     #[error("task queue is full")]
     QueueFull,
+    /// The request payload would exceed the configured in-flight byte budget.
+    #[error(
+        "in-flight task payload budget exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available"
+    )]
+    PayloadBudgetExceeded {
+        /// Payload bytes in the rejected submission.
+        requested_bytes: usize,
+        /// Payload bytes remaining when the submission was checked.
+        available_bytes: usize,
+    },
+    /// The configured number of detached admission workers is already in
+    /// flight.
+    #[error("in-flight task submission limit reached ({limit})")]
+    SubmissionLimitExceeded {
+        /// Maximum number of concurrent admission workers.
+        limit: usize,
+    },
     /// The request exceeds available configured capacity.
     #[error("task request cannot be satisfied by configured resources")]
     Unsatisfiable,
@@ -95,6 +115,9 @@ pub enum TaskServiceError {
     /// New task submissions have been stopped.
     #[error("task execution service is shutting down")]
     ShuttingDown,
+    /// The caller's shutdown deadline expired while accepted work was draining.
+    #[error("task execution service did not shut down before the deadline")]
+    ShutdownTimedOut,
     /// A persistence failure suspended task acceptance and scheduling.
     #[error("task execution service is paused after a task store failure: {0}")]
     StoreUnavailable(String),
@@ -145,6 +168,7 @@ pub(crate) struct ServiceCore {
     pub(super) wait_registry: Arc<TaskWaitRegistry>,
     pub(crate) transition_event_lock: tokio::sync::RwLock<()>,
     pub(super) admission: AdmissionGate,
+    pub(super) admission_budget: Arc<AdmissionBudget>,
     pub(crate) owner: Option<OwnerEpoch>,
     pub(crate) store_fault: Mutex<Option<String>>,
     #[cfg(feature = "event-bus")]
@@ -212,48 +236,77 @@ impl TaskExecutionService {
     }
 
     /// Accepts a reconstructable request and returns its stable task record.
+    ///
+    /// The request must include a non-empty idempotency key that the caller
+    /// created and retained before submission. Repeating the same request with
+    /// the same key resolves to the accepted record; reusing the key for a
+    /// different request returns an idempotency conflict.
     pub async fn submit(&self, request: TaskRequest) -> Result<TaskRecord, TaskServiceError> {
+        let reservation = self.reserve_admission(request.payload.len())?;
         let service = self.clone();
         await_admission(
             self.core
                 .runtime_handle
-                .spawn(async move { service.submit_admitted(request).await }),
+                .spawn(async move { service.submit_admitted(request, reservation).await }),
         )
         .await
     }
 
     /// Finishes request acceptance in a background worker that holds an
     /// admission permit even if the caller is cancelled.
-    async fn submit_admitted(&self, request: TaskRequest) -> Result<TaskRecord, TaskServiceError> {
+    async fn submit_admitted(
+        &self,
+        request: TaskRequest,
+        reservation: AdmissionReservation,
+    ) -> Result<TaskRecord, TaskServiceError> {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
         let _permit = self.core.admission.enter()?;
         let capacity = self.core.engine.capacity().capacity;
         validate_request(&request, &capacity)?;
+        let idempotency_key = request.idempotency_key.as_deref().ok_or_else(|| {
+            TaskServiceError::InvalidRequest("task submission requires a non-empty idempotency key".into())
+        })?;
+        if idempotency_key.is_empty() {
+            return Err(TaskServiceError::InvalidRequest(
+                "task submission requires a non-empty idempotency key".into(),
+            ));
+        }
         if let Some(record) = self
             .core
             .store
-            .find_idempotent(request.clone())
+            .get_by_idempotency_key(idempotency_key)
             .await
             .map_err(|error| self.handle_store_error(error))?
         {
-            return Ok(record);
+            return if record.request == request {
+                Ok(record)
+            } else {
+                Err(StoreError::IdempotencyConflict.into())
+            };
         }
         if self.core.queue_count.load(Ordering::Acquire) >= self.core.queue_capacity {
             if let Some(record) = self
                 .core
                 .store
-                .find_idempotent(request.clone())
+                .get_by_idempotency_key(idempotency_key)
                 .await
                 .map_err(|error| self.handle_store_error(error))?
             {
-                return Ok(record);
+                return if record.request == request {
+                    Ok(record)
+                } else {
+                    Err(StoreError::IdempotencyConflict.into())
+                };
             }
             return Err(TaskServiceError::QueueFull);
         }
         self.reserve_queue_slot()?;
-        let outcome = match self.core.store.accept(TaskId::generate(), request.clone()).await {
+        let resources = request.resources.clone();
+        let outcome = self.core.store.accept(TaskId::generate(), request).await;
+        drop(reservation);
+        let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.release_queue_slot();
@@ -264,7 +317,7 @@ impl TaskExecutionService {
             AcceptOutcome::Accepted(record) => {
                 self.core.queue.lock().push_back(QueuedTask {
                     id: record.id,
-                    resources: request.resources,
+                    resources,
                     retry_not_before_ms: None,
                     bypasses: 0,
                 });
@@ -288,18 +341,23 @@ impl TaskExecutionService {
         R: Send + 'static,
         E: std::fmt::Display + Send + 'static,
     {
+        let reservation = self.reserve_admission(0)?;
         let service = self.clone();
         await_admission(
             self.core
                 .runtime_handle
-                .spawn(async move { service.submit_local_admitted(task).await }),
+                .spawn(async move { service.submit_local_admitted(task, reservation).await }),
         )
         .await
     }
 
     /// Registers a local closure and retains it through acceptance and queue
     /// publication.
-    async fn submit_local_admitted<F, R, E>(&self, task: F) -> Result<LocalTaskHandle<R, E>, TaskServiceError>
+    async fn submit_local_admitted<F, R, E>(
+        &self,
+        task: F,
+        reservation: AdmissionReservation,
+    ) -> Result<LocalTaskHandle<R, E>, TaskServiceError>
     where
         F: FnOnce(TaskContext) -> LocalTaskOutcome<R, E> + Send + 'static,
         R: Send + 'static,
@@ -346,7 +404,10 @@ impl TaskExecutionService {
             }
             self.core.local_finalizations.lock().insert(id, final_sender);
         }
-        match self.core.store.accept(id, request.clone()).await {
+        let resources = request.resources.clone();
+        let outcome = self.core.store.accept(id, request).await;
+        drop(reservation);
+        match outcome {
             Ok(AcceptOutcome::Accepted(record)) => {
                 let finalizations = self.core.local_finalizations.lock();
                 if !finalizations.contains_key(&id) {
@@ -356,7 +417,7 @@ impl TaskExecutionService {
                 self.core.local_handlers.lock().insert(id, handler);
                 self.core.queue.lock().push_back(QueuedTask {
                     id,
-                    resources: request.resources,
+                    resources,
                     retry_not_before_ms: None,
                     bypasses: 0,
                 });
@@ -391,6 +452,25 @@ impl TaskExecutionService {
         error.into()
     }
 
+    /// Attempts to reserve bounded admission capacity before detaching a
+    /// worker.
+    fn reserve_admission(&self, payload_bytes: usize) -> Result<AdmissionReservation, TaskServiceError> {
+        self.core
+            .admission_budget
+            .try_reserve(payload_bytes)
+            .map_err(|error| match error {
+                AdmissionBudgetError::PayloadBytesExceeded { requested, available } => {
+                    TaskServiceError::PayloadBudgetExceeded {
+                        requested_bytes: requested,
+                        available_bytes: available,
+                    }
+                }
+                AdmissionBudgetError::SubmissionLimitExceeded { limit } => {
+                    TaskServiceError::SubmissionLimitExceeded { limit }
+                }
+            })
+    }
+
     /// Atomically reserves one waiting-queue position when capacity remains.
     fn reserve_queue_slot(&self) -> Result<(), TaskServiceError> {
         self.core
@@ -417,6 +497,24 @@ impl TaskExecutionService {
         self.core
             .store
             .get(id)
+            .await
+            .map_err(|error| self.handle_store_error(error))
+    }
+
+    /// Finds a retained task by the caller-supplied idempotency key.
+    ///
+    /// A missing record only means that the key is not committed at the time
+    /// of this lookup. A submission worker may still be accepting it; retry
+    /// `submit` with the same key and identical request to recover its record.
+    pub async fn get_by_idempotency_key(&self, key: &str) -> Result<Option<TaskRecord>, TaskServiceError> {
+        if key.is_empty() || key.len() > crate::model::MAX_IDEMPOTENCY_KEY_BYTES {
+            return Err(TaskServiceError::InvalidRequest(
+                "idempotency key must contain between 1 and 256 bytes".into(),
+            ));
+        }
+        self.core
+            .store
+            .get_by_idempotency_key(key)
             .await
             .map_err(|error| self.handle_store_error(error))
     }
@@ -657,6 +755,20 @@ impl TaskExecutionService {
 
     /// Stops accepting new work and waits for all accepted work to settle.
     pub async fn shutdown(&self) -> Result<(), TaskServiceError> {
+        self.begin_shutdown();
+        self.core.admission.wait_closed().await
+    }
+
+    /// Stops accepting work and waits until `deadline`; the shared shutdown
+    /// coordinator continues draining if this caller times out.
+    pub async fn shutdown_until(&self, deadline: tokio::time::Instant) -> Result<(), TaskServiceError> {
+        self.begin_shutdown();
+        tokio::time::timeout_at(deadline, self.core.admission.wait_closed())
+            .await
+            .map_err(|_| TaskServiceError::ShutdownTimedOut)?
+    }
+
+    fn begin_shutdown(&self) {
         if self.core.admission.close() {
             self.core.changed.notify_waiters();
             let service = self.clone();
@@ -666,7 +778,6 @@ impl TaskExecutionService {
                 service.core.changed.notify_waiters();
             });
         }
-        self.core.admission.wait_closed().await
     }
 
     /// Drains accepted work, releases store ownership, and closes publishers

@@ -212,7 +212,9 @@ impl TaskStateKind {
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     let service = TaskExecutionService::in_memory().await?;
-///     let record = service.submit(TaskRequest::new("report", "1", vec![])).await?;
+///     let request = TaskRequest::new("report", "1", vec![])
+///         .with_idempotency_key("report-2026-09-26");
+///     let record = service.submit(request).await?;
 ///     assert_eq!(record.attempt, 0);
 ///     service.shutdown().await?;
 ///     Ok(())
