@@ -26,7 +26,7 @@
 
 ### 3.1 任务身份与描述
 
-- `TaskId` 标识一次提交，由服务生成，提交后保持稳定；业务自己的标识放在 `correlation_key` 中。可选 `idempotency_key` 用于受理去重。同一去重键与相同任务描述重复提交时返回原 `TaskId`；内容不同则拒绝。去重键的有效期与存储保留期一致，过期后不保证去重。
+- `TaskId` 标识一次提交，由服务生成，提交后保持稳定；业务自己的标识放在 `correlation_key` 中。`TaskExecutionService::submit` 必须提供稳定且非空的 `idempotency_key`。同一键与相同任务描述重复提交时返回原 `TaskId`；内容不同则拒绝。`get_by_idempotency_key` 返回 `None` 只描述查询瞬间，调用方须用同键、同请求重试。去重键的有效期与存储保留期一致，记录过期后键可重用。
 - `TaskRequest` 包含 `task_type`、`handler_version`、有大小上限的 `payload`、资源需求和可选业务关联字段。它不包含进程地址、闭包或持久化后无法重建的对象。
 - 处理器通过 `TaskHandlerRegistry` 在服务启动时按 `(task_type, handler_version)` 注册。注册表可由 `rs-spi` 发现的处理器 provider 构建，也允许应用显式注入实例。服务恢复旧任务前检查处理器是否存在；缺失时将任务置为 `Blocked` 并报告不可运行原因，不把它当作业务执行失败，也不静默丢弃。当前没有 payload 预检接口，解码失败由处理器返回为执行错误。
 - `submit` 接受可重建的 `TaskRequest` 并返回受理时的 `TaskRecord`。`submit_local` 接受本地闭包并返回 `LocalTaskHandle<R, E>`：句柄提供仅存在于当前进程的完整结果值或原始业务错误，同时 `TaskRecord.output` 仅保存小型摘要或引用。该方法仅在不承诺重启恢复的存储上可用，使用可恢复存储时明确拒绝。两种提交方式始终通过同一个服务门面。
@@ -38,7 +38,7 @@
 
 提交时验证请求的每项需求不超过配置容量，无法满足的任务立即拒绝。通过验证但当前没有空闲额度的任务进入有界队列。调度器选择候选任务，`TaskExecutionEngine` 原子预约全部资源并安排执行；任务实际结束后释放预约。不能先占用部分资源再等待其余部分，以免产生资源死锁。容量变更本期仅在重建服务时生效。
 
-队列默认按受理顺序扫描，允许后续较小任务越过暂时无法运行的任务。达到可配置的最大越过次数后，调度器优先为被越过的任务留出所需资源，停止启动会继续占用这些资源的后续任务。在运行任务最终退出、资源正确归还的前提下，这避免大任务被持续插队。队列容量、运行并发上限和扫描预算均可配置；队列满时明确拒绝并允许调用方重试，不无限堆积内存。
+队列默认按受理顺序扫描，允许后续较小任务越过暂时无法运行的任务。达到可配置的最大越过次数后，调度器优先为被越过的任务留出所需资源，停止启动会继续占用这些资源的后续任务。在运行任务最终退出、资源正确归还的前提下，这避免大任务被持续插队。队列容量、运行并发上限和扫描预算均可配置；队列满时明确拒绝并允许调用方重试，不无限堆积内存。默认受理 worker 数量上限为 64，受理中 payload 总额度为 64 MiB；预留额度随后台 `accept` 完成后释放，即使调用方取消等待也不会提前释放。
 
 ### 3.3 状态与查询
 
@@ -46,7 +46,7 @@
 
 基本转换为 `Queued -> Running -> Succeeded | Failed | Panicked`，或 `Queued -> Cancelled`。缺少处理器、达到重试上限或自动重试时等待队列已满会进入 `Blocked`；容量原因消失后可显式重新入队，或由业务方取消。运行中收到取消请求时先记录 `cancel_requested`，通过 `TaskContext` 协作通知处理器；`cancel_requested` 只表示发起了请求。只有处理器实际退出并返回 `TaskRunOutcome::Cancelled` 才进入 `Cancelled`；返回成功或失败时保留该业务结果。`LocalTaskHandle::result()` 等待权威终态写入后，才返回类型化结果、业务错误或明确的取消错误。`max_attempts` 是同一 TaskId 跨进程启动的总次数；恢复时达到上限的 Queued/Running 任务转为 Blocked，人工重试也不能重置预算。`test_shutdown_keeps_scheduler_running_for_retry_after_close` 用信号控制首次执行并验证关闭受理后的自动重试，调度器仅在关闭协调器确认队列和运行任务均为空后退出。
 
-提供按 `TaskId` 查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。`stats()` 通过一次 `TaskStore::count_states()` 聚合查询得到所有保留状态计数，再读取执行引擎资源快照；二者相邻读取但不是同一事务中的原子快照。历史页按 `(accepted_at_ms ASC, id ASC)` 排序，以复合游标稳定处理同毫秒受理的记录；游标不提供并发写入或清理期间的全局快照。存储统计失败向调用方传播，查询成本不随历史页数增长。`get` 对不存在或已清理的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储限制终态历史数量；SQLite 历史默认不自动清理，显式有界清理只删除早于受理时间阈值的终态记录，并同步移除其幂等键。
+提供按 `TaskId` 和幂等键查询、按状态与业务关联键分页列举、查询任务计数及资源快照、等待单个任务终态的接口。`stats()` 通过一次 `TaskStore::count_states()` 聚合查询得到所有保留状态计数，再读取执行引擎资源快照；二者相邻读取但不是同一事务中的原子快照。历史页按 `(accepted_at_ms ASC, id ASC)` 排序，以复合游标稳定处理同毫秒受理的记录；游标不提供并发写入或清理期间的全局快照。存储统计失败向调用方传播，查询成本不随历史页数增长。`get` 与按键查询对不存在或已清理的记录返回 `None`，存储错误单独返回。`correlation_key` 仅供过滤与业务关联。内存存储限制终态历史数量且默认最多保留 64 MiB payload；空间不足时先按终态完成顺序淘汰终态记录及幂等映射，仍不足则返回容量错误，非终态记录不得淘汰。可用 `with_payload_budget` 与 builder 预设配置额度。SQLite 历史默认不自动清理，显式有界清理只删除早于受理时间阈值的终态记录，并同步移除其幂等键。
 
 ## 4. 服务接口与职责划分
 
@@ -80,7 +80,7 @@
 ```text
 TaskExecutionService
   capabilities() -> ServiceCapabilities
-  submit(TaskRequest) -> TaskRecord
+  submit(TaskRequest with stable idempotency_key) -> TaskRecord
   submit_local(local_task) -> LocalTaskHandle<R, E> | UnsupportedCapability
   get(TaskId) -> TaskRecord | NotFound | Error
   list(TaskQuery) -> Page<TaskRecord>
@@ -89,9 +89,12 @@ TaskExecutionService
   stats() -> TaskStats
   wait(TaskId) -> TaskRecord | Blocked | Error
   shutdown() -> Result
+  shutdown_until(deadline) -> Result
 ```
 
 `TaskExecutionService` 是一个门面类型，而不是为不同存储能力实现多套公共 trait。构建时由装配的 `TaskStore` 决定是否启动恢复流程，并可配置 `require_recovery`：要求恢复但所选存储不支持时，构建失败。`capabilities()` 返回存储能力及本地闭包支持情况。`submit_local` 返回 `LocalTaskHandle<R, E>`，可等待类型化业务值/错误或取消、阻塞、存储故障等明确终态结果；稳定 ID 仍可通过 `task_id()` 获取，`TaskRecord.output` 只用于查询持久摘要。若存储声明重启恢复，则返回 `UnsupportedCapability`，防止不可重建闭包被当作可恢复任务。提交返回 `Ok` 只代表受理：不可恢复存储已保存于本机队列；可恢复存储已完成持久化受理。它不代表任务已启动或成功。
+
+如果调用方取消等待或超时等待 `submit_local`，后台受理仍可能完成，但调用方会失去返回句柄，无法找回原始类型化结果。需要在请求停止等待后继续定位任务时，应使用带稳定幂等键的 `submit`。
 
 `TaskScheduler` 使用 `SchedulingPolicy` 从待执行任务中选择候选项，再向 `TaskExecutionEngine` 请求原子分配和启动。资源账本归执行引擎所有，避免调度器与执行器对剩余资源有不同认识。本期 `LocalTaskExecutionEngine` 在服务所在机器执行；今后替换为分布式实现时，提交与查询模型不必重写。`TaskStore` 是状态依据；不得由协调器或执行引擎另建一套相互竞争的权威状态。
 
@@ -119,6 +122,7 @@ TaskExecutionService
 | --- | --- | --- |
 | `TaskExecutionService::in_memory()` | `MemoryTaskStore`、默认公平调度策略、`LocalTaskExecutionEngine`；不启用事件总线 | 明确接受进程重启丢失未完成任务 |
 | `TaskExecutionServiceBuilder::in_memory()` | 在内存预设上覆盖资源、容量、策略、存储以外的组件和处理器 | 局部定制内存服务，无需使用 SPI |
+| `TaskExecutionServiceBuilder::in_memory_with_payload_budget(limit)` | 设置内存存储的常驻 payload 字节上限 | 调整内存保留预算 |
 | `TaskExecutionServiceBuilder::recoverable_sqlite(path)` | 可选 SQLite `TaskStore`、默认调度策略、本机执行引擎；强制要求恢复能力 | 单节点重启恢复；构建前须注册稳定的处理器 |
 | `TaskExecutionServiceBuilder::from_components(store, engine, policy)` | 由应用传入直接创建或经 SPI 解析的组件 | 自定义装配，不隐式补入内存存储 |
 
@@ -181,7 +185,7 @@ TaskExecutionService
 
 `TaskExecutionService::notification_stats()` 在配置总线时返回统计快照，未配置时返回 `None`。`enqueued` 统计进入本地队列的事件，`queue_full` 与 `queue_closed` 统计对应的丢弃；`accepted` 表示至少一个已报告目的地接受，`partial_rejection` 表示同一事件同时有接受和拒绝目的地，`opaque_accepted` 表示 provider 接受但未暴露目的地，`unaccepted` 表示没有可见目的地接受（含空列表和 interceptor drop），`publish_error` 记录发布错误，`worker_panicked` 记录线程 panic。计数为单调饱和值；它们只描述本地排队、provider 的接纳回执和 worker 状态，不代表 subscriber handler 已完成。
 
-`TaskExecutionServiceBuilder::runtime_handle` 可指定服务自有 admission、scheduler、completion、shutdown 和发布器关闭等待使用的 Tokio runtime；默认使用进程级 runtime。调用方须保证注入 runtime 存活到 `shutdown()` 返回。`shutdown()` 在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker，但同步 provider 若一直阻塞，显式 shutdown 仍可能无限等待。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
+`TaskExecutionServiceBuilder::runtime_handle` 可指定服务自有 admission、scheduler、completion、shutdown 和发布器关闭等待使用的 Tokio runtime；默认使用进程级 runtime。调用方须保证注入 runtime 存活到关闭协调器完成。`shutdown()` 等待最终关闭结果；`shutdown_until(deadline)` 先启动或复用同一协调器，再限制当前调用者的等待时间。到期返回 `ShutdownTimedOut` 不会取消任务、释放存储所有权或终止事件发布器；后续 `shutdown()` 可继续等待共享结果。关闭在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker，但同步 provider 若一直阻塞，显式 shutdown 仍可能无限等待。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
 
 ## 7. 关键操作顺序与不变量
 
@@ -201,7 +205,7 @@ TaskExecutionService
 
 SQLite 使用单个连接，因此同时运行的阻塞数据库操作上限为 1。异步 store 调用先取得 Tokio semaphore permit，再通过 `spawn_blocking` 执行同步 SQLite 工作；permit 由阻塞闭包持有到操作完成，即使调用方取消等待中的 future，也不会释放正在执行操作的容量。轮询 SQLite store future 需要 Tokio runtime。
 
-请求及诊断文本限额按 UTF-8 字节计算：`task_type` 128、`handler_version` 64、`correlation_key` 与 `idempotency_key` 各 256；metadata 最多 32 项，键 128、值 4096、键值总计 16384。超限请求在持久化受理前返回 `InvalidRequest`，Memory 和 SQLite store 也执行相同的请求边界检查。诊断类别最多 128 字节，Blocked 原因、Panicked 消息及其他诊断最多 4096 字节。执行阶段的诊断在 UTF-8 字符边界裁剪；`LocalTaskHandle` 的类型化错误通道仍传递原始值。既有 payload 16 MiB 与 output summary 64 KiB 上限保持不变。
+请求及诊断文本限额按 UTF-8 字节计算：`task_type` 128、`handler_version` 64、`correlation_key` 与 `idempotency_key` 各 256；metadata 最多 32 项，键 128、值 4096、键值总计 16384。超限请求在持久化受理前返回 `InvalidRequest`，Memory 和 SQLite store 也执行相同的请求边界检查。诊断类别最多 128 字节，Blocked 原因、Panicked 消息及其他诊断最多 4096 字节。执行阶段的诊断在 UTF-8 字符边界裁剪；`LocalTaskHandle` 的类型化错误通道仍传递原始值。既有单 payload 16 MiB 与 output summary 64 KiB 上限保持不变；受理中另有默认 64 MiB 总 payload 和 64 worker 数量预算，内存存储默认常驻 payload 上限也为 64 MiB。这些预算不构成进程总内存严格上界。
 
 ## 9. 验证与迁移
 

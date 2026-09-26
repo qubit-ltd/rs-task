@@ -61,6 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ~~~
 
 如果存储声明支持重启恢复，`submit_local` 会拒绝闭包提交，因为闭包无法在进程退出后从数据库重建。
+调用方等待 `submit_local` 时取消或超时后，后台受理仍可能完成，但调用方会失去返回句柄，无法取得原始
+类型化的值或错误。调用方需要在停止等待后继续找回任务时，应使用带稳定键的 `submit`。
 需要协作取消时，处理器观察 `TaskContext::is_cancelled()` 后返回
 `LocalTaskOutcome::Cancelled`；随后 `handle.result()` 返回
 `LocalTaskResultError::Cancelled`。成功的 `TaskRunOutcome` 或 `TaskRecord.output`
@@ -101,7 +103,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionServiceBuilder::in_memory()
         .register_handler(Arc::new(ImportV1))?
         .build().await?;
-    let id = service.submit(TaskRequest::new("csv-import", "1", b"...".to_vec())).await?.id;
+    let request = TaskRequest::new("csv-import", "1", b"...".to_vec())
+        .with_idempotency_key("csv-import-request-42");
+    let id = service.submit(request).await?.id;
     let finished = service.wait(id).await?;
     assert!(finished.state.is_terminal());
     service.shutdown().await?;
@@ -111,6 +115,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `TaskOutput` 用于保存小型摘要或引用。较大的结果应由业务系统保存在自己的数据存储中，再返回有大小上限的引用。
 需要重启后重建的任务应使用带精确处理器版本的 `TaskRequest`；现有 SQLite 重启恢复测试覆盖了公共服务门面上的该流程。
+
+服务级 `submit` 必须使用稳定且非空的幂等键，并在首次调用前生成和保存。调用方超时后，
+可用 `get_by_idempotency_key` 查询；返回 `None` 只代表查询瞬间没有记录，应以相同请求和同一键重试。
+对应任务记录被清理或淘汰后，该键可以重用。内存预设最多保留 64 MiB 的任务 payload，默认最多有
+64 个受理中提交，共享 64 MiB 的受理 payload 预算。这些额度只统计 payload 字节，不是进程总内存上限。
+需要更长的恢复窗口时应选 SQLite 或其他持久化存储。`shutdown_until(deadline)` 会启动正常排空，
+只限制当前调用者的等待；任务和存储所有权会保持到排空完成。
 
 ## 调度 CPU、GPU 和业务自定义资源
 

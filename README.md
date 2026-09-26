@@ -68,6 +68,22 @@ A request handler can submit an import, return a task ID, and let a versioned ha
 
 The crate provides bounded queues, resource-aware scheduling, local or pluggable execution, query and cancellation APIs, and optional SQLite recovery and lifecycle notifications. It does not provide distributed multi-node scheduling, workflow dependencies, cron scheduling, forced interruption of arbitrary code, or exactly-once business side effects.
 
+`TaskExecutionService::submit` requires a stable, non-empty idempotency key.
+Generate and persist it before the first call. If the caller stops waiting,
+`get_by_idempotency_key` can find an accepted task; if it returns `None`, retry
+the same request with the same key. The key remains reserved only while its
+record is retained. In-memory services retain at most 64 MiB of request
+payloads and allow 64 in-flight submissions, sharing a 64 MiB admission
+payload budget. Use persistent storage for a longer recovery window.
+`shutdown_until` limits the caller's wait; accepted work continues draining
+after a timeout.
+
+`submit_local` returns its typed result only through the returned handle. If
+the caller cancels or times out while awaiting `submit_local`, acceptance may
+continue in the background, but the caller loses that handle and cannot recover
+the original typed result. Use keyed `submit` when the caller must find work
+after its request stops waiting.
+
 Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite version 0 databases migrate to schema version 1 on open.
 
 The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; startup fails with records preserved if that recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
