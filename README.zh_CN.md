@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API 与存储契约
 
-自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite schema 0/1 数据库会在打开时事务性迁移到 schema 2。SQLite 将不可变请求 JSON 与生命周期 JSON 分开保存，状态变化不会重写大型 payload。
+自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite schema 0/1/2 数据库会在打开时事务性迁移到 schema 3。SQLite 将请求元数据、payload BLOB 与生命周期 JSON 分列保存；状态查询和历史分页不会读取大型 payload。
 
 服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
 
@@ -130,3 +130,15 @@ Pull Request 前运行 `./align-ci.sh` 格式化代码，运行 `./ci-check.sh` 
 **Haixing Hu** - *Qubit Co. Ltd.*
 
 仓库地址：[https://github.com/qubit-ltd/rs-task](https://github.com/qubit-ltd/rs-task)
+
+任务历史和等待接口返回不含 `payload` 的 `TaskSummary`。状态处理应使用
+`get_summary`、`list`、`wait` 和 `retry_blocked`；`get` 与
+`get_by_idempotency_key` 仍返回包含完整请求的 `TaskRecord`。SQLite schema 3
+将请求元数据、payload BLOB 和生命周期 JSON 分列保存，摘要查询与状态转换不读取
+BLOB。schema 0、1、2 数据库会事务性迁移到 schema 3，并保留请求、幂等键和生命周期。
+
+存储故障发生后，等待者和本地句柄会立即收到错误。共享关闭结果会等待调度器和已跟踪
+的执行尝试退出，再释放 SQLite 所有权。`shutdown_until` 超时后，后台排空仍会继续。
+运维人员可检查超龄 `Blocked` 摘要，并用 `abandon_blocked(id, state_version)`
+按版本放弃；版本已变化时会返回冲突。之后可调用有界
+`prune_terminal_before` 清理终态历史。

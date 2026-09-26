@@ -196,7 +196,7 @@ let service = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sql
     .build().await?;
 ~~~
 
-SQLite 将不可变请求与生命周期状态分开保存，状态更新只写生命周期 JSON，不会重复写入大型 payload。schema 0/1 数据库在打开时以单个事务迁移到 schema 2，并保留任务与幂等索引；更高的未知 schema 版本或未知记录格式会明确报错。操作系统文件锁确保同一数据库不会同时由多个服务进程执行。构建器取得所有权并扫描未完成任务后才返回。数据库被占用或所选能力不支持恢复时，服务启动失败，不会自动回退到内存。找不到历史任务对应的处理器时，任务保留在存储中并置为 `Blocked`，构建仍可成功。
+SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保存，摘要查询和状态转换不读取或解码 payload。schema 0/1/2 数据库在打开时以单个事务迁移到 schema 3，并保留任务与幂等索引；更高的未知 schema 版本或未知记录格式会明确报错。操作系统文件锁确保同一数据库不会同时由多个服务进程执行。构建器取得所有权并扫描未完成任务后才返回。数据库被占用或所选能力不支持恢复时，服务启动失败，不会自动回退到内存。找不到历史任务对应的处理器时，任务保留在存储中并置为 `Blocked`，构建仍可成功。
 
 `capabilities()` 会报告实际装配的存储能力 `persistent_history` 和 `restart_recovery`。第三方存储也可以持久化历史，但不支持恢复任务。每个 `TaskStore` 实现都必须提供 `count_states()`，在一次聚合中统计所有保留记录。`stats()` 只调用一次该方法，并向调用者传播统计失败。状态计数和执行引擎资源快照先后读取，因此是时间相邻但非原子的两个快照。统计成本是一次聚合查询，不随历史分页数增长。
 
@@ -270,6 +270,10 @@ let service = TaskExecutionServiceBuilder::in_memory()
 `TaskCursor { accepted_at_ms, id }`。第三方 `SchedulingPolicy` 收到的 `QueuedTask`
 现在包含 `resources`，不再包含完整 `TaskRequest`。`TaskStore` 新增
 `prune_terminal_before`；默认实现返回 `UnsupportedCapability`。
+最终版 `TaskStore` 契约是有意的源码破坏性变更：`transition` 返回
+`TaskSummary`，`list` 分页包含摘要，并且每个存储实现都必须提供不读取 payload 的
+`get_summary`。存储可实现带原子版本和状态检查的 `abandon_blocked`；默认实现返回
+`UnsupportedCapability`。
 
 ## 排障
 
@@ -295,3 +299,22 @@ UTF-8 字符边界裁剪；`LocalTaskHandle` 仍保留原始类型化结果和�
 - [API 文档](https://docs.rs/qubit-task)
 - [English user guide](user-guide.md)
 - [TaskExecutionService 详细设计](task_execution_service_design.md)
+
+## 无 payload 状态查询与 Blocked 运维
+
+`TaskPage.records`、`wait` 和 `retry_blocked` 返回 `TaskSummary`。它包含请求元数据、
+生命周期状态和输出摘要，但没有 payload 字段。单条状态查询可用 `get_summary`；
+只有业务代码需要完整请求和 payload 时才调用 `get`。SQLite schema 3 将
+`request_info_json`、`payload BLOB` 和 `lifecycle_json` 分列保存；历史查询、状态等待
+和状态转换只读取元数据与生命周期列。schema 0、1、2 会在一个事务中迁移，并保留任务
+payload、幂等键和生命周期值。
+
+运维人员可按状态分页浏览 `Blocked` 记录，并应用年龄阈值筛选。只对人工选定放弃的记录
+调用 `abandon_blocked(id, state_version)`。版本检查可防止并发 `retry_blocked` 被误取消：
+若分页读取后任务已变化，放弃操作返回 `StoreError::Conflict`。分页游标不代表并发写入期间
+的全局快照。放弃后，可传入截止时间和行数上限调用 `prune_terminal_before`，分批清理终态
+历史。完整流程见[`blocked_maintenance.rs`](../examples/blocked_maintenance.rs)。
+
+存储故障发生后，`wait` 和本地任务句柄会及时报告错误。共享关闭结果会等到调度器退出、
+已跟踪的执行句柄结束并释放存储所有权后才完成。调用方可用 `shutdown_until` 限制本次等待；
+超时不会停止后台排空，也不会提前释放所有权。

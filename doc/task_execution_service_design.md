@@ -93,11 +93,13 @@ TaskExecutionService
   submit(TaskRequest with stable idempotency_key) -> TaskRecord
   submit_local(local_task) -> LocalTaskHandle<R, E> | UnsupportedCapability
   get(TaskId) -> TaskRecord | NotFound | Error
-  list(TaskQuery) -> Page<TaskRecord>
+  get_summary(TaskId) -> TaskSummary | NotFound | Error
+  list(TaskQuery) -> Page<TaskSummary>
   cancel(TaskId) -> CancelOutcome
-  retry_blocked(TaskId) -> RetryOutcome
+  retry_blocked(TaskId) -> TaskSummary | Error
+  abandon_blocked(TaskId, expected_version) -> TaskSummary | Conflict | NotBlocked
   stats() -> TaskStats
-  wait(TaskId) -> TaskRecord | Blocked | Error
+  wait(TaskId) -> TaskSummary | Blocked | Error
   shutdown() -> Result
   shutdown_until(deadline) -> Result
 ```
@@ -108,7 +110,7 @@ TaskExecutionService
 
 `TaskScheduler` 使用 `SchedulingPolicy` 从待执行任务中选择候选项，再向 `TaskExecutionEngine` 请求原子分配和启动。资源账本归执行引擎所有，避免调度器与执行器对剩余资源有不同认识。本期 `LocalTaskExecutionEngine` 在服务所在机器执行；今后替换为分布式实现时，提交与查询模型不必重写。`TaskStore` 是状态依据；不得由协调器或执行引擎另建一套相互竞争的权威状态。
 
-执行引擎必须把处理器的返回错误、panic 和基础设施启动失败区分开。启动失败时释放资源、记录可诊断原因，并按明确的有限重试策略重新排队或标记失败；不能让任务永久占有资源。业务返回错误默认是终态 `Failed`，本期不自动重试，避免无意重复副作用。处理器可以主动返回可重试的基础设施错误。自动重试按 1 秒起步、指数翻倍、最高 60 秒执行，可由 `RetryPolicy` 配置；`retry_not_before_ms` 与 `Queued` 状态原子持久化，到期前调度器不启动任务，恢复会保留到期时间。`ExecutionOutcome` 显式区分业务返回、panic 与 worker 停止，panic 不再依赖错误类别字符串。SQLite 使用 `PRAGMA user_version` 管理 schema；schema 2 将不可变 `request_json` 与仅含生命周期字段的 `lifecycle_json` 分列，状态转换只更新状态索引列和生命周期 JSON。schema 0/1 在单个事务内逐行验证并迁移，损坏记录会回滚整个迁移；未知 schema 或记录格式拒绝打开或读取。
+执行引擎必须把处理器的返回错误、panic 和基础设施启动失败区分开。启动失败时释放资源、记录可诊断原因，并按明确的有限重试策略重新排队或标记失败；不能让任务永久占有资源。业务返回错误默认是终态 `Failed`，本期不自动重试，避免无意重复副作用。处理器可以主动返回可重试的基础设施错误。自动重试按 1 秒起步、指数翻倍、最高 60 秒执行，可由 `RetryPolicy` 配置；`retry_not_before_ms` 与 `Queued` 状态原子持久化，到期前调度器不启动任务，恢复会保留到期时间。`ExecutionOutcome` 显式区分业务返回、panic 与 worker 停止，panic 不再依赖错误类别字符串。SQLite 使用 `PRAGMA user_version` 管理 schema；schema 3 将不可变请求元数据、payload BLOB 与仅含生命周期字段的 `lifecycle_json` 分列，摘要查询与状态转换不读取 payload。schema 0/1/2 在单个事务内逐行验证并迁移，损坏记录会回滚整个迁移；未知 schema 或记录格式拒绝打开或读取。
 
 ### 4.1 使用 rs-spi 发现和装配扩展模块
 
@@ -222,3 +224,20 @@ SQLite 使用单个连接，因此同时运行的阻塞数据库操作上限为 
 核心验证包括：资源不足排队、GPU 设备分配、非法资源请求、队列满拒绝、越过次数后的防饥饿、取消与启动竞态、panic 后资源归还、重复提交、历史存储故障、事件故障、持久受理失败、终态写入失败、重启恢复，以及旧实例回调被版本/代际拒绝。还要验证 `in_memory()` 无 SPI 装配可执行本地任务、通用 builder 未选存储时拒绝构建、默认容量可覆盖、SQLite 便捷入口完成恢复后才返回，以及链接第三方 provider 不改变默认行为。SPI 场景要验证跨 crate 自动发现、未链接 provider 不会被发现、重复处理器键报错、运行时配置注入、`StoreCapabilities` 与实际操作一致、`require_recovery` 失败而不降级，以及旧处理器版本恢复。`TaskStore` 提供按能力分组的可复用契约测试套件，让外部后端检验原子受理、条件更新、恢复扫描、独占所有权和单次状态聚合；`stats()` 在服务层由拒绝 `list()` 的测试存储验证只执行一次 `count_states()`。
 
 实施分三步：先交付统一门面、内存 `TaskStore`、默认调度策略、本机执行引擎和 SPI 服务族；再完成可恢复 `TaskStore`、SQLite provider 和重启场景；最后直接接入可选的 `rs-event-bus` 事件通知。新版将破坏旧公开 API：使用 `in_memory()` 代替含糊的无参数构造，使用版本化 `TaskRequest` 或只适用于本地闭包的 `LocalTaskHandle<R, E>`，并用服务生成且不复用的 `TaskId`。`submit_local` 不再返回旧的通用 `TaskHandle<R, E>`；第三方 `TaskStore` 还必须实现 `count_states()`，以一次查询返回所有保留状态的计数。迁移调用代码、provider 实现和测试，不要求保留兼容层。检查当前 `rust-common` 工作区与相关 `rs-*` 仓库后，没有发现直接依赖 `rs-task` 的实际下游，因此当前没有需要同步迁移的兄弟 crate。
+
+### Payload-free status reads and blocked-task operations
+
+The public history page contains `TaskSummary`, not full `TaskRecord` values.
+`wait`, `retry_blocked`, and `get_summary` also return payload-free summaries;
+`get` is the explicit full-record query. SQLite schema 3 separates request
+metadata, payload BLOB, and lifecycle JSON, allowing history reads, wait checks,
+and transitions to avoid selecting or decoding the payload. Opening schema 0,
+1, or 2 databases migrates each row transactionally and preserves payload,
+idempotency, lifecycle, ordering, and owner behavior.
+
+A store failure wakes waiters and local handles immediately, while the shared
+shutdown completion waits for scheduler termination and all tracked execution
+handles before releasing owner state. A `shutdown_until` timeout only bounds
+the caller's wait. Blocked-task disposition is explicit: operators select aged
+summaries and pass the observed `state_version` to `abandon_blocked`; stale
+versions conflict, and only terminal records are eligible for bounded pruning.

@@ -86,7 +86,7 @@ continue in the background, but the caller loses that handle and cannot recover
 the original typed result. Use keyed `submit` when the caller must find work
 after its request stops waiting.
 
-Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite schema 0 and 1 databases migrate transactionally to schema 2 on open. SQLite keeps the immutable request JSON separate from lifecycle JSON so state transitions do not rewrite large payloads.
+Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite schema 0, 1, and 2 databases migrate transactionally to schema 3 on open. SQLite keeps the immutable request metadata, payload BLOB, and lifecycle JSON in separate columns so hot reads avoid loading large payloads.
 
 The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; startup fails with records preserved if that recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
 
@@ -157,3 +157,18 @@ API documentation and tests current, and run `./align-ci.sh` to format code and
 **Haixing Hu** - *Qubit Co. Ltd.*
 
 Repository: [https://github.com/qubit-ltd/rs-task](https://github.com/qubit-ltd/rs-task)
+
+Task history and waiting paths return `TaskSummary`, whose request metadata omits
+`payload`. Use `get_summary`, `list`, `wait`, and `retry_blocked` for status
+handling; `get` and `get_by_idempotency_key` remain detailed reads returning
+`TaskRecord`. SQLite schema 3 stores request metadata, the payload BLOB, and
+lifecycle JSON separately. Summary queries and lifecycle transitions do not
+select the BLOB. Schema 0, 1, and 2 databases migrate transactionally to schema
+3 while preserving requests, idempotency keys, and lifecycle state.
+
+After a store failure, waiters and local handles receive the fault immediately.
+The shared shutdown result waits for the scheduler and tracked executions to
+exit, then releases SQLite ownership. `shutdown_until` can time out while this
+background drain continues. Operators can inspect aged `Blocked` summaries and
+call `abandon_blocked(id, state_version)`; a stale revision returns a conflict.
+Use bounded `prune_terminal_before` afterward to reclaim terminal history.
