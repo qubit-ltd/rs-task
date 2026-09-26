@@ -1405,6 +1405,47 @@ fn test_spi_sqlite_provider_requires_and_accepts_sqlite_configuration() {
 }
 
 #[cfg(feature = "event-bus")]
+struct PanicCapabilitiesSpi;
+
+#[cfg(feature = "event-bus")]
+impl qubit_event_bus::spi::EventBusSpi for PanicCapabilitiesSpi {
+    fn capabilities(&self) -> qubit_event_bus::spi::EventBusCapabilities {
+        panic!("injected provider capability panic")
+    }
+
+    fn publish(
+        &self,
+        _message: qubit_event_bus::spi::OutboundMessage,
+    ) -> Result<qubit_event_bus::model::PublishAcknowledgement, qubit_event_bus::error::SpiError> {
+        Ok(qubit_event_bus::model::PublishAcknowledgement::Accepted {
+            provider_message_id: None,
+            metadata: Default::default(),
+        })
+    }
+
+    fn subscribe(
+        &self,
+        _request: qubit_event_bus::spi::SpiSubscriptionRequest,
+    ) -> Result<Box<dyn qubit_event_bus::spi::EventSubscriptionSpi>, qubit_event_bus::error::SpiError> {
+        Err(qubit_event_bus::error::SpiError::Operation {
+            provider_id: "panic-capabilities".into(),
+            operation: "subscribe",
+            resource: None,
+            kind: "unsupported",
+            retryable: Some(false),
+            source: Box::new(std::io::Error::other("subscriptions are unsupported")),
+        })
+    }
+
+    fn shutdown(
+        &self,
+        _mode: qubit_event_bus::spi::ShutdownMode,
+    ) -> Result<qubit_event_bus::spi::ShutdownOutcome, qubit_event_bus::error::SpiError> {
+        Ok(qubit_event_bus::spi::ShutdownOutcome::Complete)
+    }
+}
+
+#[cfg(feature = "event-bus")]
 #[tokio::test]
 async fn test_event_bus_receives_status_changes_without_becoming_authoritative() {
     use qubit_event_bus::DeliveryError;
@@ -1491,6 +1532,64 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
     subscription.cancel().expect("subscription is cancelled");
     bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
         .expect("event bus shuts down");
+}
+
+#[cfg(feature = "event-bus")]
+#[tokio::test]
+async fn test_notification_worker_panic_is_reported_by_repeated_service_shutdown() {
+    use qubit_event_bus::EventBus;
+    use qubit_event_bus::model::ProviderId;
+    use qubit_event_bus::spi::ShutdownMode;
+    use qubit_task::service::TaskExecutionServiceBuilder;
+    use qubit_task::service::TaskServiceError;
+
+    let event_bus = EventBus::from_spi(
+        ProviderId::new("panic-capabilities").expect("provider ID is valid"),
+        Arc::new(PanicCapabilitiesSpi),
+    );
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .event_bus(event_bus.clone())
+        .build()
+        .await
+        .expect("service builds with the event bus");
+    let task_id = service
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("task is accepted")
+        .task_id();
+
+    assert_eq!(
+        TaskState::Succeeded,
+        service.wait(task_id).await.expect("task completes").state
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while service
+            .notification_stats()
+            .expect("notification stats are available")
+            .worker_panicked
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("publisher records the panic");
+
+    for _ in 0..2 {
+        let error = service
+            .shutdown()
+            .await
+            .expect_err("shutdown reports the notification worker panic");
+        assert!(
+            matches!(error, TaskServiceError::NotificationClose(message) if message.contains("notification publisher worker panicked"))
+        );
+    }
+    event_bus
+        .shutdown(ShutdownMode::Immediate)
+        .expect("injected event bus shuts down");
 }
 
 #[cfg(feature = "event-bus")]
