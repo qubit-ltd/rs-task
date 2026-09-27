@@ -65,6 +65,53 @@ pub struct TaskRequest {
 }
 
 impl TaskRequest {
+    /// Creates a versioned request with one CPU slot and no optional metadata.
+    ///
+    /// # Parameters
+    ///
+    /// * `task_type` - Stable handler family name.
+    /// * `handler_version` - Exact payload interpretation version.
+    /// * `payload` - Opaque bytes passed to the selected handler.
+    ///
+    /// # Returns
+    ///
+    /// A request with one CPU slot and empty correlation, idempotency, and
+    /// metadata fields.
+    #[must_use]
+    pub fn new(task_type: impl Into<String>, handler_version: impl Into<String>, payload: Vec<u8>) -> Self {
+        Self {
+            task_type: task_type.into(),
+            handler_version: handler_version.into(),
+            payload,
+            resources: ResourceRequest {
+                cpu_slots: 1,
+                ..ResourceRequest::default()
+            },
+            correlation_key: None,
+            idempotency_key: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Sets the caller-generated key used to recover the same accepted task.
+    ///
+    /// Create and durably retain this key before calling
+    /// [`TaskExecutionService::submit`](crate::service::TaskExecutionService::submit).
+    /// Reuse it only with the identical request.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Stable caller-generated idempotency key.
+    ///
+    /// # Returns
+    ///
+    /// The request with the supplied key attached.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
     /// Checks the size limits used by both the service and task stores.
     ///
     /// # Returns
@@ -120,52 +167,5 @@ impl TaskRequest {
             return Err("metadata exceeds the 16384-byte limit");
         }
         Ok(())
-    }
-
-    /// Creates a versioned request with one CPU slot and no optional metadata.
-    ///
-    /// # Parameters
-    ///
-    /// * `task_type` - Stable handler family name.
-    /// * `handler_version` - Exact payload interpretation version.
-    /// * `payload` - Opaque bytes passed to the selected handler.
-    ///
-    /// # Returns
-    ///
-    /// A request with one CPU slot and empty correlation, idempotency, and
-    /// metadata fields.
-    #[must_use]
-    pub fn new(task_type: impl Into<String>, handler_version: impl Into<String>, payload: Vec<u8>) -> Self {
-        Self {
-            task_type: task_type.into(),
-            handler_version: handler_version.into(),
-            payload,
-            resources: ResourceRequest {
-                cpu_slots: 1,
-                ..ResourceRequest::default()
-            },
-            correlation_key: None,
-            idempotency_key: None,
-            metadata: BTreeMap::new(),
-        }
-    }
-
-    /// Sets the caller-generated key used to recover the same accepted task.
-    ///
-    /// Create and durably retain this key before calling
-    /// [`TaskExecutionService::submit`](crate::service::TaskExecutionService::submit).
-    /// Reuse it only with the identical request.
-    ///
-    /// # Parameters
-    ///
-    /// * `key` - Stable caller-generated idempotency key.
-    ///
-    /// # Returns
-    ///
-    /// The request with the supplied key attached.
-    #[must_use]
-    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
-        self.idempotency_key = Some(key.into());
-        self
     }
 }
