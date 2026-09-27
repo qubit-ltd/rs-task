@@ -486,6 +486,10 @@ impl TaskExecutionService {
     /// # Returns
     ///
     /// The payload-free summary when the task is retained, or `None` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns a service error when the store cannot read the summary.
     pub async fn get_summary(&self, id: TaskId) -> Result<Option<TaskSummary>, TaskServiceError> {
         self.core
             .store
@@ -1140,6 +1144,19 @@ impl TaskExecutionService {
 
     /// Requeues a blocked task while holding a permit through persistence and
     /// queue publication.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the blocked task.
+    ///
+    /// # Returns
+    ///
+    /// The committed queued summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a service error when the task is unavailable, exhausted, the
+    /// queue is full, shutdown has started, or persistence fails.
     async fn retry_blocked_admitted(&self, id: TaskId) -> Result<TaskSummary, TaskServiceError> {
         if let Some(error) = self.last_scheduler_error() {
             return Err(TaskServiceError::SchedulerUnavailable(error));
@@ -2136,6 +2153,11 @@ async fn close_notification_publisher(core: &Arc<ServiceCore>) -> Result<(), Tas
 /// # Returns
 ///
 /// The combined shutdown result, preserving the service error as primary.
+///
+/// # Errors
+///
+/// Returns the service failure, the notification close failure, or a combined
+/// diagnostic when both operations fail.
 fn combine_shutdown_results(
     primary: Result<(), TaskServiceError>,
     notification: Result<(), TaskServiceError>,

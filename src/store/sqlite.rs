@@ -151,6 +151,14 @@ struct StoredLifecycle {
 
 impl StoredLifecycle {
     /// Copies mutable and lifecycle fields from a complete record.
+    ///
+    /// # Parameters
+    ///
+    /// * `record` - Complete task record being persisted.
+    ///
+    /// # Returns
+    ///
+    /// Lifecycle fields copied without request data.
     fn from_record(record: &TaskRecord) -> Self {
         Self {
             id: record.id,
@@ -168,6 +176,14 @@ impl StoredLifecycle {
     }
 
     /// Copies mutable lifecycle fields from a payload-free task summary.
+    ///
+    /// # Parameters
+    ///
+    /// * `record` - Task summary being persisted.
+    ///
+    /// # Returns
+    ///
+    /// Lifecycle fields copied without request data.
     fn from_summary(record: &TaskSummary) -> Self {
         Self {
             id: record.id,
@@ -185,6 +201,14 @@ impl StoredLifecycle {
     }
 
     /// Reconstructs a complete record by attaching its immutable request.
+    ///
+    /// # Parameters
+    ///
+    /// * `request` - Immutable request associated with this lifecycle.
+    ///
+    /// # Returns
+    ///
+    /// A complete record reconstructed from persisted lifecycle values.
     fn into_record(self, request: TaskRequest) -> TaskRecord {
         TaskRecord {
             id: self.id,
@@ -203,6 +227,14 @@ impl StoredLifecycle {
     }
 
     /// Reconstructs a payload-free summary from lifecycle and request fields.
+    ///
+    /// # Parameters
+    ///
+    /// * `request` - Immutable request metadata associated with this lifecycle.
+    ///
+    /// # Returns
+    ///
+    /// A summary reconstructed without loading the request payload.
     fn into_summary(self, request: TaskRequestInfo) -> TaskSummary {
         TaskSummary {
             id: self.id,
@@ -265,6 +297,14 @@ struct StoredSummaryRow {
 }
 
 /// Decodes the payload-free SQLite columns selected for a summary query.
+///
+/// # Parameters
+///
+/// * `row` - Current SQLite row returned by the summary projection.
+///
+/// # Returns
+///
+/// The typed row projection, or the SQLite conversion error.
 fn read_stored_summary_row(row: &Row<'_>) -> SqliteResult<StoredSummaryRow> {
     Ok(StoredSummaryRow {
         id: row.get(0)?,
@@ -279,6 +319,14 @@ fn read_stored_summary_row(row: &Row<'_>) -> SqliteResult<StoredSummaryRow> {
 }
 
 /// Reads every task column needed to validate a persisted row.
+///
+/// # Parameters
+///
+/// * `row` - Current SQLite row returned by the complete task projection.
+///
+/// # Returns
+///
+/// The typed task row, or the SQLite conversion error.
 fn read_stored_task_row(row: &Row<'_>) -> SqliteResult<StoredTaskRow> {
     Ok(StoredTaskRow {
         id: row.get(0)?,
@@ -975,6 +1023,19 @@ impl TaskStore for SqliteTaskStore {
 }
 
 /// Initializes the current SQLite schema or upgrades a supported older schema.
+///
+/// # Parameters
+///
+/// * `connection` - Mutable connection used for the schema transaction.
+///
+/// # Returns
+///
+/// Success after the current schema is ready.
+///
+/// # Errors
+///
+/// Returns a store error for unsupported versions, invalid schemas, migration
+/// failures, or SQLite operation failures.
 fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -1024,6 +1085,18 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
 }
 
 /// Verifies that schema 3 has the columns expected by the current store.
+///
+/// # Parameters
+///
+/// * `transaction` - Active schema transaction used to inspect the table.
+///
+/// # Returns
+///
+/// Success when every required column is present.
+///
+/// # Errors
+///
+/// Returns a store error when inspection fails or a required column is absent.
 fn validate_schema_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
@@ -1054,6 +1127,19 @@ fn validate_schema_three(transaction: &Transaction<'_>) -> Result<(), StoreError
 }
 
 /// Migrates schema 2 request JSON into an indexed header and separate payload.
+///
+/// # Parameters
+///
+/// * `transaction` - Active schema transaction that owns the migration.
+///
+/// # Returns
+///
+/// Success after all rows are migrated to schema 3.
+///
+/// # Errors
+///
+/// Returns a store error when the old schema is invalid, a row cannot be
+/// decoded, indexed values disagree, or a SQLite operation fails.
 fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
@@ -1115,6 +1201,20 @@ fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), Stor
 }
 
 /// Migrates a schema 0 or 1 database inside the caller's transaction.
+///
+/// # Parameters
+///
+/// * `transaction` - Active transaction that owns the migration.
+/// * `schema_version` - Legacy database version being upgraded.
+///
+/// # Returns
+///
+/// Success after legacy records are represented in the schema 2 layout.
+///
+/// # Errors
+///
+/// Returns a store error when required columns are absent, records are invalid,
+/// or a SQLite operation fails.
 fn migrate_legacy_schema(transaction: &Transaction<'_>, schema_version: i64) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
@@ -1191,6 +1291,19 @@ fn migrate_legacy_schema(transaction: &Transaction<'_>, schema_version: i64) -> 
 }
 
 /// Decodes a task record only when its persisted row format is supported.
+///
+/// # Parameters
+///
+/// * `row` - Complete typed row read from the task table.
+///
+/// # Returns
+///
+/// The decoded record after validating indexed columns against JSON values.
+///
+/// # Errors
+///
+/// Returns a store error for an unsupported format, malformed data, or
+/// inconsistent indexed values.
 fn decode_stored_task_row(row: StoredTaskRow) -> Result<TaskRecord, StoreError> {
     if row.format_version != RECORD_FORMAT_VERSION {
         return Err(StoreError::Failure(format!(
@@ -1263,6 +1376,18 @@ fn decode_stored_summary_row(row: StoredSummaryRow) -> Result<TaskSummary, Store
 }
 
 /// Serializes only the lifecycle fields that can change after acceptance.
+///
+/// # Parameters
+///
+/// * `record` - Complete record whose lifecycle is serialized.
+///
+/// # Returns
+///
+/// JSON containing the mutable lifecycle values.
+///
+/// # Errors
+///
+/// Returns a store error if serialization fails.
 fn encode_lifecycle(record: &TaskRecord) -> Result<String, StoreError> {
     serde_json::to_string(&StoredLifecycle::from_record(record)).map_err(failure)
 }
@@ -1285,6 +1410,19 @@ fn encode_summary_lifecycle(record: &TaskSummary) -> Result<String, StoreError> 
 }
 
 /// Decodes a pre schema 2 record stored as a single JSON object.
+///
+/// # Parameters
+///
+/// * `format_version` - Legacy serialized record format version.
+/// * `json` - Serialized complete task record.
+///
+/// # Returns
+///
+/// The decoded legacy task record.
+///
+/// # Errors
+///
+/// Returns a store error when the format is unsupported or JSON is invalid.
 fn decode_legacy_record(format_version: i64, json: &str) -> Result<TaskRecord, StoreError> {
     if format_version != 1 {
         return Err(StoreError::Failure(format!(
@@ -1295,6 +1433,15 @@ fn decode_legacy_record(format_version: i64, json: &str) -> Result<TaskRecord, S
 }
 
 /// Builds the initial queued record before the SQLite acceptance transaction.
+///
+/// # Parameters
+///
+/// * `id` - Service-assigned identity for the new task.
+/// * `request` - Validated reconstructable request to accept.
+///
+/// # Returns
+///
+/// A queued record with initial lifecycle timestamps and revision.
 fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
     TaskRecord {
         id,
@@ -1327,6 +1474,10 @@ fn state_kind(state: &TaskState) -> &'static str {
 
 /// Reads the current Unix epoch time in milliseconds, defaulting on clock
 /// error.
+///
+/// # Returns
+///
+/// Current epoch milliseconds, or zero if the system clock predates the epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
