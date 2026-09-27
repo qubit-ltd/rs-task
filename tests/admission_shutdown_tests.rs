@@ -1682,7 +1682,8 @@ async fn test_store_fault_shutdown_waits_for_notification_publisher_to_drain() {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let spi = Arc::new(BlockingPublisherSpi::new(entered_tx, release_rx));
-    let bus = EventBus::from_spi(ProviderId::new("blocking-test").expect("valid provider"), spi);
+    let bus = EventBus::from_spi(ProviderId::new("blocking-test").expect("valid provider"), spi)
+        .expect("blocking-test provider descriptor is valid");
     let store = Arc::new(ControlledStore {
         fail_next_get: AtomicBool::new(true),
         ..ControlledStore::new()

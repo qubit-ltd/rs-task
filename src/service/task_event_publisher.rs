@@ -360,7 +360,8 @@ mod tests {
     }
 
     fn publisher_with_timeout(spi: Arc<FakeSpi>, capacity: usize, close_timeout: Duration) -> TaskEventPublisher {
-        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi);
+        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi)
+            .expect("fake provider descriptor is valid");
         TaskEventPublisher::new(
             bus,
             NonZeroUsize::new(capacity).expect("nonzero capacity"),
@@ -413,7 +414,8 @@ mod tests {
     #[test]
     fn test_task_event_publisher_fake_spi_unsupported_subscription_is_reported() {
         let spi = FakeSpi::new(false, Outcome::Opaque);
-        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi);
+        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi)
+            .expect("fake provider descriptor is valid");
         let request = SubscribeRequest::new(
             "task-observer",
             Topic::<TaskEvent>::new("task.lifecycle").expect("task lifecycle topic"),
@@ -436,7 +438,8 @@ mod tests {
     #[test]
     fn test_task_event_publisher_fake_spi_shutdown_is_complete() {
         let spi = FakeSpi::new(false, Outcome::Opaque);
-        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi);
+        let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi)
+            .expect("fake provider descriptor is valid");
 
         let outcome = bus.shutdown(ShutdownMode::Immediate).expect("bus shutdown");
 

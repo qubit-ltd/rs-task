@@ -1519,14 +1519,30 @@ struct PanicCapabilitiesSpi;
 #[cfg(feature = "event-bus")]
 impl EventBusSpi for PanicCapabilitiesSpi {
     fn capabilities(&self) -> EventBusCapabilities {
-        panic!("injected provider capability panic")
+        use qubit_event_bus::spi::DelayedDeliveryCapability;
+        use qubit_event_bus::spi::DurabilityCapability;
+        use qubit_event_bus::spi::OrderingCapability;
+        use qubit_event_bus::spi::PayloadModes;
+        use qubit_event_bus::spi::PublishGuarantee;
+        use qubit_event_bus::spi::PublishVisibility;
+        use qubit_event_bus::spi::ReplayCapability;
+        use qubit_event_bus::spi::SettlementCapabilities;
+
+        EventBusCapabilities::new(
+            PayloadModes::Native,
+            SettlementCapabilities::None,
+            OrderingCapability::None,
+            DelayedDeliveryCapability::None,
+            DurabilityCapability::Ephemeral,
+            false,
+            ReplayCapability::None,
+            PublishGuarantee::Accepted,
+            PublishVisibility::Opaque,
+        )
     }
 
     fn publish(&self, _message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
-        Ok(PublishAcknowledgement::Accepted {
-            provider_message_id: None,
-            metadata: Default::default(),
-        })
+        panic!("injected notification publisher panic")
     }
 
     fn subscribe(&self, _request: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
@@ -1695,17 +1711,17 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
 
 #[cfg(feature = "event-bus")]
 #[tokio_test]
-async fn test_notification_worker_panic_is_reported_by_repeated_service_shutdown() {
+async fn test_notification_provider_panic_is_reported_without_stopping_worker() {
     use qubit_event_bus::EventBus;
     use qubit_event_bus::model::ProviderId;
     use qubit_event_bus::spi::ShutdownMode;
     use qubit_task::service::TaskExecutionServiceBuilder;
-    use qubit_task::service::TaskServiceError;
 
     let event_bus = EventBus::from_spi(
         ProviderId::new("panic-capabilities").expect("provider ID is valid"),
         Arc::new(PanicCapabilitiesSpi),
-    );
+    )
+    .expect("panic-capabilities provider descriptor is valid");
     let service = TaskExecutionServiceBuilder::in_memory()
         .event_bus(event_bus.clone())
         .build()
@@ -1728,24 +1744,20 @@ async fn test_notification_worker_panic_is_reported_by_repeated_service_shutdown
         while service
             .notification_stats()
             .expect("notification stats are available")
-            .worker_panicked
+            .publish_error
             == 0
         {
             task::yield_now().await;
         }
     })
     .await
-    .expect("publisher records the panic");
-
-    for _ in 0..2 {
-        let error = service
-            .shutdown()
-            .await
-            .expect_err("shutdown reports the notification worker panic");
-        assert!(
-            matches!(error, TaskServiceError::NotificationClose(message) if message.contains("notification publisher worker panicked"))
-        );
-    }
+    .expect("publisher records the provider error");
+    assert_eq!(service.notification_stats().unwrap().worker_panicked, 0);
+    service
+        .shutdown()
+        .await
+        .expect("provider panic does not stop the worker");
+    service.shutdown().await.expect("repeated shutdown succeeds");
     event_bus
         .shutdown(ShutdownMode::Immediate)
         .expect("injected event bus shuts down");
@@ -1767,7 +1779,8 @@ async fn test_notification_close_timeout_is_reported_by_service_shutdown() {
             entered,
             gate: gate.clone(),
         }),
-    );
+    )
+    .expect("blocking-publish provider descriptor is valid");
     let service = TaskExecutionServiceBuilder::in_memory()
         .event_bus(event_bus)
         .event_bus_close_timeout(std::time::Duration::from_millis(20))

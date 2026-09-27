@@ -48,7 +48,6 @@ impl ExecutionHandle {
     /// # Returns
     ///
     /// A handle that exposes cancellation and receives the attempt outcome.
-    #[must_use]
     pub fn new(receiver: oneshot::Receiver<ExecutionOutcome>, cancelled: Arc<AtomicBool>) -> Self {
         Self { receiver, cancelled }
     }
