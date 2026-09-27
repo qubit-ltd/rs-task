@@ -9,6 +9,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::model::MAX_IDEMPOTENCY_KEY_BYTES;
 use qubit_task::model::MAX_TASK_QUERY_LIMIT;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
@@ -42,6 +43,25 @@ async fn test_task_service_query_limit() {
         .await
         .expect("maximum page is accepted");
     assert!(page.records.is_empty());
+    service.shutdown().await.expect("empty service shuts down");
+}
+
+/// Rejects idempotency lookup keys outside the documented byte limit.
+#[tokio::test]
+async fn test_task_service_idempotency_lookup_rejects_invalid_key_lengths() {
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .build()
+        .await
+        .expect("service builds");
+
+    for key in [String::new(), "k".repeat(MAX_IDEMPOTENCY_KEY_BYTES + 1)] {
+        assert!(matches!(
+            service.get_by_idempotency_key(&key).await,
+            Err(TaskServiceError::InvalidRequest(message))
+                if message == "idempotency key must contain between 1 and 256 bytes"
+        ));
+    }
+
     service.shutdown().await.expect("empty service shuts down");
 }
 
