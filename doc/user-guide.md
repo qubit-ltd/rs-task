@@ -148,8 +148,9 @@ that public service path.
 
 Every service-level `submit` requires a stable, non-empty key generated and
 saved before the first call. After a caller timeout, query
-`get_by_idempotency_key`; `None` is only a snapshot, so retry the identical
-request with the same key. The key can be reused after its task record is
+`get_by_idempotency_key`; it returns a payload-free `TaskSummary`, and `None` is
+only a snapshot, so retry the identical request with the same key. Call
+`get(summary.id)` when the payload is needed. The key can be reused after its task record is
 pruned or evicted. The in-memory preset retains up to 64 MiB of request payloads
 and defaults to 64 in-flight submissions sharing a 64 MiB admission payload
 budget. These budgets count payload bytes, not total process memory. Use SQLite
@@ -343,9 +344,37 @@ keeps history indefinitely by default. Call
 terminal records accepted before the cutoff; each call deletes at most
 `max_rows`, and queued, running, and blocked records remain. Pruning also
 removes the records' idempotency keys, making those keys available again. Back
-up persistent history first if the application needs an archive. The builder's
+up persistent history first if the application needs an archive. A typical
+maintenance job archives records older than 30 days, then repeatedly calls
+`prune_terminal_before(cutoff, 100)` until fewer than 100 rows are removed.
+Inspect `Blocked` summaries separately; when policy allows, abandon one with
+`abandon_blocked(id, state_version)` and prune it in a later pass. The builder's
 `runtime_handle(Handle)` selects the runtime for service-owned background tasks;
 keep it alive until `shutdown()` returns.
+
+After archiving the old records in an application-specific archive, a
+maintenance task can delete old terminal rows in bounded batches:
+
+~~~rust,no_run
+use std::num::NonZeroUsize;
+use qubit_task::store::{StoreError, TaskStore};
+
+async fn prune_old_terminal(
+    store: &impl TaskStore,
+    now_ms: u64,
+) -> Result<usize, StoreError> {
+    let cutoff = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1_000);
+    let batch = NonZeroUsize::new(100).expect("100 is nonzero");
+    let mut total = 0;
+    loop {
+        let removed = store.prune_terminal_before(cutoff, batch).await?;
+        total += removed;
+        if removed < batch.get() {
+            return Ok(total);
+        }
+    }
+}
+~~~
 Every service and built-in store rejects a `TaskQuery.limit` above 256 with
 `InvalidRequest`; zero is treated as a one-record page. The memory store scans
 history with extra selection space bounded by the requested page size.

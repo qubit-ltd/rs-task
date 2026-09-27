@@ -133,7 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 需要重启后重建的任务应使用带精确处理器版本的 `TaskRequest`；现有 SQLite 重启恢复测试覆盖了公共服务门面上的该流程。
 
 服务级 `submit` 必须使用稳定且非空的幂等键，并在首次调用前生成和保存。调用方超时后，
-可用 `get_by_idempotency_key` 查询；返回 `None` 只代表查询瞬间没有记录，应以相同请求和同一键重试。
+可用 `get_by_idempotency_key` 查询；该接口返回不含 payload 的 `TaskSummary`，返回
+`None` 只代表查询瞬间没有记录，应以相同请求和同一键重试。需要 payload 时调用
+`get(summary.id)`。
 对应任务记录被清理或淘汰后，该键可以重用。内存预设最多保留 64 MiB 的任务 payload，默认最多有
 64 个受理中提交，共享 64 MiB 的受理 payload 预算。这些额度只统计 payload 字节，不是进程总内存上限。
 需要更长的恢复窗口时应选 SQLite 或其他持久化存储。`shutdown_until(deadline)` 会启动正常排空，
@@ -258,10 +260,37 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保
 `prune_terminal_before(accepted_before_ms, max_rows)` 清理受理时间早于阈值的终态记录，
 每次最多删除 `max_rows` 条。排队、运行中和 `Blocked` 记录不会被删除。清理会同时移除
 幂等键，因此该键之后可以重新受理。需要归档时，请在清理前备份持久历史。Builder 的
+常见维护任务可先归档 30 天以前的记录，再循环调用
+`prune_terminal_before(cutoff, 100)`，直到单次删除数少于 100。应单独检查
+`Blocked` 摘要；符合策略时先用 `abandon_blocked(id, state_version)` 按版本放弃，
+再在后续清理中删除。Builder 的
 `runtime_handle(Handle)` 指定服务后台任务使用的 runtime；该 runtime 须存活到
 `shutdown()` 返回。丢弃最后一个服务句柄会启动异步排空，但无法向调用方报告结果；需要确认任务和通知都已完成时应显式调用 `shutdown()`。通过 `runtime_handle` 注入的 runtime 必须保持运行，直到排空完成。调度器 panic 会唤醒等待者并返回 `TaskServiceError::SchedulerUnavailable`；存储故障仍返回 `StoreUnavailable`。调度器不会自动重启。自定义引擎一旦启动工作就必须返回可跟踪的执行句柄；如果引擎在启动未跟踪的副作用后 panic，应用应终止并由外部监督器重启进程。
 服务与两种内置 store 都将 `TaskQuery.limit` 限制为 256；超过上限返回
 `InvalidRequest`，`limit=0` 按 1 处理。内存 store 的分页选择额外空间随页长有界增长。
+
+应用先按自身需要归档记录，再可用以下批处理函数清理 30 天以前的终态记录：
+
+~~~rust,no_run
+use std::num::NonZeroUsize;
+use qubit_task::store::{StoreError, TaskStore};
+
+async fn prune_old_terminal(
+    store: &impl TaskStore,
+    now_ms: u64,
+) -> Result<usize, StoreError> {
+    let cutoff = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1_000);
+    let batch = NonZeroUsize::new(100).expect("100 is nonzero");
+    let mut total = 0;
+    loop {
+        let removed = store.prune_terminal_before(cutoff, batch).await?;
+        total += removed;
+        if removed < batch.get() {
+            return Ok(total);
+        }
+    }
+}
+~~~
 
 ~~~rust,no_run
 use qubit_task::service::TaskExecutionServiceBuilder;
