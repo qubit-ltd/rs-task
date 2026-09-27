@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::sync::Arc;
 
 use qubit_task::TaskExecutionServiceBuilder;
@@ -10,7 +17,10 @@ use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
+use qubit_task::service::TaskServiceError;
 use qubit_task::store::TaskFuture;
+use tokio::test as tokio_test;
+use tokio::time;
 
 #[derive(Clone, Copy)]
 enum HandlerBehavior {
@@ -55,12 +65,12 @@ async fn run_handler(behavior: HandlerBehavior) -> (TaskState, u32) {
         .submit(test_keyed(TaskRequest::new("panic-provenance", "1", Vec::new())))
         .await
         .expect("task is accepted");
-    let result = tokio::time::timeout(std::time::Duration::from_secs(3), service.wait(accepted.id))
+    let result = time::timeout(std::time::Duration::from_secs(3), service.wait(accepted.id))
         .await
         .expect("task reaches a final state");
     let record = match result {
         Ok(record) => record,
-        Err(qubit_task::service::TaskServiceError::Blocked) => service
+        Err(TaskServiceError::Blocked) => service
             .get_summary(accepted.id)
             .await
             .expect("task query succeeds")
@@ -71,21 +81,21 @@ async fn run_handler(behavior: HandlerBehavior) -> (TaskState, u32) {
     (record.state, record.attempt)
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_handler_future_construction_panic_is_not_retried() {
     let (state, attempt) = run_handler(HandlerBehavior::ConstructPanic).await;
     assert!(matches!(state, TaskState::Panicked { .. }));
     assert_eq!(attempt, 1);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_handler_future_poll_panic_is_not_retried() {
     let (state, attempt) = run_handler(HandlerBehavior::PollPanic).await;
     assert!(matches!(state, TaskState::Panicked { .. }));
     assert_eq!(attempt, 1);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_application_error_category_panic_remains_failed() {
     let (state, attempt) = run_handler(HandlerBehavior::PanicCategory).await;
     assert!(matches!(state, TaskState::Failed { .. }));
@@ -98,7 +108,7 @@ fn successful_result() -> TaskRunResult {
 }
 
 #[allow(dead_code)]
-fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
         request.idempotency_key = Some(format!(

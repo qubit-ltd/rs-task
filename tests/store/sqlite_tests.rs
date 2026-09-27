@@ -1,12 +1,22 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use qubit_task::TaskId;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::MAX_TASK_QUERY_LIMIT;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskRequestInfo;
+use qubit_task::model::TaskStateKind;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
+use tokio::test as tokio_test;
 
 fn database_path(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("qubit-task-{label}-{}.sqlite", TaskId::generate()))
@@ -57,7 +67,7 @@ async fn seed_legacy_database(path: &std::path::Path) -> (TaskId, TaskRequest) {
     (id, request)
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_open_creates_version_three_schema() {
     let path = database_path("schema-fresh");
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
@@ -83,7 +93,7 @@ async fn test_sqlite_open_creates_version_three_schema() {
     remove_database(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_open_migrates_legacy_records_without_loss() {
     let path = database_path("schema-migrate");
     let (id, request) = seed_legacy_database(&path).await;
@@ -125,7 +135,7 @@ async fn test_sqlite_open_migrates_legacy_records_without_loss() {
 }
 
 /// Migrates schema 1 while retaining its original task request.
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_open_migrates_schema_one_records_without_loss() {
     let path = database_path("schema-one-migrate");
     let (id, request) = seed_legacy_database(&path).await;
@@ -153,7 +163,7 @@ async fn test_sqlite_open_migrates_schema_one_records_without_loss() {
 }
 
 /// Preserves queued retry, running, and diagnostic terminal lifecycle fields.
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
     use qubit_task::model::TaskRecord;
     use qubit_task::model::TaskState;
@@ -217,13 +227,13 @@ async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
                 rusqlite::params![
                     record.id.to_string(),
                     match record.state.kind() {
-                        qubit_task::model::TaskStateKind::Queued => "Queued",
-                        qubit_task::model::TaskStateKind::Running => "Running",
-                        qubit_task::model::TaskStateKind::Blocked => "Blocked",
-                        qubit_task::model::TaskStateKind::Succeeded => "Succeeded",
-                        qubit_task::model::TaskStateKind::Failed => "Failed",
-                        qubit_task::model::TaskStateKind::Panicked => "Panicked",
-                        qubit_task::model::TaskStateKind::Cancelled => "Cancelled",
+                        TaskStateKind::Queued => "Queued",
+                        TaskStateKind::Running => "Running",
+                        TaskStateKind::Blocked => "Blocked",
+                        TaskStateKind::Succeeded => "Succeeded",
+                        TaskStateKind::Failed => "Failed",
+                        TaskStateKind::Panicked => "Panicked",
+                        TaskStateKind::Cancelled => "Cancelled",
                     },
                     i64::try_from(record.accepted_at_ms).unwrap(),
                     record.request.correlation_key,
@@ -256,7 +266,7 @@ async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
 }
 
 /// Rolls back schema and version changes when a legacy record cannot decode.
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_schema_migration_rolls_back_when_legacy_record_is_corrupt() {
     let path = database_path("schema-corrupt");
     let (id, _) = seed_legacy_database(&path).await;
@@ -283,7 +293,7 @@ async fn test_sqlite_schema_migration_rolls_back_when_legacy_record_is_corrupt()
 }
 
 /// Leaves immutable request bytes unchanged across lifecycle transitions.
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_transitions_do_not_rewrite_the_immutable_request() {
     use qubit_task::model::TaskState;
     use qubit_task::model::TransitionCommand;
@@ -369,7 +379,7 @@ async fn test_sqlite_transitions_do_not_rewrite_the_immutable_request() {
     remove_database(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle() {
     use qubit_task::model::TaskState;
     use qubit_task::model::TransitionCommand;
@@ -433,7 +443,7 @@ async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle()
             |row| row.get(0),
         )
         .unwrap();
-    let info: qubit_task::model::TaskRequestInfo = serde_json::from_str(&info_json).unwrap();
+    let info: TaskRequestInfo = serde_json::from_str(&info_json).unwrap();
     let full = TaskRequest {
         payload,
         ..TaskRequest::new(info.task_type, info.handler_version, vec![])
@@ -482,7 +492,7 @@ async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle()
     remove_database(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_schema_two_corruption_rolls_back_migration() {
     let path = database_path("schema-two-corrupt");
     let id = TaskId::generate();
@@ -515,7 +525,7 @@ async fn test_sqlite_schema_two_corruption_rolls_back_migration() {
     remove_database(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_schema_two_migration_preserves_each_lifecycle_category() {
     use qubit_task::model::TaskState;
     use qubit_task::model::TransitionCommand;
@@ -617,8 +627,8 @@ async fn test_sqlite_schema_two_migration_preserves_each_lifecycle_category() {
     remove_database(&path);
 }
 
-#[tokio::test]
 /// Rejects SQLite history pages larger than the shared query limit.
+#[tokio_test]
 async fn test_sqlite_task_query_limit() {
     let path = database_path("query-limit");
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
@@ -651,7 +661,7 @@ async fn test_sqlite_task_query_limit() {
     remove_database(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_open_rejects_future_schema_without_changing_records() {
     let path = database_path("schema-future");
     let (id, _) = seed_legacy_database(&path).await;
@@ -684,7 +694,7 @@ async fn test_sqlite_open_rejects_future_schema_without_changing_records() {
     remove_database(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_reads_reject_unknown_row_format_everywhere() {
     let path = database_path("row-format");
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
@@ -715,7 +725,7 @@ async fn test_sqlite_reads_reject_unknown_row_format_everywhere() {
     remove_database(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_store_accepts_retry_deadlines_only_while_queued() {
     use qubit_task::model::TaskState;
     use qubit_task::model::TransitionCommand;

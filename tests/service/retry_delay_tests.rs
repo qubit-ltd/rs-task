@@ -1,7 +1,34 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::time::Duration;
 
+use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::engine::LocalTaskExecutionEngine;
+use qubit_task::handler::TaskContext;
+use qubit_task::handler::TaskHandler;
+use qubit_task::handler::TaskHandlerDescriptor;
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
+use qubit_task::model::ResourceCapacity;
+use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskRecord;
+use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskRunError;
+use qubit_task::model::TaskState;
+use qubit_task::scheduling::FairFifoPolicy;
+use qubit_task::service::CancelOutcome;
 use qubit_task::service::RetryPolicy;
 use qubit_task::service::RetryPolicyError;
+use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::TaskFuture;
+use tokio::task;
+use tokio::test as tokio_test;
+use tokio::time;
 
 #[test]
 fn test_retry_policy_defaults_to_one_second_with_sixty_second_cap() {
@@ -34,50 +61,42 @@ fn test_retry_policy_rejects_invalid_ranges() {
 
 struct RetryOnce(std::sync::atomic::AtomicUsize);
 
-impl qubit_task::handler::TaskHandler for RetryOnce {
-    fn descriptor(&self) -> qubit_task::handler::TaskHandlerDescriptor {
-        qubit_task::handler::TaskHandlerDescriptor {
+impl TaskHandler for RetryOnce {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
             task_type: "retry-delay".into(),
             version: "1".into(),
         }
     }
-    fn run<'a>(
-        &'a self,
-        _: &'a [u8],
-        _: qubit_task::handler::TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _: &'a [u8], _: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                Err(qubit_task::model::TaskRunError {
+                Err(TaskRunError {
                     category: "temporary".into(),
                     message: "retry".into(),
                     retryable: true,
                 })
             } else {
-                Ok(qubit_task::handler::TaskRunOutcome::Succeeded(
-                    qubit_task::model::TaskOutput::default(),
-                ))
+                Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
             }
         })
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_retry_is_persisted_and_waits_until_deadline() {
     use std::sync::atomic::Ordering;
 
     use qubit_task::store::TaskStore;
-    let store = std::sync::Arc::new(qubit_task::store::MemoryTaskStore::new(4));
+    let store = std::sync::Arc::new(MemoryTaskStore::new(4));
     let handler = std::sync::Arc::new(RetryOnce(std::sync::atomic::AtomicUsize::new(0)));
-    let service = qubit_task::TaskExecutionServiceBuilder::from_components(
+    let service = TaskExecutionServiceBuilder::from_components(
         store.clone(),
-        std::sync::Arc::new(qubit_task::engine::LocalTaskExecutionEngine::new(
-            qubit_task::model::ResourceCapacity {
-                cpu_slots: 1,
-                ..Default::default()
-            },
-        )),
-        std::sync::Arc::new(qubit_task::scheduling::FairFifoPolicy::default()),
+        std::sync::Arc::new(LocalTaskExecutionEngine::new(ResourceCapacity {
+            cpu_slots: 1,
+            ..Default::default()
+        })),
+        std::sync::Arc::new(FairFifoPolicy::default()),
     )
     .register_handler(handler.clone())
     .unwrap()
@@ -88,32 +107,28 @@ async fn test_retry_is_persisted_and_waits_until_deadline() {
     .await
     .unwrap();
     let accepted = service
-        .submit(test_keyed(qubit_task::model::TaskRequest::new(
-            "retry-delay",
-            "1",
-            Vec::new(),
-        )))
+        .submit(test_keyed(TaskRequest::new("retry-delay", "1", Vec::new())))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    time::timeout(Duration::from_secs(1), async {
         loop {
             let record = store.get(accepted.id).await.unwrap().unwrap();
             if record.retry_not_before_ms.is_some() {
                 break;
             }
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await
     .unwrap();
     assert_eq!(handler.0.load(Ordering::SeqCst), 1);
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    time::sleep(Duration::from_millis(80)).await;
     assert_eq!(
         handler.0.load(Ordering::SeqCst),
         1,
         "second attempt started before its deadline"
     );
-    let finished = tokio::time::timeout(Duration::from_secs(2), service.wait(accepted.id))
+    let finished = time::timeout(Duration::from_secs(2), service.wait(accepted.id))
         .await
         .unwrap()
         .unwrap();
@@ -122,7 +137,7 @@ async fn test_retry_is_persisted_and_waits_until_deadline() {
     service.shutdown().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_task_record_without_retry_deadline_deserializes_as_ready() {
     use qubit_task::model::AcceptOutcome;
     use qubit_task::model::TaskId;
@@ -141,27 +156,25 @@ async fn test_task_record_without_retry_deadline_deserializes_as_ready() {
     };
     let mut json = serde_json::to_value(record).unwrap();
     json.as_object_mut().unwrap().remove("retry_not_before_ms");
-    let restored: qubit_task::model::TaskRecord = serde_json::from_value(json).unwrap();
+    let restored: TaskRecord = serde_json::from_value(json).unwrap();
     assert_eq!(restored.retry_not_before_ms, None);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_delayed_retry_can_be_cancelled_before_its_next_attempt() {
     use std::sync::atomic::Ordering;
 
     use qubit_task::store::TaskStore;
 
-    let store = std::sync::Arc::new(qubit_task::store::MemoryTaskStore::new(4));
+    let store = std::sync::Arc::new(MemoryTaskStore::new(4));
     let handler = std::sync::Arc::new(RetryOnce(std::sync::atomic::AtomicUsize::new(0)));
-    let service = qubit_task::TaskExecutionServiceBuilder::from_components(
+    let service = TaskExecutionServiceBuilder::from_components(
         store.clone(),
-        std::sync::Arc::new(qubit_task::engine::LocalTaskExecutionEngine::new(
-            qubit_task::model::ResourceCapacity {
-                cpu_slots: 1,
-                ..Default::default()
-            },
-        )),
-        std::sync::Arc::new(qubit_task::scheduling::FairFifoPolicy::default()),
+        std::sync::Arc::new(LocalTaskExecutionEngine::new(ResourceCapacity {
+            cpu_slots: 1,
+            ..Default::default()
+        })),
+        std::sync::Arc::new(FairFifoPolicy::default()),
     )
     .register_handler(handler.clone())
     .unwrap()
@@ -172,14 +185,10 @@ async fn test_delayed_retry_can_be_cancelled_before_its_next_attempt() {
     .await
     .unwrap();
     let accepted = service
-        .submit(test_keyed(qubit_task::model::TaskRequest::new(
-            "retry-delay",
-            "1",
-            Vec::new(),
-        )))
+        .submit(test_keyed(TaskRequest::new("retry-delay", "1", Vec::new())))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    time::timeout(Duration::from_secs(1), async {
         loop {
             if store
                 .get(accepted.id)
@@ -191,26 +200,26 @@ async fn test_delayed_retry_can_be_cancelled_before_its_next_attempt() {
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await
     .unwrap();
     assert_eq!(
         service.cancel(accepted.id).await.unwrap(),
-        qubit_task::service::CancelOutcome::CancelledBeforeStart
+        CancelOutcome::CancelledBeforeStart
     );
     assert!(matches!(
         service.wait(accepted.id).await.unwrap().state,
-        qubit_task::model::TaskState::Cancelled
+        TaskState::Cancelled
     ));
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    time::sleep(Duration::from_millis(350)).await;
     assert_eq!(handler.0.load(Ordering::SeqCst), 1);
     service.shutdown().await.unwrap();
 }
 
 #[allow(dead_code)]
-fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
         request.idempotency_key = Some(format!(

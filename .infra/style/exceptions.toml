@@ -37,11 +37,6 @@ reason = "SPI specs, provider configs, and registry constructors form one cohesi
 
 [[exceptions]]
 rule = "multiple-public-types"
-path = "src/handler/registry.rs"
-reason = "The registry and its registration error describe one inseparable handler registry API."
-
-[[exceptions]]
-rule = "multiple-public-types"
 path = "src/service/task_execution_service.rs"
 reason = "The facade, effective capabilities, and operation errors define the single public service boundary."
 
@@ -52,28 +47,8 @@ reason = "The builder and its build error form one construction API."
 
 [[exceptions]]
 rule = "multiple-public-types"
-path = "src/scheduling/fair_fifo.rs"
-reason = "The fair FIFO policy and its queued task view are a single policy implementation contract."
-
-[[exceptions]]
-rule = "multiple-public-types"
 path = "src/model/task_record.rs"
 reason = "Task state, record, query, page, statistics, and transition command are the cohesive persisted lifecycle model."
-
-[[exceptions]]
-rule = "multiple-public-types"
-path = "src/model/resource.rs"
-reason = "Capacity, request, and snapshot are the cohesive resource accounting model."
-
-[[exceptions]]
-rule = "multiple-public-types"
-path = "src/model/task_request.rs"
-reason = "Task request, output, and execution error are the cohesive handler exchange model."
-
-[[exceptions]]
-rule = "type-file-name"
-path = "src/handler/context.rs"
-reason = "The context module name describes the handler capability while TaskContext is its sole public type."
 
 [[exceptions]]
 rule = "type-file-name"

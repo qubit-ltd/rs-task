@@ -6,10 +6,14 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskState;
+use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::TaskServiceError;
+use tokio::test as tokio_test;
 
-#[tokio::test]
+#[tokio_test]
 async fn test_dropping_one_clone_keeps_service_open() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -20,19 +24,17 @@ async fn test_dropping_one_clone_keeps_service_open() {
     drop(service);
 
     let handle = retained
-        .submit_local(
-            |_| qubit_task::service::LocalTaskOutcome::<(), std::io::Error>::Succeeded {
-                value: (),
-                summary: qubit_task::model::TaskOutput::default(),
-            },
-        )
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
         .await
         .expect("retained clone can still accept work");
     handle.result().await.expect("task finalizes").expect("task succeeds");
     retained.shutdown().await.expect("retained clone closes service");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_cancel_after_shutdown_is_rejected() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -53,7 +55,7 @@ async fn test_cancel_after_shutdown_is_rejected() {
             .await
             .expect("record remains readable")
             .map(|record| record.state),
-        Some(qubit_task::model::TaskState::Blocked { .. })
+        Some(TaskState::Blocked { .. })
     ));
 
     assert!(matches!(
@@ -74,6 +76,8 @@ mod sqlite_tests {
     use qubit_task::store::SqliteTaskStore;
     use qubit_task::store::StoreError;
     use qubit_task::store::TaskStore;
+    use tokio as tokio_crate;
+    use tokio::time;
 
     /// Returns a unique path for one isolated SQLite store test.
     fn test_database_path() -> std::path::PathBuf {
@@ -88,7 +92,7 @@ mod sqlite_tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_released_owner_is_fenced_and_epoch_is_checked() {
         let path = test_database_path();
         let store = SqliteTaskStore::open(&path).expect("store opens");
@@ -148,7 +152,7 @@ mod sqlite_tests {
         remove_database(&path);
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_drop_last_service_handle_releases_sqlite_owner() {
         let path = test_database_path();
         let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
@@ -156,16 +160,16 @@ mod sqlite_tests {
             .build()
             .await
             .expect("recoverable service builds");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        time::sleep(std::time::Duration::from_millis(20)).await;
 
         drop(service);
 
-        let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let replacement = time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if let Ok(store) = SqliteTaskStore::open(&path) {
                     break store;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
@@ -176,7 +180,7 @@ mod sqlite_tests {
 }
 
 #[allow(dead_code)]
-fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
         request.idempotency_key = Some(format!(

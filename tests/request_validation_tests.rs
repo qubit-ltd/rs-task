@@ -13,6 +13,7 @@ use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::MAX_TASK_PAYLOAD_BYTES;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
@@ -24,6 +25,7 @@ use qubit_task::model::TaskState;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::TaskFuture;
+use tokio::test as tokio_test;
 
 struct ValidationHandler;
 
@@ -35,11 +37,7 @@ impl TaskHandler for ValidationHandler {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        _context: TaskContext,
-    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
@@ -61,7 +59,7 @@ fn valid_request() -> TaskRequest {
     TaskRequest::new("validation", "1", b"payload".to_vec())
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_rejects_empty_task_type() {
     let service = create_service().await;
     let mut request = valid_request();
@@ -77,7 +75,7 @@ async fn test_submit_rejects_empty_task_type() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_rejects_empty_handler_version() {
     let service = create_service().await;
     let mut request = valid_request();
@@ -93,7 +91,7 @@ async fn test_submit_rejects_empty_handler_version() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_local_rejects_unsatisfiable_cpu_capacity_before_acceptance() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .capacity(ResourceCapacity {
@@ -124,7 +122,7 @@ async fn test_submit_local_rejects_unsatisfiable_cpu_capacity_before_acceptance(
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_rejects_payload_above_maximum_size() {
     let service = create_service().await;
     let mut request = valid_request();
@@ -140,7 +138,7 @@ async fn test_submit_rejects_payload_above_maximum_size() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_rejects_empty_custom_resource_name() {
     let service = create_service().await;
     let mut request = valid_request();
@@ -156,7 +154,7 @@ async fn test_submit_rejects_empty_custom_resource_name() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_rejects_empty_gpu_label() {
     let service = create_service().await;
     let mut request = valid_request();
@@ -172,7 +170,7 @@ async fn test_submit_rejects_empty_gpu_label() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_rejects_cpu_request_above_capacity() {
     let service = create_service().await;
     let mut request = valid_request();
@@ -187,7 +185,7 @@ async fn test_submit_rejects_cpu_request_above_capacity() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_accepts_valid_request() {
     let service = create_service().await;
     let record = service
@@ -211,7 +209,7 @@ impl TaskHandler for OversizedDiagnosticHandler {
         }
     }
 
-    fn run<'a>(&'a self, _: &'a [u8], _: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _: &'a [u8], _: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async {
             Err(TaskRunError {
                 category: "c".repeat(129),
@@ -229,7 +227,7 @@ fn request_with_oversized_metadata_key() -> TaskRequest {
     request
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_submit_rejects_oversized_metadata_before_accepting() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -244,7 +242,7 @@ async fn test_submit_rejects_oversized_metadata_before_accepting() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_terminal_diagnostics_are_bounded_on_a_utf8_boundary() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .register_handler(Arc::new(OversizedDiagnosticHandler))
@@ -268,7 +266,7 @@ async fn test_terminal_diagnostics_are_bounded_on_a_utf8_boundary() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_exact_request_limits_are_accepted() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .queue_capacity(16)
@@ -306,7 +304,7 @@ async fn test_exact_request_limits_are_accepted() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_each_request_limit_is_enforced_before_acceptance() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -350,7 +348,7 @@ async fn test_each_request_limit_is_enforced_before_acceptance() {
 }
 
 #[allow(dead_code)]
-fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
         request.idempotency_key = Some(format!(

@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::engine::ExecutionHandle;
 use qubit_task::engine::ExecutionOutcome;
 use qubit_task::handler::LocalTaskHandler;
@@ -15,14 +16,21 @@ use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 #[cfg(feature = "sqlite")]
+use qubit_task::model::AcceptOutcome;
+#[cfg(feature = "sqlite")]
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskState;
+#[cfg(feature = "sqlite")]
+use qubit_task::store::StoreError;
+use tokio::sync;
+use tokio::test as tokio_test;
 
 #[test]
-fn execution_handle_cancellation_signal_is_a_shared_clone() {
+fn test_execution_handle_cancellation_signal_is_a_shared_clone() {
     let cancellation = Arc::new(AtomicBool::new(false));
-    let (sender, receiver) = tokio::sync::oneshot::channel::<ExecutionOutcome>();
+    let (sender, receiver) = sync::oneshot::channel::<ExecutionOutcome>();
     let handle = ExecutionHandle::new(receiver, cancellation.clone());
 
     let signal = handle.cancellation_signal();
@@ -35,7 +43,7 @@ fn execution_handle_cancellation_signal_is_a_shared_clone() {
 }
 
 #[test]
-fn local_task_handler_returns_its_declared_descriptor() {
+fn test_local_task_handler_returns_its_declared_descriptor() {
     let descriptor = TaskHandlerDescriptor {
         task_type: "thumbnail".into(),
         version: "v3".into(),
@@ -47,8 +55,8 @@ fn local_task_handler_returns_its_declared_descriptor() {
     assert_eq!(handler.descriptor(), descriptor);
 }
 
-#[tokio::test]
-async fn local_task_handler_rejects_a_second_run() {
+#[tokio_test]
+async fn test_local_task_handler_rejects_a_second_run() {
     let descriptor = TaskHandlerDescriptor {
         task_type: "one-shot".into(),
         version: "1".into(),
@@ -56,7 +64,7 @@ async fn local_task_handler_rejects_a_second_run() {
     let handler = Arc::new(LocalTaskHandler::new(descriptor, |_| {
         Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
     }));
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .register_handler(handler)
         .expect("handler registers")
         .build()
@@ -75,21 +83,21 @@ async fn local_task_handler_rejects_a_second_run() {
     assert_eq!(
         states
             .iter()
-            .filter(|state| matches!(state, qubit_task::model::TaskState::Succeeded))
+            .filter(|state| matches!(state, TaskState::Succeeded))
             .count(),
         1
     );
     assert!(states.iter().any(|state| matches!(
         state,
-        qubit_task::model::TaskState::Failed { category, message }
+        TaskState::Failed { category, message }
             if category == "local_handler" && message.contains("ran more than once")
     )));
     service.shutdown().await.expect("service shuts down");
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
+#[tokio_test]
+async fn test_sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
     use qubit_task::store::SqliteTaskStore;
     use qubit_task::store::TaskStore;
 
@@ -104,8 +112,8 @@ async fn sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
     let id = TaskId::generate();
     let accepted = store.accept(id, request.clone()).await.unwrap();
     let accepted_record = match accepted {
-        qubit_task::model::AcceptOutcome::Accepted(record) => record,
-        qubit_task::model::AcceptOutcome::Existing(_) => panic!("first request is newly accepted"),
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => panic!("first request is newly accepted"),
     };
     assert_eq!(
         store.get_by_idempotency_key("thumbnail-source-42").await.unwrap(),
@@ -116,7 +124,7 @@ async fn sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
     conflicting.payload = b"different source".to_vec();
     assert!(matches!(
         store.accept(TaskId::generate(), conflicting).await,
-        Err(qubit_task::store::StoreError::IdempotencyConflict)
+        Err(StoreError::IdempotencyConflict)
     ));
 
     drop(store);
@@ -127,8 +135,8 @@ async fn sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
+#[tokio_test]
+async fn test_sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
     use qubit_task::store::SqliteTaskStore;
     use qubit_task::store::TaskStore;
 
@@ -138,7 +146,7 @@ async fn sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
 
     assert!(matches!(
         store.accept(TaskId::generate(), request).await,
-        Err(qubit_task::store::StoreError::InvalidRequest(_))
+        Err(StoreError::InvalidRequest(_))
     ));
     drop(store);
     let _ = std::fs::remove_file(&path);
@@ -147,19 +155,19 @@ async fn sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_open_reports_a_non_directory_parent() {
+fn test_sqlite_open_reports_a_non_directory_parent() {
     use qubit_task::store::SqliteTaskStore;
 
     let parent = std::env::temp_dir().join(format!("qubit-task-not-directory-{}", TaskId::generate()));
     std::fs::write(&parent, b"not a directory").expect("parent fixture is created");
     let result = SqliteTaskStore::open(parent.join("tasks.sqlite"));
 
-    assert!(matches!(result, Err(qubit_task::store::StoreError::Failure(_))));
+    assert!(matches!(result, Err(StoreError::Failure(_))));
     std::fs::remove_file(parent).expect("parent fixture is removed");
 }
 
 #[allow(dead_code)]
-fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
         request.idempotency_key = Some(format!(

@@ -17,6 +17,7 @@ use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::StoreCapabilities;
@@ -26,9 +27,11 @@ use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
+use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
+use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::TaskServiceBuildError;
 use qubit_task::service::TaskServiceError;
@@ -36,8 +39,11 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::spawn;
 use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
+use tokio::test as tokio_test;
+use tokio::time;
 
 struct Echo;
 
@@ -49,11 +55,7 @@ impl TaskHandler for Echo {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
@@ -69,7 +71,7 @@ fn cleanup(path: &std::path::Path) {
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
 
-async fn accept(store: &SqliteTaskStore) -> qubit_task::model::TaskRecord {
+async fn accept(store: &SqliteTaskStore) -> TaskRecord {
     match store
         .accept(TaskId::generate(), TaskRequest::new("echo", "1", Vec::new()))
         .await
@@ -80,7 +82,7 @@ async fn accept(store: &SqliteTaskStore) -> qubit_task::model::TaskRecord {
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_recovery_blocks_exhausted_attempts_and_manual_retry_preserves_record() {
     let path = temp_db();
     let store = SqliteTaskStore::open(&path).unwrap();
@@ -148,7 +150,7 @@ async fn test_recovery_blocks_exhausted_attempts_and_manual_retry_preserves_reco
     cleanup(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
     let path = temp_db();
     let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
@@ -214,7 +216,7 @@ async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
     cleanup(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_recovery_scans_across_page_boundary() {
     let path = temp_db();
     let store = SqliteTaskStore::open(&path).unwrap();
@@ -236,7 +238,7 @@ async fn test_recovery_scans_across_page_boundary() {
     cleanup(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_retry_blocked_rejects_exhausted_budget_without_mutation() {
     let path = temp_db();
     let store = SqliteTaskStore::open(&path).unwrap();
@@ -343,26 +345,17 @@ impl TaskStore for BadScanStore {
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         self.inner.accept(id, request)
     }
-    fn get_by_idempotency_key<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskRecord>, StoreError>> {
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         self.inner.get_by_idempotency_key(key)
     }
-    fn transition<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.transition(command)
     }
 
-    fn get_summary<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         self.inner.get_summary(id)
     }
-    fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskRecord>, StoreError>> {
+    fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         self.inner.get(id)
     }
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
@@ -450,7 +443,7 @@ impl TaskStore for BadScanStore {
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_invalid_recovery_pages_fail_without_looping() {
     for mode in [BadPage::EmptyWithNext, BadPage::StuckCursor, BadPage::TooManyRecords] {
         let path = temp_db();
@@ -484,7 +477,7 @@ async fn test_invalid_recovery_pages_fail_without_looping() {
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_recovery_error_retains_owner_release_failure() {
     let path = temp_db();
     let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
@@ -519,7 +512,7 @@ async fn test_recovery_error_retains_owner_release_failure() {
     cleanup(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
     let path = temp_db();
     let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
@@ -540,14 +533,14 @@ async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
         release_finished: Mutex::new(Some(release_finished)),
     });
     let builder_store = Arc::clone(&store);
-    let building = tokio::spawn(async move {
+    let building = spawn(async move {
         TaskExecutionServiceBuilder::default()
             .store(builder_store)
             .require_recovery(true)
             .build()
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(2), entered)
+    time::timeout(std::time::Duration::from_secs(2), entered)
         .await
         .expect("owner acquisition reaches its post-side-effect gate")
         .expect("owner gate signals entry");
@@ -555,7 +548,7 @@ async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
     assert!(matches!(building.await, Err(error) if error.is_cancelled()));
     gate.release.add_permits(1);
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), released)
+    time::timeout(std::time::Duration::from_secs(2), released)
         .await
         .expect("detached builder releases the acquired owner")
         .expect("owner release notification arrives");
@@ -566,7 +559,7 @@ async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
     cleanup(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
     let path = temp_db();
     let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
@@ -588,7 +581,7 @@ async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
         release_finished: Mutex::new(Some(release_finished)),
     });
     let builder_store = Arc::clone(&store);
-    let building = tokio::spawn(async move {
+    let building = spawn(async move {
         TaskExecutionServiceBuilder::default()
             .store(builder_store)
             .register_handler(Arc::new(Echo))
@@ -597,7 +590,7 @@ async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
             .build()
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(2), entered)
+    time::timeout(std::time::Duration::from_secs(2), entered)
         .await
         .expect("recovery scan reaches its gate")
         .expect("scan gate signals entry");
@@ -605,7 +598,7 @@ async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
     assert!(matches!(building.await, Err(error) if error.is_cancelled()));
     gate.release.add_permits(1);
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), released)
+    time::timeout(std::time::Duration::from_secs(2), released)
         .await
         .expect("detached builder releases owner after the page completes")
         .expect("owner release notification arrives");
@@ -616,7 +609,7 @@ async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
     cleanup(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_recovery_prechecks_once_then_scans_each_page_once() {
     let path = temp_db();
     let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
@@ -653,7 +646,7 @@ async fn test_recovery_prechecks_once_then_scans_each_page_once() {
     cleanup(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_recovery_retries_running_attempt_below_limit() {
     let path = temp_db();
     let store = SqliteTaskStore::open(&path).unwrap();
@@ -689,7 +682,7 @@ async fn test_recovery_retries_running_attempt_below_limit() {
     cleanup(&path);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_recovery_preserves_retry_deadline_for_queued_record() {
     let path = temp_db();
     let store = SqliteTaskStore::open(&path).unwrap();
@@ -763,20 +756,20 @@ async fn test_recovery_preserves_retry_deadline_for_queued_record() {
         .build()
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    time::sleep(std::time::Duration::from_millis(100)).await;
     let waiting = service.get(queued.id).await.unwrap().unwrap();
     assert_eq!(waiting.retry_not_before_ms, Some(deadline));
     assert_eq!(waiting.attempt, 1);
     let later_waiting = service.get(later_queued.id).await.unwrap().unwrap();
     assert_eq!(later_waiting.retry_not_before_ms, Some(later_deadline));
     assert_eq!(later_waiting.attempt, 1);
-    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), service.wait(queued.id))
+    let finished = time::timeout(std::time::Duration::from_secs(5), service.wait(queued.id))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(finished.attempt, 2);
     assert!(matches!(finished.state, TaskState::Succeeded));
-    let later_finished = tokio::time::timeout(std::time::Duration::from_secs(5), service.wait(later_queued.id))
+    let later_finished = time::timeout(std::time::Duration::from_secs(5), service.wait(later_queued.id))
         .await
         .unwrap()
         .unwrap();
