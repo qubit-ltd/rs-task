@@ -82,6 +82,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 丢弃最后一个服务句柄会启动异步排空；需要观察排空结果时调用 `shutdown()`。调度器 panic 会返回 `SchedulerUnavailable`，且不会自动重启。自定义引擎契约和零 CPU I/O 配置见[用户指南](doc/user-guide.zh_CN.md)。
 
+若 `TaskExecutionEngine::prepare` 返回 `Closed`，服务会停止调度并返回
+`SchedulerUnavailable`，排队任务仍可恢复。若 `activate` 返回 `Closed`，只会阻止当前任务。
+取消等待 `build()` 不会中断后台构建 worker；worker 会异步完成 owner 清理。正常关闭会等待
+调度器和已跟踪执行结束后再释放存储所有权。
+
 `TaskQuery.states` 使用 `TaskStateKind`；此前用带诊断内容的 `TaskState`
 构造筛选条件的调用方需要迁移。请求文本上限按 UTF-8 字节计算：`task_type`
 128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键

@@ -228,6 +228,11 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保
 
 ## 错误与诊断
 
+如果引擎的 `prepare()` 返回 `EngineError::Closed`，服务会将其视为永久调度故障，停止受理并返回
+`SchedulerUnavailable`；排队记录保留在存储中以便恢复。`activate()` 返回同一错误时只影响当前尝试，
+该任务会进入 `Blocked`。取消等待 builder `build()` 的 future 不会取消后台构建 worker：worker 会在恢复页边界
+停止扫描，释放已取得的 owner，并且不启动调度器。调用方取消后，这些清理会在后台异步完成。
+
 `TaskRunError` 用错误类别、诊断文本和可重试标记描述处理器失败。不可重试错误会以 `Failed` 结束，处理器 panic 则以 `Panicked` 结束。持久化诊断文本有长度上限；如需保留更完整的信息，应由业务应用记录原始错误或写入自己的结果存储。进程内任务的 `LocalTaskHandle<R, E>` 会保留原始类型化错误。
 
 `Blocked` 记录可查询，并附有需要人工处理的原因，例如找不到对应版本的处理器，或重试时队列已满。可用 `get` 或 `list` 查看记录，修复注册或容量问题后调用 `retry_blocked`。生命周期事件可通过 `notification_stats()` 区分本地队列丢弃、发布错误和 worker 故障；这些计数不表示订阅者已处理事件。
