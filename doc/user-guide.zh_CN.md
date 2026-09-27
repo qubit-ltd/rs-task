@@ -305,6 +305,26 @@ let service = TaskExecutionServiceBuilder::in_memory()
 
 处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`；执行引擎报告的 panic 进入 `Panicked`，不再根据业务错误类别字符串推断。自动重试默认采用 1 秒起步、逐次翻倍、最高 60 秒的退避，可用 `TaskExecutionServiceBuilder::retry_policy(RetryPolicy::new(initial, maximum)?)` 配置。到期时间与排队状态一同持久化，重启后不会提前执行；`retry_blocked` 会清除到期时间并立即使任务可运行。队列满时任务进入 `Blocked`，不会突破队列上限。
 
+## 从 0.5 及更早 API 迁移
+
+0.6 移除了调用方指定任务 ID、用 `submit` 提交闭包、线程池专用构建配置和旧的
+`TaskHandle<R, E>`。进程内闭包改用 `submit_local`，并通过
+`LocalTaskHandle<R, E>` 取得类型化结果；需要重建或恢复的任务使用带稳定幂等键的
+`TaskRequest`，服务负责生成 `TaskId`。这两种提交方式分别表达本地结果和可恢复描述，
+没有通用的持久化任务句柄。
+
+查询与扩展接口也有不兼容变化：`TaskQuery.states` 改为
+`Vec<TaskStateKind>`，历史分页游标改为 `TaskCursor { accepted_at_ms, id }`，
+调度策略收到的 `QueuedTask` 只暴露 `resources`。自定义 `TaskStore` 必须实现
+单次聚合统计 `count_states()`、不读取 payload 的摘要查询 `get_summary()`、有界恢复
+预检 `has_unfinished_over_limit(limit)`；`transition` 返回 `TaskSummary`，`list` 的
+分页记录也为摘要。存储还可实现有界终态清理 `prune_terminal_before` 和带版本检查的
+`abandon_blocked`；默认不支持时会明确返回 `UnsupportedCapability`。
+
+SQLite 释放 owner 后会拒绝旧句柄写入；SQLite 操作通过 Tokio blocking worker 串行执行，
+调用方须在 Tokio runtime 中轮询异步接口。升级前应同步更新应用调用点和自定义
+`TaskStore`，再运行应用的编译与恢复测试。当前工作区没有直接依赖 rs-task 的兄弟 crate。
+
 ## 排障
 
 - **提交时收到 `QueueFull`：** 有界等待队列已满。调用方可以施加背压、等待队列前进；如果部署能够安全保留更多待执行任务，也可以提高队列上限。自动重试遇到队列满时会进入 `Blocked`；有空位后调用 `retry_blocked`。
@@ -322,13 +342,6 @@ let service = TaskExecutionServiceBuilder::in_memory()
 UTF-8 字符边界裁剪；`LocalTaskHandle` 仍保留原始类型化结果和错误值。
 
 本版本只在单个服务进程内调度任务，不提供多节点租约、分布式资源发现、工作流依赖、定时任务、任意代码强制中断或业务副作用恰好一次保证。未来的分布式执行实现可以实现相同的 `TaskExecutionEngine` 接口，而不要求更改服务门面。
-
-## 延伸阅读
-
-- [项目概览与快速开始](../README.zh_CN.md)
-- [API 文档](https://docs.rs/qubit-task)
-- [English user guide](user-guide.md)
-- [TaskExecutionService 详细设计](task_execution_service_design.md)
 
 ## 无 payload 状态查询与 Blocked 运维
 
@@ -348,3 +361,10 @@ payload、幂等键和生命周期值。
 存储故障发生后，`wait` 和本地任务句柄会及时报告错误。共享关闭结果会等到调度器退出、
 已跟踪的执行句柄结束并释放存储所有权后才完成。调用方可用 `shutdown_until` 限制本次等待；
 超时不会停止后台排空，也不会提前释放所有权。
+
+## 延伸阅读
+
+- [项目概览与快速开始](../README.zh_CN.md)
+- [API 文档](https://docs.rs/qubit-task)
+- [English user guide](user-guide.md)
+- [TaskExecutionService 详细设计](task_execution_service_design.md)

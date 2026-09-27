@@ -307,8 +307,7 @@ subject to provider behavior. If the worker panics,
 `worker_panicked` records it, queued notifications may be lost, and
 `shutdown()` returns `TaskServiceError::NotificationClose`. A failure to join
 the blocking close task returns the same error. These notification failures do
-not roll back task state. Concurrent and later shutdown callers receive the
-same stored close result.
+not roll back task state.
 
 Dropping the last service handle starts an asynchronous drain. It cannot report
 the result to the caller, so call `shutdown()` when completion must be
@@ -488,13 +487,6 @@ cron scheduling, forced interruption of arbitrary code, or exactly-once
 business side effects. A future distributed engine can implement the same
 `TaskExecutionEngine` boundary without changing the service facade.
 
-## Further reading
-
-- [Project overview and quick start](../README.md)
-- [API documentation](https://docs.rs/qubit-task)
-- [中文用户指南](user-guide.zh_CN.md)
-- [Detailed service design](task_execution_service_design.md)
-
 ## Payload-free status and blocked-task maintenance
 
 `TaskPage.records`, `wait`, and `retry_blocked` return `TaskSummary`. It includes
@@ -521,3 +513,10 @@ The shared shutdown result remains pending until the scheduler exits, tracked
 execution handles finish, and the store owner is released. A caller may use
 `shutdown_until` to bound its own wait; a timeout does not stop that background
 drain or release ownership early.
+
+## Further reading
+
+- [Project overview and quick start](../README.md)
+- [API documentation](https://docs.rs/qubit-task)
+- [中文用户指南](user-guide.zh_CN.md)
+- [Detailed service design](task_execution_service_design.md)

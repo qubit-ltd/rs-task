@@ -48,10 +48,11 @@ For work that must survive restart, enable `sqlite` and use
 each stored `(task_type, handler_version)` before building the service. See the
 [user guide](doc/user-guide.md) for recovery, resource scheduling, SPI assembly,
 and event notifications. Optional lifecycle notifications use a bounded queue
-(256 entries by default); a full queue drops the notification, and shutdown
-drains queued notifications unless the publisher worker panics. A synchronous
-event-bus provider can block the dedicated publisher thread, so shutdown can
-wait indefinitely on such a provider.
+(256 entries by default); a full queue drops the notification. Explicit
+`shutdown()` waits up to 30 seconds for the notification worker by default and
+returns an error on timeout while the worker continues draining. Dropping the
+last service handle starts an asynchronous drain; a provider that never returns
+can keep that drain running. See the user guide for shutdown details.
 
 `LocalTaskHandle<R, E>` returns the full process-local value or application
 error. For running work, `LocalTaskResultError::Cancelled` is delivered only
