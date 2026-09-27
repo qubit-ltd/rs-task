@@ -13,7 +13,6 @@ use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
-use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
@@ -102,12 +101,6 @@ async fn test_application_error_category_panic_remains_failed() {
     assert_eq!(attempt, 1);
 }
 
-#[allow(dead_code)]
-fn successful_result() -> TaskRunResult {
-    Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
-}
-
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
