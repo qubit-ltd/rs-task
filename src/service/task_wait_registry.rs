@@ -2,6 +2,8 @@
 //    Copyright (c) 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,20 +13,31 @@ use tokio::sync::Notify;
 
 use crate::model::TaskId;
 
+/// Tracks task-specific wait notifications and active subscribers.
 #[derive(Default)]
 pub(super) struct TaskWaitRegistry {
+    /// Entries retained while they have at least one subscriber.
     entries: Mutex<HashMap<TaskId, Entry>>,
 }
+/// Notification primitive and subscriber count for one task ID.
 struct Entry {
+    /// Shared wakeup source for callers waiting on this task.
     notify: Arc<Notify>,
+    /// Number of live subscriptions keeping this entry registered.
     subscribers: usize,
 }
+/// Keeps one task notification registered until the subscription is dropped.
 pub(super) struct WaitSubscription {
+    /// Registry whose subscriber count this value owns.
     registry: Arc<TaskWaitRegistry>,
+    /// Task whose notifications this value observes.
     id: TaskId,
+    /// Shared notification primitive for this task.
     notify: Arc<Notify>,
 }
 impl TaskWaitRegistry {
+    /// Registers a subscriber and returns its task-specific notification
+    /// handle.
     pub(super) fn subscribe(self: &Arc<Self>, id: TaskId) -> WaitSubscription {
         let notify = {
             let mut entries = self.entries.lock();
@@ -41,12 +54,14 @@ impl TaskWaitRegistry {
             notify,
         }
     }
+    /// Wakes all current subscribers for one task ID.
     pub(super) fn notify(&self, id: TaskId) {
         let notify = self.entries.lock().get(&id).map(|entry| entry.notify.clone());
         if let Some(notify) = notify {
             notify.notify_waiters();
         }
     }
+    /// Wakes subscribers for every task currently present in the registry.
     pub(super) fn notify_all(&self) {
         let notifies = self
             .entries
@@ -60,11 +75,13 @@ impl TaskWaitRegistry {
     }
 }
 impl WaitSubscription {
+    /// Creates the notification future used to await a task update.
     pub fn notified(&self) -> tokio::sync::futures::Notified<'_> {
         self.notify.notified()
     }
 }
 impl Drop for WaitSubscription {
+    /// Removes the registry entry after its final subscriber is gone.
     fn drop(&mut self) {
         let mut entries = self.registry.entries.lock();
         if let Some(entry) = entries.get_mut(&self.id) {

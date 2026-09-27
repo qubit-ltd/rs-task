@@ -2,19 +2,27 @@
 //    Copyright (c) 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+/// Reason an in-flight admission could not reserve bounded resources.
 pub(super) enum AdmissionBudgetError {
+    /// The request payload would exceed the aggregate retained-byte budget.
     PayloadBytesExceeded { requested: usize, available: usize },
+    /// The number of concurrent admissions has reached its configured limit.
     SubmissionLimitExceeded { limit: usize },
 }
 
+/// Current detached admission counts and retained payload bytes.
 struct BudgetUsage {
+    /// Number of admission workers holding reservations.
     submissions: usize,
+    /// Payload bytes retained by those workers.
     payload_bytes: usize,
 }
 
