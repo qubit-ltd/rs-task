@@ -94,7 +94,6 @@ impl WaitSubscription {
     /// # Returns
     ///
     /// A future that completes after the next notification for this task.
-    #[must_use]
     #[inline]
     pub fn notified(&self) -> Notified<'_> {
         self.notify.notified()

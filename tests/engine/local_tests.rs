@@ -11,7 +11,6 @@ use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
-use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;

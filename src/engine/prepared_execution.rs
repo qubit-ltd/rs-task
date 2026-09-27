@@ -48,7 +48,6 @@ impl PreparedExecution {
     ///
     /// A prepared reservation that releases itself when dropped unless its
     /// callback is transferred to an execution completion guard.
-    #[must_use]
     pub fn new<F>(id: TaskId, assigned: Vec<String>, release: F) -> Self
     where
         F: FnOnce() + Send + 'static,
