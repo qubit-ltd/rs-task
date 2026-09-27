@@ -103,10 +103,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `has_unfinished_over_limit(limit)`，以便恢复预检无需解码 payload。最后句柄析构和调度器故障细节见用户指南。
 
 任务历史和等待接口返回不含 `payload` 的 `TaskSummary`。状态处理应使用
-`get_summary`、`list`、`wait` 和 `retry_blocked`；`get` 与
-`get_by_idempotency_key` 仍返回包含完整请求的 `TaskRecord`。SQLite schema 3
+`get_summary`、`list`、`wait` 和 `retry_blocked`；`get` 返回完整 `TaskRecord`，
+`get_by_idempotency_key` 返回不含 payload 的
+`TaskSummary`。需要 payload 时再调用 `get(summary.id)`。SQLite schema 3
 将请求元数据、payload BLOB 和生命周期 JSON 分列保存，摘要查询与状态转换不读取
 BLOB。schema 0、1、2 数据库会事务性迁移到 schema 3，并保留请求、幂等键和生命周期。
+
+SQLite 历史不会自动清理。可由应用定期先归档 30 天以前的记录，再循环调用
+`prune_terminal_before(cutoff, 100)`，直到单次删除数少于 100。该接口只删除终态。
+应单独检查 `Blocked` 摘要；符合业务策略时，先用
+`abandon_blocked(id, state_version)` 按版本放弃，再在后续清理中删除。记录删除后
+幂等键可重用，因此清理也会结束该键对应的重试窗口。
 
 存储故障发生后，等待者和本地句柄会立即收到错误。共享关闭结果会等待调度器和已跟踪
 的执行尝试退出，再释放 SQLite 所有权。`shutdown_until` 超时后，后台排空仍会继续。

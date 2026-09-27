@@ -132,11 +132,20 @@ last-handle drop behavior and scheduler failure reporting.
 
 Task history and waiting paths return `TaskSummary`, whose request metadata omits
 `payload`. Use `get_summary`, `list`, `wait`, and `retry_blocked` for status
-handling; `get` and `get_by_idempotency_key` remain detailed reads returning
-`TaskRecord`. SQLite schema 3 stores request metadata, the payload BLOB, and
+handling; `get` returns the full `TaskRecord`, while
+`get_by_idempotency_key` returns a payload-free `TaskSummary`. Call `get(summary.id)`
+when payload access is needed. SQLite schema 3 stores request metadata, the payload BLOB, and
 lifecycle JSON separately. Summary queries and lifecycle transitions do not
 select the BLOB. Schema 0, 1, and 2 databases migrate transactionally to schema
 3 while preserving requests, idempotency keys, and lifecycle state.
+
+SQLite history is retained until the application explicitly prunes it. A typical
+maintenance job can archive records older than 30 days, then call
+`prune_terminal_before(cutoff, 100)` repeatedly until fewer than 100 rows are
+removed. Only terminal tasks are pruned. Review `Blocked` summaries separately;
+use `abandon_blocked(id, state_version)` when policy allows, then prune them in a
+later pass. Pruning releases idempotency keys, so the retry window ends when the
+record is removed.
 
 After a store failure, waiters and local handles receive the fault immediately.
 The shared shutdown result waits for the scheduler and tracked executions to

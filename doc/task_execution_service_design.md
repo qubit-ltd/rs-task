@@ -231,7 +231,9 @@ SQLite 使用单个连接，因此同时运行的阻塞数据库操作上限为 
 
 The public history page contains `TaskSummary`, not full `TaskRecord` values.
 `wait`, `retry_blocked`, and `get_summary` also return payload-free summaries;
-`get` is the explicit full-record query. SQLite schema 3 separates request
+`get` is the explicit full-record query. `get_by_idempotency_key` returns a
+payload-free `TaskSummary`; callers use `get(summary.id)` to load payload.
+SQLite schema 3 separates request
 metadata, payload BLOB, and lifecycle JSON, allowing history reads, wait checks,
 and transitions to avoid selecting or decoding the payload. Opening schema 0,
 1, or 2 databases migrates each row transactionally and preserves payload,
