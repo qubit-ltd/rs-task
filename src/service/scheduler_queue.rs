@@ -109,17 +109,23 @@ impl SchedulerQueue {
     }
 
     /// Returns the earliest pending retry deadline.
+    #[must_use]
+    #[inline]
     pub(crate) fn next_deadline(&self) -> Option<u64> {
         self.delayed.first_key_value().map(|(deadline, _)| *deadline)
     }
 
     /// Returns whether no ready or delayed tasks are retained.
+    #[must_use]
+    #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     /// Returns the number of tasks in both scheduling classes.
     #[allow(dead_code)]
+    #[must_use]
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
@@ -143,7 +149,7 @@ mod tests {
 
     /// Bounds one scheduling window despite a large delayed population.
     #[test]
-    fn take_window_skips_far_future_tasks_and_respects_budget() {
+    fn test_take_window_skips_far_future_tasks_and_respects_budget() {
         let mut queue = SchedulerQueue::new();
         for deadline in 1_000..2_000 {
             queue.push(task(Some(deadline)));
@@ -160,7 +166,7 @@ mod tests {
 
     /// Restores a ready window in its original order and removes delayed IDs.
     #[test]
-    fn restore_and_remove_preserve_queue_accounting() {
+    fn test_restore_and_remove_preserve_queue_accounting() {
         let mut queue = SchedulerQueue::new();
         let first = task(None);
         let first_id = first.id;

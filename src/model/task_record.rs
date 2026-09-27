@@ -5,9 +5,18 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::ResourceRequest;
+use super::ResourceSnapshot;
+use super::TaskId;
+use super::TaskOutput;
+use super::TaskRequest;
+use super::TaskRequestInfo;
+use super::task_run_error::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES;
+use super::task_run_error::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES;
 use crate::store::StoreError;
 
 /// Maximum number of records returned by one task history query.
@@ -23,18 +32,16 @@ pub const MAX_TASK_QUERY_LIMIT: usize = 256;
 ///
 /// A limit in the inclusive range `1..=MAX_TASK_QUERY_LIMIT`, or
 /// [`StoreError::InvalidRequest`] when the request exceeds the maximum.
+///
+/// # Errors
+///
+/// Returns [`StoreError::InvalidRequest`] when `limit` exceeds the maximum.
 pub(crate) fn checked_page_size(limit: usize) -> Result<usize, StoreError> {
     if limit > MAX_TASK_QUERY_LIMIT {
         return Err(StoreError::InvalidRequest("task history page limit exceeds 256"));
     }
     Ok(limit.max(1))
 }
-
-use super::ResourceRequest;
-use super::TaskId;
-use super::TaskOutput;
-use super::TaskRequest;
-use super::TaskRequestInfo;
 
 /// Observable lifecycle state for an accepted task.
 ///
@@ -81,34 +88,6 @@ pub enum TaskState {
 }
 
 impl TaskState {
-    /// Returns whether every persisted diagnostic field satisfies its byte
-    /// limit.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` when the state can be persisted, or a static diagnostic naming
-    /// the exceeded limit.
-    pub(crate) fn validate_diagnostics(&self) -> Result<(), &'static str> {
-        use super::task_request::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES;
-        use super::task_request::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES;
-
-        match self {
-            Self::Blocked { reason } if reason.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES => {
-                Err("blocked reason exceeds the 4096-byte limit")
-            }
-            Self::Failed { category, message }
-                if category.len() > MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES
-                    || message.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES =>
-            {
-                Err("failure diagnostic exceeds its byte limit")
-            }
-            Self::Panicked { message } if message.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES => {
-                Err("panic diagnostic exceeds the 4096-byte limit")
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// Returns the payload-free lifecycle category used by history filters.
     ///
     /// # Returns
@@ -170,6 +149,36 @@ impl TaskState {
             Self::Succeeded | Self::Failed { .. } | Self::Panicked { .. } | Self::Cancelled => false,
         }
     }
+
+    /// Returns whether every persisted diagnostic field satisfies its byte
+    /// limit.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the state can be persisted, or a static diagnostic naming
+    /// the exceeded limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic when a blocked reason, failure category, or
+    /// lifecycle message exceeds its byte limit.
+    pub(crate) fn validate_diagnostics(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Blocked { reason } if reason.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES => {
+                Err("blocked reason exceeds the 4096-byte limit")
+            }
+            Self::Failed { category, message }
+                if category.len() > MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES
+                    || message.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES =>
+            {
+                Err("failure diagnostic exceeds its byte limit")
+            }
+            Self::Panicked { message } if message.len() > MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES => {
+                Err("panic diagnostic exceeds the 4096-byte limit")
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Payload-free category of a task lifecycle state.
@@ -205,6 +214,10 @@ pub enum TaskStateKind {
 
 impl TaskStateKind {
     /// Returns the stable SQLite state key for this lifecycle category.
+    ///
+    /// # Returns
+    ///
+    /// The case-sensitive state label persisted by SQLite.
     #[must_use]
     #[inline]
     #[cfg(feature = "sqlite")]
@@ -274,6 +287,25 @@ pub struct TaskRecord {
 }
 
 /// Payload-free lifecycle snapshot for listing and waiting on tasks.
+///
+/// # Examples
+///
+/// ```
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     use qubit_task::TaskExecutionService;
+///     use qubit_task::model::TaskRequest;
+///
+///     let service = TaskExecutionService::in_memory().await?;
+///     let request = TaskRequest::new("report", "1", vec![])
+///         .with_idempotency_key("report-summary-example");
+///     let accepted = service.submit(request).await?;
+///     let summary = service.get_summary(accepted.id).await?.expect("accepted task is retained");
+///     assert_eq!(summary.id, accepted.id);
+///     service.shutdown().await?;
+///     Ok(())
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSummary {
     /// Stable service-generated identity.
@@ -307,8 +339,7 @@ impl TaskRecord {
     ///
     /// # Returns
     ///
-    /// A `TaskSummary` containing every record field except the request
-    /// payload.
+    /// Lifecycle data and immutable request metadata, excluding the payload.
     #[must_use]
     pub fn summary(&self) -> TaskSummary {
         TaskSummary {
@@ -332,6 +363,16 @@ impl TaskRecord {
 ///
 /// Both fields are required because multiple tasks can be accepted during the
 /// same millisecond. The ID provides a deterministic tie-breaker.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskCursor;
+/// use qubit_task::model::TaskId;
+///
+/// let cursor = TaskCursor::new(42, TaskId::generate());
+/// assert_eq!(cursor.accepted_at_ms, 42);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TaskCursor {
     /// Acceptance timestamp in Unix epoch milliseconds.
@@ -359,6 +400,14 @@ impl TaskCursor {
 
 impl From<&TaskRecord> for TaskCursor {
     /// Creates a cursor at the supplied record's history position.
+    ///
+    /// # Parameters
+    ///
+    /// * `record` - Record whose acceptance position is used.
+    ///
+    /// # Returns
+    ///
+    /// A cursor with the record's acceptance timestamp and ID.
     fn from(record: &TaskRecord) -> Self {
         Self::new(record.accepted_at_ms, record.id)
     }
@@ -366,6 +415,14 @@ impl From<&TaskRecord> for TaskCursor {
 
 impl From<&TaskSummary> for TaskCursor {
     /// Creates a cursor at the supplied summary's history position.
+    ///
+    /// # Parameters
+    ///
+    /// * `record` - Summary whose acceptance position is used.
+    ///
+    /// # Returns
+    ///
+    /// A cursor with the summary's acceptance timestamp and ID.
     fn from(record: &TaskSummary) -> Self {
         Self::new(record.accepted_at_ms, record.id)
     }
@@ -379,7 +436,8 @@ impl From<&TaskSummary> for TaskCursor {
 /// # Examples
 ///
 /// ```
-/// use qubit_task::model::{TaskQuery, TaskStateKind};
+/// use qubit_task::model::TaskQuery;
+/// use qubit_task::model::TaskStateKind;
 ///
 /// let query = TaskQuery { states: vec![TaskStateKind::Queued], limit: 20, ..TaskQuery::default() };
 /// assert_eq!(query.limit, 20);
@@ -452,7 +510,9 @@ pub struct TaskStateCounts {
 /// ```
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let service = qubit_task::TaskExecutionService::in_memory().await?;
+///     use qubit_task::TaskExecutionService;
+///
+///     let service = TaskExecutionService::in_memory().await?;
 ///     let stats = service.stats().await?;
 ///     assert_eq!(stats.queued, 0);
 ///     service.shutdown().await?;
@@ -470,7 +530,7 @@ pub struct TaskStats {
     /// Number of retained terminal records.
     pub terminal: usize,
     /// Resource snapshot at the time of collection.
-    pub resources: super::ResourceSnapshot,
+    pub resources: ResourceSnapshot,
 }
 
 /// Complete request and record used to reconstruct an unfinished task.
@@ -481,7 +541,11 @@ pub struct TaskStats {
 /// # Examples
 ///
 /// ```
-/// use qubit_task::model::{StoredTask, TaskId, TaskRecord, TaskRequest, TaskState};
+/// use qubit_task::model::StoredTask;
+/// use qubit_task::model::TaskId;
+/// use qubit_task::model::TaskRecord;
+/// use qubit_task::model::TaskRequest;
+/// use qubit_task::model::TaskState;
 ///
 /// let task = StoredTask {
 ///     record: TaskRecord {
@@ -536,7 +600,11 @@ pub struct StoreCapabilities {
 /// # Examples
 ///
 /// ```
-/// use qubit_task::model::{AcceptOutcome, TaskId, TaskRecord, TaskRequest, TaskState};
+/// use qubit_task::model::AcceptOutcome;
+/// use qubit_task::model::TaskId;
+/// use qubit_task::model::TaskRecord;
+/// use qubit_task::model::TaskRequest;
+/// use qubit_task::model::TaskState;
 ///
 /// let outcome = AcceptOutcome::Accepted(TaskRecord {
 ///     id: TaskId::generate(),
@@ -573,13 +641,15 @@ pub enum AcceptOutcome {
 /// # Examples
 ///
 /// ```
-/// use qubit_task::model::{TaskId, TaskState, TransitionCommand};
+/// use qubit_task::model::TaskId;
+/// use qubit_task::model::TaskState;
+/// use qubit_task::model::TransitionCommand;
 ///
 /// let command = TransitionCommand {
 ///     id: TaskId::generate(),
 ///     expected_version: 0,
 ///     expected_attempt: 0,
-///     state: qubit_task::model::TaskState::Running,
+///     state: TaskState::Running,
 ///     retry_not_before_ms: None,
 ///     output: None,
 ///     assigned_resources: Vec::new(),
@@ -621,7 +691,10 @@ pub struct TransitionCommand {
 /// assert_eq!(epoch.0, 7);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OwnerEpoch(pub u64);
+pub struct OwnerEpoch(
+    /// Monotonically increasing generation issued to the current store owner.
+    pub u64,
+);
 
 /// Page of unfinished stored work returned during recovery.
 ///

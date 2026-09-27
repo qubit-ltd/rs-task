@@ -5,14 +5,18 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 //! Coordinates admission with one service-wide shutdown result.
 
 use parking_lot::Mutex;
+use tokio::pin;
 use tokio::sync::Notify;
 
 use super::task_execution_service::TaskServiceError;
 
+/// Copyable shutdown failure retained for every caller awaiting close.
 #[derive(Clone)]
+#[must_use]
 enum CloseFailure {
     /// A shutdown failure without a dedicated service error category.
     Other(String),
@@ -47,17 +51,24 @@ struct GateState {
 
 /// Serializes admission against shutdown and tracks operations already inside.
 pub(super) struct AdmissionGate {
+    /// Active count, phase, and shared shutdown outcome.
     state: Mutex<GateState>,
+    /// Notifies admissions and shutdown waiters when gate state changes.
     changed: Notify,
 }
 
 /// Keeps one accepted operation in the gate until all its side effects finish.
 pub(super) struct AdmissionPermit<'a> {
+    /// Gate whose active-operation count this permit holds.
     gate: &'a AdmissionGate,
 }
 
 impl AdmissionGate {
     /// Creates an open gate with no in-flight operations.
+    ///
+    /// # Returns
+    ///
+    /// A gate ready to admit operations.
     pub(super) fn new() -> Self {
         Self {
             state: Mutex::new(GateState {
@@ -70,6 +81,14 @@ impl AdmissionGate {
     }
 
     /// Enters before the first storage operation, or rejects a closed gate.
+    ///
+    /// # Returns
+    ///
+    /// A permit held through the operation's side effects.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ShuttingDown` after shutdown has started.
     pub(super) fn enter(&self) -> Result<AdmissionPermit<'_>, TaskServiceError> {
         let mut state = self.state.lock();
         if !matches!(state.phase, Phase::Open) {
@@ -80,6 +99,11 @@ impl AdmissionGate {
     }
 
     /// Starts closing and returns whether this call owns shutdown coordination.
+    ///
+    /// # Returns
+    ///
+    /// `true` only for the call that transitions the gate from open to closing.
+    #[must_use]
     pub(super) fn close(&self) -> bool {
         let mut state = self.state.lock();
         if !matches!(state.phase, Phase::Open) {
@@ -90,21 +114,35 @@ impl AdmissionGate {
         true
     }
 
-    /// Reports whether shutdown has published its final result.
+    /// Reports whether shutdown has started.
+    ///
+    /// # Returns
+    ///
+    /// Whether the gate has left its open phase.
+    #[must_use]
     pub(super) fn is_closing(&self) -> bool {
         !matches!(self.state.lock().phase, Phase::Open)
     }
 
     /// Reports whether every operation admitted before close has finished.
+    ///
+    /// # Returns
+    ///
+    /// Whether the active permit count is zero.
+    #[must_use]
     pub(super) fn is_idle(&self) -> bool {
         self.state.lock().active == 0
     }
 
     /// Waits until permits granted before closing have all been dropped.
+    ///
+    /// # Returns
+    ///
+    /// Completes after every active permit has been released.
     pub(super) async fn wait_idle(&self) {
         loop {
             let notified = self.changed.notified();
-            tokio::pin!(notified);
+            pin!(notified);
             notified.as_mut().enable();
             if self.state.lock().active == 0 {
                 return;
@@ -114,6 +152,10 @@ impl AdmissionGate {
     }
 
     /// Publishes the coordinator result exactly once and wakes all waiters.
+    ///
+    /// # Parameters
+    ///
+    /// * `result` - Final outcome shared by all shutdown callers.
     pub(super) fn finish_close(&self, result: Result<(), TaskServiceError>) {
         let mut state = self.state.lock();
         if matches!(state.phase, Phase::Closed) {
@@ -130,10 +172,18 @@ impl AdmissionGate {
     }
 
     /// Returns the same completed shutdown diagnosis to each caller.
+    ///
+    /// # Returns
+    ///
+    /// The published shutdown result, or waits until one is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns the retained service error if shutdown failed.
     pub(super) async fn wait_closed(&self) -> Result<(), TaskServiceError> {
         loop {
             let notified = self.changed.notified();
-            tokio::pin!(notified);
+            pin!(notified);
             notified.as_mut().enable();
             if let Some(result) = self.state.lock().close_result.clone() {
                 return result.map_err(|error| match error {
@@ -150,6 +200,7 @@ impl AdmissionGate {
 }
 
 impl Drop for AdmissionPermit<'_> {
+    /// Decrements the active count and wakes tasks waiting for idle state.
     fn drop(&mut self) {
         let mut state = self.gate.state.lock();
         state.active -= 1;
@@ -159,10 +210,12 @@ impl Drop for AdmissionPermit<'_> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::test as tokio_test;
+
     use super::AdmissionGate;
     use crate::service::TaskServiceError;
 
-    #[tokio::test]
+    #[tokio_test]
     async fn test_wait_closed_preserves_notification_close_failure_for_all_callers() {
         let gate = AdmissionGate::new();
         assert!(gate.close());
@@ -174,7 +227,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio_test]
     async fn test_wait_closed_keeps_other_failures_as_store_unavailable() {
         let gate = AdmissionGate::new();
         assert!(gate.close());

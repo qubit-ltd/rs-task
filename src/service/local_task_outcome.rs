@@ -37,6 +37,7 @@ use crate::model::TaskRunError;
 /// };
 /// assert!(matches!(outcome, LocalTaskOutcome::Succeeded { value: 42, .. }));
 /// ```
+#[must_use]
 pub enum LocalTaskOutcome<R, E> {
     /// Provides a process-local value and a bounded persisted summary.
     Succeeded {
