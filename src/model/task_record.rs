@@ -14,6 +14,15 @@ use crate::store::StoreError;
 pub const MAX_TASK_QUERY_LIMIT: usize = 256;
 
 /// Validates a history page size and normalizes zero to one.
+///
+/// # Parameters
+///
+/// * `limit` - Requested maximum number of records.
+///
+/// # Returns
+///
+/// A limit in the inclusive range `1..=MAX_TASK_QUERY_LIMIT`, or
+/// [`StoreError::InvalidRequest`] when the request exceeds the maximum.
 pub(crate) fn checked_page_size(limit: usize) -> Result<usize, StoreError> {
     if limit > MAX_TASK_QUERY_LIMIT {
         return Err(StoreError::InvalidRequest("task history page limit exceeds 256"));
@@ -356,6 +365,7 @@ impl From<&TaskRecord> for TaskCursor {
 }
 
 impl From<&TaskSummary> for TaskCursor {
+    /// Creates a cursor at the supplied summary's history position.
     fn from(record: &TaskSummary) -> Self {
         Self::new(record.accepted_at_ms, record.id)
     }

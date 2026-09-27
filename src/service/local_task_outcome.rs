@@ -20,6 +20,11 @@ use crate::model::TaskRunError;
 /// The full success value and original application error stay in process-local
 /// channels; only `summary` and classified lifecycle state are persisted.
 ///
+/// # Type Parameters
+///
+/// * `R` - Process-local value produced by successful work.
+/// * `E` - Application error type preserved for failed work.
+///
 /// # Examples
 ///
 /// ```
@@ -48,6 +53,21 @@ pub enum LocalTaskOutcome<R, E> {
 
 /// Converts a typed closure result into the handler outcome persisted by the
 /// service.
+///
+/// # Type Parameters
+///
+/// * `F` - One-shot closure that performs the local task.
+/// * `R` - Process-local success value.
+/// * `E` - Process-local application error.
+///
+/// # Parameters
+///
+/// * `task` - Closure whose typed outcome is adapted for service execution.
+/// * `sender` - Channel for returning the closure's typed value or error.
+///
+/// # Returns
+///
+/// A one-shot handler closure that publishes the persisted task outcome.
 pub(crate) fn adapt_local_outcome<F, R, E>(
     task: F,
     sender: oneshot::Sender<Result<R, E>>,

@@ -54,6 +54,9 @@ pub enum TaskRunOutcome {
 }
 
 /// Handler result: an explicit outcome or classified failure.
+///
+/// The service persists a successful outcome or the error's category and
+/// diagnostic, subject to the documented size limits.
 pub type TaskRunResult = Result<TaskRunOutcome, crate::model::TaskRunError>;
 
 /// Resolves task handlers by their exact task type and version.

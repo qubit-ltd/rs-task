@@ -8,6 +8,16 @@
 use std::time::Duration;
 
 /// Retry delay configuration with an exponential cap.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use qubit_task::RetryPolicy;
+///
+/// let policy = RetryPolicy::new(Duration::from_secs(1), Duration::from_secs(8)).unwrap();
+/// assert_eq!(policy.delay_for_attempt(4), Duration::from_secs(8));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     initial_delay: Duration,
@@ -18,6 +28,21 @@ use super::retry_policy_error::RetryPolicyError;
 
 impl RetryPolicy {
     /// Creates a policy after checking that both delays form a valid range.
+    ///
+    /// # Parameters
+    ///
+    /// * `initial_delay` - Positive delay used for the first retry.
+    /// * `max_delay` - Upper bound applied to all retry delays.
+    ///
+    /// # Returns
+    ///
+    /// A policy with the requested retry delay range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RetryPolicyError::ZeroInitialDelay`] when the initial delay
+    /// is zero, or [`RetryPolicyError::MaximumBelowInitial`] when the maximum
+    /// is less than the initial delay.
     pub fn new(initial_delay: Duration, max_delay: Duration) -> Result<Self, RetryPolicyError> {
         if initial_delay.is_zero() {
             return Err(RetryPolicyError::ZeroInitialDelay);
@@ -33,6 +58,14 @@ impl RetryPolicy {
 
     /// Returns the exponential delay for a failed attempt, capped at
     /// `max_delay`.
+    ///
+    /// # Parameters
+    ///
+    /// * `attempt` - One-based attempt number; zero uses the first delay.
+    ///
+    /// # Returns
+    ///
+    /// The exponentially increased delay, never greater than `max_delay`.
     #[must_use]
     pub fn delay_for_attempt(self, attempt: u32) -> Duration {
         let mut delay = self.initial_delay;
