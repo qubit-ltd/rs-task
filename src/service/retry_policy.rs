@@ -22,7 +22,9 @@ use super::retry_policy_error::RetryPolicyError;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
+    /// Delay assigned to the first retry.
     initial_delay: Duration,
+    /// Upper bound applied after exponential delay growth.
     max_delay: Duration,
 }
 

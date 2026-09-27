@@ -118,7 +118,11 @@ pub struct TaskServiceCapabilities {
 pub enum TaskServiceError {
     /// The selected store failed an operation.
     #[error(transparent)]
-    Store(#[from] StoreError),
+    Store(
+        /// Underlying storage failure.
+        #[from]
+        StoreError,
+    ),
     /// The configured queue has no remaining waiting capacity.
     #[error("task queue is full")]
     QueueFull,
@@ -144,7 +148,10 @@ pub enum TaskServiceError {
     Unsatisfiable,
     /// The request contains invalid metadata or an oversized payload.
     #[error("invalid task request: {0}")]
-    InvalidRequest(String),
+    InvalidRequest(
+        /// Validation diagnostic describing the rejected request field.
+        String,
+    ),
     /// The requested task is blocked pending intervention.
     #[error("task is blocked and requires intervention")]
     Blocked,
@@ -170,13 +177,22 @@ pub enum TaskServiceError {
     ShutdownTimedOut,
     /// A persistence failure suspended task acceptance and scheduling.
     #[error("task execution service is paused after a task store failure: {0}")]
-    StoreUnavailable(String),
+    StoreUnavailable(
+        /// First store failure retained by the service.
+        String,
+    ),
     /// The scheduler or execution engine cannot accept or start more work.
     #[error("task execution scheduler is unavailable: {0}")]
-    SchedulerUnavailable(String),
+    SchedulerUnavailable(
+        /// Scheduler or engine failure retained by the service.
+        String,
+    ),
     /// The task notification publisher failed while draining during shutdown.
     #[error("task notification publisher failed to close: {0}")]
-    NotificationClose(String),
+    NotificationClose(
+        /// Notification publisher close or worker failure diagnostic.
+        String,
+    ),
     /// No handler matches the submitted type and exact version.
     #[error("no handler registered for `{task_type}` version `{version}`")]
     MissingHandler {

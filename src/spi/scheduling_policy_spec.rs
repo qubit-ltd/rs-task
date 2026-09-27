@@ -27,10 +27,15 @@ use crate::scheduling::SchedulingPolicy;
 pub struct SchedulingPolicySpec;
 
 impl ServiceSpec for SchedulingPolicySpec {
+    /// Empty configuration because the built-in policy has no construction
+    /// options.
     type Config = ();
+    /// Infallible marker because policy construction has no provider-specific
+    /// failure.
     type Error = Infallible;
 }
 
 impl SyncServiceSpec for SchedulingPolicySpec {
+    /// Shared scheduling policy instance created for the selected provider.
     type Output = Arc<dyn SchedulingPolicy>;
 }

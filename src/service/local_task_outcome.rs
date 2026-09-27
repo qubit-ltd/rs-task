@@ -47,7 +47,10 @@ pub enum LocalTaskOutcome<R, E> {
         summary: TaskOutput,
     },
     /// Provides the original application error type.
-    Failed(E),
+    Failed(
+        /// Application error preserved for the process-local result handle.
+        E,
+    ),
     /// Acknowledges cancellation without a result value.
     Cancelled,
 }
@@ -69,6 +72,12 @@ pub enum LocalTaskOutcome<R, E> {
 /// # Returns
 ///
 /// A one-shot handler closure that publishes the persisted task outcome.
+///
+/// # Errors
+///
+/// The returned closure yields a non-retryable `TaskRunError` when the local
+/// task returns `Failed`; success and cancellation map to their matching
+/// handler outcomes.
 pub(crate) fn adapt_local_outcome<F, R, E>(
     task: F,
     sender: oneshot::Sender<Result<R, E>>,

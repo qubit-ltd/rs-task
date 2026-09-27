@@ -26,16 +26,28 @@ pub enum LocalTaskResultError {
     Cancelled,
     /// Execution panicked.
     #[error("local task panicked: {0}")]
-    Panicked(String),
+    Panicked(
+        /// Panic diagnostic reported by the execution engine.
+        String,
+    ),
     /// Execution cannot currently continue.
     #[error("local task is blocked: {0}")]
-    Blocked(String),
+    Blocked(
+        /// Reason the task requires intervention before it can continue.
+        String,
+    ),
     /// The engine failed without a typed application error.
     #[error("local task infrastructure failed: {0}")]
-    Infrastructure(String),
+    Infrastructure(
+        /// Diagnostic from the execution engine or service infrastructure.
+        String,
+    ),
     /// A task store failure prevented authoritative finalization.
     #[error("local task store is unavailable: {0}")]
-    StoreUnavailable(String),
+    StoreUnavailable(
+        /// Store diagnostic that prevented authoritative finalization.
+        String,
+    ),
     /// The typed result channel closed unexpectedly.
     #[error("local task result channel closed")]
     ResultChannelClosed,

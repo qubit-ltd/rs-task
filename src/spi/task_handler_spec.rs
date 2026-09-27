@@ -29,10 +29,13 @@ use crate::handler::TaskHandler;
 pub struct TaskHandlerSpec;
 
 impl ServiceSpec for TaskHandlerSpec {
+    /// Type-erased, thread-safe configuration supplied to a handler provider.
     type Config = Arc<dyn Any + Send + Sync>;
+    /// I/O error returned when handler provider configuration is invalid.
     type Error = std::io::Error;
 }
 
 impl SyncServiceSpec for TaskHandlerSpec {
+    /// Shared task handler created for its declared type and version.
     type Output = Arc<dyn TaskHandler>;
 }

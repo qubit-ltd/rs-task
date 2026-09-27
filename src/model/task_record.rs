@@ -628,9 +628,15 @@ pub struct StoreCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptOutcome {
     /// A new task was accepted.
-    Accepted(TaskRecord),
+    Accepted(
+        /// Newly retained task record.
+        TaskRecord,
+    ),
     /// An identical idempotent request already exists.
-    Existing(TaskRecord),
+    Existing(
+        /// Previously retained record associated with the idempotency key.
+        TaskRecord,
+    ),
 }
 
 /// Conditional task state update guarded by state version and attempt.

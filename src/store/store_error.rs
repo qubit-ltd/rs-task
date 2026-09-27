@@ -51,7 +51,10 @@ pub enum StoreError {
     Conflict,
     /// A request or persisted diagnostic violates a documented size limit.
     #[error("invalid task data: {0}")]
-    InvalidRequest(&'static str),
+    InvalidRequest(
+        /// Static diagnostic naming the invalid request or exceeded limit.
+        &'static str,
+    ),
     /// A valid revision attempted an illegal lifecycle transition.
     #[error("task lifecycle transition is not allowed")]
     InvalidTransition,
@@ -60,5 +63,8 @@ pub enum StoreError {
     NotFound,
     /// Persistence implementation reported an operational failure.
     #[error("task store failure: {0}")]
-    Failure(String),
+    Failure(
+        /// Backend diagnostic describing the persistence failure.
+        String,
+    ),
 }

@@ -115,6 +115,7 @@ impl Drop for WorkerGuard {
     }
 }
 
+/// Process-lock ownership and epoch retained by the SQLite store.
 struct SqliteOwnerState {
     /// Exclusive lock file retained for the active store owner.
     lock_file: Option<File>,
@@ -305,6 +306,11 @@ struct StoredSummaryRow {
 /// # Returns
 ///
 /// The typed row projection, or the SQLite conversion error.
+///
+/// # Errors
+///
+/// Returns a SQLite conversion error when a selected column has the wrong
+/// type or cannot be decoded.
 fn read_stored_summary_row(row: &Row<'_>) -> SqliteResult<StoredSummaryRow> {
     Ok(StoredSummaryRow {
         id: row.get(0)?,
@@ -327,6 +333,11 @@ fn read_stored_summary_row(row: &Row<'_>) -> SqliteResult<StoredSummaryRow> {
 /// # Returns
 ///
 /// The typed task row, or the SQLite conversion error.
+///
+/// # Errors
+///
+/// Returns a SQLite conversion error when a selected column has the wrong
+/// type or cannot be decoded.
 fn read_stored_task_row(row: &Row<'_>) -> SqliteResult<StoredTaskRow> {
     Ok(StoredTaskRow {
         id: row.get(0)?,
