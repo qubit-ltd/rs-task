@@ -12,6 +12,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use qubit_event_bus::EventBus;
 use qubit_event_bus::NotificationOutcome;
@@ -47,11 +48,12 @@ fn increment(counter: &AtomicU64) {
 pub(super) struct TaskEventPublisher {
     publisher: Arc<NotificationPublisher<TaskEvent>>,
     counters: Arc<Counters>,
+    close_timeout: Duration,
 }
 
 impl TaskEventPublisher {
     /// Starts a dedicated worker before service scheduling begins.
-    pub(super) fn new(bus: EventBus, capacity: NonZeroUsize) -> io::Result<Self> {
+    pub(super) fn new(bus: EventBus, capacity: NonZeroUsize, close_timeout: Duration) -> io::Result<Self> {
         let counters = Arc::new(Counters::default());
         let worker_counters = Arc::clone(&counters);
         let topic = Topic::<TaskEvent>::new("task.lifecycle").expect("fixed task lifecycle topic is valid");
@@ -62,6 +64,7 @@ impl TaskEventPublisher {
         Ok(Self {
             publisher: Arc::new(publisher),
             counters,
+            close_timeout,
         })
     }
 
@@ -90,15 +93,19 @@ impl TaskEventPublisher {
         }
     }
 
-    /// Stops enqueue, drains accepted events, and waits for the worker to exit.
+    /// Stops enqueue, drains accepted events, and waits up to the configured
+    /// timeout.
     ///
     /// # Errors
-    /// Returns an error when the blocking close task fails to join or the
-    /// notification publisher worker panicked.
+    /// Returns an error when the blocking close task fails to join, the
+    /// notification publisher worker panics, or it does not exit before the
+    /// configured timeout. On timeout, the worker continues draining accepted
+    /// events and a later close call can wait for completion.
     pub(super) async fn close(&self, runtime_handle: &tokio::runtime::Handle) -> io::Result<()> {
         let publisher = Arc::clone(&self.publisher);
+        let close_timeout = self.close_timeout;
         runtime_handle
-            .spawn_blocking(move || publisher.close())
+            .spawn_blocking(move || publisher.close_with_timeout(close_timeout))
             .await
             .map_err(io::Error::other)?
     }
@@ -289,9 +296,18 @@ mod tests {
         }
     }
 
-    fn publisher(spi: Arc<FakeSpi>, capacity: usize) -> TaskEventPublisher {
+    fn publisher_with_timeout(spi: Arc<FakeSpi>, capacity: usize, close_timeout: Duration) -> TaskEventPublisher {
         let bus = EventBus::from_spi(ProviderId::new("fake").expect("provider ID"), spi);
-        TaskEventPublisher::new(bus, NonZeroUsize::new(capacity).expect("nonzero capacity")).expect("publisher starts")
+        TaskEventPublisher::new(
+            bus,
+            NonZeroUsize::new(capacity).expect("nonzero capacity"),
+            close_timeout,
+        )
+        .expect("publisher starts")
+    }
+
+    fn publisher(spi: Arc<FakeSpi>, capacity: usize) -> TaskEventPublisher {
+        publisher_with_timeout(spi, capacity, Duration::from_secs(30))
     }
 
     #[test]
@@ -482,5 +498,39 @@ mod tests {
         publisher.enqueue(event(3));
         assert_eq!(publisher.stats().queue_closed, 1);
         assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_task_event_publisher_close_timeout_can_be_retried() {
+        let spi = FakeSpi::new(true, Outcome::Opaque);
+        let publisher = Arc::new(publisher_with_timeout(spi.clone(), 1, Duration::from_millis(20)));
+        publisher.enqueue(event(1));
+        while spi.entered.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let error = publisher
+            .close(&tokio::runtime::Handle::current())
+            .await
+            .expect_err("blocked provider exceeds the close timeout");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        publisher.enqueue(event(2));
+        assert_eq!(publisher.stats().queue_closed, 1);
+
+        spi.release();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if publisher.stats().opaque_accepted == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted notification drains after provider unblocks");
+        publisher
+            .close(&tokio::runtime::Handle::current())
+            .await
+            .expect("close can be retried after worker completion");
     }
 }

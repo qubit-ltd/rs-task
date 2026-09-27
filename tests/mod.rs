@@ -1538,6 +1538,75 @@ impl qubit_event_bus::spi::EventBusSpi for PanicCapabilitiesSpi {
 }
 
 #[cfg(feature = "event-bus")]
+struct BlockingPublishSpi {
+    entered: std::sync::mpsc::SyncSender<()>,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+#[cfg(feature = "event-bus")]
+impl qubit_event_bus::spi::EventBusSpi for BlockingPublishSpi {
+    fn capabilities(&self) -> qubit_event_bus::spi::EventBusCapabilities {
+        use qubit_event_bus::spi::DelayedDeliveryCapability;
+        use qubit_event_bus::spi::DurabilityCapability;
+        use qubit_event_bus::spi::OrderingCapability;
+        use qubit_event_bus::spi::PayloadModes;
+        use qubit_event_bus::spi::PublishGuarantee;
+        use qubit_event_bus::spi::PublishVisibility;
+        use qubit_event_bus::spi::ReplayCapability;
+        use qubit_event_bus::spi::SettlementCapabilities;
+
+        qubit_event_bus::spi::EventBusCapabilities::new(
+            PayloadModes::Native,
+            SettlementCapabilities::None,
+            OrderingCapability::None,
+            DelayedDeliveryCapability::None,
+            DurabilityCapability::Ephemeral,
+            false,
+            ReplayCapability::None,
+            PublishGuarantee::Accepted,
+            PublishVisibility::Opaque,
+        )
+    }
+
+    fn publish(
+        &self,
+        _message: qubit_event_bus::spi::OutboundMessage,
+    ) -> Result<qubit_event_bus::model::PublishAcknowledgement, qubit_event_bus::error::SpiError> {
+        let _ = self.entered.send(());
+        let (lock, changed) = &*self.gate;
+        let mut released = lock.lock().expect("publish gate lock");
+        while !*released {
+            released = changed.wait(released).expect("publish gate wait");
+        }
+        Ok(qubit_event_bus::model::PublishAcknowledgement::Accepted {
+            provider_message_id: None,
+            metadata: Default::default(),
+        })
+    }
+
+    fn subscribe(
+        &self,
+        _request: qubit_event_bus::spi::SpiSubscriptionRequest,
+    ) -> Result<Box<dyn qubit_event_bus::spi::EventSubscriptionSpi>, qubit_event_bus::error::SpiError> {
+        Err(qubit_event_bus::error::SpiError::Operation {
+            provider_id: "blocking-publish".into(),
+            operation: "subscribe",
+            resource: None,
+            kind: "unsupported",
+            retryable: Some(false),
+            source: Box::new(std::io::Error::other("subscriptions are unsupported")),
+        })
+    }
+
+    fn shutdown(
+        &self,
+        _mode: qubit_event_bus::spi::ShutdownMode,
+    ) -> Result<qubit_event_bus::spi::ShutdownOutcome, qubit_event_bus::error::SpiError> {
+        Ok(qubit_event_bus::spi::ShutdownOutcome::Complete)
+    }
+}
+
+#[cfg(feature = "event-bus")]
 #[tokio::test]
 async fn test_event_bus_receives_status_changes_without_becoming_authoritative() {
     use qubit_event_bus::DeliveryError;
@@ -1682,6 +1751,69 @@ async fn test_notification_worker_panic_is_reported_by_repeated_service_shutdown
     event_bus
         .shutdown(ShutdownMode::Immediate)
         .expect("injected event bus shuts down");
+}
+
+#[cfg(feature = "event-bus")]
+#[tokio::test]
+async fn test_notification_close_timeout_is_reported_by_service_shutdown() {
+    use qubit_event_bus::EventBus;
+    use qubit_event_bus::model::ProviderId;
+    use qubit_task::service::TaskExecutionServiceBuilder;
+    use qubit_task::service::TaskServiceError;
+
+    let (entered, entered_receiver) = std::sync::mpsc::sync_channel(1);
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let event_bus = EventBus::from_spi(
+        ProviderId::new("blocking-publish").expect("provider ID is valid"),
+        Arc::new(BlockingPublishSpi {
+            entered,
+            gate: gate.clone(),
+        }),
+    );
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .event_bus(event_bus)
+        .event_bus_close_timeout(std::time::Duration::from_millis(20))
+        .build()
+        .await
+        .expect("service builds with the event bus");
+    service
+        .submit(
+            qubit_task::model::TaskRequest::new("timeout", "1", Vec::new())
+                .with_idempotency_key("notification-close-timeout"),
+        )
+        .await
+        .expect("task is accepted");
+    tokio::task::spawn_blocking(move || {
+        entered_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("publisher enters the blocking provider");
+    })
+    .await
+    .expect("publisher entry wait completes");
+
+    let error = service
+        .shutdown()
+        .await
+        .expect_err("publisher close timeout is reported by service shutdown");
+    assert!(matches!(
+        error,
+        TaskServiceError::NotificationClose(message) if message.contains("close timed out")
+    ));
+
+    let (lock, changed) = &*gate;
+    *lock.lock().expect("publish gate lock") = true;
+    changed.notify_all();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let stats = service.notification_stats().expect("notification stats are available");
+            if stats.opaque_accepted >= stats.enqueued {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("accepted notification continues after shutdown reports its timeout");
 }
 
 #[cfg(feature = "event-bus")]
