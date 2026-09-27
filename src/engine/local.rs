@@ -92,6 +92,10 @@ impl LocalTaskExecutionEngine {
 
 impl TaskExecutionEngine for LocalTaskExecutionEngine {
     /// Returns the immutable engine limits and current reservation totals.
+    ///
+    /// # Returns
+    ///
+    /// Configured limits and a snapshot of currently held resources.
     fn capacity(&self) -> ResourceSnapshot {
         let usage = self.usage.lock();
         ResourceSnapshot {
@@ -231,6 +235,14 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
 }
 
 /// Converts a panic payload to a diagnostic string.
+///
+/// # Parameters
+///
+/// * `payload` - Panic value captured from handler execution.
+///
+/// # Returns
+///
+/// The panic message or a stable fallback for non-string payloads.
 fn panic_message(payload: Box<dyn Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<String>() {
         message.clone()
@@ -253,6 +265,12 @@ impl Drop for ReservationGuard {
 }
 
 /// Removes one reservation and returns its resources to the shared counters.
+///
+/// # Parameters
+///
+/// * `token` - Unique key of the reservation to release.
+/// * `allocations` - Ledger containing the reservation's resource amounts.
+/// * `usage` - Shared counters to decrement for the released reservation.
 fn release(token: u64, allocations: &Mutex<AllocationLedger>, usage: &Mutex<Usage>) {
     if let Some((cpu, gpus, custom)) = allocations.lock().remove(&token) {
         let mut current = usage.lock();

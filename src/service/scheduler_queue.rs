@@ -23,6 +23,10 @@ pub(crate) struct SchedulerQueue {
 
 impl SchedulerQueue {
     /// Creates an empty scheduler queue.
+    ///
+    /// # Returns
+    ///
+    /// A queue with no ready or delayed tasks.
     pub(crate) fn new() -> Self {
         Self {
             ready: VecDeque::new(),
@@ -32,6 +36,10 @@ impl SchedulerQueue {
     }
 
     /// Adds a task to the ready queue or its retry deadline bucket.
+    ///
+    /// # Parameters
+    ///
+    /// * `task` - Accepted task metadata to retain for scheduling.
     pub(crate) fn push(&mut self, task: QueuedTask) {
         self.len += 1;
         if let Some(deadline) = task.retry_not_before_ms {
@@ -42,6 +50,15 @@ impl SchedulerQueue {
     }
 
     /// Takes at most `budget` due tasks in FIFO order for one scheduling pass.
+    ///
+    /// # Parameters
+    ///
+    /// * `budget` - Maximum number of tasks returned in this window.
+    /// * `now_ms` - Current epoch time used to identify due retry tasks.
+    ///
+    /// # Returns
+    ///
+    /// Due delayed tasks followed by ready tasks, up to the effective budget.
     pub(crate) fn take_window(&mut self, budget: usize, now_ms: u64) -> Vec<QueuedTask> {
         let budget = budget.max(1);
         let mut window = Vec::with_capacity(budget.min(self.len));
@@ -72,6 +89,10 @@ impl SchedulerQueue {
     }
 
     /// Restores unstarted tasks at the front while preserving their order.
+    ///
+    /// # Parameters
+    ///
+    /// * `tasks` - Unstarted tasks removed from a previous scheduling window.
     pub(crate) fn restore_front(&mut self, tasks: Vec<QueuedTask>) {
         for task in tasks.into_iter().rev() {
             if let Some(deadline) = task.retry_not_before_ms {
@@ -85,6 +106,14 @@ impl SchedulerQueue {
     }
 
     /// Removes one queued task by ID from either scheduling class.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identity of the task to remove.
+    ///
+    /// # Returns
+    ///
+    /// Whether a matching queued task was removed.
     pub(crate) fn remove(&mut self, id: TaskId) -> bool {
         if let Some(index) = self.ready.iter().position(|task| task.id == id) {
             self.ready.remove(index);
@@ -112,6 +141,11 @@ impl SchedulerQueue {
     }
 
     /// Returns the earliest pending retry deadline.
+    ///
+    /// # Returns
+    ///
+    /// The smallest delayed retry timestamp, or `None` when no delayed task
+    /// remains.
     #[must_use]
     #[inline]
     pub(crate) fn next_deadline(&self) -> Option<u64> {
@@ -119,6 +153,10 @@ impl SchedulerQueue {
     }
 
     /// Returns whether no ready or delayed tasks are retained.
+    ///
+    /// # Returns
+    ///
+    /// Whether the combined queue length is zero.
     #[must_use]
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
@@ -126,6 +164,10 @@ impl SchedulerQueue {
     }
 
     /// Returns the number of tasks in both scheduling classes.
+    ///
+    /// # Returns
+    ///
+    /// The combined number of ready and delayed tasks.
     #[allow(dead_code)]
     #[must_use]
     #[inline]
