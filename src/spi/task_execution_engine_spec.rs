@@ -29,10 +29,14 @@ use crate::model::ResourceCapacity;
 pub struct TaskExecutionEngineSpec;
 
 impl ServiceSpec for TaskExecutionEngineSpec {
+    /// Resource capacity passed to the selected execution engine provider.
     type Config = ResourceCapacity;
+    /// Infallible marker because engine construction reports no typed provider
+    /// error.
     type Error = Infallible;
 }
 
 impl SyncServiceSpec for TaskExecutionEngineSpec {
+    /// Shared execution engine created with the configured resource capacity.
     type Output = Arc<dyn TaskExecutionEngine>;
 }

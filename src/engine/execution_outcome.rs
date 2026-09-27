@@ -23,9 +23,18 @@ use crate::handler::TaskRunResult;
 #[must_use]
 pub enum ExecutionOutcome {
     /// The handler returned a result, including a classified application error.
-    Returned(TaskRunResult),
+    Returned(
+        /// Handler outcome or classified application failure.
+        TaskRunResult,
+    ),
     /// The handler panicked while constructing or polling its future.
-    Panicked(String),
+    Panicked(
+        /// Diagnostic captured from the panic payload.
+        String,
+    ),
     /// The execution worker stopped before it could report a handler result.
-    WorkerStopped(String),
+    WorkerStopped(
+        /// Diagnostic describing why the worker stopped without an outcome.
+        String,
+    ),
 }

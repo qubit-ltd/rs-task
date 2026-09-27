@@ -59,10 +59,17 @@ pub enum TaskServiceBuildError {
     RecoveryRequired,
     /// Store initialization or recovery scan failed.
     #[error(transparent)]
-    Store(#[from] crate::store::StoreError),
+    Store(
+        /// Store initialization or recovery error.
+        #[from]
+        crate::store::StoreError,
+    ),
     /// Two handlers claimed the same task type and version.
     #[error("{0}")]
-    HandlerConflict(String),
+    HandlerConflict(
+        /// Diagnostic identifying the conflicting handler registrations.
+        String,
+    ),
     /// SQLite support is disabled for this crate build.
     #[error("SQLite support requires the `sqlite` feature")]
     SqliteFeatureDisabled,
@@ -74,10 +81,16 @@ pub enum TaskServiceBuildError {
     },
     /// A task store returned an invalid recovery page.
     #[error("invalid recovery page: {0}")]
-    InvalidRecoveryPage(String),
+    InvalidRecoveryPage(
+        /// Diagnostic describing the malformed recovery page.
+        String,
+    ),
     /// The selected queue and running capacities overflow the supported range.
     #[error("invalid service configuration: {0}")]
-    InvalidConfiguration(String),
+    InvalidConfiguration(
+        /// Diagnostic describing the invalid service configuration.
+        String,
+    ),
     /// Construction worker panicked or stopped before returning a result.
     #[error("service construction worker stopped unexpectedly")]
     WorkerStopped,
@@ -93,7 +106,11 @@ pub enum TaskServiceBuildError {
     /// The dedicated lifecycle event publisher thread could not start.
     #[cfg(feature = "event-bus")]
     #[error("failed to start task event publisher thread: {0}")]
-    EventPublisherThread(#[source] std::io::Error),
+    EventPublisherThread(
+        /// Operating system error returned while spawning the publisher.
+        #[source]
+        std::io::Error,
+    ),
 }
 
 /// Explicit component assembly and resource policy for one task service.

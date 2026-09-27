@@ -17,9 +17,17 @@ use parking_lot::Mutex;
 #[must_use]
 pub(super) enum AdmissionBudgetError {
     /// The request payload would exceed the aggregate retained-byte budget.
-    PayloadBytesExceeded { requested: usize, available: usize },
+    PayloadBytesExceeded {
+        /// Payload bytes requested by the new reservation.
+        requested: usize,
+        /// Payload bytes remaining under the configured budget.
+        available: usize,
+    },
     /// The number of concurrent admissions has reached its configured limit.
-    SubmissionLimitExceeded { limit: usize },
+    SubmissionLimitExceeded {
+        /// Maximum number of concurrent admission workers.
+        limit: usize,
+    },
 }
 
 /// Current detached admission counts and retained payload bytes.

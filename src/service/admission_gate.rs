@@ -19,14 +19,26 @@ use super::task_execution_service::TaskServiceError;
 #[must_use]
 enum CloseFailure {
     /// A shutdown failure without a dedicated service error category.
-    Other(String),
+    Other(
+        /// Display message retained for later shutdown callers.
+        String,
+    ),
     /// A task store failure that must be returned to every shutdown caller.
-    Store(String),
+    Store(
+        /// Store diagnostic retained for later shutdown callers.
+        String,
+    ),
     /// A scheduler worker failure that must be returned to every shutdown
     /// caller.
-    Scheduler(String),
+    Scheduler(
+        /// Scheduler diagnostic retained for later shutdown callers.
+        String,
+    ),
     /// An event notification worker failed while closing.
-    NotificationClose(String),
+    NotificationClose(
+        /// Notification worker diagnostic retained for later callers.
+        String,
+    ),
 }
 
 /// Admission and shutdown coordination lifecycle.

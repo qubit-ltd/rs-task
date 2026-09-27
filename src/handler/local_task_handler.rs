@@ -25,6 +25,7 @@ type LocalTaskClosure = Box<dyn FnOnce(TaskContext) -> TaskRunResult + Send>;
 ///
 /// ```
 /// use qubit_task::handler::LocalTaskHandler;
+/// use qubit_task::handler::TaskHandler;
 /// use qubit_task::handler::TaskHandlerDescriptor;
 /// use qubit_task::handler::TaskRunOutcome;
 /// use qubit_task::model::TaskOutput;

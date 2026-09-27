@@ -100,7 +100,6 @@ impl<R, E> LocalTaskHandle<R, E> {
     ///
     /// Returns a finalization error for cancellation, panic, blocking,
     /// infrastructure failure, or a closed result channel.
-    #[must_use]
     pub async fn result(self) -> Result<Result<R, E>, LocalTaskResultError> {
         let state = self
             .final_state
@@ -138,6 +137,10 @@ impl<R, E> std::fmt::Debug for LocalTaskHandle<R, E> {
     /// # Returns
     ///
     /// The formatter result, including any write failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::fmt::Error`] if writing the debug representation fails.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("LocalTaskHandle").field("id", &self.id).finish()
     }

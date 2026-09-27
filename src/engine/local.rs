@@ -120,6 +120,11 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
     ///
     /// A prepared reservation or an engine error describing unavailable
     /// capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsatisfiable` when the request exceeds configured capacity
+    /// and `TemporarilyUnavailable` when valid resources are currently held.
     fn prepare<'a>(
         &'a self,
         id: TaskId,
@@ -196,6 +201,16 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
     /// # Returns
     ///
     /// A handle whose receiver reports the handler result or panic.
+    ///
+    /// # Errors
+    ///
+    /// This implementation does not return an engine error after receiving a
+    /// prepared reservation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the returned future is polled outside an active Tokio
+    /// runtime, because activation starts a Tokio task.
     fn activate<'a>(
         &'a self,
         mut prepared: PreparedExecution,
@@ -254,7 +269,10 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 }
 
 /// Releases a prepared reservation when its execution worker exits or unwinds.
-struct ReservationGuard(Option<Box<dyn FnOnce() + Send>>);
+struct ReservationGuard(
+    /// Callback that releases the attempt's reserved resources.
+    Option<Box<dyn FnOnce() + Send>>,
+);
 impl Drop for ReservationGuard {
     /// Releases the held resource reservation exactly once.
     fn drop(&mut self) {

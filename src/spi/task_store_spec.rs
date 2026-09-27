@@ -29,10 +29,13 @@ use crate::store::TaskStore;
 pub struct TaskStoreSpec;
 
 impl ServiceSpec for TaskStoreSpec {
+    /// Store-specific options selected by the application.
     type Config = TaskStoreConfig;
+    /// Store configuration, initialization, or persistence failure.
     type Error = StoreError;
 }
 
 impl SyncServiceSpec for TaskStoreSpec {
+    /// Shared task store created from the selected configuration.
     type Output = Arc<dyn TaskStore>;
 }

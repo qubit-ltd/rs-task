@@ -21,7 +21,7 @@ use crate::model::TaskId;
 /// use qubit_task::model::ResourceSnapshot;
 /// use qubit_task::scheduling::QueueSnapshot;
 /// use qubit_task::scheduling::SchedulingPolicy;
-/// use qubit_task::FairFifoPolicy;
+/// use qubit_task::scheduling::FairFifoPolicy;
 ///
 /// let policy = FairFifoPolicy::new(8);
 /// let order = policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default());
