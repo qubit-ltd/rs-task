@@ -854,6 +854,35 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
+    async fn test_owner_guard_drop_releases_sqlite_lease() {
+        let path = std::env::temp_dir().join(format!("qubit-task-owner-guard-{}.sqlite", TaskId::generate()));
+        let store = Arc::new(crate::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
+        let epoch = store.acquire_owner().await.expect("store acquires ownership");
+        drop(super::OwnerGuard::new(
+            Arc::clone(&store) as Arc<dyn TaskStore>,
+            Some(epoch),
+        ));
+
+        let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(store) = crate::store::SqliteTaskStore::open(&path) {
+                    break store;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropping the guard releases SQLite ownership");
+        drop(replacement);
+        drop(store);
+        for suffix in ["", "-shm", "-wal"] {
+            let path = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
     async fn test_sqlite_builder_recovers_unfinished_records() {
         use crate::model::AcceptOutcome;
         use crate::store::SqliteTaskStore;
