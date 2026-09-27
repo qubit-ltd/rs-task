@@ -7,6 +7,7 @@
 // =============================================================================
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -32,6 +33,7 @@ use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
@@ -115,6 +117,41 @@ impl TaskExecutionEngine for PanickingPrepareEngine {
         _context: TaskContext,
     ) -> TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
         unreachable!("prepare panic prevents activation");
+    }
+}
+
+struct ClosedPrepareEngine {
+    prepare_calls: AtomicUsize,
+}
+
+impl TaskExecutionEngine for ClosedPrepareEngine {
+    fn capacity(&self) -> ResourceSnapshot {
+        ResourceSnapshot {
+            capacity: ResourceCapacity {
+                cpu_slots: 1,
+                ..ResourceCapacity::default()
+            },
+            ..ResourceSnapshot::default()
+        }
+    }
+
+    fn prepare<'a>(
+        &'a self,
+        _id: TaskId,
+        _request: ResourceRequest,
+    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
+        self.prepare_calls.fetch_add(1, Ordering::AcqRel);
+        Box::pin(async { Err(EngineError::Closed) })
+    }
+
+    fn activate<'a>(
+        &'a self,
+        _prepared: PreparedExecution,
+        _handler: Arc<dyn TaskHandler>,
+        _payload: Vec<u8>,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
+        unreachable!("prepare returns Closed before activation")
     }
 }
 
@@ -466,6 +503,54 @@ async fn test_engine_prepare_panic_is_reported_as_scheduler_unavailable() {
     assert!(matches!(
         service.shutdown().await,
         Err(TaskServiceError::SchedulerUnavailable(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_engine_prepare_closed_stops_scheduler_and_preserves_queued_task() {
+    let engine = Arc::new(ClosedPrepareEngine {
+        prepare_calls: AtomicUsize::new(0),
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(Arc::new(MemoryTaskStore::new(16)))
+        .engine(engine.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("task is accepted before engine preparation");
+    let id = handle.task_id();
+
+    let shutdown = tokio::time::timeout(Duration::from_secs(1), service.shutdown())
+        .await
+        .expect("permanently closed engine must not leave shutdown polling");
+    assert!(matches!(shutdown, Err(TaskServiceError::SchedulerUnavailable(message)) if message.contains("closed")));
+    assert_eq!(engine.prepare_calls.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        service.get_summary(id).await.unwrap().unwrap().state,
+        TaskState::Queued
+    ));
+    assert!(matches!(
+        service.wait(id).await,
+        Err(TaskServiceError::SchedulerUnavailable(message)) if message.contains("closed")
+    ));
+    assert!(matches!(
+        service
+            .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+                value: (),
+                summary: TaskOutput::default(),
+            })
+            .await,
+        Err(TaskServiceError::SchedulerUnavailable(message)) if message.contains("closed")
+    ));
+    assert!(matches!(
+        handle.result().await,
+        Err(LocalTaskResultError::Infrastructure(message)) if message.contains("closed")
     ));
 }
 

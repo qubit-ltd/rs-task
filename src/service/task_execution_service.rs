@@ -130,7 +130,7 @@ pub enum TaskServiceError {
     /// A persistence failure suspended task acceptance and scheduling.
     #[error("task execution service is paused after a task store failure: {0}")]
     StoreUnavailable(String),
-    /// The scheduler panicked and cannot accept or start more work.
+    /// The scheduler or execution engine cannot accept or start more work.
     #[error("task execution scheduler is unavailable: {0}")]
     SchedulerUnavailable(String),
     /// The task notification publisher failed while draining during shutdown.
@@ -942,6 +942,8 @@ async fn coordinate_shutdown(core: Arc<ServiceCore>) -> Result<(), TaskServiceEr
             Err(error) => return Err(error),
         };
         if stats.queued == 0 && stats.running == 0 {
+            wait_scheduler_finished(&core).await;
+            wait_for_attempts(&core).await;
             let transition_guard = core.transition_event_lock.write().await;
             let settled_result = task_stats(&core).await.inspect_err(|error| {
                 if let TaskServiceError::Store(store_error) = error
@@ -1103,8 +1105,17 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
         let mut window = QueueWindowGuard::new(Arc::clone(&core), window_tasks);
         let queue = window.tasks_mut();
         if queue.is_empty() {
-            if core.admission.is_closed() && core.queue.lock().is_empty() {
-                return;
+            if core.admission.is_closing() && core.admission.is_idle() && core.queue.lock().is_empty() {
+                match task_stats(&core).await {
+                    Ok(stats) if stats.queued == 0 && stats.running == 0 => return,
+                    Err(error) => {
+                        if let TaskServiceError::Store(store_error) = error {
+                            record_store_fault(&core, store_error.to_string());
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
             }
             let notified = core.changed.notified();
             tokio::pin!(notified);
@@ -1222,7 +1233,8 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 }
                 Err(EngineError::Closed) => {
                     queue.push(task);
-                    break;
+                    record_scheduler_fault(&core, "execution engine closed during prepare".into());
+                    return;
                 }
             };
             if core.store_fault.lock().is_some() {

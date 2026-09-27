@@ -143,12 +143,13 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
             let release = prepared.release.take();
             let task_context = context;
             tokio::spawn(async move {
-                let _guard = ReservationGuard(release);
+                let guard = ReservationGuard(release);
                 let handler_future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     handler.run(&payload, task_context)
                 })) {
                     Ok(future) => future,
                     Err(payload) => {
+                        drop(guard);
                         let _ = sender.send(ExecutionOutcome::Panicked(panic_message(payload)));
                         return;
                     }
@@ -157,6 +158,9 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
                     Ok(result) => ExecutionOutcome::Returned(result),
                     Err(payload) => ExecutionOutcome::Panicked(panic_message(payload)),
                 };
+                // Completion means handler cleanup and resource release have
+                // both finished, so service shutdown can safely await handles.
+                drop(guard);
                 let _ = sender.send(outcome);
             });
             Ok(ExecutionHandle { receiver, cancelled })
