@@ -14,21 +14,34 @@ use super::task_execution_service::TaskServiceError;
 
 #[derive(Clone)]
 enum CloseFailure {
+    /// A shutdown failure without a dedicated service error category.
     Other(String),
+    /// A task store failure that must be returned to every shutdown caller.
     Store(String),
+    /// A scheduler worker failure that must be returned to every shutdown
+    /// caller.
     Scheduler(String),
+    /// An event notification worker failed while closing.
     NotificationClose(String),
 }
 
+/// Admission and shutdown coordination lifecycle.
 enum Phase {
+    /// New operations may enter.
     Open,
+    /// No new operations may enter; existing permits are draining.
     Closing,
+    /// Shutdown has published its final result.
     Closed,
 }
 
+/// State protected by the admission gate mutex.
 struct GateState {
+    /// Current admission lifecycle phase.
     phase: Phase,
+    /// Operations admitted before shutdown that have not finished.
     active: usize,
+    /// Shared final shutdown outcome, once published.
     close_result: Option<Result<(), CloseFailure>>,
 }
 
