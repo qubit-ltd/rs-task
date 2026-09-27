@@ -30,6 +30,7 @@ use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
+use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
@@ -37,7 +38,12 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::spawn;
+use tokio::sync;
 use tokio::sync::Notify;
+use tokio::task;
+use tokio::test as tokio_test;
+use tokio::time;
 
 struct HoldTerminalStore {
     inner: MemoryTaskStore,
@@ -87,10 +93,7 @@ impl TaskStore for HoldTerminalStore {
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         self.inner.get_by_idempotency_key(key)
     }
-    fn transition<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             if matches!(command.state, TaskState::Running)
                 && command.cancel_requested
@@ -125,10 +128,7 @@ impl TaskStore for HoldTerminalStore {
             Ok(updated)
         })
     }
-    fn get_summary<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         Box::pin(async move {
             let summary = self.inner.get_summary(id).await?;
             if summary
@@ -186,7 +186,7 @@ struct RetryOnceHandler {
     first_started: Notify,
     release_first: Notify,
     release_second: Notify,
-    second_signal: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Arc<AtomicBool>>>>,
+    second_signal: std::sync::Mutex<Option<sync::oneshot::Sender<Arc<AtomicBool>>>>,
 }
 
 impl TaskHandler for RetryOnceHandler {
@@ -222,13 +222,13 @@ impl TaskHandler for RetryOnceHandler {
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_success_after_cancellation_request_stays_succeeded() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
         .await
         .expect("service builds");
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let id = service
         .submit_local(move |context| {
@@ -255,15 +255,15 @@ async fn test_success_after_cancellation_request_stays_succeeded() {
         service.cancel(id).await.expect("request succeeds"),
         CancelOutcome::CancellationRequested
     );
-    tokio::time::timeout(Duration::from_secs(2), async {
+    time::timeout(Duration::from_secs(2), async {
         while !signal.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await
     .expect("handler signal follows persisted request");
     release_tx.send(()).expect("release handler");
-    let record = tokio::time::timeout(Duration::from_secs(2), service.wait(id))
+    let record = time::timeout(Duration::from_secs(2), service.wait(id))
         .await
         .expect("task settles")
         .expect("wait succeeds");
@@ -272,13 +272,13 @@ async fn test_success_after_cancellation_request_stays_succeeded() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_handler_explicitly_confirms_cancellation() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
         .await
         .expect("service builds");
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let id = service
         .submit_local(move |context| {
@@ -297,15 +297,15 @@ async fn test_handler_explicitly_confirms_cancellation() {
         service.cancel(id).await.expect("request succeeds"),
         CancelOutcome::CancellationRequested
     );
-    tokio::time::timeout(Duration::from_secs(2), async {
+    time::timeout(Duration::from_secs(2), async {
         while !signal.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await
     .expect("handler signal follows persisted request");
     release_tx.send(()).expect("release handler");
-    let record = tokio::time::timeout(Duration::from_secs(2), service.wait(id))
+    let record = time::timeout(Duration::from_secs(2), service.wait(id))
         .await
         .expect("task settles")
         .expect("wait succeeds");
@@ -313,7 +313,7 @@ async fn test_handler_explicitly_confirms_cancellation() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_handler_result_racing_cancellation_commits_one_terminal_state() {
     let store = Arc::new(HoldTerminalStore::new());
     let service = TaskExecutionServiceBuilder::default()
@@ -329,7 +329,7 @@ async fn test_handler_result_racing_cancellation_commits_one_terminal_state() {
         .await
         .expect("task accepted")
         .task_id();
-    tokio::time::timeout(Duration::from_secs(2), store.entered.notified())
+    time::timeout(Duration::from_secs(2), store.entered.notified())
         .await
         .expect("handler result reached terminal write");
     assert_eq!(
@@ -337,7 +337,7 @@ async fn test_handler_result_racing_cancellation_commits_one_terminal_state() {
         CancelOutcome::CancellationRequested
     );
     store.release.notify_one();
-    let record = tokio::time::timeout(Duration::from_secs(2), service.wait(id))
+    let record = time::timeout(Duration::from_secs(2), service.wait(id))
         .await
         .expect("task settles")
         .expect("wait succeeds");
@@ -346,7 +346,7 @@ async fn test_handler_result_racing_cancellation_commits_one_terminal_state() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_blocked_task_can_be_cancelled_directly() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -356,7 +356,7 @@ async fn test_blocked_task_can_be_cancelled_directly() {
         .submit(test_keyed(TaskRequest::new("missing", "1", Vec::new())))
         .await
         .expect("task accepted");
-    tokio::time::timeout(Duration::from_secs(2), async {
+    time::timeout(Duration::from_secs(2), async {
         loop {
             let record = service
                 .get(accepted.id)
@@ -366,7 +366,7 @@ async fn test_blocked_task_can_be_cancelled_directly() {
             if matches!(record.state, TaskState::Blocked { .. }) {
                 break;
             }
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await
@@ -385,10 +385,10 @@ async fn test_blocked_task_can_be_cancelled_directly() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_late_cancel_response_does_not_signal_next_attempt() {
     let store = Arc::new(HoldTerminalStore::for_late_cancel_return());
-    let (second_signal_tx, second_signal_rx) = tokio::sync::oneshot::channel();
+    let (second_signal_tx, second_signal_rx) = sync::oneshot::channel();
     let handler = Arc::new(RetryOnceHandler {
         first_started: Notify::new(),
         release_first: Notify::new(),
@@ -406,20 +406,20 @@ async fn test_late_cancel_response_does_not_signal_next_attempt() {
         .submit(test_keyed(TaskRequest::new("retry-once", "1", Vec::new())))
         .await
         .expect("task accepted");
-    tokio::time::timeout(Duration::from_secs(2), handler.first_started.notified())
+    time::timeout(Duration::from_secs(2), handler.first_started.notified())
         .await
         .expect("first attempt starts");
     let cancel_service = service.clone();
-    let cancel = tokio::spawn(async move { cancel_service.cancel(accepted.id).await });
-    tokio::time::timeout(Duration::from_secs(2), store.cancel_persisted.notified())
+    let cancel = spawn(async move { cancel_service.cancel(accepted.id).await });
+    time::timeout(Duration::from_secs(2), store.cancel_persisted.notified())
         .await
         .expect("first attempt cancellation request persisted");
     handler.release_first.notify_one();
-    let second_signal = tokio::time::timeout(Duration::from_secs(2), second_signal_rx)
+    let second_signal = time::timeout(Duration::from_secs(2), second_signal_rx)
         .await
         .expect("second attempt starts")
         .expect("signal received");
-    tokio::time::timeout(Duration::from_secs(2), store.second_registered.notified())
+    time::timeout(Duration::from_secs(2), store.second_registered.notified())
         .await
         .expect("second attempt signal is registered before stale response");
     store.release_cancel.notify_one();
@@ -432,7 +432,7 @@ async fn test_late_cancel_response_does_not_signal_next_attempt() {
         "attempt two must not receive attempt one's stale signal"
     );
     handler.release_second.notify_one();
-    let final_record = tokio::time::timeout(Duration::from_secs(2), service.wait(accepted.id))
+    let final_record = time::timeout(Duration::from_secs(2), service.wait(accepted.id))
         .await
         .expect("task settles")
         .expect("wait succeeds");
@@ -442,7 +442,7 @@ async fn test_late_cancel_response_does_not_signal_next_attempt() {
 }
 
 #[allow(dead_code)]
-fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
         request.idempotency_key = Some(format!(

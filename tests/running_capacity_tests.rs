@@ -15,12 +15,18 @@ use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskState;
+use qubit_task::store::TaskFuture;
+use tokio::sync;
+use tokio::test as tokio_test;
+use tokio::time;
 
 struct HoldingHandler {
-    started: tokio::sync::mpsc::UnboundedSender<()>,
-    release: Arc<tokio::sync::Semaphore>,
+    started: sync::mpsc::UnboundedSender<()>,
+    release: Arc<sync::Semaphore>,
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
 }
@@ -33,11 +39,7 @@ impl TaskHandler for HoldingHandler {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
@@ -55,10 +57,10 @@ impl TaskHandler for HoldingHandler {
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_zero_cpu_tasks_obey_independent_running_limit() {
-    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (started_tx, mut started_rx) = sync::mpsc::unbounded_channel();
+    let release = Arc::new(sync::Semaphore::new(0));
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let handler = Arc::new(HoldingHandler {
@@ -80,19 +82,19 @@ async fn test_zero_cpu_tasks_obey_independent_running_limit() {
         request.resources.cpu_slots = 0;
         ids.push(service.submit(test_keyed(request)).await.unwrap().id);
     }
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    time::timeout(std::time::Duration::from_secs(2), async {
         started_rx.recv().await.unwrap();
         started_rx.recv().await.unwrap();
     })
     .await
     .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(peak.load(Ordering::SeqCst), 2);
     assert_eq!(active.load(Ordering::SeqCst), 2);
     assert_eq!(service.stats().await.unwrap().queued, 2);
     release.add_permits(4);
     for id in ids {
-        tokio::time::timeout(std::time::Duration::from_secs(2), service.wait(id))
+        time::timeout(std::time::Duration::from_secs(2), service.wait(id))
             .await
             .unwrap()
             .unwrap();
@@ -100,10 +102,10 @@ async fn test_zero_cpu_tasks_obey_independent_running_limit() {
     service.shutdown().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_zero_cpu_tasks_still_obey_max_running_tasks() {
-    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (started_tx, mut started_rx) = sync::mpsc::unbounded_channel();
+    let release = Arc::new(sync::Semaphore::new(0));
     let handler = Arc::new(HoldingHandler {
         started: started_tx,
         release: release.clone(),
@@ -124,20 +126,20 @@ async fn test_zero_cpu_tasks_still_obey_max_running_tasks() {
     second.resources.cpu_slots = 0;
     let second = service.submit(test_keyed(second)).await.unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+    time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(
         service.get(second.id).await.unwrap().unwrap().state,
-        qubit_task::model::TaskState::Queued
+        TaskState::Queued
     ));
     release.add_permits(1);
-    tokio::time::timeout(std::time::Duration::from_secs(2), service.wait(first.id))
+    time::timeout(std::time::Duration::from_secs(2), service.wait(first.id))
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+    time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -156,11 +158,7 @@ impl TaskHandler for PanicThenSucceed {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 panic!("injected panic");
@@ -171,7 +169,7 @@ impl TaskHandler for PanicThenSucceed {
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_running_permit_is_returned_after_panicked_attempt() {
     let handler = Arc::new(PanicThenSucceed(AtomicUsize::new(0)));
     let service = TaskExecutionServiceBuilder::in_memory()
@@ -191,17 +189,17 @@ async fn test_running_permit_is_returned_after_panicked_attempt() {
         .unwrap();
     assert!(matches!(
         service.wait(first.id).await.unwrap().state,
-        qubit_task::model::TaskState::Panicked { .. }
+        TaskState::Panicked { .. }
     ));
     assert!(matches!(
         service.wait(second.id).await.unwrap().state,
-        qubit_task::model::TaskState::Succeeded
+        TaskState::Succeeded
     ));
     service.shutdown().await.unwrap();
 }
 
 #[allow(dead_code)]
-fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
         request.idempotency_key = Some(format!(

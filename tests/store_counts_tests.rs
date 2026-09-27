@@ -27,6 +27,7 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::test as tokio_test;
 
 struct FailListStore {
     inner: Arc<dyn TaskStore>,
@@ -47,17 +48,11 @@ impl TaskStore for FailListStore {
         self.inner.get_by_idempotency_key(key)
     }
 
-    fn transition<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.transition(command)
     }
 
-    fn get_summary<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         self.inner.get_summary(id)
     }
 
@@ -192,13 +187,13 @@ async fn check_all_state_categories(store: &dyn TaskStore) {
     );
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_counts_all_state_categories() {
     let store = MemoryTaskStore::new(16);
     check_all_state_categories(&store).await;
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_counts_only_retained_terminal_records() {
     let store = MemoryTaskStore::new(1);
     let queued = accept(&store).await;
@@ -228,7 +223,7 @@ async fn test_memory_store_counts_only_retained_terminal_records() {
     );
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_store_count_works_when_list_fails() {
     let store = FailListStore {
         inner: Arc::new(MemoryTaskStore::new(8)),
@@ -249,7 +244,7 @@ async fn test_store_count_works_when_list_fails() {
     );
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_service_stats_uses_one_aggregate_without_listing_history() {
     let store = Arc::new(FailListStore {
         inner: Arc::new(MemoryTaskStore::new(8)),
@@ -276,7 +271,7 @@ async fn test_service_stats_uses_one_aggregate_without_listing_history() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_store_counts_all_state_categories() {
     use qubit_task::store::SqliteTaskStore;
 
@@ -295,7 +290,7 @@ async fn test_sqlite_store_counts_all_state_categories() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_service_stats_uses_one_sqlite_aggregate_for_large_history() {
     use qubit_task::store::SqliteTaskStore;
 
@@ -336,7 +331,7 @@ async fn test_service_stats_uses_one_sqlite_aggregate_for_large_history() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_store_count_rejects_unknown_state_kind() {
     use qubit_task::store::SqliteTaskStore;
 

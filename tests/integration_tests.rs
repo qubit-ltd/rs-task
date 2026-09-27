@@ -7,22 +7,61 @@
 // =============================================================================
 use std::sync::Arc;
 
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::error::SpiError;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::model::PublishAcknowledgement;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::EventBusCapabilities;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::EventBusSpi;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::EventSubscriptionSpi;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::OutboundMessage;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::ShutdownMode;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::ShutdownOutcome;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::SpiSubscriptionRequest;
+#[cfg(feature = "inventory")]
+use qubit_spi::ProviderDescriptor;
+#[cfg(feature = "inventory")]
+use qubit_spi::ProviderMetadata;
+#[cfg(feature = "inventory")]
+use qubit_spi::ProviderSelection;
+#[cfg(feature = "inventory")]
+use qubit_spi::ServiceProvider;
+#[cfg(feature = "inventory")]
+use qubit_spi::error::ProviderFailure;
+#[cfg(feature = "inventory")]
+use qubit_spi::provider_descriptor;
+#[cfg(feature = "inventory")]
+use qubit_spi::submit_sync_provider;
 use qubit_task::TaskExecutionService;
+use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::engine::EngineError;
 use qubit_task::engine::ExecutionHandle;
 use qubit_task::engine::ExecutionOutcome;
 use qubit_task::engine::LocalTaskExecutionEngine;
 use qubit_task::engine::PreparedExecution;
 use qubit_task::engine::TaskExecutionEngine;
+#[cfg(feature = "event-bus")]
+use qubit_task::event::TaskEvent;
 use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskHandlerRegistry;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
+use qubit_task::model::OwnerEpoch;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::ResourceSnapshot;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskQuery;
@@ -35,10 +74,32 @@ use qubit_task::scheduling::FairFifoPolicy;
 use qubit_task::scheduling::QueueSnapshot;
 use qubit_task::scheduling::QueuedTask;
 use qubit_task::scheduling::SchedulingPolicy;
+use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
+use qubit_task::service::TaskServiceBuildError;
+use qubit_task::service::TaskServiceError;
+#[cfg(feature = "inventory")]
+use qubit_task::spi::MEMORY_STORE_PROVIDER_ID;
+#[cfg(feature = "inventory")]
+use qubit_task::spi::TaskStoreConfig;
+#[cfg(feature = "inventory")]
+use qubit_task::spi::TaskStoreSpec;
+#[cfg(feature = "inventory")]
+use qubit_task::spi::discovered_task_store_registry;
+#[cfg(feature = "inventory")]
+use qubit_task::spi::task_store_providers::Entry;
 use qubit_task::store::MemoryTaskStore;
+#[cfg(feature = "sqlite")]
+use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
+use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::runtime;
+use tokio::spawn;
+use tokio::sync;
+use tokio::task;
+use tokio::test as tokio_test;
+use tokio::time;
 
 mod engine;
 mod model;
@@ -54,11 +115,7 @@ impl TaskHandler for EchoHandler {
             version: "1".into(),
         }
     }
-    fn run<'a>(
-        &'a self,
-        payload: &'a [u8],
-        _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             assert!(!_context.task_id().to_string().is_empty());
             assert!(_context.attempt() > 0);
@@ -81,11 +138,7 @@ impl TaskHandler for PanicHandler {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { panic!("handler panic") })
     }
 }
@@ -99,14 +152,10 @@ impl TaskHandler for CooperativeHandler {
             version: "1".into(),
         }
     }
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             while !context.is_cancelled() {
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                time::sleep(std::time::Duration::from_millis(2)).await;
             }
             Ok(TaskRunOutcome::Cancelled)
         })
@@ -114,8 +163,8 @@ impl TaskHandler for CooperativeHandler {
 }
 
 struct RetryQueueHandler {
-    started: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Notify>,
+    started: Arc<sync::Notify>,
+    release: Arc<sync::Notify>,
 }
 
 impl TaskHandler for RetryQueueHandler {
@@ -126,11 +175,7 @@ impl TaskHandler for RetryQueueHandler {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        payload: &'a [u8],
-        context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             if payload == b"retry" && context.attempt() == 1 {
                 self.started.notify_one();
@@ -148,8 +193,8 @@ impl TaskHandler for RetryQueueHandler {
 
 struct PausablePolicy {
     paused: std::sync::atomic::AtomicBool,
-    called: tokio::sync::Notify,
-    saw_nonempty: tokio::sync::Notify,
+    called: sync::Notify,
+    saw_nonempty: sync::Notify,
 }
 
 impl SchedulingPolicy for PausablePolicy {
@@ -179,7 +224,7 @@ impl TaskExecutionEngine for ExternalEngine {
         &'a self,
         id: TaskId,
         request: ResourceRequest,
-    ) -> qubit_task::store::TaskFuture<'a, Result<PreparedExecution, EngineError>> {
+    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
         self.inner.prepare(id, request)
     }
 
@@ -189,12 +234,12 @@ impl TaskExecutionEngine for ExternalEngine {
         handler: Arc<dyn TaskHandler>,
         payload: Vec<u8>,
         context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
+    ) -> TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
         Box::pin(async move {
             let release = prepared.take_release();
             let cancellation = context.cancellation_signal();
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
+            let (sender, receiver) = sync::oneshot::channel();
+            spawn(async move {
                 let _release = ReleaseOnDrop(release);
                 let result = handler.run(&payload, context).await;
                 let _ = sender.send(ExecutionOutcome::Returned(result));
@@ -214,7 +259,7 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_in_memory_service_accepts_and_completes_a_local_task() {
     let service = TaskExecutionService::in_memory()
         .await
@@ -235,12 +280,12 @@ async fn test_in_memory_service_accepts_and_completes_a_local_task() {
     assert_eq!(record.output.expect("output retained").summary, b"done");
     assert_eq!(
         service.cancel(id).await.expect("terminal cancellation query succeeds"),
-        qubit_task::service::CancelOutcome::AlreadyTerminal
+        CancelOutcome::AlreadyTerminal
     );
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_local_task_panic_is_recorded_as_panicked() {
     let service = TaskExecutionService::in_memory().await.expect("service builds");
     let id = service
@@ -253,7 +298,7 @@ async fn test_local_task_panic_is_recorded_as_panicked() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_local_engine_reserves_and_releases_all_requested_resources() {
     let mut capacity = ResourceCapacity {
         cpu_slots: 2,
@@ -275,7 +320,7 @@ async fn test_local_engine_reserves_and_releases_all_requested_resources() {
     assert_eq!(first.assigned_resources(), &["gpu0"]);
     assert!(matches!(
         engine.prepare(TaskId::generate(), request.clone()).await,
-        Err(qubit_task::engine::EngineError::TemporarilyUnavailable)
+        Err(EngineError::TemporarilyUnavailable)
     ));
     drop(first);
     assert!(engine.prepare(TaskId::generate(), request).await.is_ok());
@@ -302,13 +347,13 @@ fn test_prepared_execution_public_constructor_and_release_paths() {
     assert_eq!(released.load(std::sync::atomic::Ordering::Acquire), 2);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_versioned_handler_runs_reconstructable_request() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(Arc::new(EchoHandler)).expect("handler registers");
     assert!(registry.resolve("echo", "1").is_some());
     assert!(registry.resolve("echo", "2").is_none());
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .register_handler(Arc::new(EchoHandler))
         .expect("handler registration succeeds")
         .build()
@@ -322,19 +367,16 @@ async fn test_versioned_handler_runs_reconstructable_request() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_service_query_listing_stats_and_unknown_cancellation() {
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .register_handler(Arc::new(EchoHandler))
         .expect("handler registers")
         .build()
         .await
         .expect("service builds");
     let unknown = service.cancel(TaskId::generate()).await.unwrap_err();
-    assert!(matches!(
-        unknown,
-        qubit_task::service::TaskServiceError::Store(StoreError::NotFound)
-    ));
+    assert!(matches!(unknown, TaskServiceError::Store(StoreError::NotFound)));
 
     let first = service
         .submit(test_keyed(TaskRequest::new("echo", "1", b"one".to_vec())))
@@ -369,9 +411,9 @@ async fn test_service_query_listing_stats_and_unknown_cancellation() {
     service.shutdown().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_async_handler_panic_is_recorded_and_resources_are_released() {
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .register_handler(Arc::new(PanicHandler))
         .expect("handler registration succeeds")
         .build()
@@ -390,7 +432,7 @@ async fn test_async_handler_panic_is_recorded_and_resources_are_released() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_service_idempotency_returns_the_original_task_id() {
     let service = TaskExecutionService::in_memory().await.expect("service builds");
     let mut request = TaskRequest::new("echo", "1", b"same".to_vec());
@@ -404,21 +446,15 @@ async fn test_service_idempotency_returns_the_original_task_id() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_service_submit_requires_and_exposes_a_stable_idempotency_key() {
     let service = TaskExecutionService::in_memory().await.expect("service builds");
     let missing_key = service.submit(TaskRequest::new("keyed", "1", Vec::new())).await;
-    assert!(matches!(
-        missing_key,
-        Err(qubit_task::service::TaskServiceError::InvalidRequest(_))
-    ));
+    assert!(matches!(missing_key, Err(TaskServiceError::InvalidRequest(_))));
     let empty_key = service
         .submit(TaskRequest::new("keyed", "1", Vec::new()).with_idempotency_key(""))
         .await;
-    assert!(matches!(
-        empty_key,
-        Err(qubit_task::service::TaskServiceError::InvalidRequest(_))
-    ));
+    assert!(matches!(empty_key, Err(TaskServiceError::InvalidRequest(_))));
     assert!(service.list(TaskQuery::default()).await.unwrap().records.is_empty());
 
     let mut request = TaskRequest::new("keyed", "1", Vec::new());
@@ -440,7 +476,7 @@ async fn test_service_submit_requires_and_exposes_a_stable_idempotency_key() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_idempotency_conflict_precedes_queue_full() {
     let store = Arc::new(MemoryTaskStore::new(8));
     let request = TaskRequest::new("keyed", "1", b"original".to_vec()).with_idempotency_key("queue-full-key");
@@ -466,7 +502,7 @@ async fn test_idempotency_conflict_precedes_queue_full() {
         })
         .await
         .expect("seed task becomes terminal");
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .store(store)
         .queue_capacity(0)
         .build()
@@ -479,18 +515,18 @@ async fn test_idempotency_conflict_precedes_queue_full() {
         .expect_err("key conflict wins while queue is full");
     assert!(matches!(
         error,
-        qubit_task::service::TaskServiceError::Store(StoreError::IdempotencyConflict)
+        TaskServiceError::Store(StoreError::IdempotencyConflict)
     ));
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_external_execution_engine_can_implement_public_contract() {
     let capacity = ResourceCapacity {
         cpu_slots: 1,
         ..ResourceCapacity::default()
     };
-    let service = qubit_task::TaskExecutionServiceBuilder::from_components(
+    let service = TaskExecutionServiceBuilder::from_components(
         Arc::new(MemoryTaskStore::new(8)),
         Arc::new(ExternalEngine {
             inner: LocalTaskExecutionEngine::new(capacity),
@@ -511,7 +547,7 @@ async fn test_external_execution_engine_can_implement_public_contract() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_missing_handler_transitions_task_to_blocked() {
     let service = TaskExecutionService::in_memory().await.expect("service builds");
     let accepted = service
@@ -545,9 +581,9 @@ async fn test_missing_handler_transitions_task_to_blocked() {
     assert!(matches!(blocked_again.state, TaskState::Blocked { .. }));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_running_task_cancellation_is_cooperative_and_terminal() {
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .register_handler(Arc::new(CooperativeHandler))
         .expect("handler registration succeeds")
         .build()
@@ -566,13 +602,13 @@ async fn test_running_task_cancellation_is_cooperative_and_terminal() {
         {
             break;
         }
-        tokio::task::yield_now().await;
+        task::yield_now().await;
     }
     let outcome = service
         .cancel(accepted.id)
         .await
         .expect("cancellation request succeeds");
-    assert_eq!(outcome, qubit_task::service::CancelOutcome::CancellationRequested);
+    assert_eq!(outcome, CancelOutcome::CancellationRequested);
     let record = service.wait(accepted.id).await.expect("handler observes cancellation");
     assert_eq!(record.state, TaskState::Cancelled);
     service.shutdown().await.expect("service shuts down");
@@ -630,11 +666,11 @@ impl SchedulingPolicy for TwoRoundBlockingPolicy {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio_test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
     let gate = Arc::new(TwoRoundPolicyGate::default());
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
-        .runtime_handle(tokio::runtime::Handle::current())
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(runtime::Handle::current())
         .register_handler(Arc::new(EchoHandler))
         .expect("handler registration succeeds")
         .policy(Arc::new(TwoRoundBlockingPolicy { gate: gate.clone() }))
@@ -649,7 +685,7 @@ async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
     let c = service.submit(test_keyed(request())).await.expect("C accepted");
     assert_eq!(
         service.cancel(a.id).await.expect("A cancelled"),
-        qubit_task::service::CancelOutcome::CancelledBeforeStart
+        CancelOutcome::CancelledBeforeStart
     );
     gate.release(1);
     assert_eq!(gate.wait_for_round(2), vec![b.id, c.id]);
@@ -659,21 +695,21 @@ async fn test_cancel_scheduler_local_task_releases_one_queue_slot() {
         .expect("D fills the sole free slot");
     let e = service.submit(test_keyed(request())).await;
     gate.release(2);
-    tokio::time::timeout(std::time::Duration::from_secs(5), service.shutdown())
+    time::timeout(std::time::Duration::from_secs(5), service.shutdown())
         .await
         .expect("remaining tasks drain before the test timeout")
         .expect("service shuts down");
-    assert!(matches!(e, Err(qubit_task::service::TaskServiceError::QueueFull)));
+    assert!(matches!(e, Err(TaskServiceError::QueueFull)));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_retryable_completion_does_not_overfill_waiting_queue() {
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::new(sync::Notify::new());
+    let release = Arc::new(sync::Notify::new());
     let policy = Arc::new(PausablePolicy {
         paused: std::sync::atomic::AtomicBool::new(false),
-        called: tokio::sync::Notify::new(),
-        saw_nonempty: tokio::sync::Notify::new(),
+        called: sync::Notify::new(),
+        saw_nonempty: sync::Notify::new(),
     });
     let mut handlers = TaskHandlerRegistry::new();
     handlers
@@ -682,7 +718,7 @@ async fn test_retryable_completion_does_not_overfill_waiting_queue() {
             release: release.clone(),
         }))
         .expect("handler registers");
-    let service = qubit_task::TaskExecutionServiceBuilder::from_components(
+    let service = TaskExecutionServiceBuilder::from_components(
         Arc::new(MemoryTaskStore::new(8)),
         Arc::new(LocalTaskExecutionEngine::new(ResourceCapacity {
             cpu_slots: 1,
@@ -700,7 +736,7 @@ async fn test_retryable_completion_does_not_overfill_waiting_queue() {
         .submit(test_keyed(TaskRequest::new("retry-queue", "1", b"retry".to_vec())))
         .await
         .expect("first task is accepted");
-    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+    time::timeout(std::time::Duration::from_secs(2), started.notified())
         .await
         .expect("first attempt starts");
 
@@ -709,18 +745,18 @@ async fn test_retryable_completion_does_not_overfill_waiting_queue() {
         .await
         .expect("one waiting task fills the queue");
     policy.paused.store(true, std::sync::atomic::Ordering::Release);
-    tokio::time::timeout(std::time::Duration::from_secs(2), policy.saw_nonempty.notified())
+    time::timeout(std::time::Duration::from_secs(2), policy.saw_nonempty.notified())
         .await
         .expect("scheduler observes the waiting task while paused");
 
     release.notify_one();
-    let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let blocked = time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let record = service.get(retrying.id).await.unwrap().unwrap();
             if !matches!(record.state, TaskState::Running) {
                 break record;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            time::sleep(std::time::Duration::from_millis(2)).await;
         }
     })
     .await
@@ -744,7 +780,7 @@ async fn test_retryable_completion_does_not_overfill_waiting_queue() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_is_idempotent_and_rejects_illegal_transitions() {
     let store = MemoryTaskStore::new(8);
     let id = TaskId::generate();
@@ -781,7 +817,7 @@ async fn test_memory_store_is_idempotent_and_rejects_illegal_transitions() {
     assert!(matches!(error, StoreError::InvalidTransition));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_rejects_oversized_lifecycle_diagnostics() {
     let store = MemoryTaskStore::new(1);
     let id = TaskId::generate();
@@ -821,7 +857,7 @@ async fn test_memory_store_rejects_oversized_lifecycle_diagnostics() {
     assert!(TaskState::Running.allows_transition_to(&TaskState::Succeeded));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_task_state_and_record_resource_contracts() {
     let queued = TaskState::Queued;
     assert!(queued.allows_transition_to(&TaskState::Running));
@@ -850,7 +886,7 @@ async fn test_task_state_and_record_resource_contracts() {
     assert_eq!(record.resource_request(), &request.resources);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_paginates_and_can_drop_terminal_history() {
     let store = MemoryTaskStore::new(0);
     let mut request = TaskRequest::new("echo", "1", Vec::new());
@@ -916,7 +952,7 @@ async fn test_memory_store_paginates_and_can_drop_terminal_history() {
         Err(StoreError::UnsupportedCapability)
     ));
     assert!(matches!(
-        store.release_owner(qubit_task::model::OwnerEpoch(1)).await,
+        store.release_owner(OwnerEpoch(1)).await,
         Err(StoreError::UnsupportedCapability)
     ));
 }
@@ -931,11 +967,7 @@ fn test_handler_registry_rejects_invalid_and_duplicate_descriptors() {
                 version: "1".into(),
             }
         }
-        fn run<'a>(
-            &'a self,
-            _payload: &'a [u8],
-            _context: TaskContext,
-        ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
             Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
         }
     }
@@ -952,9 +984,9 @@ fn test_handler_registry_rejects_invalid_and_duplicate_descriptors() {
     assert!(registry.resolve("echo", "missing").is_none());
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_zero_capacity_queue_rejects_without_accepting() {
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .queue_capacity(0)
         .build()
         .await
@@ -966,35 +998,29 @@ async fn test_zero_capacity_queue_rejects_without_accepting() {
         })
         .await
         .expect_err("zero-capacity queue rejects work");
-    assert!(matches!(error, qubit_task::service::TaskServiceError::QueueFull));
+    assert!(matches!(error, TaskServiceError::QueueFull));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_builder_requires_explicit_storage_and_recovery_capability() {
-    let missing = qubit_task::TaskExecutionServiceBuilder::default()
+    let missing = TaskExecutionServiceBuilder::default()
         .build()
         .await
         .err()
         .expect("generic builder must not choose storage implicitly");
-    assert!(matches!(
-        missing,
-        qubit_task::service::TaskServiceBuildError::MissingStore
-    ));
+    assert!(matches!(missing, TaskServiceBuildError::MissingStore));
 
-    let recovery = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let recovery = TaskExecutionServiceBuilder::in_memory()
         .require_recovery(true)
         .build()
         .await
         .err()
         .expect("recovery cannot silently fall back to memory");
-    assert!(matches!(
-        recovery,
-        qubit_task::service::TaskServiceBuildError::RecoveryRequired
-    ));
+    assert!(matches!(recovery, TaskServiceBuildError::RecoveryRequired));
 
     let mut handlers = TaskHandlerRegistry::new();
     handlers.register(Arc::new(EchoHandler)).expect("handler registers");
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .handlers(handlers)
         .capacity(ResourceCapacity {
             cpu_slots: 1,
@@ -1020,7 +1046,7 @@ fn test_memory_store_reports_non_recovery_capabilities() {
 #[test]
 fn test_fair_fifo_policy_orders_fit_candidates_before_unschedulable_head() {
     let make_task = |name: &str, bypasses| QueuedTask {
-        id: qubit_task::TaskId::generate(),
+        id: TaskId::generate(),
         resources: TaskRequest::new(name, "1", Vec::new()).resources,
         retry_not_before_ms: None,
         bypasses,
@@ -1048,23 +1074,20 @@ fn test_fair_fifo_policy_orders_fit_candidates_before_unschedulable_head() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_store_recovers_interrupted_running_task() {
-    let path = std::env::temp_dir().join(format!("qubit-task-{}.sqlite", qubit_task::TaskId::generate()));
-    let store = qubit_task::store::SqliteTaskStore::open(&path).expect("SQLite store opens");
+    let path = std::env::temp_dir().join(format!("qubit-task-{}.sqlite", TaskId::generate()));
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     let accepted = store
-        .accept(
-            qubit_task::TaskId::generate(),
-            TaskRequest::new("echo", "1", b"restart".to_vec()),
-        )
+        .accept(TaskId::generate(), TaskRequest::new("echo", "1", b"restart".to_vec()))
         .await
         .expect("task accepted");
     let record = match accepted {
-        qubit_task::model::AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Accepted(record) => record,
         _ => panic!("first request is new"),
     };
     store
-        .transition(qubit_task::model::TransitionCommand {
+        .transition(TransitionCommand {
             id: record.id,
             expected_version: 0,
             expected_attempt: 0,
@@ -1077,7 +1100,7 @@ async fn test_sqlite_store_recovers_interrupted_running_task() {
         .await
         .expect("running state persisted");
     drop(store);
-    let service = qubit_task::TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
         .expect("recoverable service config")
         .register_handler(Arc::new(EchoHandler))
         .expect("handler registers")
@@ -1096,7 +1119,7 @@ async fn test_sqlite_store_recovers_interrupted_running_task() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
     use qubit_task::store::SqliteTaskStore;
 
@@ -1151,7 +1174,7 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
         .unwrap();
     assert_eq!(filtered.records.len(), 1);
     let first_record = store.get(first_id).await.unwrap().expect("first record exists");
-    let after_cursor = qubit_task::model::TaskCursor::from(&first_record);
+    let after_cursor = TaskCursor::from(&first_record);
     let after = store
         .list(TaskQuery {
             limit: 8,
@@ -1213,7 +1236,7 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
     use qubit_task::store::SqliteTaskStore;
 
@@ -1314,10 +1337,10 @@ async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_recovery_blocks_tasks_without_a_registered_handler() {
     let path = std::env::temp_dir().join(format!("qubit-task-missing-handler-{}.sqlite", TaskId::generate()));
-    let store = qubit_task::store::SqliteTaskStore::open(&path).expect("SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     let accepted = store
         .accept(TaskId::generate(), TaskRequest::new("missing", "1", Vec::new()))
         .await
@@ -1328,7 +1351,7 @@ async fn test_recovery_blocks_tasks_without_a_registered_handler() {
     };
     drop(store);
 
-    let service = qubit_task::TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
         .expect("recoverable service config")
         .build()
         .await
@@ -1351,10 +1374,10 @@ async fn test_recovery_blocks_tasks_without_a_registered_handler() {
 #[test]
 fn test_sqlite_store_enforces_one_process_owner() {
     let path = std::env::temp_dir().join(format!("qubit-task-owner-{}.sqlite", TaskId::generate()));
-    let first = qubit_task::store::SqliteTaskStore::open(&path).expect("first store gets ownership");
-    assert!(qubit_task::store::SqliteTaskStore::open(&path).is_err());
+    let first = SqliteTaskStore::open(&path).expect("first store gets ownership");
+    assert!(SqliteTaskStore::open(&path).is_err());
     drop(first);
-    let second = qubit_task::store::SqliteTaskStore::open(&path).expect("ownership releases after drop");
+    let second = SqliteTaskStore::open(&path).expect("ownership releases after drop");
     drop(second);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("owner.lock"));
@@ -1366,53 +1389,47 @@ fn test_sqlite_store_enforces_one_process_owner() {
 struct TestStoreProvider;
 
 #[cfg(feature = "inventory")]
-impl qubit_spi::ProviderMetadata for TestStoreProvider {
-    fn descriptor(&self) -> qubit_spi::ProviderDescriptor {
-        qubit_spi::provider_descriptor!("test.task.store.memory")
+impl ProviderMetadata for TestStoreProvider {
+    fn descriptor(&self) -> ProviderDescriptor {
+        provider_descriptor!("test.task.store.memory")
     }
 }
 
 #[cfg(feature = "inventory")]
-impl qubit_spi::ServiceProvider<qubit_task::spi::TaskStoreSpec> for TestStoreProvider {
-    fn create_configured(
-        &self,
-        config: &qubit_task::spi::TaskStoreConfig,
-    ) -> Result<Arc<dyn TaskStore>, qubit_spi::error::ProviderFailure<StoreError>> {
+impl ServiceProvider<TaskStoreSpec> for TestStoreProvider {
+    fn create_configured(&self, config: &TaskStoreConfig) -> Result<Arc<dyn TaskStore>, ProviderFailure<StoreError>> {
         match config {
-            qubit_task::spi::TaskStoreConfig::Memory { history_capacity } => {
-                Ok(Arc::new(MemoryTaskStore::new(*history_capacity)))
-            }
+            TaskStoreConfig::Memory { history_capacity } => Ok(Arc::new(MemoryTaskStore::new(*history_capacity))),
             #[cfg(feature = "sqlite")]
-            qubit_task::spi::TaskStoreConfig::Sqlite { .. } => Err(qubit_spi::error::ProviderFailure::unsupported(
-                StoreError::Failure("test provider only accepts memory configuration".into()),
-            )),
-            qubit_task::spi::TaskStoreConfig::Custom(_) => Err(qubit_spi::error::ProviderFailure::unsupported(
-                StoreError::Failure("test provider only accepts memory configuration".into()),
-            )),
+            TaskStoreConfig::Sqlite { .. } => Err(ProviderFailure::unsupported(StoreError::Failure(
+                "test provider only accepts memory configuration".into(),
+            ))),
+            TaskStoreConfig::Custom(_) => Err(ProviderFailure::unsupported(StoreError::Failure(
+                "test provider only accepts memory configuration".into(),
+            ))),
         }
     }
 }
 
 #[cfg(feature = "inventory")]
-qubit_spi::submit_sync_provider! {
-    inventory_entry = qubit_task::spi::task_store_providers::Entry;
-    spec = qubit_task::spi::TaskStoreSpec;
+submit_sync_provider! {
+    inventory_entry = Entry;
+    spec = TaskStoreSpec;
     provider = TestStoreProvider;
 }
 
 #[cfg(feature = "inventory")]
 #[test]
 fn test_spi_inventory_discovers_builtin_and_linked_store_providers() {
-    let registry = qubit_task::spi::discovered_task_store_registry().expect("inventory builds");
-    let selection = qubit_spi::ProviderSelection::named("test.task.store.memory").expect("provider selection is valid");
+    let registry = discovered_task_store_registry().expect("inventory builds");
+    let selection = ProviderSelection::named("test.task.store.memory").expect("provider selection is valid");
     let store = registry
         .resolve_selected(&selection)
         .expect("linked provider resolves")
-        .create_configured(&qubit_task::spi::TaskStoreConfig::Memory { history_capacity: 17 })
+        .create_configured(&TaskStoreConfig::Memory { history_capacity: 17 })
         .expect("provider creates a store");
     assert!(!store.capabilities().restart_recovery);
-    let builtin = qubit_spi::ProviderSelection::named(qubit_task::spi::MEMORY_STORE_PROVIDER_ID)
-        .expect("built-in provider ID is valid");
+    let builtin = ProviderSelection::named(MEMORY_STORE_PROVIDER_ID).expect("built-in provider ID is valid");
     assert!(registry.resolve_selected(&builtin).is_ok());
 }
 
@@ -1500,26 +1517,20 @@ fn test_spi_sqlite_provider_requires_and_accepts_sqlite_configuration() {
 struct PanicCapabilitiesSpi;
 
 #[cfg(feature = "event-bus")]
-impl qubit_event_bus::spi::EventBusSpi for PanicCapabilitiesSpi {
-    fn capabilities(&self) -> qubit_event_bus::spi::EventBusCapabilities {
+impl EventBusSpi for PanicCapabilitiesSpi {
+    fn capabilities(&self) -> EventBusCapabilities {
         panic!("injected provider capability panic")
     }
 
-    fn publish(
-        &self,
-        _message: qubit_event_bus::spi::OutboundMessage,
-    ) -> Result<qubit_event_bus::model::PublishAcknowledgement, qubit_event_bus::error::SpiError> {
-        Ok(qubit_event_bus::model::PublishAcknowledgement::Accepted {
+    fn publish(&self, _message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
+        Ok(PublishAcknowledgement::Accepted {
             provider_message_id: None,
             metadata: Default::default(),
         })
     }
 
-    fn subscribe(
-        &self,
-        _request: qubit_event_bus::spi::SpiSubscriptionRequest,
-    ) -> Result<Box<dyn qubit_event_bus::spi::EventSubscriptionSpi>, qubit_event_bus::error::SpiError> {
-        Err(qubit_event_bus::error::SpiError::Operation {
+    fn subscribe(&self, _request: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
+        Err(SpiError::Operation {
             provider_id: "panic-capabilities".into(),
             operation: "subscribe",
             resource: None,
@@ -1529,11 +1540,8 @@ impl qubit_event_bus::spi::EventBusSpi for PanicCapabilitiesSpi {
         })
     }
 
-    fn shutdown(
-        &self,
-        _mode: qubit_event_bus::spi::ShutdownMode,
-    ) -> Result<qubit_event_bus::spi::ShutdownOutcome, qubit_event_bus::error::SpiError> {
-        Ok(qubit_event_bus::spi::ShutdownOutcome::Complete)
+    fn shutdown(&self, _mode: ShutdownMode) -> Result<ShutdownOutcome, SpiError> {
+        Ok(ShutdownOutcome::Complete)
     }
 }
 
@@ -1544,8 +1552,8 @@ struct BlockingPublishSpi {
 }
 
 #[cfg(feature = "event-bus")]
-impl qubit_event_bus::spi::EventBusSpi for BlockingPublishSpi {
-    fn capabilities(&self) -> qubit_event_bus::spi::EventBusCapabilities {
+impl EventBusSpi for BlockingPublishSpi {
+    fn capabilities(&self) -> EventBusCapabilities {
         use qubit_event_bus::spi::DelayedDeliveryCapability;
         use qubit_event_bus::spi::DurabilityCapability;
         use qubit_event_bus::spi::OrderingCapability;
@@ -1555,7 +1563,7 @@ impl qubit_event_bus::spi::EventBusSpi for BlockingPublishSpi {
         use qubit_event_bus::spi::ReplayCapability;
         use qubit_event_bus::spi::SettlementCapabilities;
 
-        qubit_event_bus::spi::EventBusCapabilities::new(
+        EventBusCapabilities::new(
             PayloadModes::Native,
             SettlementCapabilities::None,
             OrderingCapability::None,
@@ -1568,27 +1576,21 @@ impl qubit_event_bus::spi::EventBusSpi for BlockingPublishSpi {
         )
     }
 
-    fn publish(
-        &self,
-        _message: qubit_event_bus::spi::OutboundMessage,
-    ) -> Result<qubit_event_bus::model::PublishAcknowledgement, qubit_event_bus::error::SpiError> {
+    fn publish(&self, _message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
         let _ = self.entered.send(());
         let (lock, changed) = &*self.gate;
         let mut released = lock.lock().expect("publish gate lock");
         while !*released {
             released = changed.wait(released).expect("publish gate wait");
         }
-        Ok(qubit_event_bus::model::PublishAcknowledgement::Accepted {
+        Ok(PublishAcknowledgement::Accepted {
             provider_message_id: None,
             metadata: Default::default(),
         })
     }
 
-    fn subscribe(
-        &self,
-        _request: qubit_event_bus::spi::SpiSubscriptionRequest,
-    ) -> Result<Box<dyn qubit_event_bus::spi::EventSubscriptionSpi>, qubit_event_bus::error::SpiError> {
-        Err(qubit_event_bus::error::SpiError::Operation {
+    fn subscribe(&self, _request: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
+        Err(SpiError::Operation {
             provider_id: "blocking-publish".into(),
             operation: "subscribe",
             resource: None,
@@ -1598,16 +1600,13 @@ impl qubit_event_bus::spi::EventBusSpi for BlockingPublishSpi {
         })
     }
 
-    fn shutdown(
-        &self,
-        _mode: qubit_event_bus::spi::ShutdownMode,
-    ) -> Result<qubit_event_bus::spi::ShutdownOutcome, qubit_event_bus::error::SpiError> {
-        Ok(qubit_event_bus::spi::ShutdownOutcome::Complete)
+    fn shutdown(&self, _mode: ShutdownMode) -> Result<ShutdownOutcome, SpiError> {
+        Ok(ShutdownOutcome::Complete)
     }
 }
 
 #[cfg(feature = "event-bus")]
-#[tokio::test]
+#[tokio_test]
 async fn test_event_bus_receives_status_changes_without_becoming_authoritative() {
     use qubit_event_bus::DeliveryError;
     use qubit_event_bus::EventBus;
@@ -1616,7 +1615,7 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
     use qubit_event_bus::model::Topic;
 
     let bus = EventBus::local(LocalEventBusConfig::default()).expect("local event bus starts");
-    let topic = Topic::<qubit_task::event::TaskEvent>::new("task.lifecycle").expect("topic is valid");
+    let topic = Topic::<TaskEvent>::new("task.lifecycle").expect("topic is valid");
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count_ref = count.clone();
     let versions = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1634,8 +1633,8 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
             },
         )
         .expect("topic subscription succeeds");
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
-        .runtime_handle(tokio::runtime::Handle::current())
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(runtime::Handle::current())
         .event_bus(bus.clone())
         .event_bus_buffer_capacity(std::num::NonZeroUsize::new(256).expect("nonzero capacity"))
         .build()
@@ -1653,9 +1652,9 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
         service.wait(id).await.expect("task completes").state,
         TaskState::Succeeded
     );
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    time::timeout(std::time::Duration::from_secs(2), async {
         while service.notification_stats().expect("notification counters").enqueued < 3 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await
@@ -1672,9 +1671,9 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
     let after_shutdown = service.notification_stats().expect("notification counters");
     assert_eq!(after_shutdown.enqueued, enqueued_before_shutdown);
     assert_eq!(after_shutdown.accepted, enqueued_before_shutdown);
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    time::timeout(std::time::Duration::from_secs(2), async {
         while count.load(std::sync::atomic::Ordering::Acquire) < 3 {
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            time::sleep(std::time::Duration::from_millis(2)).await;
         }
     })
     .await
@@ -1691,12 +1690,11 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
     observed_versions.sort_unstable();
     assert_eq!(observed_versions, [0, 1, 2]);
     subscription.cancel().expect("subscription is cancelled");
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
-        .expect("event bus shuts down");
+    bus.shutdown(ShutdownMode::Immediate).expect("event bus shuts down");
 }
 
 #[cfg(feature = "event-bus")]
-#[tokio::test]
+#[tokio_test]
 async fn test_notification_worker_panic_is_reported_by_repeated_service_shutdown() {
     use qubit_event_bus::EventBus;
     use qubit_event_bus::model::ProviderId;
@@ -1726,14 +1724,14 @@ async fn test_notification_worker_panic_is_reported_by_repeated_service_shutdown
         TaskState::Succeeded,
         service.wait(task_id).await.expect("task completes").state
     );
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    time::timeout(std::time::Duration::from_secs(2), async {
         while service
             .notification_stats()
             .expect("notification stats are available")
             .worker_panicked
             == 0
         {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await
@@ -1754,7 +1752,7 @@ async fn test_notification_worker_panic_is_reported_by_repeated_service_shutdown
 }
 
 #[cfg(feature = "event-bus")]
-#[tokio::test]
+#[tokio_test]
 async fn test_notification_close_timeout_is_reported_by_service_shutdown() {
     use qubit_event_bus::EventBus;
     use qubit_event_bus::model::ProviderId;
@@ -1777,13 +1775,10 @@ async fn test_notification_close_timeout_is_reported_by_service_shutdown() {
         .await
         .expect("service builds with the event bus");
     service
-        .submit(
-            qubit_task::model::TaskRequest::new("timeout", "1", Vec::new())
-                .with_idempotency_key("notification-close-timeout"),
-        )
+        .submit(TaskRequest::new("timeout", "1", Vec::new()).with_idempotency_key("notification-close-timeout"))
         .await
         .expect("task is accepted");
-    tokio::task::spawn_blocking(move || {
+    task::spawn_blocking(move || {
         entered_receiver
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("publisher enters the blocking provider");
@@ -1803,13 +1798,13 @@ async fn test_notification_close_timeout_is_reported_by_service_shutdown() {
     let (lock, changed) = &*gate;
     *lock.lock().expect("publish gate lock") = true;
     changed.notify_all();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let stats = service.notification_stats().expect("notification stats are available");
             if stats.opaque_accepted >= stats.enqueued {
                 break;
             }
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     })
     .await
@@ -1817,15 +1812,15 @@ async fn test_notification_close_timeout_is_reported_by_service_shutdown() {
 }
 
 #[cfg(feature = "event-bus")]
-#[tokio::test]
+#[tokio_test]
 async fn test_event_bus_publish_failure_does_not_change_task_result() {
     use qubit_event_bus::EventBus;
     use qubit_event_bus::local::LocalEventBusConfig;
 
     let bus = EventBus::local(LocalEventBusConfig::default()).expect("local event bus starts");
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+    bus.shutdown(ShutdownMode::Immediate)
         .expect("event bus shuts down before notification");
-    let service = qubit_task::TaskExecutionServiceBuilder::in_memory()
+    let service = TaskExecutionServiceBuilder::in_memory()
         .event_bus(bus)
         .build()
         .await
@@ -1851,16 +1846,14 @@ async fn test_event_bus_publish_failure_does_not_change_task_result() {
 }
 
 #[cfg(feature = "event-bus")]
-#[tokio::test]
+#[tokio_test]
 async fn test_event_bus_stats_are_absent_without_a_bus() {
-    let service = qubit_task::TaskExecutionService::in_memory()
-        .await
-        .expect("service builds");
+    let service = TaskExecutionService::in_memory().await.expect("service builds");
     assert!(service.notification_stats().is_none());
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_accepts_retry_deadlines_only_while_queued() {
     let store = MemoryTaskStore::new(4);
     let accepted = match store
@@ -1933,7 +1926,7 @@ async fn test_memory_store_accepts_retry_deadlines_only_while_queued() {
 }
 
 #[allow(dead_code)]
-fn test_keyed(mut request: qubit_task::model::TaskRequest) -> qubit_task::model::TaskRequest {
+fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
         request.idempotency_key = Some(format!(

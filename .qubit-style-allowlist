@@ -1,3 +1,11 @@
 # Closely coupled private lifecycle types stay beside their owning service state.
 multiple-public-types | src/service/task_execution_service.rs | Task execution wrapper and status-reporting task form one submission boundary.
-multiple-public-types | src/service/task_execution_service_state.rs | Registry state and its private lifecycle records share one mutex protocol.
+multiple-public-types | src/engine/local.rs | Resource usage and reservation rollback helpers are private parts of the local engine allocation protocol.
+multiple-public-types | src/model/task_record.rs | Lifecycle state, task records, summaries, cursors, and storage commands form one versioned persistence contract.
+multiple-public-types | src/service/admission_budget.rs | Budget state, reservation token, usage snapshot, and failure types share one admission accounting invariant.
+multiple-public-types | src/service/admission_gate.rs | Gate phase, waiter state, permit, and close result implement one shutdown admission protocol.
+multiple-public-types | src/service/task_event_publisher.rs | Private publication counters share the publisher's queue and completion lifecycle.
+multiple-public-types | src/service/task_execution_service_builder.rs | Builder configuration, build failures, and owner lease guard form one service construction and recovery boundary.
+multiple-public-types | src/service/task_wait_registry.rs | Registry entries and subscriptions coordinate one per-task notification protocol.
+multiple-public-types | src/store/memory.rs | The private memory state is the synchronized backing state owned by the memory store.
+multiple-public-types | src/store/sqlite.rs | SQLite worker guards, owner state, and row representations are private parts of one schema and connection protocol.

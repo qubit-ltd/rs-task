@@ -19,7 +19,11 @@ use qubit_task::engine::TaskExecutionEngine;
 use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 #[cfg(feature = "sqlite")]
+use qubit_task::handler::TaskHandlerDescriptor;
+#[cfg(feature = "sqlite")]
 use qubit_task::handler::TaskRunOutcome;
+#[cfg(feature = "sqlite")]
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::ResourceCapacity;
@@ -41,13 +45,18 @@ use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::LocalTaskResultError;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
+#[cfg(feature = "sqlite")]
+use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::sync;
+use tokio::test as tokio_test;
+use tokio::time;
 
 struct ActivationGateEngine {
-    entered: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    release: tokio::sync::Semaphore,
+    entered: parking_lot::Mutex<Option<sync::oneshot::Sender<()>>>,
+    release: sync::Semaphore,
 }
 
 impl TaskExecutionEngine for ActivationGateEngine {
@@ -255,22 +264,18 @@ struct NoopHandler;
 
 #[cfg(feature = "sqlite")]
 impl TaskHandler for NoopHandler {
-    fn descriptor(&self) -> qubit_task::handler::TaskHandlerDescriptor {
-        qubit_task::handler::TaskHandlerDescriptor {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
             task_type: "owner-test".into(),
             version: "1".into(),
         }
     }
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        _context: TaskContext,
-    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_store_fault_shutdown_waits_for_active_attempt_after_caller_timeout() {
     let store = Arc::new(FailFirstGetStore::new());
     store.should_fail_get.store(false, Ordering::Release);
@@ -279,7 +284,7 @@ async fn test_store_fault_shutdown_waits_for_active_attempt_after_caller_timeout
         .build()
         .await
         .unwrap();
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let handle = service
         .submit_local(move |_| {
@@ -292,7 +297,7 @@ async fn test_store_fault_shutdown_waits_for_active_attempt_after_caller_timeout
         })
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), started_rx)
+    time::timeout(Duration::from_secs(2), started_rx)
         .await
         .unwrap()
         .unwrap();
@@ -301,7 +306,7 @@ async fn test_store_fault_shutdown_waits_for_active_attempt_after_caller_timeout
     assert!(service.list(TaskQuery::default()).await.is_err());
     assert!(matches!(
         service
-            .shutdown_until(tokio::time::Instant::now() + Duration::from_millis(30))
+            .shutdown_until(time::Instant::now() + Duration::from_millis(30))
             .await,
         Err(TaskServiceError::ShutdownTimedOut)
     ));
@@ -316,14 +321,14 @@ async fn test_store_fault_shutdown_waits_for_active_attempt_after_caller_timeout
     ));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_store_fault_shutdown_waits_for_scheduler_activation_to_return() {
     let store = Arc::new(FailFirstGetStore::new());
     store.should_fail_get.store(false, Ordering::Release);
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (entered_tx, entered_rx) = sync::oneshot::channel();
     let engine = Arc::new(ActivationGateEngine {
         entered: parking_lot::Mutex::new(Some(entered_tx)),
-        release: tokio::sync::Semaphore::new(0),
+        release: sync::Semaphore::new(0),
     });
     let service = TaskExecutionServiceBuilder::default()
         .store(store.clone())
@@ -338,7 +343,7 @@ async fn test_store_fault_shutdown_waits_for_scheduler_activation_to_return() {
         })
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+    time::timeout(Duration::from_secs(2), entered_rx)
         .await
         .unwrap()
         .unwrap();
@@ -347,7 +352,7 @@ async fn test_store_fault_shutdown_waits_for_scheduler_activation_to_return() {
     assert!(service.list(TaskQuery::default()).await.is_err());
     assert!(matches!(
         service
-            .shutdown_until(tokio::time::Instant::now() + Duration::from_millis(30))
+            .shutdown_until(time::Instant::now() + Duration::from_millis(30))
             .await,
         Err(TaskServiceError::ShutdownTimedOut)
     ));
@@ -363,15 +368,15 @@ async fn test_store_fault_shutdown_waits_for_scheduler_activation_to_return() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_store_fault_keeps_sqlite_owner_until_scheduler_activation_stops() {
     let path = std::env::temp_dir().join(format!("qubit-task-fault-drain-{}.sqlite", TaskId::generate()));
-    let sqlite = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
+    let sqlite = Arc::new(SqliteTaskStore::open(&path).unwrap());
     let store = Arc::new(FailFirstGetStore::with_inner(sqlite));
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (entered_tx, entered_rx) = sync::oneshot::channel();
     let engine = Arc::new(ActivationGateEngine {
         entered: parking_lot::Mutex::new(Some(entered_tx)),
-        release: tokio::sync::Semaphore::new(0),
+        release: sync::Semaphore::new(0),
     });
     let service = TaskExecutionServiceBuilder::default()
         .store(store.clone())
@@ -385,7 +390,7 @@ async fn test_store_fault_keeps_sqlite_owner_until_scheduler_activation_stops() 
         .submit(TaskRequest::new("owner-test", "1", vec![1]).with_idempotency_key("owner-test-key"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+    time::timeout(Duration::from_secs(2), entered_rx)
         .await
         .unwrap()
         .unwrap();
@@ -394,7 +399,7 @@ async fn test_store_fault_keeps_sqlite_owner_until_scheduler_activation_stops() 
     assert!(service.list(TaskQuery::default()).await.is_err());
     assert!(matches!(
         service
-            .shutdown_until(tokio::time::Instant::now() + Duration::from_millis(30))
+            .shutdown_until(time::Instant::now() + Duration::from_millis(30))
             .await,
         Err(TaskServiceError::ShutdownTimedOut)
     ));
@@ -407,7 +412,7 @@ async fn test_store_fault_keeps_sqlite_owner_until_scheduler_activation_stops() 
     assert_eq!(store.release_owner_calls.load(Ordering::Acquire), 1);
     drop(service);
 
-    let reopened = qubit_task::store::SqliteTaskStore::open(&path).expect("owner lock was released after drain");
+    let reopened = SqliteTaskStore::open(&path).expect("owner lock was released after drain");
     drop(reopened);
     for suffix in ["", "-wal", "-shm", ".owner.lock"] {
         let file = if suffix == ".owner.lock" {
@@ -420,7 +425,7 @@ async fn test_store_fault_keeps_sqlite_owner_until_scheduler_activation_stops() 
     let _ = task;
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
     let service = TaskExecutionServiceBuilder::default()
         .store(Arc::new(FailFirstGetStore::new()))
@@ -440,18 +445,18 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
         .await
         .expect("task is accepted before scheduler reads it");
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    time::timeout(Duration::from_secs(2), async {
         loop {
             if service.last_store_error().is_some() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
     .expect("scheduler records the storage failure");
 
-    let result = tokio::time::timeout(Duration::from_secs(2), handle.result())
+    let result = time::timeout(Duration::from_secs(2), handle.result())
         .await
         .expect("typed handle receives the store fault");
     assert!(
@@ -473,7 +478,7 @@ async fn test_scheduler_store_failure_pauses_service_and_prevents_execution() {
     ));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_engine_prepare_panic_is_reported_as_scheduler_unavailable() {
     let service = TaskExecutionServiceBuilder::default()
         .store(Arc::new(MemoryTaskStore::new(16)))
@@ -490,7 +495,7 @@ async fn test_engine_prepare_panic_is_reported_as_scheduler_unavailable() {
         .expect("task is accepted before engine preparation");
     let id = handle.task_id();
 
-    let result = tokio::time::timeout(Duration::from_secs(1), handle.result())
+    let result = time::timeout(Duration::from_secs(1), handle.result())
         .await
         .expect("local waiter is woken by scheduler failure");
     assert!(
@@ -506,7 +511,7 @@ async fn test_engine_prepare_panic_is_reported_as_scheduler_unavailable() {
     ));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_engine_prepare_closed_stops_scheduler_and_preserves_queued_task() {
     let engine = Arc::new(ClosedPrepareEngine {
         prepare_calls: AtomicUsize::new(0),
@@ -526,7 +531,7 @@ async fn test_engine_prepare_closed_stops_scheduler_and_preserves_queued_task() 
         .expect("task is accepted before engine preparation");
     let id = handle.task_id();
 
-    let shutdown = tokio::time::timeout(Duration::from_secs(1), service.shutdown())
+    let shutdown = time::timeout(Duration::from_secs(1), service.shutdown())
         .await
         .expect("permanently closed engine must not leave shutdown polling");
     assert!(matches!(shutdown, Err(TaskServiceError::SchedulerUnavailable(message)) if message.contains("closed")));
@@ -555,7 +560,7 @@ async fn test_engine_prepare_closed_stops_scheduler_and_preserves_queued_task() 
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_recoverable_sqlite_store_rejects_local_closure_without_accepting_it() {
     let path = std::env::temp_dir().join(format!("qubit-task-local-submit-{}.sqlite", TaskId::generate()));
     let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)

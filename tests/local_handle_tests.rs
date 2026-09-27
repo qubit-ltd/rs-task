@@ -16,6 +16,7 @@ use parking_lot::Mutex;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::ResourceCapacity;
 use qubit_task::model::StoreCapabilities;
 use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
@@ -27,6 +28,7 @@ use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TaskStateKind;
+use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
@@ -36,8 +38,13 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::spawn;
+use tokio::sync;
 use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
+use tokio::task;
+use tokio::test as tokio_test;
+use tokio::time;
 
 const WAIT_LIMIT: Duration = Duration::from_secs(3);
 
@@ -82,10 +89,7 @@ impl TaskStore for PauseEvictedGetStore {
         self.inner.get_by_idempotency_key(key)
     }
 
-    fn transition<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let cancel = matches!(command.state, TaskState::Cancelled);
             let updated = self.inner.transition(command).await?;
@@ -103,10 +107,7 @@ impl TaskStore for PauseEvictedGetStore {
         })
     }
 
-    fn get_summary<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         self.inner.get_summary(id)
     }
 
@@ -179,17 +180,11 @@ impl TaskStore for PauseAfterAcceptStore {
         self.inner.get_by_idempotency_key(key)
     }
 
-    fn transition<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, StoreError>> {
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.transition(command)
     }
 
-    fn get_summary<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskSummary>, StoreError>> {
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         self.inner.get_summary(id)
     }
 
@@ -245,7 +240,7 @@ async fn cancel_during_accept(history_capacity: usize) {
     let ran = Arc::new(AtomicBool::new(false));
     let handler_ran = Arc::clone(&ran);
     let submitting = service.clone();
-    let submission = tokio::spawn(async move {
+    let submission = spawn(async move {
         submitting
             .submit_local(move |_| {
                 handler_ran.store(true, Ordering::Release);
@@ -256,7 +251,7 @@ async fn cancel_during_accept(history_capacity: usize) {
             })
             .await
     });
-    tokio::time::timeout(WAIT_LIMIT, accepted_rx)
+    time::timeout(WAIT_LIMIT, accepted_rx)
         .await
         .expect("store persisted Queued")
         .expect("store sent accept signal");
@@ -275,14 +270,14 @@ async fn cancel_during_accept(history_capacity: usize) {
         CancelOutcome::CancelledBeforeStart
     );
     store.release.add_permits(1);
-    let handle = tokio::time::timeout(WAIT_LIMIT, submission)
+    let handle = time::timeout(WAIT_LIMIT, submission)
         .await
         .expect("submit finishes after accept gate opens")
         .expect("submit task joins")
         .expect("accepted task still returns a handle");
     assert_eq!(handle.task_id(), id);
     assert!(matches!(
-        tokio::time::timeout(WAIT_LIMIT, handle.result())
+        time::timeout(WAIT_LIMIT, handle.result())
             .await
             .expect("cancelled handle finalizes"),
         Err(LocalTaskResultError::Cancelled)
@@ -297,17 +292,17 @@ async fn cancel_during_accept(history_capacity: usize) {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_cancel_persisted_local_task_before_accept_returns() {
     cancel_during_accept(16).await;
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_cancel_persisted_local_task_before_accept_returns_with_zero_history() {
     cancel_during_accept(0).await;
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
     let (get_entered_tx, get_entered_rx) = oneshot::channel();
     let (cancel_persisted_tx, cancel_persisted_rx) = oneshot::channel();
@@ -330,18 +325,18 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
         .await
         .expect("first task accepted");
     let id = handle.task_id();
-    tokio::time::timeout(WAIT_LIMIT, get_entered_rx)
+    time::timeout(WAIT_LIMIT, get_entered_rx)
         .await
         .expect("scheduler entered first get")
         .expect("scheduler get signal received");
     let cancelling_service = service.clone();
-    let cancellation = tokio::spawn(async move { cancelling_service.cancel(id).await });
-    tokio::time::timeout(WAIT_LIMIT, cancel_persisted_rx)
+    let cancellation = spawn(async move { cancelling_service.cancel(id).await });
+    time::timeout(WAIT_LIMIT, cancel_persisted_rx)
         .await
         .expect("Cancelled was persisted and evicted")
         .expect("cancel persistence signal received");
     store.get_release.add_permits(1);
-    let replacement = tokio::time::timeout(WAIT_LIMIT, async {
+    let replacement = time::timeout(WAIT_LIMIT, async {
         loop {
             match service
                 .submit_local(|_| LocalTaskOutcome::<(), DomainError>::Succeeded {
@@ -351,7 +346,7 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
                 .await
             {
                 Ok(handle) => break handle,
-                Err(TaskServiceError::QueueFull) => tokio::task::yield_now().await,
+                Err(TaskServiceError::QueueFull) => task::yield_now().await,
                 Err(error) => panic!("unexpected replacement submission error: {error}"),
             }
         }
@@ -368,7 +363,7 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
     assert!(matches!(futures::poll!(result.as_mut()), std::task::Poll::Pending));
     store.cancel_release.add_permits(1);
     assert_eq!(
-        tokio::time::timeout(WAIT_LIMIT, cancellation)
+        time::timeout(WAIT_LIMIT, cancellation)
             .await
             .expect("cancel finishes")
             .expect("cancel task joins")
@@ -376,7 +371,7 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
         CancelOutcome::CancelledBeforeStart
     );
     assert!(matches!(
-        tokio::time::timeout(WAIT_LIMIT, result)
+        time::timeout(WAIT_LIMIT, result)
             .await
             .expect("authoritative cancellation reaches handle"),
         Err(LocalTaskResultError::Cancelled)
@@ -384,7 +379,7 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_local_handle_delivers_non_clone_value_after_summary_is_persisted() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -400,7 +395,7 @@ async fn test_local_handle_delivers_non_clone_value_after_summary_is_persisted()
         .await
         .expect("local task accepted");
     let task_id = handle.task_id();
-    let NonCloneValue(value) = tokio::time::timeout(WAIT_LIMIT, handle.result())
+    let NonCloneValue(value) = time::timeout(WAIT_LIMIT, handle.result())
         .await
         .expect("handle result arrives")
         .expect("task succeeded")
@@ -419,7 +414,7 @@ async fn test_local_handle_delivers_non_clone_value_after_summary_is_persisted()
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_local_handle_preserves_domain_error_type() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -430,7 +425,7 @@ async fn test_local_handle_preserves_domain_error_type() {
         .await
         .expect("local task accepted");
     let id = handle.task_id();
-    let error: DomainError = tokio::time::timeout(WAIT_LIMIT, handle.result())
+    let error: DomainError = time::timeout(WAIT_LIMIT, handle.result())
         .await
         .expect("handle result arrives")
         .expect("task finalizes")
@@ -445,12 +440,12 @@ async fn test_local_handle_preserves_domain_error_type() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_queued_local_handle_reports_cancelled_without_running_handler() {
-    let (started, started_rx) = tokio::sync::oneshot::channel();
+    let (started, started_rx) = sync::oneshot::channel();
     let (release, release_rx) = mpsc::channel();
     let service = TaskExecutionServiceBuilder::in_memory()
-        .capacity(qubit_task::model::ResourceCapacity {
+        .capacity(ResourceCapacity {
             cpu_slots: 1,
             ..Default::default()
         })
@@ -468,7 +463,7 @@ async fn test_queued_local_handle_reports_cancelled_without_running_handler() {
         })
         .await
         .expect("holding task accepted");
-    tokio::time::timeout(WAIT_LIMIT, started_rx)
+    time::timeout(WAIT_LIMIT, started_rx)
         .await
         .expect("holding task starts")
         .expect("start signal received");
@@ -490,7 +485,7 @@ async fn test_queued_local_handle_reports_cancelled_without_running_handler() {
         CancelOutcome::CancelledBeforeStart
     );
     assert!(matches!(
-        tokio::time::timeout(WAIT_LIMIT, queued.result())
+        time::timeout(WAIT_LIMIT, queued.result())
             .await
             .expect("queued handle finalizes"),
         Err(LocalTaskResultError::Cancelled)
@@ -505,7 +500,7 @@ async fn test_queued_local_handle_reports_cancelled_without_running_handler() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_handler_initiated_cancellation_has_distinct_handle_result() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -517,7 +512,7 @@ async fn test_handler_initiated_cancellation_has_distinct_handle_result() {
         .expect("local task accepted");
     let id = handle.task_id();
     assert!(matches!(
-        tokio::time::timeout(WAIT_LIMIT, handle.result())
+        time::timeout(WAIT_LIMIT, handle.result())
             .await
             .expect("cancelled handle finalizes"),
         Err(LocalTaskResultError::Cancelled)
@@ -534,10 +529,10 @@ async fn test_handler_initiated_cancellation_has_distinct_handle_result() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_unsatisfiable_local_task_is_rejected_before_acceptance() {
     let service = TaskExecutionServiceBuilder::in_memory()
-        .capacity(qubit_task::model::ResourceCapacity {
+        .capacity(ResourceCapacity {
             cpu_slots: 0,
             ..Default::default()
         })
@@ -555,15 +550,12 @@ async fn test_unsatisfiable_local_task_is_rejected_before_acceptance() {
             }
         })
         .await;
-    assert!(matches!(
-        result,
-        Err(qubit_task::service::TaskServiceError::Unsatisfiable)
-    ));
+    assert!(matches!(result, Err(TaskServiceError::Unsatisfiable)));
     assert!(!ran.load(Ordering::Acquire));
     assert_eq!(service.stats().await.expect("stats query succeeds").queued, 0);
     assert!(
         service
-            .list(qubit_task::model::TaskQuery::default())
+            .list(TaskQuery::default())
             .await
             .expect("history query succeeds")
             .records
@@ -572,7 +564,7 @@ async fn test_unsatisfiable_local_task_is_rejected_before_acceptance() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_panicking_local_handler_reports_panic_without_typed_result() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -583,7 +575,7 @@ async fn test_panicking_local_handler_reports_panic_without_typed_result() {
         .await
         .expect("local task accepted");
     let id = handle.task_id();
-    let result = tokio::time::timeout(WAIT_LIMIT, handle.result())
+    let result = time::timeout(WAIT_LIMIT, handle.result())
         .await
         .expect("panicking handle finalizes");
     assert!(
@@ -601,7 +593,7 @@ async fn test_panicking_local_handler_reports_panic_without_typed_result() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_dropping_local_handle_does_not_cancel_accepted_task() {
     let service = TaskExecutionServiceBuilder::in_memory()
         .build()
@@ -616,7 +608,7 @@ async fn test_dropping_local_handle_does_not_cancel_accepted_task() {
         .expect("local task accepted");
     let id = handle.task_id();
     drop(handle);
-    let record = tokio::time::timeout(WAIT_LIMIT, service.wait(id))
+    let record = time::timeout(WAIT_LIMIT, service.wait(id))
         .await
         .expect("accepted task finishes")
         .expect("wait succeeds");
@@ -624,7 +616,7 @@ async fn test_dropping_local_handle_does_not_cancel_accepted_task() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_local_handle_result_survives_zero_history_retention() {
     let service = TaskExecutionServiceBuilder::default()
         .store(Arc::new(MemoryTaskStore::new(0)))
@@ -639,7 +631,7 @@ async fn test_local_handle_result_survives_zero_history_retention() {
         .await
         .expect("local task accepted");
     let id = handle.task_id();
-    let NonCloneValue(value) = tokio::time::timeout(WAIT_LIMIT, handle.result())
+    let NonCloneValue(value) = time::timeout(WAIT_LIMIT, handle.result())
         .await
         .expect("handle result arrives")
         .expect("task finalized")
@@ -650,12 +642,9 @@ async fn test_local_handle_result_survives_zero_history_retention() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio_test]
 async fn test_recoverable_store_rejects_typed_local_submission() {
-    let path = std::env::temp_dir().join(format!(
-        "qubit-task-typed-handle-{}.sqlite",
-        qubit_task::TaskId::generate()
-    ));
+    let path = std::env::temp_dir().join(format!("qubit-task-typed-handle-{}.sqlite", TaskId::generate()));
     let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
         .expect("SQLite builder created")
         .build()

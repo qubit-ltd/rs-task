@@ -20,7 +20,10 @@ mod sqlite_tests {
     use qubit_task::model::TransitionCommand;
     use qubit_task::store::MemoryTaskStore;
     use qubit_task::store::SqliteTaskStore;
+    use qubit_task::store::StoreError;
     use qubit_task::store::TaskStore;
+    use tokio as tokio_crate;
+    use tokio::time;
 
     /// Inserts a record and moves it to the requested state through store
     /// transitions.
@@ -92,7 +95,7 @@ mod sqlite_tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_memory_and_sqlite_filter_failed_states_by_kind() {
         let path = std::env::temp_dir().join(format!("qubit-task-state-filter-{}.sqlite", TaskId::generate()));
         let memory: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
@@ -269,7 +272,7 @@ mod sqlite_tests {
         remove_database(&path);
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_memory_and_sqlite_pages_follow_acceptance_time() {
         let path = std::env::temp_dir().join(format!("qubit-task-time-cursor-{}.sqlite", TaskId::generate()));
         let memory = MemoryTaskStore::new(16);
@@ -285,7 +288,7 @@ mod sqlite_tests {
             memory_records.push(insert_with_id(&memory, id).await);
             sqlite_records.push(insert_with_id(&sqlite, id).await);
             if index < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+                time::sleep(std::time::Duration::from_millis(3)).await;
             }
         }
 
@@ -323,8 +326,8 @@ mod sqlite_tests {
         remove_database(&path);
     }
 
-    #[tokio::test]
-    async fn history_page_limit_overflow_is_rejected_by_both_stores() {
+    #[tokio_crate::test]
+    async fn test_history_page_limit_overflow_is_rejected_by_both_stores() {
         let path = std::env::temp_dir().join(format!("qubit-task-page-overflow-{}.sqlite", TaskId::generate()));
         let memory = MemoryTaskStore::new(8);
         let sqlite = SqliteTaskStore::open(&path).expect("SQLite store opens");
@@ -335,7 +338,7 @@ mod sqlite_tests {
                     ..TaskQuery::default()
                 })
                 .await;
-            assert!(matches!(result, Err(qubit_task::store::StoreError::InvalidRequest(_))));
+            assert!(matches!(result, Err(StoreError::InvalidRequest(_))));
         }
         drop(sqlite);
         remove_database(&path);
