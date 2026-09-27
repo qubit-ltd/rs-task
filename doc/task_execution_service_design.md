@@ -199,6 +199,8 @@ TaskExecutionService
 
 `TaskExecutionServiceBuilder::runtime_handle` 可指定服务自有 admission、scheduler、completion、shutdown 和发布器关闭等待使用的 Tokio runtime；默认使用进程级 runtime。调用方须保证注入 runtime 存活到关闭协调器完成。`shutdown()` 等待最终关闭结果；`shutdown_until(deadline)` 先启动或复用同一协调器，再限制当前调用者的等待时间。到期返回 `ShutdownTimedOut` 不会取消任务、释放存储所有权或终止事件发布器；后续 `shutdown()` 可继续等待共享结果。关闭在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；存储故障路径在服务取得关闭协调权后也执行通知收尾。服务自有 `NotificationPublisher` 占用一条发布线程；服务不订阅时不会产生订阅接收线程。服务不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker，但同步 provider 若一直阻塞，显式 shutdown 仍可能无限等待。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
 
+正常关闭只有在 admission 关闭、存储中的 `Queued`/`Running` 数量归零、调度器退出且所有已跟踪执行句柄完成后才释放 store owner。`prepare()` 返回 `EngineError::Closed` 是服务级永久调度故障，排队记录保留并通过 `SchedulerUnavailable` 报告；`activate()` 返回 `Closed` 只阻止对应任务。构建器在稳定的进程级 runtime 上执行恢复准备；调用方取消 `build()` 后，worker 会在恢复页边界停止、释放已取得的 owner，且不启动 scheduler。此清理是异步的。
+
 ## 7. 关键操作顺序与不变量
 
 ```text

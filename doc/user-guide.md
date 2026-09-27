@@ -318,6 +318,15 @@ restart the process through the application supervisor.
 
 ## Errors and diagnostics
 
+If an engine's `prepare()` returns `EngineError::Closed`, the service treats it
+as a permanent scheduler failure, stops admission, and reports
+`SchedulerUnavailable`; queued records remain in the store for recovery.
+`EngineError::Closed` from `activate()` applies to the affected attempt and
+blocks that task. Cancelling the future awaiting builder `build()` does not
+cancel its background construction worker: it stops at a recovery page
+boundary, releases any acquired owner, and does not start the scheduler. This
+cleanup is asynchronous after the caller has cancelled.
+
 `TaskRunError` distinguishes a handler failure by category, diagnostic text, and retryability. Non-retryable errors settle as `Failed`; a handler panic settles as `Panicked`. Stored diagnostic text is bounded, so keep the original application error in the application's own logs or result store when more detail is needed. `LocalTaskHandle<R, E>` preserves the original typed error for process-local work.
 
 A `Blocked` record is queryable and carries a reason for intervention, such as a missing handler version or a full retry queue. Use `get` or `list` to inspect that record, correct the registration or capacity condition, then call `retry_blocked`. For lifecycle events, use `notification_stats()` to distinguish local queue drops, publication errors, and worker failure; those counters do not indicate subscriber completion.

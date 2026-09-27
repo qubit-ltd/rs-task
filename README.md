@@ -92,6 +92,13 @@ The service also has an independent `max_running_tasks(NonZeroUsize)` limit, inc
 
 Dropping the last service handle starts an asynchronous drain; call `shutdown()` to observe completion. Scheduler panics surface as `SchedulerUnavailable` and are not restarted automatically. See the [user guide](doc/user-guide.md) for the custom engine contract and zero-CPU I/O configuration.
 
+If `TaskExecutionEngine::prepare` reports `Closed`, the service stops scheduling
+and reports `SchedulerUnavailable`; the queued task remains recoverable.
+`Closed` from `activate` applies to that task attempt and blocks its task. A
+cancelled builder call may finish asynchronous owner cleanup in its background
+worker. Successful shutdown waits for the scheduler and tracked executions
+before releasing store ownership.
+
 ## Project documents
 
 - [User guide](doc/user-guide.md)
