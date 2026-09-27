@@ -36,7 +36,9 @@ fn test_discovered_scheduling_registry_contains_builtin_fair_fifo_provider() {
         .resolve_selected(&ProviderSelection::named(spi::FAIR_FIFO_PROVIDER_ID).expect("valid provider ID"))
         .expect("built-in policy resolves");
     let policy = resolver.create_configured(&()).expect("policy is created");
-    assert!(policy.order(&Default::default(), &Default::default()).is_empty());
+    let plan = policy.order(&Default::default(), &Default::default());
+    assert!(plan.order.is_empty());
+    assert!(plan.barrier.is_none());
 }
 
 #[cfg(feature = "inventory")]

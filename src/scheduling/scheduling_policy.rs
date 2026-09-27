@@ -6,11 +6,11 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use super::QueueSnapshot;
+use super::SchedulingPlan;
 use crate::model::ResourceSnapshot;
-use crate::model::TaskId;
 
 /// Ordering strategy extension point; implementations only select candidate
-/// IDs.
+/// IDs and may establish a barrier to preserve fairness.
 ///
 /// The policy receives a bounded queue snapshot and current resource usage. It
 /// does not mutate task state or reserve resources; the execution engine makes
@@ -25,11 +25,13 @@ use crate::model::TaskId;
 /// use qubit_task::scheduling::SchedulingPolicy;
 ///
 /// let policy = FairFifoPolicy::default();
-/// let ordered = policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default());
-/// assert!(ordered.is_empty());
+/// let plan = policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default());
+/// assert!(plan.order.is_empty());
+/// assert!(plan.barrier.is_none());
 /// ```
 pub trait SchedulingPolicy: Send + Sync {
-    /// Returns candidate IDs in preferred order without changing task state.
+    /// Returns candidate IDs in preferred order and an optional fairness
+    /// barrier without changing task state.
     ///
     /// # Parameters
     ///
@@ -38,7 +40,8 @@ pub trait SchedulingPolicy: Send + Sync {
     ///
     /// # Returns
     ///
-    /// Task identifiers in preferred scheduling order.
+    /// A candidate order. If `barrier` is set, the scheduler must stop scanning
+    /// later candidates while that task is temporarily unable to start.
     #[must_use]
-    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId>;
+    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> SchedulingPlan;
 }

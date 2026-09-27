@@ -18,6 +18,7 @@ use qubit_task::model::ResourceSnapshot;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
 use qubit_task::scheduling::QueueSnapshot;
+use qubit_task::scheduling::SchedulingPlan;
 use qubit_task::scheduling::SchedulingPolicy;
 use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
@@ -30,7 +31,7 @@ struct HoldFirstOrder {
 }
 
 impl SchedulingPolicy for HoldFirstOrder {
-    fn order(&self, queue: &QueueSnapshot, _: &ResourceSnapshot) -> Vec<TaskId> {
+    fn order(&self, queue: &QueueSnapshot, _: &ResourceSnapshot) -> SchedulingPlan {
         let ids: Vec<_> = queue.tasks.iter().map(|task| task.id).collect();
         if !self.held.swap(true, Ordering::AcqRel) {
             self.entered
@@ -42,7 +43,10 @@ impl SchedulingPolicy for HoldFirstOrder {
                 .recv()
                 .expect("first policy call is released");
         }
-        ids
+        SchedulingPlan {
+            order: ids,
+            barrier: None,
+        }
     }
 }
 

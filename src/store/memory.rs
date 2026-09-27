@@ -387,6 +387,20 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        Box::pin(async move {
+            let state = self.state.lock();
+            Ok(state
+                .idempotency
+                .get(key)
+                .and_then(|id| state.records.get(id))
+                .map(TaskRecord::summary))
+        })
+    }
+
     /// Loads a retained task including its request payload.
     ///
     /// # Parameters

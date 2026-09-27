@@ -45,7 +45,8 @@ fn test_fair_fifo_policy_protects_head_when_max_bypasses_is_zero() {
 
     let result = FairFifoPolicy::new(0).order(&snapshot, &resources);
 
-    assert_eq!(result, vec![head.id]);
+    assert_eq!(result.order, vec![head.id]);
+    assert_eq!(result.barrier, Some(head.id));
 }
 
 #[test]
@@ -65,8 +66,10 @@ fn test_fair_fifo_policy_respects_scan_budget() {
     let truncated = FairFifoPolicy::new(8).order(&queue(vec![blocked.clone(), available.clone()], 1), &resources);
     let within_budget = FairFifoPolicy::new(8).order(&queue(vec![blocked, available.clone()], 2), &resources);
 
-    assert_eq!(truncated, vec![blocked_id]);
-    assert_eq!(within_budget, vec![available.id, blocked_id]);
+    assert_eq!(truncated.order, vec![blocked_id]);
+    assert_eq!(truncated.barrier, None);
+    assert_eq!(within_budget.order, vec![available.id, blocked_id]);
+    assert_eq!(within_budget.barrier, None);
 }
 
 #[test]
@@ -91,8 +94,13 @@ fn test_fair_fifo_policy_checks_cpu_capacity_and_current_usage() {
         ..ResourceSnapshot::default()
     };
 
-    assert_eq!(FairFifoPolicy::new(8).order(&snapshot, &sufficient), vec![task.id]);
-    assert!(FairFifoPolicy::new(8).order(&snapshot, &insufficient).is_empty());
+    let sufficient_order = FairFifoPolicy::new(8).order(&snapshot, &sufficient);
+    let insufficient_order = FairFifoPolicy::new(8).order(&snapshot, &insufficient);
+
+    assert_eq!(sufficient_order.order, vec![task.id]);
+    assert_eq!(sufficient_order.barrier, None);
+    assert!(insufficient_order.order.is_empty());
+    assert_eq!(insufficient_order.barrier, None);
 }
 
 #[test]
@@ -115,22 +123,32 @@ fn test_fair_fifo_policy_checks_gpu_labels_and_custom_resources() {
         used_custom: BTreeMap::from([("license".to_owned(), 1)]),
         ..ResourceSnapshot::default()
     };
-    assert_eq!(FairFifoPolicy::new(8).order(&snapshot, &resources), vec![task.id]);
+    assert_eq!(FairFifoPolicy::new(8).order(&snapshot, &resources).order, vec![task.id]);
 
     let mut wrong_label = resources.clone();
     wrong_label
         .capacity
         .gpus
         .insert("gpu1".to_owned(), vec!["rocm".to_owned()]);
-    assert!(FairFifoPolicy::new(8).order(&snapshot, &wrong_label).is_empty());
+    assert!(FairFifoPolicy::new(8).order(&snapshot, &wrong_label).order.is_empty());
 
     let mut unavailable_gpu = resources.clone();
     unavailable_gpu.used_gpus.push("gpu1".to_owned());
-    assert!(FairFifoPolicy::new(8).order(&snapshot, &unavailable_gpu).is_empty());
+    assert!(
+        FairFifoPolicy::new(8)
+            .order(&snapshot, &unavailable_gpu)
+            .order
+            .is_empty()
+    );
 
     let mut insufficient_custom = resources;
     insufficient_custom.capacity.custom.insert("license".to_owned(), 2);
-    assert!(FairFifoPolicy::new(8).order(&snapshot, &insufficient_custom).is_empty());
+    assert!(
+        FairFifoPolicy::new(8)
+            .order(&snapshot, &insufficient_custom)
+            .order
+            .is_empty()
+    );
 }
 
 #[test]
@@ -159,8 +177,11 @@ fn test_fair_fifo_policy_surfaces_requests_that_exceed_total_capacity() {
         ..ResourceSnapshot::default()
     };
 
+    let plan = FairFifoPolicy::new(8).order(&snapshot, &resources);
+
     assert_eq!(
-        FairFifoPolicy::new(8).order(&snapshot, &resources),
+        plan.order,
         vec![too_many_gpus.id, unknown_gpu_label.id, too_much_custom.id]
     );
+    assert_eq!(plan.barrier, None);
 }

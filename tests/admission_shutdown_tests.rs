@@ -82,6 +82,7 @@ use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::scheduling::QueueSnapshot;
+use qubit_task::scheduling::SchedulingPlan;
 use qubit_task::scheduling::SchedulingPolicy;
 use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
@@ -105,7 +106,7 @@ use tokio::time;
 struct PanickingPolicy;
 
 impl SchedulingPolicy for PanickingPolicy {
-    fn order(&self, _queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> Vec<TaskId> {
+    fn order(&self, _queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> SchedulingPlan {
         panic!("injected policy panic");
     }
 }
@@ -113,11 +114,14 @@ impl SchedulingPolicy for PanickingPolicy {
 struct PanicAfterFirstPolicy(AtomicUsize);
 
 impl SchedulingPolicy for PanicAfterFirstPolicy {
-    fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> Vec<TaskId> {
+    fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> SchedulingPlan {
         if self.0.fetch_add(1, Ordering::AcqRel) > 0 {
             panic!("injected later policy panic");
         }
-        queue.tasks.iter().map(|task| task.id).collect()
+        SchedulingPlan {
+            order: queue.tasks.iter().map(|task| task.id).collect(),
+            barrier: None,
+        }
     }
 }
 
@@ -441,6 +445,17 @@ impl TaskStore for ControlledStore {
             Box::pin(async { Err(StoreError::Failure("injected idempotency lookup failure".into())) })
         } else {
             self.inner.get_by_idempotency_key(key)
+        }
+    }
+
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        if self.fail_next_find.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(StoreError::Failure("injected idempotency lookup failure".into())) })
+        } else {
+            self.inner.get_summary_by_idempotency_key(key)
         }
     }
 

@@ -33,6 +33,7 @@ use qubit_task::model::TaskState;
 use qubit_task::scheduling::FairFifoPolicy;
 use qubit_task::scheduling::QueueSnapshot;
 use qubit_task::scheduling::QueuedTask;
+use qubit_task::scheduling::SchedulingPlan;
 use qubit_task::scheduling::SchedulingPolicy;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::store::TaskFuture;
@@ -47,15 +48,16 @@ struct ObservePolicy {
 }
 
 impl SchedulingPolicy for ObservePolicy {
-    fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> Vec<TaskId> {
+    fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> SchedulingPlan {
         let _ = self
             .observed
             .send(queue.tasks.iter().map(|task| (task.id, task.bypasses)).collect());
-        if self.allow_later.load(Ordering::Acquire) {
+        let order = if self.allow_later.load(Ordering::Acquire) {
             queue.tasks.last().map(|task| vec![task.id]).unwrap_or_default()
         } else {
             Vec::new()
-        }
+        };
+        SchedulingPlan { order, barrier: None }
     }
 }
 
@@ -94,7 +96,7 @@ struct BoundedSnapshotPolicy {
 }
 
 impl SchedulingPolicy for BoundedSnapshotPolicy {
-    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId> {
+    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> SchedulingPlan {
         let _ = self.observed.send(
             queue
                 .tasks
@@ -107,7 +109,7 @@ impl SchedulingPolicy for BoundedSnapshotPolicy {
 }
 
 impl SchedulingPolicy for ObservingFairPolicy {
-    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId> {
+    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> SchedulingPlan {
         let _ = self
             .observed
             .send(queue.tasks.iter().map(|task| (task.id, task.bypasses)).collect());
@@ -196,6 +198,75 @@ impl TaskExecutionEngine for FailingActivationEngine {
     ) -> TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
         Box::pin(async { Err(EngineError::Closed) })
     }
+}
+
+#[tokio_test]
+async fn test_cross_window_runnable_task_progresses() {
+    let (started, mut starts) = mpsc::unbounded_channel();
+    let release = Arc::new(
+        b"PABs"
+            .iter()
+            .copied()
+            .map(|label| (label, Arc::new(Semaphore::new(0))))
+            .collect::<HashMap<_, _>>(),
+    );
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .capacity(ResourceCapacity {
+            cpu_slots: 2,
+            ..ResourceCapacity::default()
+        })
+        .scan_budget(2)
+        .register_handler(Arc::new(GatedHandler {
+            started,
+            release: Arc::clone(&release),
+        }))
+        .expect("handler registration succeeds")
+        .build()
+        .await
+        .expect("service builds");
+
+    let mut preoccupier = TaskRequest::new("fairness-gated", "1", b"P".to_vec());
+    preoccupier.resources.cpu_slots = 1;
+    service
+        .submit(test_keyed(preoccupier))
+        .await
+        .expect("preoccupier is accepted");
+    assert_eq!(
+        time::timeout(Duration::from_secs(3), starts.recv())
+            .await
+            .expect("preoccupier starts")
+            .expect("handler event channel remains open"),
+        b'P'
+    );
+
+    for label in b"AB".iter().copied() {
+        let mut large = TaskRequest::new("fairness-gated", "1", vec![label]);
+        large.resources.cpu_slots = 2;
+        service.submit(test_keyed(large)).await.expect("large task is accepted");
+    }
+    let mut small = TaskRequest::new("fairness-gated", "1", b"s".to_vec());
+    small.resources.cpu_slots = 1;
+    service.submit(test_keyed(small)).await.expect("small task is accepted");
+
+    assert_eq!(
+        time::timeout(Duration::from_secs(3), starts.recv())
+            .await
+            .expect("later runnable task progresses beyond the blocked scan window")
+            .expect("handler event channel remains open"),
+        b's'
+    );
+
+    release[&b's'].add_permits(1);
+    release[&b'P'].add_permits(1);
+    for expected in b"AB" {
+        let label = time::timeout(Duration::from_secs(3), starts.recv())
+            .await
+            .expect("large queued task starts after resources are returned")
+            .expect("handler event channel remains open");
+        assert_eq!(label, *expected);
+        release[&label].add_permits(1);
+    }
+    service.shutdown().await.expect("service drains and shuts down");
 }
 
 #[tokio_test]
@@ -368,8 +439,8 @@ fn test_protected_head_stays_first_until_resources_are_returned() {
         ..ResourceSnapshot::default()
     };
 
-    assert_eq!(policy.order(&queue, &constrained), vec![large.id]);
-    assert_eq!(policy.order(&queue, &available), vec![large.id]);
+    assert_eq!(policy.order(&queue, &constrained).order, vec![large.id]);
+    assert_eq!(policy.order(&queue, &available).order, vec![large.id]);
 }
 
 #[tokio_test]
@@ -391,7 +462,7 @@ async fn test_protected_large_task_starts_before_small_tasks_after_resources_ret
             cpu_slots: 2,
             ..ResourceCapacity::default()
         })
-        .scan_budget(32)
+        .scan_budget(1)
         .policy(policy)
         .register_handler(Arc::new(GatedHandler {
             started,

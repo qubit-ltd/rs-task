@@ -105,6 +105,70 @@ impl SchedulerQueue {
         }
     }
 
+    /// Restores unstarted tasks at the back so a later window can be scanned.
+    ///
+    /// # Parameters
+    ///
+    /// * `tasks` - Unstarted tasks removed from the current scheduling window.
+    pub(crate) fn restore_back(&mut self, tasks: Vec<QueuedTask>) {
+        for task in tasks {
+            self.len += 1;
+            if let Some(deadline) = task.retry_not_before_ms {
+                self.delayed.entry(deadline).or_default().push_back(task);
+            } else {
+                self.ready.push_back(task);
+            }
+        }
+    }
+
+    /// Promotes the listed still-ready tasks while preserving their supplied
+    /// order.
+    ///
+    /// Tasks that were removed or moved to a delayed retry bucket are ignored.
+    ///
+    /// # Parameters
+    ///
+    /// * `ids` - Task identifiers in their original FIFO order.
+    pub(crate) fn promote_ids_front(&mut self, ids: &[TaskId]) {
+        let tasks = self.take_ready_ids(ids);
+        self.restore_front(tasks);
+    }
+
+    /// Counts one successful bypass for each listed ready task and promotes
+    /// them.
+    ///
+    /// # Parameters
+    ///
+    /// * `ids` - Earlier task identifiers in their original FIFO order.
+    pub(crate) fn record_bypass_and_promote_front(&mut self, ids: &[TaskId]) {
+        let mut tasks = self.take_ready_ids(ids);
+        for task in &mut tasks {
+            task.bypasses = task.bypasses.saturating_add(1);
+        }
+        self.restore_front(tasks);
+    }
+
+    /// Removes matching ready tasks without changing their relative order.
+    ///
+    /// # Parameters
+    ///
+    /// * `ids` - Task identifiers to extract from the ready queue.
+    ///
+    /// # Returns
+    ///
+    /// Matching tasks in the order supplied by `ids`; absent IDs are ignored.
+    fn take_ready_ids(&mut self, ids: &[TaskId]) -> Vec<QueuedTask> {
+        let mut tasks = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(index) = self.ready.iter().position(|task| task.id == *id) {
+                let task = self.ready.remove(index).expect("matching ready task exists");
+                self.len -= 1;
+                tasks.push(task);
+            }
+        }
+        tasks
+    }
+
     /// Removes one queued task by ID from either scheduling class.
     ///
     /// # Parameters
@@ -232,5 +296,61 @@ mod tests {
         assert!(!queue.remove(delayed_id));
         assert_eq!(queue.len(), 0);
         assert!(queue.is_empty());
+    }
+
+    /// Moves an unstarted window behind tasks that have not been inspected.
+    #[test]
+    fn test_restore_back_advances_to_later_candidates() {
+        let mut queue = SchedulerQueue::new();
+        let first = task(None);
+        let first_id = first.id;
+        let second = task(None);
+        let second_id = second.id;
+        let later = task(None);
+        let later_id = later.id;
+        queue.push(first);
+        queue.push(second);
+        queue.push(later);
+
+        let window = queue.take_window(2, 0);
+        queue.restore_back(window);
+
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.take_window(1, 0)[0].id, later_id);
+        assert_eq!(
+            queue.take_window(2, 0).iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![first_id, second_id]
+        );
+    }
+
+    /// Promotes still-queued tasks in the original order after a successful
+    /// bypass.
+    #[test]
+    fn test_record_bypass_promotes_ids_without_changing_queue_length() {
+        let mut queue = SchedulerQueue::new();
+        let first = task(None);
+        let first_id = first.id;
+        let second = task(None);
+        let second_id = second.id;
+        let later = task(None);
+        let later_id = later.id;
+        queue.push(first);
+        queue.push(second);
+        queue.push(later);
+
+        let skipped = queue.take_window(2, 0);
+        queue.restore_back(skipped);
+        let launched = queue.take_window(1, 0);
+        assert_eq!(launched[0].id, later_id);
+        queue.record_bypass_and_promote_front(&[first_id, second_id]);
+
+        let promoted = queue.take_window(2, 0);
+        assert_eq!(
+            promoted.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![first_id, second_id]
+        );
+        assert_eq!(promoted[0].bypasses, 1);
+        assert_eq!(promoted[1].bypasses, 1);
+        assert_eq!(queue.len(), 0);
     }
 }

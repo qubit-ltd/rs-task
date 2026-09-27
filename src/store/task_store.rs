@@ -82,6 +82,29 @@ pub trait TaskStore: Send + Sync {
     /// Resolves to an error if the store cannot complete the lookup.
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
 
+    /// Finds lifecycle metadata by idempotency key without loading payload
+    /// bytes.
+    ///
+    /// Implementations must query only the summary projection. This operation
+    /// is required so implementations cannot silently fall back to a full
+    /// record read.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Idempotency key to look up.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the matching retained summary, if any.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to an error if the store cannot complete the lookup.
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>>;
+
     /// Applies a lifecycle transition only when its expected revision matches.
     ///
     /// # Parameters

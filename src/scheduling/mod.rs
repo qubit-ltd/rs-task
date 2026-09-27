@@ -11,6 +11,7 @@ mod fair_fifo_policy;
 mod queue_snapshot;
 mod queued_task;
 mod scheduling_future;
+mod scheduling_plan;
 mod scheduling_policy;
 mod scheduling_policy_provider;
 
@@ -18,5 +19,6 @@ pub use fair_fifo_policy::FairFifoPolicy;
 pub use queue_snapshot::QueueSnapshot;
 pub use queued_task::QueuedTask;
 pub use scheduling_future::SchedulingFuture;
+pub use scheduling_plan::SchedulingPlan;
 pub use scheduling_policy::SchedulingPolicy;
 pub use scheduling_policy_provider::SchedulingPolicyProvider;

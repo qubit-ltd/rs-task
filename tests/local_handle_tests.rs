@@ -89,6 +89,13 @@ impl TaskStore for PauseEvictedGetStore {
         self.inner.get_by_idempotency_key(key)
     }
 
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        self.inner.get_summary_by_idempotency_key(key)
+    }
+
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let cancel = matches!(command.state, TaskState::Cancelled);
@@ -178,6 +185,13 @@ impl TaskStore for PauseAfterAcceptStore {
 
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         self.inner.get_by_idempotency_key(key)
+    }
+
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        self.inner.get_summary_by_idempotency_key(key)
     }
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
