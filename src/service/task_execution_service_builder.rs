@@ -417,18 +417,20 @@ impl TaskExecutionServiceBuilder {
             .unwrap_or_else(|| super::task_execution_service::runtime().handle().clone());
         #[cfg(feature = "event-bus")]
         let event_bus = match self.event_bus {
-            Some(bus) => match TaskEventPublisher::new(bus, self.event_bus_buffer_capacity, self.event_bus_close_timeout) {
-                Ok(publisher) => Some(publisher),
-                Err(error) => {
-                    if let Some(epoch) = owner
-                        && let Err(cleanup) = store.release_owner(epoch).await
-                    {
-                        return Err(TaskServiceBuildError::CleanupFailed {
-                            primary: Box::new(TaskServiceBuildError::EventPublisherThread(error)),
-                            cleanup,
-                        });
+            Some(bus) => {
+                match TaskEventPublisher::new(bus, self.event_bus_buffer_capacity, self.event_bus_close_timeout) {
+                    Ok(publisher) => Some(publisher),
+                    Err(error) => {
+                        if let Some(epoch) = owner
+                            && let Err(cleanup) = store.release_owner(epoch).await
+                        {
+                            return Err(TaskServiceBuildError::CleanupFailed {
+                                primary: Box::new(TaskServiceBuildError::EventPublisherThread(error)),
+                                cleanup,
+                            });
+                        }
+                        return Err(TaskServiceBuildError::EventPublisherThread(error));
                     }
-                    return Err(TaskServiceBuildError::EventPublisherThread(error));
                 }
             }
             None => None,
