@@ -24,7 +24,7 @@ recovered.
 | --- | --- | --- |
 | `TaskExecutionService::in_memory()` | Bounded memory history | Lost when the process exits |
 | Custom `TaskStore` with persistent history | Persistent | Depends on the store's declared recovery capability |
-| `recoverable_sqlite(path)` | SQLite | Queued work is restored; interrupted running work may run again |
+| `TaskExecutionServiceBuilder::recoverable_sqlite(path)` | SQLite | Queued work is restored; interrupted running work may run again |
 
 Recovery provides at-least-once execution. A handler can have performed an
 external side effect before a process exits, so handlers should use idempotency
@@ -403,7 +403,7 @@ starting again. `retry_blocked` returns `TaskServiceError::AttemptsExhausted`
 for an exhausted record; submit a new task ID for a fresh attempt budget. This
 behavior changes the 0.6.0 retry contract.
 
-## Migration from 0.5 and earlier's previous API
+## Migration from 0.5 and earlier APIs
 
 This redesign removes caller-supplied IDs, `submit` closures,
 thread-pool-specific builder settings, and the old `TaskHandle<R, E>` API. There

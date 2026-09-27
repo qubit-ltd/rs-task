@@ -94,15 +94,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 4096 字节；执行诊断会在 UTF-8 字符边界裁剪。SQLite 同时只执行一个阻塞
 数据库操作。开始关闭后服务拒绝新的写入，SQLite 所有权释放后旧句柄不能写入。
 
-## 测试
-
 历史分页使用 `TaskCursor { accepted_at_ms, id }`，按受理时间、再按任务 ID
 排序。SQLite 历史默认保留；调用方可显式调用 `prune_terminal_before`，并为每次
 清理指定最大行数。被删除记录的幂等键可以重新使用。公开调度策略中的
-`QueuedTask` 现在保存 `resources`，不再保存完整请求。应用可通过
+`QueuedTask` 保存 `resources`，不保存完整请求。应用可通过
 `TaskExecutionServiceBuilder::runtime_handle` 指定服务后台任务使用的 runtime，
 并须保证它至少存活到排空完成。第三方 `TaskStore` 必须实现
 `has_unfinished_over_limit(limit)`，以便恢复预检无需解码 payload。最后句柄析构和调度器故障细节见用户指南。
+
+任务历史和等待接口返回不含 `payload` 的 `TaskSummary`。状态处理应使用
+`get_summary`、`list`、`wait` 和 `retry_blocked`；`get` 与
+`get_by_idempotency_key` 仍返回包含完整请求的 `TaskRecord`。SQLite schema 3
+将请求元数据、payload BLOB 和生命周期 JSON 分列保存，摘要查询与状态转换不读取
+BLOB。schema 0、1、2 数据库会事务性迁移到 schema 3，并保留请求、幂等键和生命周期。
+
+存储故障发生后，等待者和本地句柄会立即收到错误。共享关闭结果会等待调度器和已跟踪
+的执行尝试退出，再释放 SQLite 所有权。`shutdown_until` 超时后，后台排空仍会继续。
+运维人员可检查超龄 `Blocked` 摘要，并用 `abandon_blocked(id, state_version)`
+按版本放弃；版本已变化时会返回冲突。之后可调用有界
+`prune_terminal_before` 清理终态历史。
+
+## 测试
 
 ```bash
 # 使用默认 feature 集运行测试
@@ -135,15 +147,3 @@ Pull Request 前运行 `./align-ci.sh` 格式化代码，运行 `./ci-check.sh` 
 **Haixing Hu** - *Qubit Co. Ltd.*
 
 仓库地址：[https://github.com/qubit-ltd/rs-task](https://github.com/qubit-ltd/rs-task)
-
-任务历史和等待接口返回不含 `payload` 的 `TaskSummary`。状态处理应使用
-`get_summary`、`list`、`wait` 和 `retry_blocked`；`get` 与
-`get_by_idempotency_key` 仍返回包含完整请求的 `TaskRecord`。SQLite schema 3
-将请求元数据、payload BLOB 和生命周期 JSON 分列保存，摘要查询与状态转换不读取
-BLOB。schema 0、1、2 数据库会事务性迁移到 schema 3，并保留请求、幂等键和生命周期。
-
-存储故障发生后，等待者和本地句柄会立即收到错误。共享关闭结果会等待调度器和已跟踪
-的执行尝试退出，再释放 SQLite 所有权。`shutdown_until` 超时后，后台排空仍会继续。
-运维人员可检查超龄 `Blocked` 摘要，并用 `abandon_blocked(id, state_version)`
-按版本放弃；版本已变化时会返回冲突。之后可调用有界
-`prune_terminal_before` 清理终态历史。

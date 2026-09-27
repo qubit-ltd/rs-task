@@ -16,11 +16,13 @@ use qubit_task::model::TaskStateKind;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::StoreError;
 
+/// Creates the runtime used by the asynchronous maintenance example.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(run())
 }
 
+/// Reviews aged blocked tasks, abandons unchanged tasks, then prunes history.
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let service = TaskExecutionService::in_memory().await?;
     let cutoff_ms = now_ms().saturating_sub(Duration::from_secs(24 * 60 * 60).as_millis() as u64);
@@ -62,6 +64,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Returns current Unix epoch milliseconds, defaulting if the clock is earlier.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
