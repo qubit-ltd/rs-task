@@ -5,11 +5,13 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
+use tokio::sync::futures::Notified;
 
 use crate::model::TaskId;
 
@@ -38,6 +40,14 @@ pub(super) struct WaitSubscription {
 impl TaskWaitRegistry {
     /// Registers a subscriber and returns its task-specific notification
     /// handle.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Task identity whose state changes should wake this subscriber.
+    ///
+    /// # Returns
+    ///
+    /// A subscription that unregisters when dropped.
     pub(super) fn subscribe(self: &Arc<Self>, id: TaskId) -> WaitSubscription {
         let notify = {
             let mut entries = self.entries.lock();
@@ -55,6 +65,10 @@ impl TaskWaitRegistry {
         }
     }
     /// Wakes all current subscribers for one task ID.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Task identity whose current subscribers are notified.
     pub(super) fn notify(&self, id: TaskId) {
         let notify = self.entries.lock().get(&id).map(|entry| entry.notify.clone());
         if let Some(notify) = notify {
@@ -76,7 +90,13 @@ impl TaskWaitRegistry {
 }
 impl WaitSubscription {
     /// Creates the notification future used to await a task update.
-    pub fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+    ///
+    /// # Returns
+    ///
+    /// A future that completes after the next notification for this task.
+    #[must_use]
+    #[inline]
+    pub fn notified(&self) -> Notified<'_> {
         self.notify.notified()
     }
 }
@@ -96,11 +116,16 @@ impl Drop for WaitSubscription {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::pin;
+    use tokio::test as tokio_test;
+    use tokio::time;
 
     use super::TaskWaitRegistry;
     use crate::model::TaskId;
-    #[tokio::test]
-    async fn subscriptions_are_scoped_and_removed_on_drop() {
+    #[tokio_test]
+    async fn test_subscriptions_are_scoped_and_removed_on_drop() {
         let registry = Arc::new(TaskWaitRegistry::default());
         let a = TaskId::generate();
         let b = TaskId::generate();
@@ -109,30 +134,22 @@ mod tests {
         let sub_b = registry.subscribe(b);
         {
             let notified_a = sub_a.notified();
-            tokio::pin!(notified_a);
+            pin!(notified_a);
             notified_a.as_mut().enable();
             let notified_a_second = sub_a_second.notified();
-            tokio::pin!(notified_a_second);
+            pin!(notified_a_second);
             notified_a_second.as_mut().enable();
             let notified_b = sub_b.notified();
-            tokio::pin!(notified_b);
+            pin!(notified_b);
             notified_b.as_mut().enable();
             registry.notify(a);
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut notified_a)
+            time::timeout(Duration::from_millis(50), &mut notified_a).await.unwrap();
+            time::timeout(Duration::from_millis(50), &mut notified_a_second)
                 .await
                 .unwrap();
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut notified_a_second)
-                .await
-                .unwrap();
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(10), &mut notified_b)
-                    .await
-                    .is_err()
-            );
+            assert!(time::timeout(Duration::from_millis(10), &mut notified_b).await.is_err());
             registry.notify_all();
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut notified_b)
-                .await
-                .unwrap();
+            time::timeout(Duration::from_millis(50), &mut notified_b).await.unwrap();
         }
         drop(sub_a);
         assert!(registry.entries.lock().contains_key(&a));

@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -18,17 +19,27 @@ use fs2::FileExt;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+use rusqlite::Result as SqliteResult;
+use rusqlite::Row;
+use rusqlite::Transaction;
+use rusqlite::params;
+use rusqlite::params_from_iter;
+use rusqlite::types::Value;
+use tokio::sync;
+use tokio::task;
 
 use super::StoreError;
 use super::TaskFuture;
 use super::TaskStore;
 use crate::model::AcceptOutcome;
+use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
 use crate::model::StoredTask;
 use crate::model::StoredTaskPage;
 use crate::model::TaskCursor;
 use crate::model::TaskId;
+use crate::model::TaskOutput;
 use crate::model::TaskPage;
 use crate::model::TaskQuery;
 use crate::model::TaskRecord;
@@ -47,10 +58,33 @@ const SUMMARY_COLUMNS: &str =
 
 /// SQLite-backed history with an exclusive OS lock for one active service
 /// process.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use std::fs;
+///
+/// use qubit_task::model::TaskId;
+/// use qubit_task::store::SqliteTaskStore;
+/// use qubit_task::store::TaskStore;
+///
+/// let path = std::env::temp_dir().join(format!("qubit-task-{}.sqlite", TaskId::generate()));
+/// let store = SqliteTaskStore::open(&path)?;
+/// assert!(store.capabilities().restart_recovery);
+/// drop(store);
+/// fs::remove_file(&path)?;
+/// fs::remove_file(path.with_extension("owner.lock"))?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct SqliteTaskStore {
+    /// SQLite connection serialized behind a synchronous mutex.
     connection: Arc<Mutex<Connection>>,
+    /// Process-lock file and currently held recovery epoch.
     owner_state: Arc<Mutex<SqliteOwnerState>>,
-    operation_slot: Arc<tokio::sync::Semaphore>,
+    /// Bounds connection operations to one blocking worker at a time.
+    operation_slot: Arc<sync::Semaphore>,
     #[cfg(test)]
     worker_counts: Arc<WorkerCounts>,
 }
@@ -82,23 +116,36 @@ impl Drop for WorkerGuard {
 }
 
 struct SqliteOwnerState {
+    /// Exclusive lock file retained for the active store owner.
     lock_file: Option<File>,
+    /// Epoch issued to the current service owner.
     epoch: Option<OwnerEpoch>,
 }
 
 /// Immutable task request fields are stored separately from this lifecycle.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredLifecycle {
+    /// Stable task identity copied from the indexed row.
     id: TaskId,
+    /// Mutable lifecycle state.
     state: TaskState,
+    /// Monotonic lifecycle revision.
     state_version: u64,
+    /// Number of attempts started.
     attempt: u32,
+    /// Earliest eligible retry timestamp, if delayed.
     retry_not_before_ms: Option<u64>,
+    /// Acceptance timestamp in Unix epoch milliseconds.
     accepted_at_ms: u64,
+    /// Timestamp of the most recent execution start.
     started_at_ms: Option<u64>,
+    /// Timestamp when the task became terminal.
     finished_at_ms: Option<u64>,
+    /// Resources assigned to the current or last attempt.
     assigned_resources: Vec<String>,
-    output: Option<crate::model::TaskOutput>,
+    /// Bounded output summary from successful work.
+    output: Option<TaskOutput>,
+    /// Whether cooperative cancellation has been requested.
     cancel_requested: bool,
 }
 
@@ -120,6 +167,7 @@ impl StoredLifecycle {
         }
     }
 
+    /// Copies mutable lifecycle fields from a payload-free task summary.
     fn from_summary(record: &TaskSummary) -> Self {
         Self {
             id: record.id,
@@ -136,7 +184,7 @@ impl StoredLifecycle {
         }
     }
 
-    /// Reconstructs a complete record using its immutable request.
+    /// Reconstructs a complete record by attaching its immutable request.
     fn into_record(self, request: TaskRequest) -> TaskRecord {
         TaskRecord {
             id: self.id,
@@ -154,6 +202,7 @@ impl StoredLifecycle {
         }
     }
 
+    /// Reconstructs a payload-free summary from lifecycle and request fields.
     fn into_summary(self, request: TaskRequestInfo) -> TaskSummary {
         TaskSummary {
             id: self.id,
@@ -175,29 +224,48 @@ impl StoredLifecycle {
 /// Raw task columns duplicated for indexed SQLite lookup and consistency
 /// checks.
 struct StoredTaskRow {
+    /// UUID text stored in the indexed identity column.
     id: String,
+    /// Indexed lifecycle category.
     state_kind: String,
+    /// Indexed acceptance timestamp.
     accepted_at: i64,
+    /// Indexed correlation key.
     correlation_key: Option<String>,
+    /// Indexed idempotency key.
     idempotency_key: Option<String>,
+    /// Version of the serialized row representation.
     format_version: i64,
+    /// Immutable request metadata encoded as JSON.
     request_info_json: String,
+    /// Opaque request payload bytes.
     payload: Vec<u8>,
+    /// Mutable task lifecycle encoded as JSON.
     lifecycle_json: String,
 }
 
+/// Row projection used by reads that deliberately omit the payload column.
 struct StoredSummaryRow {
+    /// UUID text stored in the indexed identity column.
     id: String,
+    /// Indexed lifecycle category.
     state_kind: String,
+    /// Indexed acceptance timestamp.
     accepted_at: i64,
+    /// Indexed correlation key.
     correlation_key: Option<String>,
+    /// Indexed idempotency key.
     idempotency_key: Option<String>,
+    /// Version of the serialized row representation.
     format_version: i64,
+    /// Immutable request metadata encoded as JSON.
     request_info_json: String,
+    /// Mutable task lifecycle encoded as JSON.
     lifecycle_json: String,
 }
 
-fn read_stored_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSummaryRow> {
+/// Decodes the payload-free SQLite columns selected for a summary query.
+fn read_stored_summary_row(row: &Row<'_>) -> SqliteResult<StoredSummaryRow> {
     Ok(StoredSummaryRow {
         id: row.get(0)?,
         state_kind: row.get(1)?,
@@ -211,7 +279,7 @@ fn read_stored_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSu
 }
 
 /// Reads every task column needed to validate a persisted row.
-fn read_stored_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredTaskRow> {
+fn read_stored_task_row(row: &Row<'_>) -> SqliteResult<StoredTaskRow> {
     Ok(StoredTaskRow {
         id: row.get(0)?,
         state_kind: row.get(1)?,
@@ -227,6 +295,19 @@ fn read_stored_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredTaskR
 
 impl SqliteTaskStore {
     /// Opens a database, applies its schema, and reserves process ownership.
+    ///
+    /// # Parameters
+    ///
+    /// * `path` - Database path; parent directories are created when needed.
+    ///
+    /// # Returns
+    ///
+    /// An initialized store holding the database's exclusive owner lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error when opening, locking, initializing, or migrating
+    /// the database fails.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -256,7 +337,7 @@ impl SqliteTaskStore {
                 lock_file: Some(lock),
                 epoch: None,
             })),
-            operation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            operation_slot: Arc::new(sync::Semaphore::new(1)),
             #[cfg(test)]
             worker_counts: Arc::new(WorkerCounts::default()),
         })
@@ -264,6 +345,23 @@ impl SqliteTaskStore {
 
     /// Runs one connection operation on the blocking pool through its serial
     /// slot.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Value produced by the operation.
+    /// * `F` - Blocking connection operation.
+    ///
+    /// # Parameters
+    ///
+    /// * `operation` - Closure executed while holding the operation slot.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the operation value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the slot, blocking worker, or operation fails.
     fn run<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
     where
         T: Send + 'static,
@@ -278,7 +376,7 @@ impl SqliteTaskStore {
                 .acquire_owned()
                 .await
                 .map_err(|_| StoreError::Failure("SQLite operation queue is closed".into()))?;
-            tokio::task::spawn_blocking(move || {
+            task::spawn_blocking(move || {
                 let _permit = permit;
                 #[cfg(test)]
                 let _worker_guard = WorkerGuard::enter(worker_counts);
@@ -291,6 +389,23 @@ impl SqliteTaskStore {
 
     /// Runs one serialized write only while this store still owns its process
     /// lock.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Value produced by the operation.
+    /// * `F` - Blocking connection operation.
+    ///
+    /// # Parameters
+    ///
+    /// * `operation` - Write closure executed while ownership is checked.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the operation value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when ownership is absent or the write fails.
     fn run_write<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
     where
         T: Send + 'static,
@@ -308,6 +423,11 @@ impl SqliteTaskStore {
 }
 
 impl TaskStore for SqliteTaskStore {
+    /// Reports that history is persistent and unfinished records can recover.
+    ///
+    /// # Returns
+    ///
+    /// Both persistent-history and restart-recovery capabilities.
     fn capabilities(&self) -> StoreCapabilities {
         StoreCapabilities {
             persistent_history: true,
@@ -315,6 +435,20 @@ impl TaskStore for SqliteTaskStore {
         }
     }
 
+    /// Acceptance and idempotency lookup share one SQLite transaction.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Service-generated identity for a new request.
+    /// * `request` - Bounded immutable request to retain.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to a newly accepted or identical existing task.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, idempotency, or SQLite persistence errors.
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         if let Err(error) = request.validate_limits() {
             return Box::pin(async move { Err(StoreError::InvalidRequest(error)) });
@@ -333,12 +467,25 @@ impl TaskStore for SqliteTaskStore {
             }
             let request_info_json = serde_json::to_string(&TaskRequestInfo::from(&request)).map_err(failure)?;
             let lifecycle_json = encode_lifecycle(&initial)?;
-            transaction.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json) VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7,?8)", rusqlite::params![id.to_string(), initial.accepted_at_ms, request.correlation_key, request.idempotency_key, request_info_json, request.payload, RECORD_FORMAT_VERSION, lifecycle_json]).map_err(failure)?;
+            transaction.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json) VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7,?8)", params![id.to_string(), initial.accepted_at_ms, request.correlation_key, request.idempotency_key, request_info_json, request.payload, RECORD_FORMAT_VERSION, lifecycle_json]).map_err(failure)?;
             transaction.commit().map_err(failure)?;
             Ok(AcceptOutcome::Accepted(initial))
         })
     }
 
+    /// Commits a version-checked lifecycle update without loading payload.
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Expected revision, state, resources, and result data.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the committed payload-free summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns missing, stale, invalid, oversized, or persistence errors.
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         if let Err(error) = command.state.validate_diagnostics() {
             return Box::pin(async move { Err(StoreError::InvalidRequest(error)) });
@@ -346,7 +493,7 @@ impl TaskStore for SqliteTaskStore {
         if command
             .output
             .as_ref()
-            .is_some_and(|output| output.summary.len() > crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES)
+            .is_some_and(|output| output.summary.len() > MAX_TASK_OUTPUT_SUMMARY_BYTES)
         {
             return Box::pin(async {
                 Err(StoreError::InvalidRequest(
@@ -394,7 +541,7 @@ impl TaskStore for SqliteTaskStore {
             transaction
                 .execute(
                     "UPDATE tasks SET state_kind=?2, lifecycle_json=?3 WHERE id=?1",
-                    rusqlite::params![
+                    params![
                         record.id.to_string(),
                         state_kind(&record.state),
                         encode_summary_lifecycle(&record)?
@@ -406,6 +553,19 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Loads the matching complete record, including its payload.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Exact persisted idempotency key.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the matching retained record, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query or persisted row decoding fails.
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         let key = key.to_owned();
         self.run(move |connection| {
@@ -421,6 +581,19 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Loads one complete task record, including its payload bytes.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable task identity.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the retained record, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query or persisted row decoding fails.
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move {
             let stored = self
@@ -439,6 +612,19 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Reads one ordered history page using metadata-only row projection.
+    ///
+    /// # Parameters
+    ///
+    /// * `query` - State, correlation, cursor, and page-size filters.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to payload-free summaries and a continuation.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid query or SQLite decoding errors.
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.run(move |connection| {
             let page_size = checked_page_size(query.limit)?;
@@ -465,23 +651,23 @@ impl TaskStore for SqliteTaskStore {
             }
             sql.push_str(&format!(" ORDER BY accepted_at, id LIMIT ?{}", 4 + state_kinds.len()));
             let mut values = vec![
-                after_time.map_or(rusqlite::types::Value::Null, rusqlite::types::Value::Integer),
+                after_time.map_or(Value::Null, Value::Integer),
                 query.after.map(|cursor| cursor.id.to_string()).map_or(
-                    rusqlite::types::Value::Null,
-                    rusqlite::types::Value::Text,
+                    Value::Null,
+                    Value::Text,
                 ),
                 query
                     .correlation_key
-                    .map_or(rusqlite::types::Value::Null, rusqlite::types::Value::Text),
+                    .map_or(Value::Null, Value::Text),
             ];
             values.extend(
                 state_kinds
                     .into_iter()
-                    .map(|kind| rusqlite::types::Value::Text(kind.into())),
+                    .map(|kind| Value::Text(kind.into())),
             );
-            values.push(rusqlite::types::Value::Integer(fetch_limit));
+            values.push(Value::Integer(fetch_limit));
             let mut statement = connection.prepare(&sql).map_err(failure)?;
-            let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(failure)?;
+            let mut rows = statement.query(params_from_iter(values)).map_err(failure)?;
             let mut records = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
                 records.push(decode_stored_summary_row(read_stored_summary_row(row).map_err(failure)?)?);
@@ -497,6 +683,19 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Loads task lifecycle and immutable metadata without the payload.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable task identity.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the retained summary, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query or persisted summary decoding fails.
     fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         self.run(move |connection| {
             let stored = connection
@@ -511,6 +710,20 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Atomically cancels a blocked task at the caller's observed revision.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the blocked task.
+    /// * `expected_version` - State revision observed by the caller.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the committed cancelled summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, conflict, invalid-state, or SQLite errors.
     fn abandon_blocked<'a>(
         &'a self,
         id: TaskId,
@@ -543,7 +756,7 @@ impl TaskStore for SqliteTaskStore {
             transaction
                 .execute(
                     "UPDATE tasks SET state_kind='Cancelled', lifecycle_json=?2 WHERE id=?1",
-                    rusqlite::params![id.to_string(), encode_summary_lifecycle(&record)?],
+                    params![id.to_string(), encode_summary_lifecycle(&record)?],
                 )
                 .map_err(failure)?;
             transaction.commit().map_err(failure)?;
@@ -551,6 +764,15 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Aggregates retained lifecycle categories in one SQL query.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to one consistent state-count snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQLite reports an unknown state or count failure.
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
         self.run(|connection| {
             let mut statement = connection
@@ -572,13 +794,29 @@ impl TaskStore for SqliteTaskStore {
                             .checked_add(count)
                             .ok_or_else(|| StoreError::Failure("terminal state count exceeds usize".into()))?;
                     }
-                    _ => return Err(StoreError::Failure(format!("unknown task state kind: {kind}"))),
+                    _ => {
+                        return Err(StoreError::Failure(format!("unknown task state kind: {kind}")));
+                    }
                 }
             }
             Ok(counts)
         })
     }
 
+    /// Deletes a bounded batch of old terminal rows and their idempotency keys.
+    ///
+    /// # Parameters
+    ///
+    /// * `accepted_before_ms` - Exclusive acceptance-time cutoff.
+    /// * `max_rows` - Maximum rows removed by this call.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the number of deleted records.
+    ///
+    /// # Errors
+    ///
+    /// Returns range, transaction, or SQLite errors.
     fn prune_terminal_before<'a>(
         &'a self,
         accepted_before_ms: u64,
@@ -610,7 +848,7 @@ impl TaskStore for SqliteTaskStore {
                 .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND accepted_at < ?1 ORDER BY accepted_at, id LIMIT ?2")
                 .map_err(failure)?;
             let rows = statement
-                .query_map(rusqlite::params![accepted_before_ms, max_rows], |row| row.get::<_, String>(0))
+                .query_map(params![accepted_before_ms, max_rows], |row| row.get::<_, String>(0))
                 .map_err(failure)?;
             let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
             drop(statement);
@@ -624,6 +862,15 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Increments and records the exclusive service ownership epoch.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the new owner epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the owner lock is absent or metadata access fails.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         let owner_state = Arc::clone(&self.owner_state);
         self.run(move |connection| {
@@ -640,6 +887,19 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Checks queued and running rows through a payload-free SQL probe.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Maximum allowed unfinished record count.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to whether the count strictly exceeds the limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot perform the probe.
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
         if limit > i64::MAX as usize {
             return Box::pin(async { Ok(false) });
@@ -653,6 +913,19 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Loads at most 256 unfinished records after an exclusive task ID.
+    ///
+    /// # Parameters
+    ///
+    /// * `cursor` - Last task ID returned by the preceding page.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to records and an optional next cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row is malformed or SQLite access fails.
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         self.run(move |connection| {
             let mut statement = connection.prepare("SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,payload, lifecycle_json FROM tasks WHERE state_kind IN ('Queued','Running') AND (?1 IS NULL OR id > ?1) ORDER BY id LIMIT 257").map_err(failure)?;
@@ -670,6 +943,19 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Releases the process lock only when the supplied epoch still matches.
+    ///
+    /// # Parameters
+    ///
+    /// * `epoch` - Ownership generation previously issued by this store.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after the lock file is released.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale epoch, absent owner, or lock failure.
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         let owner_state = Arc::clone(&self.owner_state);
         self.run(move |_| {
@@ -738,7 +1024,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
 }
 
 /// Verifies that schema 3 has the columns expected by the current store.
-fn validate_schema_three(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+fn validate_schema_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
         let rows = statement
@@ -768,7 +1054,7 @@ fn validate_schema_three(transaction: &rusqlite::Transaction<'_>) -> Result<(), 
 }
 
 /// Migrates schema 2 request JSON into an indexed header and separate payload.
-fn migrate_schema_two_to_three(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
         let rows = statement
@@ -818,7 +1104,7 @@ fn migrate_schema_two_to_three(transaction: &rusqlite::Transaction<'_>) -> Resul
         }
         let info = serde_json::to_string(&TaskRequestInfo::from(&request)).map_err(failure)?;
         let lifecycle_json = encode_lifecycle(&old_record)?;
-        transaction.execute("INSERT INTO tasks_v3 (id,state_kind,accepted_at,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,?7,3,?8)", rusqlite::params![id, state, accepted, correlation, key, info, request.payload, lifecycle_json]).map_err(failure)?;
+        transaction.execute("INSERT INTO tasks_v3 (id,state_kind,accepted_at,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,?7,3,?8)", params![id, state, accepted, correlation, key, info, request.payload, lifecycle_json]).map_err(failure)?;
     }
     drop(rows);
     drop(statement);
@@ -829,7 +1115,7 @@ fn migrate_schema_two_to_three(transaction: &rusqlite::Transaction<'_>) -> Resul
 }
 
 /// Migrates a schema 0 or 1 database inside the caller's transaction.
-fn migrate_legacy_schema(transaction: &rusqlite::Transaction<'_>, schema_version: i64) -> Result<(), StoreError> {
+fn migrate_legacy_schema(transaction: &Transaction<'_>, schema_version: i64) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
         let rows = statement
@@ -895,7 +1181,7 @@ fn migrate_legacy_schema(transaction: &rusqlite::Transaction<'_>, schema_version
         }
         let request_json = serde_json::to_string(&record.request).map_err(failure)?;
         let lifecycle_json = encode_lifecycle(&record)?;
-        transaction.execute("INSERT INTO tasks_v2 (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,2,?7)", rusqlite::params![id, state, accepted_at, correlation, idempotency, request_json, lifecycle_json]).map_err(failure)?;
+        transaction.execute("INSERT INTO tasks_v2 (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,2,?7)", params![id, state, accepted_at, correlation, idempotency, request_json, lifecycle_json]).map_err(failure)?;
         cursor = Some(id);
     }
     transaction
@@ -938,6 +1224,20 @@ fn decode_stored_task_row(row: StoredTaskRow) -> Result<TaskRecord, StoreError> 
     Ok(record)
 }
 
+/// Decodes lifecycle and immutable metadata without querying request payload.
+///
+/// # Parameters
+///
+/// * `row` - Indexed row projection returned by a summary query.
+///
+/// # Returns
+///
+/// A payload-free task summary matching every indexed column.
+///
+/// # Errors
+///
+/// Returns an error for unsupported formats, malformed JSON, or inconsistent
+/// indexed and serialized values.
 fn decode_stored_summary_row(row: StoredSummaryRow) -> Result<TaskSummary, StoreError> {
     if row.format_version != RECORD_FORMAT_VERSION {
         return Err(StoreError::Failure(format!(
@@ -967,6 +1267,19 @@ fn encode_lifecycle(record: &TaskRecord) -> Result<String, StoreError> {
     serde_json::to_string(&StoredLifecycle::from_record(record)).map_err(failure)
 }
 
+/// Serializes lifecycle fields from a payload-free task summary.
+///
+/// # Parameters
+///
+/// * `record` - Summary whose mutable lifecycle fields are encoded.
+///
+/// # Returns
+///
+/// JSON containing only lifecycle values.
+///
+/// # Errors
+///
+/// Returns an error if the lifecycle cannot be serialized.
 fn encode_summary_lifecycle(record: &TaskSummary) -> Result<String, StoreError> {
     serde_json::to_string(&StoredLifecycle::from_summary(record)).map_err(failure)
 }
@@ -1000,6 +1313,14 @@ fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
 }
 
 /// Maps a lifecycle state to its stable SQLite index key.
+///
+/// # Parameters
+///
+/// * `state` - Lifecycle value to map.
+///
+/// # Returns
+///
+/// The case-sensitive variant name used in the indexed state column.
 fn state_kind(state: &TaskState) -> &'static str {
     state.kind().as_str()
 }
@@ -1013,6 +1334,18 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 /// Converts a SQLite, filesystem, or serialization diagnostic to store failure.
+///
+/// # Type Parameters
+///
+/// * `E` - Diagnostic value implementing `Display`.
+///
+/// # Parameters
+///
+/// * `error` - Underlying operation failure.
+///
+/// # Returns
+///
+/// A store failure preserving the diagnostic text.
 fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }
@@ -1021,8 +1354,12 @@ fn failure(error: impl std::fmt::Display) -> StoreError {
 mod tests {
     use std::sync::Arc;
 
+    use tokio as tokio_crate;
+    use tokio::spawn;
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
+    use tokio::task;
+    use tokio::time;
 
     use super::SqliteTaskStore;
     use super::TaskId;
@@ -1044,8 +1381,8 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
-    #[tokio::test]
-    async fn same_millisecond_pages_use_task_id_as_tie_breaker() {
+    #[tokio_crate::test]
+    async fn test_same_millisecond_pages_use_task_id_as_tie_breaker() {
         let path = test_database_path();
         let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
         let ids = [TaskId::generate(), TaskId::generate()];
@@ -1094,8 +1431,8 @@ mod tests {
         remove_database(&path);
     }
 
-    #[tokio::test]
-    async fn pruning_rejects_values_outside_sqlite_integer_range() {
+    #[tokio_crate::test]
+    async fn test_pruning_rejects_values_outside_sqlite_integer_range() {
         let path = test_database_path();
         let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
         let cutoff = store
@@ -1113,14 +1450,14 @@ mod tests {
         remove_database(&path);
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_blocking_worker_peak_is_bounded_to_one() {
         let path = test_database_path();
         let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
         let (started_sender, started_receiver) = oneshot::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let running_store = Arc::clone(&store);
-        let first = tokio::spawn(async move {
+        let first = spawn(async move {
             running_store
                 .run(move |_| {
                     let _ = started_sender.send(());
@@ -1129,7 +1466,7 @@ mod tests {
                 })
                 .await
         });
-        tokio::time::timeout(std::time::Duration::from_secs(2), started_receiver)
+        time::timeout(std::time::Duration::from_secs(2), started_receiver)
             .await
             .expect("first operation enters the blocking worker")
             .expect("first operation signals its start");
@@ -1139,7 +1476,7 @@ mod tests {
         for _ in 0..8 {
             let waiting_store = Arc::clone(&store);
             let ready_sender = ready_sender.clone();
-            waiters.push(tokio::spawn(async move {
+            waiters.push(spawn(async move {
                 let operation = waiting_store.run(|_| Ok(()));
                 let _ = ready_sender.send(());
                 operation.await
@@ -1169,7 +1506,7 @@ mod tests {
         remove_database(&path);
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_run_waits_for_its_single_operation_slot() {
         let path = test_database_path();
         let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
@@ -1181,7 +1518,7 @@ mod tests {
             .expect("operation slot is available");
         let (started_sender, mut started_receiver) = oneshot::channel();
         let running_store = Arc::clone(&store);
-        let operation = tokio::spawn(async move {
+        let operation = spawn(async move {
             running_store
                 .run(move |_| {
                     let _ = started_sender.send(());
@@ -1189,13 +1526,13 @@ mod tests {
                 })
                 .await
         });
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         assert!(matches!(
             started_receiver.try_recv(),
             Err(oneshot::error::TryRecvError::Empty | oneshot::error::TryRecvError::Closed)
         ));
         drop(permit);
-        tokio::time::timeout(std::time::Duration::from_secs(2), started_receiver)
+        time::timeout(std::time::Duration::from_secs(2), started_receiver)
             .await
             .expect("operation starts after the slot is released")
             .expect("operation signals its start");
@@ -1208,7 +1545,7 @@ mod tests {
         remove_database(&path);
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_cancelled_slot_waiter_does_not_block_later_operations() {
         let path = test_database_path();
         let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
@@ -1220,7 +1557,7 @@ mod tests {
             .expect("operation slot is available");
         let (started_sender, mut started_receiver) = oneshot::channel();
         let waiting_store = Arc::clone(&store);
-        let waiting = tokio::spawn(async move {
+        let waiting = spawn(async move {
             waiting_store
                 .run(move |_| {
                     let _ = started_sender.send(());
@@ -1228,7 +1565,7 @@ mod tests {
                 })
                 .await
         });
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         waiting.abort();
         drop(permit);
         let result = store.run(|_| Ok(())).await;
@@ -1246,7 +1583,7 @@ mod tests {
 #[cfg(test)]
 mod summary_query_tests {
     #[test]
-    fn summary_projection_never_selects_payload() {
+    fn test_summary_projection_never_selects_payload() {
         assert!(!super::SUMMARY_COLUMNS.split(',').any(|column| column == "payload"));
         assert_eq!(super::SUMMARY_COLUMNS.split(',').count(), 8);
     }

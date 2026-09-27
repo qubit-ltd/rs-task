@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ use super::StoreError;
 use super::TaskFuture;
 use super::TaskStore;
 use crate::model::AcceptOutcome;
+use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
 use crate::model::StoredTaskPage;
@@ -32,11 +34,17 @@ use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
 use crate::model::checked_page_size;
 
+/// Records and accounting used to enforce bounded volatile-store retention.
 struct MemoryState {
+    /// Retained task records indexed by stable identifier.
     records: BTreeMap<TaskId, TaskRecord>,
+    /// Retained idempotency keys mapped to their task IDs.
     idempotency: HashMap<String, TaskId>,
+    /// Terminal task IDs in eviction order.
     terminal_order: VecDeque<TaskId>,
+    /// Payload bytes held by all retained records.
     retained_payload_bytes: usize,
+    /// Number of retained queued, running, or blocked records.
     unfinished_records: usize,
 }
 
@@ -45,16 +53,38 @@ pub const DEFAULT_MAX_UNFINISHED_RECORDS: usize = 2_048;
 
 /// Volatile task history with bounded retention for completed and unfinished
 /// tasks.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::store::MemoryTaskStore;
+/// use qubit_task::store::TaskStore;
+///
+/// let store = MemoryTaskStore::new(32);
+/// assert!(!store.capabilities().persistent_history);
+/// ```
 pub struct MemoryTaskStore {
+    /// Maximum retained terminal record count.
     history_capacity: usize,
+    /// Maximum total payload bytes retained by records.
     max_payload_bytes: usize,
+    /// Maximum retained nonterminal record count.
     max_unfinished_records: usize,
+    /// Records and retention accounting protected by one mutex.
     state: Mutex<MemoryState>,
 }
 
 impl MemoryState {
     /// Removes a retained record and updates payload, key, and unfinished
     /// accounting.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identifier of the retained record to remove.
+    ///
+    /// # Returns
+    ///
+    /// The removed record, or `None` when it was not retained.
     fn remove_record(&mut self, id: TaskId) -> Option<TaskRecord> {
         let record = self.records.remove(&id)?;
         self.retained_payload_bytes -= record.request.payload.len();
@@ -73,6 +103,14 @@ impl MemoryState {
 impl MemoryTaskStore {
     /// Creates an in-memory store retaining at most `history_capacity` terminal
     /// records and [`DEFAULT_MAX_UNFINISHED_RECORDS`] nonterminal records.
+    ///
+    /// # Parameters
+    ///
+    /// * `history_capacity` - Maximum number of terminal records to retain.
+    ///
+    /// # Returns
+    ///
+    /// A volatile store with the default payload and unfinished-record limits.
     #[must_use]
     pub fn new(history_capacity: usize) -> Self {
         Self::with_payload_budget(
@@ -83,6 +121,15 @@ impl MemoryTaskStore {
 
     /// Creates an in-memory store with an explicit payload budget and the
     /// default nonterminal-record limit.
+    ///
+    /// # Parameters
+    ///
+    /// * `history_capacity` - Maximum number of terminal records to retain.
+    /// * `max_payload_bytes` - Maximum total retained payload bytes.
+    ///
+    /// # Returns
+    ///
+    /// A volatile store with the supplied payload budget.
     #[must_use]
     pub fn with_payload_budget(history_capacity: usize, max_payload_bytes: NonZeroUsize) -> Self {
         Self::with_limits(
@@ -131,6 +178,12 @@ impl MemoryTaskStore {
 }
 
 impl TaskStore for MemoryTaskStore {
+    /// Reports that this store does not persist records across process
+    /// restarts.
+    ///
+    /// # Returns
+    ///
+    /// Capabilities indicating volatile history without restart recovery.
     fn capabilities(&self) -> StoreCapabilities {
         StoreCapabilities {
             persistent_history: false,
@@ -138,6 +191,21 @@ impl TaskStore for MemoryTaskStore {
         }
     }
 
+    /// Retains a new task or returns an identical request already retained.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identifier assigned to a new request.
+    /// * `request` - Task request to validate and retain.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the accepted or existing record.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to validation, duplicate, idempotency, capacity, or retention
+    /// limit errors.
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         Box::pin(async move {
             request.validate_limits().map_err(StoreError::InvalidRequest)?;
@@ -217,6 +285,21 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Applies a version-checked lifecycle transition and evicts old terminal
+    /// records when required by retention limits.
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Desired state and expected version and attempt.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the updated task summary.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to an error when the record is missing, the revision conflicts,
+    /// the transition is invalid, or diagnostics are invalid.
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             command
@@ -226,7 +309,7 @@ impl TaskStore for MemoryTaskStore {
             if command
                 .output
                 .as_ref()
-                .is_some_and(|output| output.summary.len() > crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES)
+                .is_some_and(|output| output.summary.len() > MAX_TASK_OUTPUT_SUMMARY_BYTES)
             {
                 return Err(StoreError::InvalidRequest(
                     "task output summary exceeds the 65536-byte limit",
@@ -281,6 +364,19 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Looks up a retained task by idempotency key.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Caller-supplied idempotency key.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the matching record, if retained.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to a store error if the lookup cannot complete.
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move {
             let state = self.state.lock();
@@ -291,14 +387,55 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Loads a retained task including its request payload.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable task identifier.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the matching record, if retained.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to a store error if the lookup cannot complete.
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().records.get(&id).cloned()) })
     }
 
+    /// Loads lifecycle and request metadata without copying the payload.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable task identifier.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the summary, if retained.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to a store error if the lookup cannot complete.
     fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().records.get(&id).map(TaskRecord::summary)) })
     }
 
+    /// Cancels a blocked task only if its revision has not changed.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable task identifier.
+    /// * `expected_version` - State version observed by the caller.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the cancelled task summary.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to `NotFound`, `Conflict`, or `InvalidTransition` when the
+    /// task is unavailable or no longer blocked at that revision.
     fn abandon_blocked<'a>(
         &'a self,
         id: TaskId,
@@ -332,6 +469,20 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Lists retained summaries in acceptance order using a bounded cursor
+    /// page.
+    ///
+    /// # Parameters
+    ///
+    /// * `query` - State, correlation, cursor, and page-size filters.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to matching summaries and a continuation cursor.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to `InvalidRequest` when the page limit is invalid.
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         Box::pin(async move {
             let page_size = checked_page_size(query.limit)?;
@@ -392,6 +543,15 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Counts each state among currently retained records.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to counts from one locked snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to a store error if the count cannot be read.
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
         Box::pin(async move {
             let state = self.state.lock();
@@ -413,6 +573,20 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Deletes at most the requested number of old terminal records.
+    ///
+    /// # Parameters
+    ///
+    /// * `accepted_before_ms` - Exclusive acceptance-time cutoff.
+    /// * `max_rows` - Maximum terminal records to remove.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the number of removed records.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to a store error if pruning cannot complete.
     fn prune_terminal_before<'a>(
         &'a self,
         accepted_before_ms: u64,
@@ -438,10 +612,34 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Reports that this volatile store cannot provide exclusive recovery
+    /// ownership.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to `UnsupportedCapability`.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to `UnsupportedCapability` because this volatile store has no
+    /// persistent ownership lock.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
+    /// Checks whether queued and running records strictly exceed a limit.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Maximum unfinished records allowed by the caller.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to whether the count exceeds `limit`.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to a store error if the count cannot be read.
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
         Box::pin(async move {
             let state = self.state.lock();
@@ -458,10 +656,37 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Reports that this volatile store cannot scan persistent recovery rows.
+    ///
+    /// # Parameters
+    ///
+    /// * `_cursor` - Ignored because recovery scanning is unsupported.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to `UnsupportedCapability`.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to `UnsupportedCapability` because this store retains no
+    /// restart-recovery rows.
     fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
+    /// Reports that no ownership lock is held by this volatile store.
+    ///
+    /// # Parameters
+    ///
+    /// * `_epoch` - Ignored because ownership acquisition is unsupported.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to `UnsupportedCapability`.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to `UnsupportedCapability` because ownership is unsupported.
     fn release_owner<'a>(&'a self, _epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
@@ -469,6 +694,10 @@ impl TaskStore for MemoryTaskStore {
 
 /// Reads the current Unix epoch time in milliseconds, defaulting on clock
 /// error.
+///
+/// # Returns
+///
+/// Current epoch milliseconds, or zero if the system clock predates the epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -486,7 +715,7 @@ mod tests {
     use crate::store::TaskStore;
 
     #[tokio::test]
-    async fn same_millisecond_pages_use_task_id_as_tie_breaker() {
+    async fn test_same_millisecond_pages_use_task_id_as_tie_breaker() {
         let store = MemoryTaskStore::new(8);
         let first_id = TaskId::generate();
         let second_id = TaskId::generate();

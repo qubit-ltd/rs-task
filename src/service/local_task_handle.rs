@@ -27,11 +27,15 @@ use crate::model::TaskState;
 /// ```
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let service = qubit_task::TaskExecutionService::in_memory().await?;
+/// use qubit_task::TaskExecutionService;
+/// use qubit_task::model::TaskOutput;
+/// use qubit_task::service::LocalTaskOutcome;
+///
+/// let service = TaskExecutionService::in_memory().await?;
 /// let handle = service.submit_local(|_| {
-///     qubit_task::service::LocalTaskOutcome::<u32, std::io::Error>::Succeeded {
+///     LocalTaskOutcome::<u32, std::io::Error>::Succeeded {
 ///         value: 7,
-///         summary: qubit_task::model::TaskOutput { summary: b"seven".to_vec() },
+///         summary: TaskOutput { summary: b"seven".to_vec() },
 ///     }
 /// }).await?;
 /// assert_eq!(handle.result().await??, 7);
@@ -40,14 +44,27 @@ use crate::model::TaskState;
 /// # }
 /// ```
 pub struct LocalTaskHandle<R, E> {
+    /// Stable identity assigned by the task service.
     id: TaskId,
+    /// One-shot channel carrying the closure's typed result.
     typed_result: oneshot::Receiver<Result<R, E>>,
+    /// One-shot channel carrying the persisted final lifecycle state.
     final_state: oneshot::Receiver<Result<TaskState, LocalTaskResultError>>,
 }
 
 impl<R, E> LocalTaskHandle<R, E> {
     /// Creates a handle from the result and authoritative-finalization
     /// channels.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable accepted task identity.
+    /// * `typed_result` - Closure result receiver.
+    /// * `final_state` - Persisted final-state receiver.
+    ///
+    /// # Returns
+    ///
+    /// A handle that waits for finalization before yielding the typed result.
     pub(crate) fn new(
         id: TaskId,
         typed_result: oneshot::Receiver<Result<R, E>>,
@@ -61,6 +78,11 @@ impl<R, E> LocalTaskHandle<R, E> {
     }
 
     /// Returns the stable identity of this accepted task.
+    ///
+    /// # Returns
+    ///
+    /// The task identifier.
+    #[inline]
     #[must_use]
     pub fn task_id(&self) -> TaskId {
         self.id
@@ -73,6 +95,12 @@ impl<R, E> LocalTaskHandle<R, E> {
     /// The original closure result for successful or failed application work;
     /// infrastructure, cancellation, blocked, and channel failures are
     /// reported as [`LocalTaskResultError`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a finalization error for cancellation, panic, blocking,
+    /// infrastructure failure, or a closed result channel.
+    #[must_use]
     pub async fn result(self) -> Result<Result<R, E>, LocalTaskResultError> {
         let state = self
             .final_state
@@ -100,6 +128,16 @@ impl<R, E> LocalTaskHandle<R, E> {
 }
 
 impl<R, E> std::fmt::Debug for LocalTaskHandle<R, E> {
+    /// Formats the handle using its task identity without requiring `R` or `E`
+    /// to implement `Debug`.
+    ///
+    /// # Parameters
+    ///
+    /// * `formatter` - Destination formatter.
+    ///
+    /// # Returns
+    ///
+    /// The formatter result, including any write failure.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("LocalTaskHandle").field("id", &self.id).finish()
     }

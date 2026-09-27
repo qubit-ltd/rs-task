@@ -5,10 +5,16 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(feature = "event-bus")]
 use std::time::Duration;
+
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::EventBus;
+use tokio::runtime;
+use tokio::sync;
 
 use super::admission_budget::AdmissionBudget;
 use super::admission_gate::AdmissionGate;
@@ -33,7 +39,17 @@ use crate::store::MemoryTaskStore;
 use crate::store::TaskStore;
 
 /// Service construction error, including unsupported or unavailable recovery.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::service::TaskServiceBuildError;
+///
+/// let error = TaskServiceBuildError::MissingStore;
+/// assert!(error.to_string().contains("must be selected"));
+/// ```
 #[derive(Debug, thiserror::Error)]
+#[must_use]
 pub enum TaskServiceBuildError {
     /// A generic builder did not select a store explicitly.
     #[error("a task store must be selected explicitly")]
@@ -91,50 +107,95 @@ pub enum TaskServiceBuildError {
 /// ```
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let service = qubit_task::TaskExecutionServiceBuilder::in_memory().build().await?;
+/// use qubit_task::TaskExecutionServiceBuilder;
+///
+/// let service = TaskExecutionServiceBuilder::in_memory().build().await?;
 /// assert!(!service.capabilities().store.restart_recovery);
 /// service.shutdown().await?;
 /// # Ok(())
 /// # }
 /// ```
 pub struct TaskExecutionServiceBuilder {
+    /// Selected persistent or volatile task history store.
     store: Option<Arc<dyn TaskStore>>,
+    /// Selected resource reservation and execution backend.
     engine: Option<Arc<dyn TaskExecutionEngine>>,
+    /// Selected candidate ordering policy.
     policy: Option<Arc<dyn SchedulingPolicy>>,
+    /// Exact-version handlers available during service execution.
     handlers: TaskHandlerRegistry,
+    /// Capacity used when the builder creates its default local engine.
     capacity: ResourceCapacity,
+    /// Maximum waiting tasks accepted by the scheduler.
     queue_capacity: usize,
+    /// Aggregate payload bytes held by detached admissions.
     max_inflight_payload_bytes: NonZeroUsize,
+    /// Maximum detached admission workers.
     max_inflight_submissions: NonZeroUsize,
+    /// Maximum simultaneously running attempts.
     max_running_tasks: NonZeroUsize,
+    /// Maximum candidate tasks inspected per scheduler pass.
     scan_budget: usize,
+    /// Maximum execution attempts for one task.
     max_attempts: u32,
+    /// Delay schedule for retryable failures.
     retry_policy: RetryPolicy,
+    /// Whether the selected store must recover unfinished work.
     require_recovery: bool,
-    runtime_handle: Option<tokio::runtime::Handle>,
+    /// Runtime for service-owned background workers, when supplied.
+    runtime_handle: Option<runtime::Handle>,
+    /// Optional destination for lifecycle notifications.
     #[cfg(feature = "event-bus")]
-    event_bus: Option<qubit_event_bus::EventBus>,
+    event_bus: Option<EventBus>,
+    /// Maximum pending lifecycle notifications.
     #[cfg(feature = "event-bus")]
     event_bus_buffer_capacity: NonZeroUsize,
+    /// Maximum wait for notification worker shutdown.
     #[cfg(feature = "event-bus")]
     event_bus_close_timeout: Duration,
 }
 
 /// Owns a recovery lease until it is released or transferred to the service.
 struct OwnerGuard {
+    /// Store whose ownership lease is managed by this guard.
     store: Arc<dyn TaskStore>,
+    /// Lease not yet released or transferred to the running service.
     epoch: Option<crate::model::OwnerEpoch>,
 }
 
 impl OwnerGuard {
+    /// Creates a guard for an optional store ownership lease.
+    ///
+    /// # Parameters
+    ///
+    /// * `store` - Store that issued the lease.
+    /// * `epoch` - Acquired lease, or `None` for a volatile store.
+    ///
+    /// # Returns
+    ///
+    /// A guard that releases an untransferred lease.
     fn new(store: Arc<dyn TaskStore>, epoch: Option<crate::model::OwnerEpoch>) -> Self {
         Self { store, epoch }
     }
 
+    /// Transfers the lease to the constructed service.
+    ///
+    /// # Returns
+    ///
+    /// The lease epoch, if this guard still owns one.
     fn transfer(&mut self) -> Option<crate::model::OwnerEpoch> {
         self.epoch.take()
     }
 
+    /// Releases an owned lease and retains no ownership after completion.
+    ///
+    /// # Returns
+    ///
+    /// Success when no lease remains or release succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store error if the lease cannot be released.
     async fn release(&mut self) -> Result<(), crate::store::StoreError> {
         if let Some(epoch) = self.epoch.take() {
             self.store.release_owner(epoch).await
@@ -145,6 +206,8 @@ impl OwnerGuard {
 }
 
 impl Drop for OwnerGuard {
+    /// Schedules best-effort asynchronous release if the caller drops the
+    /// guard before explicit cleanup.
     fn drop(&mut self) {
         if let Some(epoch) = self.epoch.take() {
             let store = Arc::clone(&self.store);
@@ -158,6 +221,11 @@ impl Drop for OwnerGuard {
 }
 
 impl Default for TaskExecutionServiceBuilder {
+    /// Creates a builder with bounded local-service defaults and no store.
+    ///
+    /// # Returns
+    ///
+    /// A builder that requires a store to be selected before `build`.
     fn default() -> Self {
         let cpu_slots = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32;
         Self {
@@ -190,25 +258,59 @@ impl Default for TaskExecutionServiceBuilder {
 
 impl TaskExecutionServiceBuilder {
     /// Selects explicit volatile storage with standard local components.
+    ///
+    /// # Returns
+    ///
+    /// A builder configured with bounded in-memory task history.
     #[must_use]
     pub fn in_memory() -> Self {
         Self::default().store(Arc::new(MemoryTaskStore::new(1024)))
     }
 
     /// Selects volatile storage with an explicit retained payload budget.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Maximum payload bytes retained by the store.
+    ///
+    /// # Returns
+    ///
+    /// A builder configured with the supplied payload budget.
     #[must_use]
     pub fn in_memory_with_payload_budget(limit: NonZeroUsize) -> Self {
         Self::default().store(Arc::new(MemoryTaskStore::with_payload_budget(1024, limit)))
     }
 
     /// Selects a restart-recoverable SQLite store when enabled.
+    ///
+    /// # Parameters
+    ///
+    /// * `path` - SQLite database path.
+    ///
+    /// # Returns
+    ///
+    /// A builder configured to require restart recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store error if opening the database fails.
     #[cfg(feature = "sqlite")]
     pub fn recoverable_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, TaskServiceBuildError> {
         let store = crate::store::SqliteTaskStore::open(path)?;
         Ok(Self::default().store(Arc::new(store)).require_recovery(true))
     }
 
-    /// Returns a builder that refuses construction if no store was selected.
+    /// Creates a builder with all three core components selected.
+    ///
+    /// # Parameters
+    ///
+    /// * `store` - Authoritative task store.
+    /// * `engine` - Resource reservation and execution backend.
+    /// * `policy` - Task ordering policy.
+    ///
+    /// # Returns
+    ///
+    /// A builder initialized with those components.
     #[must_use]
     pub fn from_components(
         store: Arc<dyn TaskStore>,
@@ -219,6 +321,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Selects the authoritative task store.
+    ///
+    /// # Parameters
+    ///
+    /// * `store` - Task store used for acceptance, reads, and transitions.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the supplied store selected.
     #[must_use]
     pub fn store(mut self, store: Arc<dyn TaskStore>) -> Self {
         self.store = Some(store);
@@ -226,6 +336,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Selects the resource execution engine.
+    ///
+    /// # Parameters
+    ///
+    /// * `engine` - Backend that reserves resources and runs handlers.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the supplied engine selected.
     #[must_use]
     pub fn engine(mut self, engine: Arc<dyn TaskExecutionEngine>) -> Self {
         self.engine = Some(engine);
@@ -233,6 +351,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Selects the task ordering policy.
+    ///
+    /// # Parameters
+    ///
+    /// * `policy` - Strategy that orders eligible task candidates.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the supplied scheduling policy selected.
     #[must_use]
     pub fn policy(mut self, policy: Arc<dyn SchedulingPolicy>) -> Self {
         self.policy = Some(policy);
@@ -240,6 +366,19 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Adds one exact-version business handler.
+    ///
+    /// # Parameters
+    ///
+    /// * `handler` - Handler registered under its descriptor.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the handler registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the handler descriptor is invalid or duplicates
+    /// an existing registration.
     pub fn register_handler(mut self, handler: Arc<dyn TaskHandler>) -> Result<Self, TaskServiceBuildError> {
         self.handlers
             .register(handler)
@@ -249,6 +388,14 @@ impl TaskExecutionServiceBuilder {
 
     /// Replaces the handler registry, for example with handlers created by an
     /// SPI registry.
+    ///
+    /// # Parameters
+    ///
+    /// * `handlers` - Complete exact-version handler registry.
+    ///
+    /// # Returns
+    ///
+    /// This builder with its handler registry replaced.
     #[must_use]
     pub fn handlers(mut self, handlers: TaskHandlerRegistry) -> Self {
         self.handlers = handlers;
@@ -256,6 +403,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Overrides local CPU, GPU, and custom resource capacity.
+    ///
+    /// # Parameters
+    ///
+    /// * `capacity` - Total resources supplied by the local engine.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the local engine capacity replaced.
     #[must_use]
     pub fn capacity(mut self, capacity: ResourceCapacity) -> Self {
         self.capacity = capacity;
@@ -263,6 +418,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Sets the maximum number of waiting tasks accepted by the service.
+    ///
+    /// # Parameters
+    ///
+    /// * `capacity` - Maximum number of queued tasks.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the queue limit replaced.
     #[must_use]
     pub fn queue_capacity(mut self, capacity: usize) -> Self {
         self.queue_capacity = capacity;
@@ -270,6 +433,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Sets the maximum payload bytes retained by in-flight admission workers.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Aggregate in-flight payload byte limit.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the admission payload limit replaced.
     #[must_use]
     pub fn max_inflight_payload_bytes(mut self, limit: NonZeroUsize) -> Self {
         self.max_inflight_payload_bytes = limit;
@@ -277,6 +448,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Sets the maximum number of in-flight admission workers.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Maximum detached admission worker count.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the admission worker limit replaced.
     #[must_use]
     pub fn max_inflight_submissions(mut self, limit: NonZeroUsize) -> Self {
         self.max_inflight_submissions = limit;
@@ -284,6 +463,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Sets the maximum number of task attempts that may run simultaneously.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Maximum concurrent handler attempts.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the running task limit replaced.
     #[must_use]
     pub fn max_running_tasks(mut self, limit: NonZeroUsize) -> Self {
         self.max_running_tasks = limit;
@@ -291,6 +478,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Sets the maximum number of candidates inspected in each scheduler cycle.
+    ///
+    /// # Parameters
+    ///
+    /// * `budget` - Requested number of candidates; zero is normalized to one.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the normalized scheduler scan budget.
     #[must_use]
     pub fn scan_budget(mut self, budget: usize) -> Self {
         self.scan_budget = budget.max(1);
@@ -298,6 +493,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Sets the maximum execution attempts for a retryable handler result.
+    ///
+    /// # Parameters
+    ///
+    /// * `attempts` - Requested attempt limit; zero is normalized to one.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the normalized retry attempt limit.
     #[must_use]
     pub fn max_attempts(mut self, attempts: u32) -> Self {
         self.max_attempts = attempts.max(1);
@@ -305,6 +508,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Sets the exponential delay applied between retryable attempts.
+    ///
+    /// # Parameters
+    ///
+    /// * `policy` - Delay policy applied to retryable failures.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the retry delay policy replaced.
     #[must_use]
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
@@ -312,6 +523,14 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Fails construction unless storage declares restart recovery.
+    ///
+    /// # Parameters
+    ///
+    /// * `required` - Whether restart recovery is mandatory.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the recovery requirement replaced.
     #[must_use]
     pub fn require_recovery(mut self, required: bool) -> Self {
         self.require_recovery = required;
@@ -323,21 +542,43 @@ impl TaskExecutionServiceBuilder {
     /// The runtime must remain alive until `TaskExecutionService::shutdown`
     /// completes. When omitted, the service uses its process-wide default
     /// runtime. Store futures continue to run on the runtime polling them.
+    ///
+    /// # Parameters
+    ///
+    /// * `handle` - Runtime used for service-owned background workers.
+    ///
+    /// # Returns
+    ///
+    /// This builder configured with the supplied runtime.
     #[must_use]
-    pub fn runtime_handle(mut self, handle: tokio::runtime::Handle) -> Self {
+    pub fn runtime_handle(mut self, handle: runtime::Handle) -> Self {
         self.runtime_handle = Some(handle);
         self
     }
 
     /// Injects the concrete event bus facade for optional status notifications.
+    /// # Parameters
+    ///
+    /// * `event_bus` - Event bus used for lifecycle notifications.
+    ///
+    /// # Returns
+    ///
+    /// This builder configured with the supplied event bus.
     #[cfg(feature = "event-bus")]
     #[must_use]
-    pub fn event_bus(mut self, event_bus: qubit_event_bus::EventBus) -> Self {
+    pub fn event_bus(mut self, event_bus: EventBus) -> Self {
         self.event_bus = Some(event_bus);
         self
     }
 
     /// Sets the number of lifecycle notifications waiting behind the publisher.
+    /// # Parameters
+    ///
+    /// * `capacity` - Maximum number of queued notifications.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the notification queue capacity replaced.
     #[cfg(feature = "event-bus")]
     #[must_use]
     pub fn event_bus_buffer_capacity(mut self, capacity: NonZeroUsize) -> Self {
@@ -347,6 +588,13 @@ impl TaskExecutionServiceBuilder {
 
     /// Sets how long service shutdown waits for the lifecycle notification
     /// worker.
+    /// # Parameters
+    ///
+    /// * `timeout` - Maximum worker close wait.
+    ///
+    /// # Returns
+    ///
+    /// This builder with the notification close timeout replaced.
     #[cfg(feature = "event-bus")]
     #[must_use]
     pub fn event_bus_close_timeout(mut self, timeout: Duration) -> Self {
@@ -355,8 +603,17 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Builds one unified task service after validating and preparing recovery.
+    ///
+    /// # Returns
+    ///
+    /// A running service with recovered work queued for execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a build error when configuration, store setup, recovery, or
+    /// background worker startup fails.
     pub async fn build(self) -> Result<TaskExecutionService, TaskServiceBuildError> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (sender, receiver) = sync::oneshot::channel();
         // Construction can acquire a persistent store owner and then await
         // arbitrary store futures. Keep that work alive if the caller drops
         // its build future, so ownership cleanup is not cancelled midway.
@@ -376,9 +633,25 @@ impl TaskExecutionServiceBuilder {
         receiver.await.unwrap_or(Err(TaskServiceBuildError::WorkerStopped))
     }
 
+    /// Validates components, recovers unfinished rows, and starts service
+    /// state.
+    ///
+    /// # Parameters
+    ///
+    /// * `sender` - Build caller used to detect cancellation before ownership
+    ///   is transferred.
+    ///
+    /// # Returns
+    ///
+    /// The started service with any recovered work queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns a build error for invalid setup, failed recovery, or failed
+    /// ownership cleanup.
     async fn build_inner(
         self,
-        sender: &tokio::sync::oneshot::Sender<Result<TaskExecutionService, TaskServiceBuildError>>,
+        sender: &sync::oneshot::Sender<Result<TaskExecutionService, TaskServiceBuildError>>,
     ) -> Result<TaskExecutionService, TaskServiceBuildError> {
         let store = self.store.ok_or(TaskServiceBuildError::MissingStore)?;
         let store_capabilities = store.capabilities();
@@ -472,7 +745,7 @@ impl TaskExecutionServiceBuilder {
             runtime_handle,
             handlers: self.handlers,
             queue_capacity: self.queue_capacity,
-            running_slots: Arc::new(tokio::sync::Semaphore::new(self.max_running_tasks.get())),
+            running_slots: Arc::new(sync::Semaphore::new(self.max_running_tasks.get())),
             scan_budget: self.scan_budget,
             max_attempts: self.max_attempts,
             retry_policy: self.retry_policy,
@@ -481,9 +754,9 @@ impl TaskExecutionServiceBuilder {
             local_handlers: parking_lot::Mutex::new(Default::default()),
             local_finalizations: parking_lot::Mutex::new(Default::default()),
             cancellations: parking_lot::Mutex::new(Default::default()),
-            changed: tokio::sync::Notify::new(),
+            changed: sync::Notify::new(),
             wait_registry: Arc::new(super::task_wait_registry::TaskWaitRegistry::default()),
-            transition_event_lock: tokio::sync::RwLock::new(()),
+            transition_event_lock: sync::RwLock::new(()),
             admission: AdmissionGate::new(),
             admission_budget: Arc::new(AdmissionBudget::new(
                 self.max_inflight_payload_bytes,
@@ -493,9 +766,9 @@ impl TaskExecutionServiceBuilder {
             store_fault: parking_lot::Mutex::new(None),
             scheduler_fault: parking_lot::Mutex::new(None),
             attempts_in_flight: std::sync::atomic::AtomicUsize::new(0),
-            attempts_changed: tokio::sync::Notify::new(),
+            attempts_changed: sync::Notify::new(),
             scheduler_finished: std::sync::atomic::AtomicBool::new(false),
-            scheduler_finished_notify: tokio::sync::Notify::new(),
+            scheduler_finished_notify: sync::Notify::new(),
             #[cfg(feature = "event-bus")]
             event_bus,
         };
@@ -504,8 +777,25 @@ impl TaskExecutionServiceBuilder {
     }
 }
 
+/// Maximum number of rows allowed in one recovery scan page.
 const RECOVERY_PAGE_LIMIT: usize = 256;
 
+/// Validates page size and strict recovery cursor progress.
+///
+/// # Parameters
+///
+/// * `tasks` - Rows returned in the current page.
+/// * `previous` - Cursor used to request this page.
+/// * `next` - Cursor advertised for the next page.
+///
+/// # Returns
+///
+/// Success when the page is bounded and its cursor advances.
+///
+/// # Errors
+///
+/// Returns an invalid-recovery-page error for oversized, empty-with-next, or
+/// non-advancing pages.
 fn validate_recovery_page(
     tasks: &[StoredTask],
     previous: Option<TaskId>,
@@ -534,12 +824,29 @@ fn validate_recovery_page(
 
 /// Resets interrupted attempts and queues recoverable tasks with available
 /// handlers, retaining only one store page at a time.
+///
+/// # Parameters
+///
+/// * `store` - Recoverable store to scan and update.
+/// * `handlers` - Registered handlers available after restart.
+/// * `max_attempts` - Attempt limit used to block exhausted tasks.
+/// * `limit` - Maximum number of unfinished records to restore.
+/// * `sender` - Build caller used to detect cancellation between pages.
+///
+/// # Returns
+///
+/// The bounded queue of records that are ready for execution.
+///
+/// # Errors
+///
+/// Returns a build error for failed scans, invalid pages, capacity overflow,
+/// missing-handler transitions, or interrupted construction.
 async fn restore_tasks_paged(
     store: &Arc<dyn TaskStore>,
     handlers: &TaskHandlerRegistry,
     max_attempts: u32,
     limit: usize,
-    sender: &tokio::sync::oneshot::Sender<Result<TaskExecutionService, TaskServiceBuildError>>,
+    sender: &sync::oneshot::Sender<Result<TaskExecutionService, TaskServiceBuildError>>,
 ) -> Result<std::collections::VecDeque<QueuedTask>, TaskServiceBuildError> {
     let mut queue = std::collections::VecDeque::new();
     let mut cursor = None;
@@ -641,6 +948,14 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    #[cfg(feature = "event-bus")]
+    use qubit_event_bus::EventBus;
+    #[cfg(feature = "event-bus")]
+    use qubit_event_bus::local::LocalEventBusConfig;
+    use tokio as tokio_crate;
+    #[cfg(feature = "sqlite")]
+    use tokio::time;
+
     use super::TaskExecutionService;
     use super::TaskExecutionServiceBuilder;
     use super::TaskServiceBuildError;
@@ -706,7 +1021,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_public_builder_and_service_lifecycle_contracts() {
         let mut registry = TaskHandlerRegistry::new();
         registry.register(Arc::new(Echo)).unwrap();
@@ -731,9 +1046,7 @@ mod tests {
         .require_recovery(false);
         #[cfg(feature = "event-bus")]
         let builder = builder
-            .event_bus(
-                qubit_event_bus::EventBus::local(qubit_event_bus::local::LocalEventBusConfig::default()).unwrap(),
-            )
+            .event_bus(EventBus::local(LocalEventBusConfig::default()).unwrap())
             .event_bus_buffer_capacity(NonZeroUsize::new(4).unwrap());
         let service = builder.build().await.unwrap();
         #[cfg(feature = "event-bus")]
@@ -823,7 +1136,7 @@ mod tests {
         memory_service.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_builder_rejects_overflowing_recovery_capacity_configuration() {
         let result = TaskExecutionServiceBuilder::in_memory()
             .queue_capacity(usize::MAX)
@@ -833,7 +1146,7 @@ mod tests {
         assert!(matches!(result, Err(TaskServiceBuildError::InvalidConfiguration(_))));
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_owner_guard_without_lease_is_a_noop() {
         let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(4));
         let mut guard = super::OwnerGuard::new(store, None);
@@ -841,7 +1154,7 @@ mod tests {
         assert!(guard.transfer().is_none());
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_owner_guard_preserves_release_failure() {
         let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(4));
         let mut guard = super::OwnerGuard::new(store, Some(crate::model::OwnerEpoch(1)));
@@ -853,7 +1166,7 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_owner_guard_drop_releases_sqlite_lease() {
         let path = std::env::temp_dir().join(format!("qubit-task-owner-guard-{}.sqlite", TaskId::generate()));
         let store = Arc::new(crate::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
@@ -863,12 +1176,12 @@ mod tests {
             Some(epoch),
         ));
 
-        let replacement = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let replacement = time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if let Ok(store) = crate::store::SqliteTaskStore::open(&path) {
                     break store;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
@@ -882,7 +1195,7 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_sqlite_builder_recovers_unfinished_records() {
         use crate::model::AcceptOutcome;
         use crate::store::SqliteTaskStore;

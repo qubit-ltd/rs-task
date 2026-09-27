@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 //! Bounded serial publication of best-effort task lifecycle notifications.
 
 use std::io;
@@ -20,6 +21,7 @@ use qubit_event_bus::NotificationPublisher;
 use qubit_event_bus::TryPublishError;
 use qubit_event_bus::model::AdmissionOutcome;
 use qubit_event_bus::model::Topic;
+use tokio::runtime;
 
 use super::task_event_notification_stats::TaskEventNotificationStats;
 use crate::event::TaskEvent;
@@ -27,17 +29,29 @@ use crate::event::TaskEvent;
 /// Atomic counters shared between the service thread and publisher worker.
 #[derive(Default)]
 struct Counters {
+    /// Events accepted into the bounded queue.
     enqueued: AtomicU64,
+    /// Events rejected because the queue was full.
     queue_full: AtomicU64,
+    /// Events rejected because the queue was closed.
     queue_closed: AtomicU64,
+    /// Events accepted by at least one reported destination.
     accepted: AtomicU64,
+    /// Events accepted by providers without destination details.
     opaque_accepted: AtomicU64,
+    /// Events without an accepting destination.
     unaccepted: AtomicU64,
+    /// Events with mixed accepted and rejected destinations.
     partial_rejection: AtomicU64,
+    /// Failed publish calls.
     publish_error: AtomicU64,
 }
 
 /// Increments a counter without wrapping its accumulated diagnostic value.
+///
+/// # Parameters
+///
+/// * `counter` - Atomic diagnostic counter to increment.
 fn increment(counter: &AtomicU64) {
     let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
         Some(value.saturating_add(1))
@@ -46,13 +60,34 @@ fn increment(counter: &AtomicU64) {
 
 /// Owns one worker and one bounded queue for a service's event bus.
 pub(super) struct TaskEventPublisher {
+    /// Bounded publisher used by the single background worker.
     publisher: Arc<NotificationPublisher<TaskEvent>>,
+    /// Counters shared with publish completion callbacks.
     counters: Arc<Counters>,
+    /// Maximum time a close call waits for worker completion.
     close_timeout: Duration,
 }
 
 impl TaskEventPublisher {
     /// Starts a dedicated worker before service scheduling begins.
+    ///
+    /// # Parameters
+    ///
+    /// * `bus` - Event bus that receives lifecycle notifications.
+    /// * `capacity` - Maximum number of queued notifications.
+    /// * `close_timeout` - Maximum wait for worker completion during close.
+    ///
+    /// # Returns
+    ///
+    /// A publisher with one dedicated worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the publisher worker cannot be started.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the fixed internal lifecycle topic is invalid.
     pub(super) fn new(bus: EventBus, capacity: NonZeroUsize, close_timeout: Duration) -> io::Result<Self> {
         let counters = Arc::new(Counters::default());
         let worker_counters = Arc::clone(&counters);
@@ -69,6 +104,10 @@ impl TaskEventPublisher {
     }
 
     /// Attempts to enqueue without waiting for the worker or event bus.
+    ///
+    /// # Parameters
+    ///
+    /// * `event` - Lifecycle snapshot to enqueue.
     pub(super) fn enqueue(&self, event: TaskEvent) {
         match self.publisher.try_publish(event) {
             Ok(()) => increment(&self.counters.enqueued),
@@ -78,6 +117,10 @@ impl TaskEventPublisher {
     }
 
     /// Returns a monotonic snapshot of enqueue and publication outcomes.
+    ///
+    /// # Returns
+    ///
+    /// A snapshot of counters observed with acquire ordering.
     pub(super) fn stats(&self) -> TaskEventNotificationStats {
         let load = |counter: &AtomicU64| counter.load(Ordering::Acquire);
         TaskEventNotificationStats {
@@ -96,12 +139,21 @@ impl TaskEventPublisher {
     /// Stops enqueue, drains accepted events, and waits up to the configured
     /// timeout.
     ///
+    /// # Parameters
+    ///
+    /// * `runtime_handle` - Runtime used to join the blocking close operation.
+    ///
+    /// # Returns
+    ///
+    /// Success when the worker closes before the timeout.
+    ///
     /// # Errors
+    ///
     /// Returns an error when the blocking close task fails to join, the
     /// notification publisher worker panics, or it does not exit before the
     /// configured timeout. On timeout, the worker continues draining accepted
     /// events and a later close call can wait for completion.
-    pub(super) async fn close(&self, runtime_handle: &tokio::runtime::Handle) -> io::Result<()> {
+    pub(super) async fn close(&self, runtime_handle: &runtime::Handle) -> io::Result<()> {
         let publisher = Arc::clone(&self.publisher);
         let close_timeout = self.close_timeout;
         runtime_handle
@@ -112,6 +164,11 @@ impl TaskEventPublisher {
 }
 
 /// Adds one provider admission result to the corresponding observable counters.
+///
+/// # Parameters
+///
+/// * `counters` - Shared event publication counters.
+/// * `outcome` - Provider's destination admission result.
 fn record_admission(counters: &Counters, outcome: AdmissionOutcome) {
     match outcome {
         AdmissionOutcome::OpaqueAccepted => increment(&counters.opaque_accepted),
@@ -165,6 +222,12 @@ mod tests {
     use qubit_event_bus::spi::ShutdownOutcome;
     use qubit_event_bus::spi::SpiSubscriptionRequest;
     use qubit_event_bus::spi::TransportPayload;
+    use qubit_id::Id;
+    use tokio as tokio_crate;
+    use tokio::runtime;
+    use tokio::spawn;
+    use tokio::task;
+    use tokio::time;
 
     use super::Counters;
     use super::TaskEventPublisher;
@@ -240,7 +303,7 @@ mod tests {
             }
             let admission = |index, status| {
                 DestinationAdmission::new(
-                    qubit_id::Id::new(index),
+                    Id::new(index),
                     SubscriberId::new("fake").expect("subscriber ID"),
                     status,
                 )
@@ -380,13 +443,13 @@ mod tests {
         assert!(matches!(outcome, ShutdownOutcome::Complete));
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_task_event_publisher_queue_full_is_nonblocking_and_ordered() {
         let spi = FakeSpi::new(true, Outcome::Opaque);
         let publisher = Arc::new(publisher(spi.clone(), 1));
         publisher.enqueue(event(1));
         while spi.entered.load(Ordering::Acquire) == 0 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
         publisher.enqueue(event(2));
         let third_publisher = Arc::clone(&publisher);
@@ -401,7 +464,7 @@ mod tests {
         assert!(nonblocking, "full-queue enqueue returned without waiting for publish");
         assert_eq!(publisher.stats().queue_full, 1);
         publisher
-            .close(&tokio::runtime::Handle::current())
+            .close(&runtime::Handle::current())
             .await
             .expect("publisher closes after queue-full coverage");
         assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
@@ -409,7 +472,7 @@ mod tests {
         assert_eq!(publisher.stats().opaque_accepted, 2);
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_task_event_publisher_admission_outcomes_and_panic() {
         for outcome in [
             Outcome::AllRejected,
@@ -421,7 +484,7 @@ mod tests {
         ] {
             let publisher = publisher(FakeSpi::new(false, outcome), 1);
             publisher.enqueue(event(1));
-            let close_result = publisher.close(&tokio::runtime::Handle::current()).await;
+            let close_result = publisher.close(&runtime::Handle::current()).await;
             let stats = publisher.stats();
             match outcome {
                 Outcome::AllRejected | Outcome::Empty | Outcome::Dropped => {
@@ -447,16 +510,16 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_task_event_publisher_close_reports_blocking_join_failure() {
         let publisher = publisher(FakeSpi::new(false, Outcome::Opaque), 1);
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = runtime::Builder::new_current_thread()
             .build()
             .expect("separate runtime builds");
         let stopped_handle = runtime.handle().clone();
         runtime.shutdown_background();
 
-        let close_result = tokio::time::timeout(Duration::from_secs(2), publisher.close(&stopped_handle))
+        let close_result = time::timeout(Duration::from_secs(2), publisher.close(&stopped_handle))
             .await
             .expect("close task join returns");
         assert!(
@@ -464,32 +527,32 @@ mod tests {
             "failure to join the blocking close task must be reported"
         );
         publisher
-            .close(&tokio::runtime::Handle::current())
+            .close(&runtime::Handle::current())
             .await
             .expect("current runtime can close the worker");
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_task_event_publisher_concurrent_close_waits_for_drain() {
         let spi = FakeSpi::new(true, Outcome::Opaque);
         let publisher = Arc::new(publisher(spi.clone(), 1));
-        let runtime_handle = tokio::runtime::Handle::current();
+        let runtime_handle = runtime::Handle::current();
         publisher.enqueue(event(1));
         while spi.entered.load(Ordering::Acquire) == 0 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
         publisher.enqueue(event(2));
         let first = {
             let publisher = publisher.clone();
             let runtime_handle = runtime_handle.clone();
-            tokio::spawn(async move { publisher.close(&runtime_handle).await })
+            spawn(async move { publisher.close(&runtime_handle).await })
         };
         let second = {
             let publisher = publisher.clone();
             let runtime_handle = runtime_handle.clone();
-            tokio::spawn(async move { publisher.close(&runtime_handle).await })
+            spawn(async move { publisher.close(&runtime_handle).await })
         };
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         assert!(!first.is_finished());
         assert!(!second.is_finished());
         spi.release();
@@ -500,17 +563,17 @@ mod tests {
         assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
     }
 
-    #[tokio::test]
+    #[tokio_crate::test]
     async fn test_task_event_publisher_close_timeout_can_be_retried() {
         let spi = FakeSpi::new(true, Outcome::Opaque);
         let publisher = Arc::new(publisher_with_timeout(spi.clone(), 1, Duration::from_millis(20)));
         publisher.enqueue(event(1));
         while spi.entered.load(Ordering::Acquire) == 0 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
 
         let error = publisher
-            .close(&tokio::runtime::Handle::current())
+            .close(&runtime::Handle::current())
             .await
             .expect_err("blocked provider exceeds the close timeout");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
@@ -518,18 +581,18 @@ mod tests {
         assert_eq!(publisher.stats().queue_closed, 1);
 
         spi.release();
-        tokio::time::timeout(Duration::from_secs(2), async {
+        time::timeout(Duration::from_secs(2), async {
             loop {
                 if publisher.stats().opaque_accepted == 1 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                task::yield_now().await;
             }
         })
         .await
         .expect("accepted notification drains after provider unblocks");
         publisher
-            .close(&tokio::runtime::Handle::current())
+            .close(&runtime::Handle::current())
             .await
             .expect("close can be retried after worker completion");
     }

@@ -5,12 +5,16 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use parking_lot::Mutex;
+use tokio::spawn;
+use tokio::sync::oneshot;
 
 use crate::engine::EngineError;
 use crate::engine::ExecutionHandle;
@@ -25,28 +29,56 @@ use crate::model::ResourceSnapshot;
 use crate::model::TaskId;
 use crate::store::TaskFuture;
 
+/// Resource amounts held by one execution reservation.
 type Allocation = (u32, Vec<String>, BTreeMap<String, u64>);
+/// Active reservations indexed by their release token.
 type AllocationLedger = HashMap<u64, Allocation>;
 
 /// Mutable aggregate of resources currently reserved by active attempts.
 #[derive(Default)]
 struct Usage {
+    /// Reserved CPU slots.
     cpu: u32,
+    /// Reserved GPU identifiers.
     gpus: Vec<String>,
+    /// Reserved custom resource amounts.
     custom: BTreeMap<String, u64>,
 }
 
 /// Single-process executor that atomically accounts for CPU, GPU, and custom
 /// resources.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::engine::LocalTaskExecutionEngine;
+/// use qubit_task::engine::TaskExecutionEngine;
+/// use qubit_task::model::ResourceCapacity;
+///
+/// let engine = LocalTaskExecutionEngine::new(ResourceCapacity::default());
+/// assert_eq!(engine.capacity().used_cpu_slots, 0);
+/// ```
 pub struct LocalTaskExecutionEngine {
+    /// Total available resources.
     capacity: ResourceCapacity,
+    /// Current aggregate resource reservations.
     usage: Arc<Mutex<Usage>>,
+    /// Next unique reservation token.
     next_token: std::sync::atomic::AtomicU64,
+    /// Reservations that can be released by execution guards.
     allocations: Arc<Mutex<AllocationLedger>>,
 }
 
 impl LocalTaskExecutionEngine {
     /// Creates a local engine with explicit resource capacity.
+    ///
+    /// # Parameters
+    ///
+    /// * `capacity` - Maximum CPU, GPU, and custom resource capacity.
+    ///
+    /// # Returns
+    ///
+    /// A local engine with no resources reserved.
     #[must_use]
     pub fn new(capacity: ResourceCapacity) -> Self {
         Self {
@@ -59,6 +91,7 @@ impl LocalTaskExecutionEngine {
 }
 
 impl TaskExecutionEngine for LocalTaskExecutionEngine {
+    /// Returns the immutable engine limits and current reservation totals.
     fn capacity(&self) -> ResourceSnapshot {
         let usage = self.usage.lock();
         ResourceSnapshot {
@@ -69,6 +102,20 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
         }
     }
 
+    /// Reserves requested CPU, GPU, and custom resources as one atomic unit.
+    ///
+    /// The returned reservation rolls back automatically unless activation
+    /// transfers its release callback to the execution worker.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the task attempt.
+    /// * `request` - Resource amounts and labels required by the attempt.
+    ///
+    /// # Returns
+    ///
+    /// A prepared reservation or an engine error describing unavailable
+    /// capacity.
     fn prepare<'a>(
         &'a self,
         id: TaskId,
@@ -130,6 +177,21 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
         })
     }
 
+    /// Starts the handler on Tokio's blocking pool and tracks its completion.
+    ///
+    /// The reservation remains held until the handler exits, including panic
+    /// unwinding, so the returned handle represents the full resource lease.
+    ///
+    /// # Parameters
+    ///
+    /// * `prepared` - Reservation created for this attempt.
+    /// * `handler` - Handler invoked with the request payload.
+    /// * `payload` - Opaque task input bytes.
+    /// * `context` - Attempt metadata and cooperative cancellation signal.
+    ///
+    /// # Returns
+    ///
+    /// A handle whose receiver reports the handler result or panic.
     fn activate<'a>(
         &'a self,
         mut prepared: PreparedExecution,
@@ -138,11 +200,11 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
         context: TaskContext,
     ) -> TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
         Box::pin(async move {
-            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let (sender, receiver) = oneshot::channel();
             let cancelled = context.cancellation_signal();
             let release = prepared.release.take();
             let task_context = context;
-            tokio::spawn(async move {
+            spawn(async move {
                 let guard = ReservationGuard(release);
                 let handler_future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     handler.run(&payload, task_context)
@@ -182,6 +244,7 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 /// Releases a prepared reservation when its execution worker exits or unwinds.
 struct ReservationGuard(Option<Box<dyn FnOnce() + Send>>);
 impl Drop for ReservationGuard {
+    /// Releases the held resource reservation exactly once.
     fn drop(&mut self) {
         if let Some(release) = self.0.take() {
             release();
@@ -205,5 +268,3 @@ fn release(token: u64, allocations: &Mutex<AllocationLedger>, usage: &Mutex<Usag
         }
     }
 }
-
-use futures::FutureExt;

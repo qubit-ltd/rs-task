@@ -7,6 +7,8 @@
 // =============================================================================
 use std::time::Duration;
 
+use super::retry_policy_error::RetryPolicyError;
+
 /// Retry delay configuration with an exponential cap.
 ///
 /// # Examples
@@ -23,8 +25,6 @@ pub struct RetryPolicy {
     initial_delay: Duration,
     max_delay: Duration,
 }
-
-use super::retry_policy_error::RetryPolicyError;
 
 impl RetryPolicy {
     /// Creates a policy after checking that both delays form a valid range.
@@ -78,19 +78,34 @@ impl RetryPolicy {
     }
 
     /// Returns the configured initial delay.
+    ///
+    /// # Returns
+    ///
+    /// The delay used for the first retry.
     #[must_use]
+    #[inline]
     pub fn initial_delay(self) -> Duration {
         self.initial_delay
     }
 
     /// Returns the configured maximum delay.
+    ///
+    /// # Returns
+    ///
+    /// The largest delay this policy returns.
     #[must_use]
+    #[inline]
     pub fn max_delay(self) -> Duration {
         self.max_delay
     }
 }
 
 impl Default for RetryPolicy {
+    /// Returns the service's default one-second to sixty-second backoff.
+    ///
+    /// # Returns
+    ///
+    /// A retry policy with an exponential delay capped at sixty seconds.
     fn default() -> Self {
         Self {
             initial_delay: Duration::from_secs(1),

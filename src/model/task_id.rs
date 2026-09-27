@@ -25,7 +25,10 @@ use uuid::Uuid;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TaskId(Uuid);
+pub struct TaskId(
+    /// UUID value used as the stable task identity.
+    Uuid,
+);
 
 impl TaskId {
     /// Generates an unpredictable identifier for a new task submission.
@@ -42,6 +45,14 @@ impl TaskId {
 
 impl std::fmt::Display for TaskId {
     /// Formats the wrapped UUID using its canonical textual representation.
+    ///
+    /// # Parameters
+    ///
+    /// * `formatter` - Destination formatter.
+    ///
+    /// # Returns
+    ///
+    /// The formatter result, including any write failure.
     #[inline]
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)

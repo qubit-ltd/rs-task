@@ -6,34 +6,43 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use super::QueueSnapshot;
+use super::QueuedTask;
 use super::SchedulingPolicy;
 use crate::model::ResourceCapacity;
-use crate::model::ResourceRequest;
 use crate::model::ResourceSnapshot;
 use crate::model::TaskId;
 
-/// Queue entry metadata needed to keep a frequently bypassed request
-/// progressing.
-#[derive(Debug, Clone)]
-pub struct QueuedTask {
-    /// Stable task identity.
-    pub id: TaskId,
-    /// Resource requirements used to determine likely fit.
-    pub resources: ResourceRequest,
-    /// Earliest Unix epoch millisecond when a retry may be considered.
-    pub retry_not_before_ms: Option<u64>,
-    /// Number of scheduling cycles in which a later task started first.
-    pub bypasses: u32,
-}
-
 /// FIFO-first scheduler with bounded bypass and a configurable starvation
 /// limit.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::ResourceSnapshot;
+/// use qubit_task::scheduling::QueueSnapshot;
+/// use qubit_task::scheduling::SchedulingPolicy;
+/// use qubit_task::FairFifoPolicy;
+///
+/// let policy = FairFifoPolicy::new(8);
+/// let order = policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default());
+/// assert!(order.is_empty());
+/// ```
 pub struct FairFifoPolicy {
+    /// Successful bypass count after which a head task is protected.
     max_bypasses: u32,
 }
 
 impl FairFifoPolicy {
     /// Creates a policy that stops bypassing a head task after `max_bypasses`.
+    ///
+    /// # Parameters
+    ///
+    /// * `max_bypasses` - Maximum number of successful bypasses before the
+    ///   earliest protected task is selected alone.
+    ///
+    /// # Returns
+    ///
+    /// A FIFO-first policy with the requested bypass limit.
     #[must_use]
     pub fn new(max_bypasses: u32) -> Self {
         Self { max_bypasses }
@@ -41,12 +50,30 @@ impl FairFifoPolicy {
 }
 
 impl Default for FairFifoPolicy {
+    /// Creates a policy that permits eight successful bypasses.
+    ///
+    /// # Returns
+    ///
+    /// A policy with a bypass limit of eight.
     fn default() -> Self {
         Self::new(8)
     }
 }
 
 impl SchedulingPolicy for FairFifoPolicy {
+    /// Orders eligible tasks, protecting the earliest task at its bypass limit.
+    ///
+    /// # Parameters
+    ///
+    /// * `queue` - Bounded queue snapshot and policy scan limit.
+    /// * `resources` - Current total capacity and resource usage.
+    ///
+    /// # Returns
+    ///
+    /// Task IDs in scheduling priority order. A task that cannot fit current
+    /// usage but can fit total capacity remains queued and is omitted; a task
+    /// that can never fit total capacity is returned so the service can block
+    /// it.
     fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId> {
         let candidates = queue.tasks.iter().take(queue.scan_budget.max(1)).collect::<Vec<_>>();
         let protected = candidates.iter().find(|task| task.bypasses >= self.max_bypasses);
@@ -71,6 +98,15 @@ impl SchedulingPolicy for FairFifoPolicy {
 }
 
 /// Reports whether configured capacity can ever satisfy the task's request.
+///
+/// # Parameters
+///
+/// * `task` - Candidate task to evaluate.
+/// * `capacity` - Configured total resource capacity.
+///
+/// # Returns
+///
+/// Whether the request can fit the configured capacity.
 fn can_fit_capacity(task: &QueuedTask, capacity: &ResourceCapacity) -> bool {
     let request = &task.resources;
     request.cpu_slots <= capacity.cpu_slots
@@ -87,6 +123,15 @@ fn can_fit_capacity(task: &QueuedTask, capacity: &ResourceCapacity) -> bool {
 }
 
 /// Reports whether currently unreserved resources appear sufficient for a task.
+///
+/// # Parameters
+///
+/// * `task` - Candidate task to evaluate.
+/// * `resources` - Capacity and current reservations.
+///
+/// # Returns
+///
+/// Whether the request appears to fit the currently available resources.
 fn likely_fits(task: &QueuedTask, resources: &ResourceSnapshot) -> bool {
     let request = &task.resources;
     request.cpu_slots <= resources.capacity.cpu_slots.saturating_sub(resources.used_cpu_slots)

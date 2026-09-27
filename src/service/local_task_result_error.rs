@@ -19,6 +19,7 @@
 /// assert_eq!(error.to_string(), "local task was cancelled");
 /// ```
 #[derive(Debug, thiserror::Error)]
+#[must_use]
 pub enum LocalTaskResultError {
     /// Execution was cancelled before or during the handler.
     #[error("local task was cancelled")]

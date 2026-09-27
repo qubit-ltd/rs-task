@@ -5,12 +5,16 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// qubit-style: allow multiple-public-types
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 /// Reason an in-flight admission could not reserve bounded resources.
+///
+/// The caller can reject promptly and report the relevant configured limit.
+#[must_use]
 pub(super) enum AdmissionBudgetError {
     /// The request payload would exceed the aggregate retained-byte budget.
     PayloadBytesExceeded { requested: usize, available: usize },
@@ -28,20 +32,34 @@ struct BudgetUsage {
 
 /// Bounds the request payload and count held by detached admission workers.
 pub(super) struct AdmissionBudget {
+    /// Maximum aggregate payload bytes held by in-flight admissions.
     max_payload_bytes: NonZeroUsize,
+    /// Maximum number of concurrent admission workers.
     max_submissions: NonZeroUsize,
+    /// Current worker count and payload bytes.
     usage: Mutex<BudgetUsage>,
 }
 
 /// Releases one payload and submission reservation when its admission worker
 /// ends.
 pub(super) struct AdmissionReservation {
+    /// Budget whose usage is decremented when this reservation is dropped.
     budget: Arc<AdmissionBudget>,
+    /// Payload bytes charged to this reservation.
     payload_bytes: usize,
 }
 
 impl AdmissionBudget {
     /// Creates an empty in-flight budget with fixed payload and worker limits.
+    ///
+    /// # Parameters
+    ///
+    /// * `max_payload_bytes` - Aggregate payload byte limit.
+    /// * `max_submissions` - Concurrent admission worker limit.
+    ///
+    /// # Returns
+    ///
+    /// A budget with no active reservations.
     pub(super) fn new(max_payload_bytes: NonZeroUsize, max_submissions: NonZeroUsize) -> Self {
         Self {
             max_payload_bytes,
@@ -54,6 +72,18 @@ impl AdmissionBudget {
     }
 
     /// Reserves one worker and its payload size without waiting for capacity.
+    ///
+    /// # Parameters
+    ///
+    /// * `payload_bytes` - Payload bytes requested by one admission.
+    ///
+    /// # Returns
+    ///
+    /// A reservation that releases usage when dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns a budget error if the worker or payload limit would be exceeded.
     pub(super) fn try_reserve(
         self: &Arc<Self>,
         payload_bytes: usize,
@@ -87,6 +117,7 @@ impl AdmissionBudget {
 }
 
 impl Drop for AdmissionReservation {
+    /// Returns this reservation's worker and payload accounting to the budget.
     fn drop(&mut self) {
         let mut usage = self.budget.usage.lock();
         debug_assert!(usage.submissions > 0);

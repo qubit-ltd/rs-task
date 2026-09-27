@@ -9,6 +9,15 @@
 
 /// Publication admission counters. Acceptance reports enqueue or provider
 /// admission only; it does not report subscriber handler completion.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::service::TaskEventNotificationStats;
+///
+/// let stats = TaskEventNotificationStats::default();
+/// assert_eq!(stats.enqueued, 0);
+/// ```
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TaskEventNotificationStats {
     /// Events placed in the publisher's bounded queue.

@@ -15,8 +15,6 @@ use super::ResourceRequest;
 /// Maximum number of bytes accepted in a reconstructable task payload.
 pub const MAX_TASK_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
-/// Maximum number of bytes retained for a task output summary.
-pub const MAX_TASK_OUTPUT_SUMMARY_BYTES: usize = 64 * 1024;
 /// Maximum byte lengths for stable task request identifiers.
 pub const MAX_TASK_TYPE_BYTES: usize = 128;
 /// Maximum byte lengths for handler versions.
@@ -33,11 +31,6 @@ pub const MAX_TASK_METADATA_KEY_BYTES: usize = 128;
 pub const MAX_TASK_METADATA_VALUE_BYTES: usize = 4 * 1024;
 /// Maximum combined UTF-8 bytes used by task metadata.
 pub const MAX_TASK_METADATA_BYTES: usize = 16 * 1024;
-/// Maximum byte length of a persisted diagnostic category.
-pub const MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES: usize = 128;
-/// Maximum byte length of a persisted diagnostic message.
-pub const MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES: usize = 4 * 1024;
-
 /// Reconstructible description accepted by a task handler.
 ///
 /// The payload is interpreted by the exact `(task_type, handler_version)`
@@ -69,50 +62,6 @@ pub struct TaskRequest {
     pub idempotency_key: Option<String>,
     /// Small values attached to the task for filtering and diagnostics.
     pub metadata: BTreeMap<String, String>,
-}
-
-/// Payload-free immutable fields used in task history and lifecycle reads.
-///
-/// The request payload is intentionally omitted so callers can inspect task
-/// metadata without loading potentially large or sensitive input bytes.
-///
-/// # Examples
-///
-/// ```
-/// use qubit_task::model::{TaskRequest, TaskRequestInfo};
-///
-/// let request = TaskRequest::new("report", "1", b"input".to_vec());
-/// let info = TaskRequestInfo::from(&request);
-/// assert_eq!(info.task_type, "report");
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskRequestInfo {
-    /// Stable task family understood by registered handlers.
-    pub task_type: String,
-    /// Exact handler version required to decode the payload.
-    pub handler_version: String,
-    /// Resource budget required during execution.
-    pub resources: ResourceRequest,
-    /// Optional caller-defined value used to find related tasks.
-    pub correlation_key: Option<String>,
-    /// Optional key used to deduplicate identical submissions.
-    pub idempotency_key: Option<String>,
-    /// Small values attached to the task for filtering and diagnostics.
-    pub metadata: BTreeMap<String, String>,
-}
-
-impl From<&TaskRequest> for TaskRequestInfo {
-    /// Copies immutable request metadata without cloning the payload.
-    fn from(request: &TaskRequest) -> Self {
-        Self {
-            task_type: request.task_type.clone(),
-            handler_version: request.handler_version.clone(),
-            resources: request.resources.clone(),
-            correlation_key: request.correlation_key.clone(),
-            idempotency_key: request.idempotency_key.clone(),
-            metadata: request.metadata.clone(),
-        }
-    }
 }
 
 impl TaskRequest {
@@ -206,53 +155,17 @@ impl TaskRequest {
     /// Create and durably retain this key before calling
     /// [`TaskExecutionService::submit`](crate::service::TaskExecutionService::submit).
     /// Reuse it only with the identical request.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Stable caller-generated idempotency key.
+    ///
+    /// # Returns
+    ///
+    /// The request with the supplied key attached.
     #[must_use]
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self
     }
-}
-
-/// Small result summary saved with the task record.
-///
-/// # Examples
-///
-/// ```
-/// use qubit_task::model::TaskOutput;
-///
-/// let output = TaskOutput { summary: b"stored result key".to_vec() };
-/// assert_eq!(output.summary, b"stored result key");
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct TaskOutput {
-    /// Bounded opaque summary or external result reference.
-    pub summary: Vec<u8>,
-}
-
-/// Classified failure reported by a handler.
-///
-/// Set `retryable` only when repeating the operation is safe under the
-/// application's idempotency and side-effect rules. Persisted category and
-/// message strings are byte-bounded by the service.
-///
-/// # Examples
-///
-/// ```
-/// use qubit_task::model::TaskRunError;
-///
-/// let error = TaskRunError {
-///     category: "remote_unavailable".into(),
-///     message: "try again later".into(),
-///     retryable: true,
-/// };
-/// assert!(error.retryable);
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskRunError {
-    /// Stable error category suitable for business logic.
-    pub category: String,
-    /// Human-readable diagnostic summary.
-    pub message: String,
-    /// Whether the service may retry this attempt.
-    pub retryable: bool,
 }
