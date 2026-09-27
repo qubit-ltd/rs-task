@@ -60,6 +60,18 @@ pub enum TaskServiceBuildError {
     /// The selected queue and running capacities overflow the supported range.
     #[error("invalid service configuration: {0}")]
     InvalidConfiguration(String),
+    /// Construction worker panicked or stopped before returning a result.
+    #[error("service construction worker stopped unexpectedly")]
+    WorkerStopped,
+    /// Construction failed and releasing the store owner also failed.
+    #[error("{primary}; releasing store ownership also failed: {cleanup}")]
+    CleanupFailed {
+        /// Original construction failure.
+        #[source]
+        primary: Box<TaskServiceBuildError>,
+        /// Failure while releasing the acquired owner.
+        cleanup: crate::store::StoreError,
+    },
     /// The dedicated lifecycle event publisher thread could not start.
     #[cfg(feature = "event-bus")]
     #[error("failed to start task event publisher thread: {0}")]
@@ -292,6 +304,30 @@ impl TaskExecutionServiceBuilder {
 
     /// Builds one unified task service after validating and preparing recovery.
     pub async fn build(self) -> Result<TaskExecutionService, TaskServiceBuildError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // Construction can acquire a persistent store owner and then await
+        // arbitrary store futures. Keep that work alive if the caller drops
+        // its build future, so ownership cleanup is not cancelled midway.
+        super::task_execution_service::runtime().handle().spawn(async move {
+            let result = self.build_inner(&sender).await;
+            if let Err(error) = sender.send(result) {
+                match error {
+                    Ok(service) => {
+                        if let Err(error) = service.shutdown().await {
+                            eprintln!("cancelled task service build could not finish shutdown: {error}");
+                        }
+                    }
+                    Err(error) => eprintln!("cancelled task service build failed: {error}"),
+                }
+            }
+        });
+        receiver.await.unwrap_or(Err(TaskServiceBuildError::WorkerStopped))
+    }
+
+    async fn build_inner(
+        self,
+        sender: &tokio::sync::oneshot::Sender<Result<TaskExecutionService, TaskServiceBuildError>>,
+    ) -> Result<TaskExecutionService, TaskServiceBuildError> {
         let store = self.store.ok_or(TaskServiceBuildError::MissingStore)?;
         let store_capabilities = store.capabilities();
         if self.require_recovery && !store_capabilities.restart_recovery {
@@ -315,12 +351,20 @@ impl TaskExecutionServiceBuilder {
         } else {
             None
         };
+        if sender.is_closed() {
+            if let Some(epoch) = owner {
+                store.release_owner(epoch).await?;
+            }
+            return Err(TaskServiceBuildError::InvalidConfiguration(
+                "service construction caller was cancelled".into(),
+            ));
+        }
         let recovered_result = async {
             if store_capabilities.restart_recovery {
                 if store.has_unfinished_over_limit(recovery_limit).await? {
                     return Err(TaskServiceBuildError::RecoveryCapacityExceeded { limit: recovery_limit });
                 }
-                restore_tasks_paged(&store, &self.handlers, self.max_attempts, recovery_limit).await
+                restore_tasks_paged(&store, &self.handlers, self.max_attempts, recovery_limit, sender).await
             } else {
                 Ok(std::collections::VecDeque::new())
             }
@@ -329,12 +373,25 @@ impl TaskExecutionServiceBuilder {
         let queue = match recovered_result {
             Ok(queue) => queue,
             Err(error) => {
-                if let Some(epoch) = owner {
-                    let _ = store.release_owner(epoch).await;
+                if let Some(epoch) = owner
+                    && let Err(cleanup) = store.release_owner(epoch).await
+                {
+                    return Err(TaskServiceBuildError::CleanupFailed {
+                        primary: Box::new(error),
+                        cleanup,
+                    });
                 }
                 return Err(error);
             }
         };
+        if sender.is_closed() {
+            if let Some(epoch) = owner {
+                store.release_owner(epoch).await?;
+            }
+            return Err(TaskServiceBuildError::InvalidConfiguration(
+                "service construction caller was cancelled".into(),
+            ));
+        }
         let queue_count = queue.len();
         let mut scheduler_queue = SchedulerQueue::new();
         for task in queue {
@@ -348,8 +405,13 @@ impl TaskExecutionServiceBuilder {
             Some(bus) => match TaskEventPublisher::new(bus, self.event_bus_buffer_capacity) {
                 Ok(publisher) => Some(publisher),
                 Err(error) => {
-                    if let Some(epoch) = owner {
-                        let _ = store.release_owner(epoch).await;
+                    if let Some(epoch) = owner
+                        && let Err(cleanup) = store.release_owner(epoch).await
+                    {
+                        return Err(TaskServiceBuildError::CleanupFailed {
+                            primary: Box::new(TaskServiceBuildError::EventPublisherThread(error)),
+                            cleanup,
+                        });
                     }
                     return Err(TaskServiceBuildError::EventPublisherThread(error));
                 }
@@ -430,11 +492,17 @@ async fn restore_tasks_paged(
     handlers: &TaskHandlerRegistry,
     max_attempts: u32,
     limit: usize,
+    sender: &tokio::sync::oneshot::Sender<Result<TaskExecutionService, TaskServiceBuildError>>,
 ) -> Result<std::collections::VecDeque<QueuedTask>, TaskServiceBuildError> {
     let mut queue = std::collections::VecDeque::new();
     let mut cursor = None;
     let mut count = 0_usize;
     loop {
+        if sender.is_closed() {
+            return Err(TaskServiceBuildError::InvalidConfiguration(
+                "service construction caller was cancelled".into(),
+            ));
+        }
         let page = store.scan_unfinished(cursor).await?;
         validate_recovery_page(&page.tasks, cursor, page.next)?;
         count = count.checked_add(page.tasks.len()).ok_or_else(|| {
@@ -764,5 +832,20 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("owner.lock"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn test_build_errors_preserve_worker_and_cleanup_diagnostics() {
+        let worker_error = TaskServiceBuildError::WorkerStopped;
+        assert!(worker_error.to_string().contains("worker stopped"));
+
+        let cleanup_error = TaskServiceBuildError::CleanupFailed {
+            primary: Box::new(TaskServiceBuildError::InvalidRecoveryPage("bad cursor".into())),
+            cleanup: crate::store::StoreError::Failure("release failed".into()),
+        };
+        let message = cleanup_error.to_string();
+        assert!(message.contains("bad cursor"));
+        assert!(message.contains("release failed"));
+        assert!(std::error::Error::source(&cleanup_error).is_some());
     }
 }

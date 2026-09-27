@@ -36,6 +36,8 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::sync::Semaphore;
+use tokio::sync::oneshot;
 
 struct Echo;
 
@@ -161,6 +163,10 @@ async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
         cursor: TaskId::generate(),
         precheck_calls: AtomicUsize::new(0),
         scan_calls: AtomicUsize::new(0),
+        acquire_gate: None,
+        scan_gate: None,
+        release_calls: AtomicUsize::new(0),
+        release_finished: Mutex::new(None),
     });
 
     let result = TaskExecutionServiceBuilder::default()
@@ -297,6 +303,35 @@ struct BadScanStore {
     cursor: TaskId,
     precheck_calls: AtomicUsize,
     scan_calls: AtomicUsize,
+    acquire_gate: Option<Arc<AsyncGate>>,
+    scan_gate: Option<Arc<AsyncGate>>,
+    release_calls: AtomicUsize,
+    release_finished: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+struct AsyncGate {
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+    release: Semaphore,
+}
+
+impl AsyncGate {
+    fn new() -> (Self, oneshot::Receiver<()>) {
+        let (entered, receiver) = oneshot::channel();
+        (
+            Self {
+                entered: Mutex::new(Some(entered)),
+                release: Semaphore::new(0),
+            },
+            receiver,
+        )
+    }
+
+    async fn wait(&self) {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        self.release.acquire().await.expect("test gate remains open").forget();
+    }
 }
 
 impl TaskStore for BadScanStore {
@@ -343,10 +378,27 @@ impl TaskStore for BadScanStore {
     }
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
-        self.inner.acquire_owner()
+        let inner = Arc::clone(&self.inner);
+        let gate = self.acquire_gate.clone();
+        Box::pin(async move {
+            let owner = inner.acquire_owner().await?;
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+            Ok(owner)
+        })
     }
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
-        self.inner.release_owner(epoch)
+        self.release_calls.fetch_add(1, Ordering::AcqRel);
+        let result = self.inner.release_owner(epoch);
+        let finished = self.release_finished.lock().unwrap().take();
+        Box::pin(async move {
+            let result = result.await;
+            if let Some(finished) = finished {
+                let _ = finished.send(());
+            }
+            result
+        })
     }
 
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
@@ -356,7 +408,11 @@ impl TaskStore for BadScanStore {
 
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
         self.scan_calls.fetch_add(1, Ordering::Relaxed);
+        let gate = self.scan_gate.clone();
         Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
             match self.mode {
                 BadPage::Normal => self.inner.scan_unfinished(cursor).await,
                 BadPage::EmptyWithNext => Ok(StoredTaskPage {
@@ -402,6 +458,10 @@ async fn test_invalid_recovery_pages_fail_without_looping() {
             cursor: TaskId::generate(),
             precheck_calls: AtomicUsize::new(0),
             scan_calls: AtomicUsize::new(0),
+            acquire_gate: None,
+            scan_gate: None,
+            release_calls: AtomicUsize::new(0),
+            release_finished: Mutex::new(None),
         });
         let result = TaskExecutionServiceBuilder::default()
             .store(store.clone())
@@ -419,6 +479,101 @@ async fn test_invalid_recovery_pages_fail_without_looping() {
 }
 
 #[tokio::test]
+async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    let (gate, entered) = AsyncGate::new();
+    let gate = Arc::new(gate);
+    let (release_finished, released) = oneshot::channel();
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::Normal,
+        stored: Mutex::new(None),
+        cursor: TaskId::generate(),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+        acquire_gate: Some(Arc::clone(&gate)),
+        scan_gate: None,
+        release_calls: AtomicUsize::new(0),
+        release_finished: Mutex::new(Some(release_finished)),
+    });
+    let builder_store = Arc::clone(&store);
+    let building = tokio::spawn(async move {
+        TaskExecutionServiceBuilder::default()
+            .store(builder_store)
+            .require_recovery(true)
+            .build()
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered)
+        .await
+        .expect("owner acquisition reaches its post-side-effect gate")
+        .expect("owner gate signals entry");
+    building.abort();
+    assert!(matches!(building.await, Err(error) if error.is_cancelled()));
+    gate.release.add_permits(1);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), released)
+        .await
+        .expect("detached builder releases the acquired owner")
+        .expect("owner release notification arrives");
+    assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+    drop(store);
+    let reopened = SqliteTaskStore::open(&path).expect("cancelled build released SQLite ownership");
+    drop(reopened);
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    accept(&inner).await;
+    let (gate, entered) = AsyncGate::new();
+    let gate = Arc::new(gate);
+    let (release_finished, released) = oneshot::channel();
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::Normal,
+        stored: Mutex::new(None),
+        cursor: TaskId::generate(),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+        acquire_gate: None,
+        scan_gate: Some(Arc::clone(&gate)),
+        release_calls: AtomicUsize::new(0),
+        release_finished: Mutex::new(Some(release_finished)),
+    });
+    let builder_store = Arc::clone(&store);
+    let building = tokio::spawn(async move {
+        TaskExecutionServiceBuilder::default()
+            .store(builder_store)
+            .register_handler(Arc::new(Echo))
+            .unwrap()
+            .require_recovery(true)
+            .build()
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered)
+        .await
+        .expect("recovery scan reaches its gate")
+        .expect("scan gate signals entry");
+    building.abort();
+    assert!(matches!(building.await, Err(error) if error.is_cancelled()));
+    gate.release.add_permits(1);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), released)
+        .await
+        .expect("detached builder releases owner after the page completes")
+        .expect("owner release notification arrives");
+    assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+    drop(store);
+    let reopened = SqliteTaskStore::open(&path).expect("cancelled recovery released SQLite ownership");
+    drop(reopened);
+    cleanup(&path);
+}
+
+#[tokio::test]
 async fn test_recovery_prechecks_once_then_scans_each_page_once() {
     let path = temp_db();
     let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
@@ -432,6 +587,10 @@ async fn test_recovery_prechecks_once_then_scans_each_page_once() {
         cursor: TaskId::generate(),
         precheck_calls: AtomicUsize::new(0),
         scan_calls: AtomicUsize::new(0),
+        acquire_gate: None,
+        scan_gate: None,
+        release_calls: AtomicUsize::new(0),
+        release_finished: Mutex::new(None),
     });
     let service = TaskExecutionServiceBuilder::default()
         .store(store.clone())
