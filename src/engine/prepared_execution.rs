@@ -34,6 +34,10 @@ impl PreparedExecution {
     /// `release` must return all resources reserved for this task when the
     /// prepared execution is abandoned or the execution attempt finishes.
     ///
+    /// # Type Parameters
+    ///
+    /// * `F` - Callback type that releases the reserved resources.
+    ///
     /// # Parameters
     ///
     /// * `id` - Task whose resources were reserved.

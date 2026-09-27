@@ -13,8 +13,11 @@ use crate::scheduling::QueuedTask;
 
 /// Holds ready work separately from tasks waiting for retry deadlines.
 pub(crate) struct SchedulerQueue {
+    /// Tasks eligible for immediate FIFO scheduling.
     ready: VecDeque<QueuedTask>,
+    /// Tasks grouped by retry deadline in ascending deadline order.
     delayed: BTreeMap<u64, VecDeque<QueuedTask>>,
+    /// Total number of ready and delayed tasks retained by the queue.
     len: usize,
 }
 

@@ -46,6 +46,10 @@ impl LocalTaskHandler {
     /// Creates a one-shot handler for a closure submitted directly to a
     /// volatile service.
     ///
+    /// # Type Parameters
+    ///
+    /// * `F` - One-shot closure type used to execute the task.
+    ///
     /// # Parameters
     ///
     /// * `descriptor` - Stable task type and version handled by the closure.
