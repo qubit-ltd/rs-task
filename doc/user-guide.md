@@ -295,11 +295,14 @@ store fault follows the same drain path once the service owns shutdown
 coordination. The service has one publisher thread and creates no subscription
 receiver thread when it has no subscriptions. It does not shut down the
 application-owned event bus. Publication runs on a
-dedicated OS thread, keeping a synchronous provider off Tokio runtime workers;
-however, a synchronous provider that never returns can keep that thread busy
-and make `shutdown()` wait indefinitely. Dropping the service without calling
-`shutdown()` closes the sender and lets the worker drain queued notifications
-before exiting, subject to the same provider behavior. If the worker panics,
+dedicated OS thread, keeping a synchronous provider off Tokio runtime workers.
+By default, `shutdown()` waits at most 30 seconds for the notification worker;
+configure another limit with `event_bus_close_timeout(Duration)`. On timeout,
+`shutdown()` returns `TaskServiceError::NotificationClose`, while the worker
+continues processing accepted notifications. Concurrent and later shutdown
+callers receive the same stored close result. Dropping the service without calling `shutdown()` closes
+the sender and lets the worker drain queued notifications before exiting,
+subject to provider behavior. If the worker panics,
 `worker_panicked` records it, queued notifications may be lost, and
 `shutdown()` returns `TaskServiceError::NotificationClose`. A failure to join
 the blocking close task returns the same error. These notification failures do

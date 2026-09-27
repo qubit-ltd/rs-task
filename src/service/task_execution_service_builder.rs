@@ -7,6 +7,8 @@
 // =============================================================================
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+#[cfg(feature = "event-bus")]
+use std::time::Duration;
 
 use super::admission_budget::AdmissionBudget;
 use super::admission_gate::AdmissionGate;
@@ -114,6 +116,8 @@ pub struct TaskExecutionServiceBuilder {
     event_bus: Option<qubit_event_bus::EventBus>,
     #[cfg(feature = "event-bus")]
     event_bus_buffer_capacity: NonZeroUsize,
+    #[cfg(feature = "event-bus")]
+    event_bus_close_timeout: Duration,
 }
 
 impl Default for TaskExecutionServiceBuilder {
@@ -141,6 +145,8 @@ impl Default for TaskExecutionServiceBuilder {
             event_bus: None,
             #[cfg(feature = "event-bus")]
             event_bus_buffer_capacity: NonZeroUsize::new(256).expect("default event bus buffer capacity is nonzero"),
+            #[cfg(feature = "event-bus")]
+            event_bus_close_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -302,6 +308,15 @@ impl TaskExecutionServiceBuilder {
         self
     }
 
+    /// Sets how long service shutdown waits for the lifecycle notification
+    /// worker.
+    #[cfg(feature = "event-bus")]
+    #[must_use]
+    pub fn event_bus_close_timeout(mut self, timeout: Duration) -> Self {
+        self.event_bus_close_timeout = timeout;
+        self
+    }
+
     /// Builds one unified task service after validating and preparing recovery.
     pub async fn build(self) -> Result<TaskExecutionService, TaskServiceBuildError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -402,7 +417,7 @@ impl TaskExecutionServiceBuilder {
             .unwrap_or_else(|| super::task_execution_service::runtime().handle().clone());
         #[cfg(feature = "event-bus")]
         let event_bus = match self.event_bus {
-            Some(bus) => match TaskEventPublisher::new(bus, self.event_bus_buffer_capacity) {
+            Some(bus) => match TaskEventPublisher::new(bus, self.event_bus_buffer_capacity, self.event_bus_close_timeout) {
                 Ok(publisher) => Some(publisher),
                 Err(error) => {
                     if let Some(epoch) = owner
@@ -415,7 +430,7 @@ impl TaskExecutionServiceBuilder {
                     }
                     return Err(TaskServiceBuildError::EventPublisherThread(error));
                 }
-            },
+            }
             None => None,
         };
         let core = ServiceCore {

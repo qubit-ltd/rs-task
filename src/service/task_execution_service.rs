@@ -1652,13 +1652,14 @@ async fn task_stats(core: &ServiceCore) -> Result<TaskStats, TaskServiceError> {
 /// Stops and drains the service-owned notification worker before shutdown
 /// publishes its shared result.
 ///
-/// With the `event-bus` feature, this blocks on the publisher's worker through
-/// `spawn_blocking`; a provider that never returns can therefore keep the
-/// service shutdown coordinator alive. The injected `EventBus` remains owned
-/// by the application and is not shut down here.
+/// With the `event-bus` feature, this waits on the publisher through
+/// `spawn_blocking`, bounded by the configured timeout. A timeout is reported
+/// through `NotificationClose`; the worker continues processing accepted
+/// notifications. The injected `EventBus` remains application owned.
 ///
 /// # Errors
-/// Returns `NotificationClose` when the worker fails to join or panics.
+/// Returns `NotificationClose` when the worker times out, fails to join, or
+/// panics.
 async fn close_notification_publisher(core: &Arc<ServiceCore>) -> Result<(), TaskServiceError> {
     #[cfg(feature = "event-bus")]
     if let Some(publisher) = &core.event_bus {
@@ -1869,9 +1870,9 @@ mod shutdown_result_tests {
         assert!(matches!(
             combine_shutdown_results(
                 Ok(()),
-                Err(TaskServiceError::NotificationClose("close failed".into()))
+                Err(TaskServiceError::NotificationClose("notification publisher close timed out".into()))
             ),
-            Err(TaskServiceError::NotificationClose(message)) if message == "close failed"
+            Err(TaskServiceError::NotificationClose(message)) if message == "notification publisher close timed out"
         ));
         assert!(matches!(
             combine_shutdown_results(
