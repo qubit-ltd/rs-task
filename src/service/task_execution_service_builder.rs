@@ -120,6 +120,43 @@ pub struct TaskExecutionServiceBuilder {
     event_bus_close_timeout: Duration,
 }
 
+/// Owns a recovery lease until it is released or transferred to the service.
+struct OwnerGuard {
+    store: Arc<dyn TaskStore>,
+    epoch: Option<crate::model::OwnerEpoch>,
+}
+
+impl OwnerGuard {
+    fn new(store: Arc<dyn TaskStore>, epoch: Option<crate::model::OwnerEpoch>) -> Self {
+        Self { store, epoch }
+    }
+
+    fn transfer(&mut self) -> Option<crate::model::OwnerEpoch> {
+        self.epoch.take()
+    }
+
+    async fn release(&mut self) -> Result<(), crate::store::StoreError> {
+        if let Some(epoch) = self.epoch.take() {
+            self.store.release_owner(epoch).await
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for OwnerGuard {
+    fn drop(&mut self) {
+        if let Some(epoch) = self.epoch.take() {
+            let store = Arc::clone(&self.store);
+            super::task_execution_service::runtime().handle().spawn(async move {
+                if let Err(error) = store.release_owner(epoch).await {
+                    eprintln!("task service owner guard could not release ownership: {error}");
+                }
+            });
+        }
+    }
+}
+
 impl Default for TaskExecutionServiceBuilder {
     fn default() -> Self {
         let cpu_slots = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32;
@@ -366,10 +403,9 @@ impl TaskExecutionServiceBuilder {
         } else {
             None
         };
+        let mut owner = OwnerGuard::new(Arc::clone(&store), owner);
         if sender.is_closed() {
-            if let Some(epoch) = owner {
-                store.release_owner(epoch).await?;
-            }
+            owner.release().await?;
             return Err(TaskServiceBuildError::InvalidConfiguration(
                 "service construction caller was cancelled".into(),
             ));
@@ -388,9 +424,7 @@ impl TaskExecutionServiceBuilder {
         let queue = match recovered_result {
             Ok(queue) => queue,
             Err(error) => {
-                if let Some(epoch) = owner
-                    && let Err(cleanup) = store.release_owner(epoch).await
-                {
+                if let Err(cleanup) = owner.release().await {
                     return Err(TaskServiceBuildError::CleanupFailed {
                         primary: Box::new(error),
                         cleanup,
@@ -400,9 +434,7 @@ impl TaskExecutionServiceBuilder {
             }
         };
         if sender.is_closed() {
-            if let Some(epoch) = owner {
-                store.release_owner(epoch).await?;
-            }
+            owner.release().await?;
             return Err(TaskServiceBuildError::InvalidConfiguration(
                 "service construction caller was cancelled".into(),
             ));
@@ -421,9 +453,7 @@ impl TaskExecutionServiceBuilder {
                 match TaskEventPublisher::new(bus, self.event_bus_buffer_capacity, self.event_bus_close_timeout) {
                     Ok(publisher) => Some(publisher),
                     Err(error) => {
-                        if let Some(epoch) = owner
-                            && let Err(cleanup) = store.release_owner(epoch).await
-                        {
+                        if let Err(cleanup) = owner.release().await {
                             return Err(TaskServiceBuildError::CleanupFailed {
                                 primary: Box::new(TaskServiceBuildError::EventPublisherThread(error)),
                                 cleanup,
@@ -459,7 +489,7 @@ impl TaskExecutionServiceBuilder {
                 self.max_inflight_payload_bytes,
                 self.max_inflight_submissions,
             )),
-            owner,
+            owner: owner.transfer(),
             store_fault: parking_lot::Mutex::new(None),
             scheduler_fault: parking_lot::Mutex::new(None),
             attempts_in_flight: std::sync::atomic::AtomicUsize::new(0),
@@ -626,6 +656,7 @@ mod tests {
     use crate::model::TaskState;
     use crate::scheduling::FairFifoPolicy;
     use crate::store::MemoryTaskStore;
+    use crate::store::TaskStore;
 
     struct Echo;
 
@@ -800,6 +831,14 @@ mod tests {
             .build()
             .await;
         assert!(matches!(result, Err(TaskServiceBuildError::InvalidConfiguration(_))));
+    }
+
+    #[tokio::test]
+    async fn test_owner_guard_without_lease_is_a_noop() {
+        let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(4));
+        let mut guard = super::OwnerGuard::new(store, None);
+        guard.release().await.expect("no lease needs no release");
+        assert!(guard.transfer().is_none());
     }
 
     #[cfg(feature = "sqlite")]
