@@ -72,6 +72,19 @@ pub struct TaskRequest {
 }
 
 /// Payload-free immutable fields used in task history and lifecycle reads.
+///
+/// The request payload is intentionally omitted so callers can inspect task
+/// metadata without loading potentially large or sensitive input bytes.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::{TaskRequest, TaskRequestInfo};
+///
+/// let request = TaskRequest::new("report", "1", b"input".to_vec());
+/// let info = TaskRequestInfo::from(&request);
+/// assert_eq!(info.task_type, "report");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRequestInfo {
     /// Stable task family understood by registered handlers.
@@ -89,6 +102,7 @@ pub struct TaskRequestInfo {
 }
 
 impl From<&TaskRequest> for TaskRequestInfo {
+    /// Copies immutable request metadata without cloning the payload.
     fn from(request: &TaskRequest) -> Self {
         Self {
             task_type: request.task_type.clone(),
@@ -108,6 +122,11 @@ impl TaskRequest {
     ///
     /// `Ok(())` when all fields fit their documented byte and entry limits;
     /// otherwise returns a static diagnostic suitable for validation errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first static diagnostic for an empty required identifier or
+    /// a field, metadata entry, or combined metadata size over its limit.
     pub(crate) fn validate_limits(&self) -> Result<(), &'static str> {
         if self.task_type.is_empty() || self.handler_version.is_empty() {
             return Err("task type and handler version must not be empty");

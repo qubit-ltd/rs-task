@@ -17,6 +17,11 @@ use crate::model::TaskState;
 /// [`result`](Self::result) waits for persisted finalization before exposing
 /// the process-local value.
 ///
+/// # Type Parameters
+///
+/// * `R` - Value returned by the local closure on success.
+/// * `E` - Application error returned by the local closure on failure.
+///
 /// # Examples
 ///
 /// ```

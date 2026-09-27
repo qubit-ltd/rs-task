@@ -41,6 +41,7 @@ impl TaskId {
 }
 
 impl std::fmt::Display for TaskId {
+    /// Formats the wrapped UUID using its canonical textual representation.
     #[inline]
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
