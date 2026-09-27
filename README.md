@@ -130,6 +130,21 @@ Applications may select the runtime for service background tasks with
 until shutdown and any asynchronous drain complete. See the user guide for
 last-handle drop behavior and scheduler failure reporting.
 
+Task history and waiting paths return `TaskSummary`, whose request metadata omits
+`payload`. Use `get_summary`, `list`, `wait`, and `retry_blocked` for status
+handling; `get` and `get_by_idempotency_key` remain detailed reads returning
+`TaskRecord`. SQLite schema 3 stores request metadata, the payload BLOB, and
+lifecycle JSON separately. Summary queries and lifecycle transitions do not
+select the BLOB. Schema 0, 1, and 2 databases migrate transactionally to schema
+3 while preserving requests, idempotency keys, and lifecycle state.
+
+After a store failure, waiters and local handles receive the fault immediately.
+The shared shutdown result waits for the scheduler and tracked executions to
+exit, then releases SQLite ownership. `shutdown_until` can time out while this
+background drain continues. Operators can inspect aged `Blocked` summaries and
+call `abandon_blocked(id, state_version)`; a stale revision returns a conflict.
+Use bounded `prune_terminal_before` afterward to reclaim terminal history.
+
 ## Testing
 
 ```bash
@@ -164,18 +179,3 @@ API documentation and tests current, and run `./align-ci.sh` to format code and
 **Haixing Hu** - *Qubit Co. Ltd.*
 
 Repository: [https://github.com/qubit-ltd/rs-task](https://github.com/qubit-ltd/rs-task)
-
-Task history and waiting paths return `TaskSummary`, whose request metadata omits
-`payload`. Use `get_summary`, `list`, `wait`, and `retry_blocked` for status
-handling; `get` and `get_by_idempotency_key` remain detailed reads returning
-`TaskRecord`. SQLite schema 3 stores request metadata, the payload BLOB, and
-lifecycle JSON separately. Summary queries and lifecycle transitions do not
-select the BLOB. Schema 0, 1, and 2 databases migrate transactionally to schema
-3 while preserving requests, idempotency keys, and lifecycle state.
-
-After a store failure, waiters and local handles receive the fault immediately.
-The shared shutdown result waits for the scheduler and tracked executions to
-exit, then releases SQLite ownership. `shutdown_until` can time out while this
-background drain continues. Operators can inspect aged `Blocked` summaries and
-call `abandon_blocked(id, state_version)`; a stale revision returns a conflict.
-Use bounded `prune_terminal_before` afterward to reclaim terminal history.

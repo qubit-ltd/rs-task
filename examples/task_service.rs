@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+//! Demonstrates local closures, cooperative cancellation, and versioned tasks.
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -15,8 +17,10 @@ use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskState;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::LocalTaskResultError;
 use qubit_task::store::TaskFuture;
@@ -31,11 +35,7 @@ impl TaskHandler for EchoV1 {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        payload: &'a [u8],
-        _context: TaskContext,
-    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             Ok(TaskRunOutcome::Succeeded(TaskOutput {
                 summary: format!("echoed {} bytes", payload.len()).into_bytes(),
@@ -44,6 +44,7 @@ impl TaskHandler for EchoV1 {
     }
 }
 
+/// Runs each task mode and shuts the service down after it settles.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
     runtime.block_on(async {
@@ -78,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         while !started.load(Ordering::Acquire) {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        service.cancel(cancel_handle.task_id()).await?;
+        let _cancel_outcome = service.cancel(cancel_handle.task_id()).await?;
         assert!(matches!(
             cancel_handle.result().await,
             Err(LocalTaskResultError::Cancelled)
@@ -93,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("accepted task remains queryable");
         assert_eq!(snapshot.request.task_type, "echo");
         let finished = service.wait(accepted.id).await?;
-        assert!(matches!(finished.state, qubit_task::model::TaskState::Succeeded));
+        assert!(matches!(finished.state, TaskState::Succeeded));
         assert_eq!(
             finished.output.expect("summary is persisted").summary,
             b"echoed 14 bytes"
