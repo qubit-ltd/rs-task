@@ -78,8 +78,13 @@ impl AdmissionGate {
     }
 
     /// Reports whether shutdown has published its final result.
-    pub(super) fn is_closed(&self) -> bool {
-        matches!(self.state.lock().phase, Phase::Closed)
+    pub(super) fn is_closing(&self) -> bool {
+        !matches!(self.state.lock().phase, Phase::Open)
+    }
+
+    /// Reports whether every operation admitted before close has finished.
+    pub(super) fn is_idle(&self) -> bool {
+        self.state.lock().active == 0
     }
 
     /// Waits until permits granted before closing have all been dropped.

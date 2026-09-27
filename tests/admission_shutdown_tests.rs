@@ -227,6 +227,45 @@ async fn test_scheduler_panic_retains_owner_until_started_attempt_finishes() {
     assert_eq!(store.release_count.load(Ordering::Acquire), 1);
 }
 
+#[tokio::test]
+async fn test_normal_shutdown_waits_for_local_execution_reservation_release() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let release = Arc::new(Semaphore::new(0));
+    let handler = Arc::new(HeldHandler {
+        started: Mutex::new(Some(started_tx)),
+        release: release.clone(),
+    });
+    let engine = Arc::new(LocalTaskExecutionEngine::new(ResourceCapacity {
+        cpu_slots: 1,
+        ..ResourceCapacity::default()
+    }));
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .engine(engine.clone())
+        .register_handler(handler)
+        .expect("handler registers")
+        .build()
+        .await
+        .expect("service builds");
+    service
+        .submit(test_keyed(TaskRequest::new("held-after-panic", "1", Vec::new())))
+        .await
+        .expect("task is accepted");
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("handler starts")
+        .expect("start signal arrives");
+
+    let closing_service = service.clone();
+    let closing = tokio::spawn(async move { closing_service.shutdown().await });
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), closing)
+        .await
+        .expect("shutdown waits for and observes execution cleanup")
+        .expect("shutdown task joins")
+        .expect("service shuts down");
+    assert_eq!(engine.capacity().used_cpu_slots, 0);
+}
+
 struct ControlledStore {
     inner: Arc<MemoryTaskStore>,
     accept_entered: Mutex<Option<oneshot::Sender<()>>>,
