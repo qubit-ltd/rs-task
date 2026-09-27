@@ -48,6 +48,13 @@ impl TaskStore for FailListStore {
         self.inner.get_by_idempotency_key(key)
     }
 
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        self.inner.get_summary_by_idempotency_key(key)
+    }
+
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.transition(command)
     }

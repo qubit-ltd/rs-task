@@ -640,6 +640,25 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Reads lifecycle metadata using the payload-free summary projection.
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        let key = key.to_owned();
+        self.run(move |connection| {
+            let stored = connection
+                .query_row(
+                    &format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE idempotency_key=?1"),
+                    [key],
+                    read_stored_summary_row,
+                )
+                .optional()
+                .map_err(failure)?;
+            stored.map(decode_stored_summary_row).transpose()
+        })
+    }
+
     /// Loads one complete task record, including its payload bytes.
     ///
     /// # Parameters

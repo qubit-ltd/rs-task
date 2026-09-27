@@ -514,11 +514,11 @@ impl TaskExecutionService {
             .map_err(|error| self.handle_store_error(error))
     }
 
-    /// Finds a retained task by the caller-supplied idempotency key.
+    /// Finds the payload-free summary for a retained idempotency key.
     ///
     /// A missing record only means that the key is not committed at the time
     /// of this lookup. A submission worker may still be accepting it; retry
-    /// `submit` with the same key and identical request to recover its record.
+    /// `submit` with the same key and identical request to recover its task.
     ///
     /// # Parameters
     ///
@@ -526,13 +526,14 @@ impl TaskExecutionService {
     ///
     /// # Returns
     ///
-    /// The matching retained task, or `None` when not yet committed or absent.
+    /// The matching retained summary, or `None` when not yet committed or
+    /// absent.
     ///
     /// # Errors
     ///
     /// Returns `InvalidRequest` for an empty or oversized key, or a store
     /// error if lookup fails.
-    pub async fn get_by_idempotency_key(&self, key: &str) -> Result<Option<TaskRecord>, TaskServiceError> {
+    pub async fn get_by_idempotency_key(&self, key: &str) -> Result<Option<TaskSummary>, TaskServiceError> {
         if key.is_empty() || key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
             return Err(TaskServiceError::InvalidRequest(
                 "idempotency key must contain between 1 and 256 bytes".into(),
@@ -540,7 +541,7 @@ impl TaskExecutionService {
         }
         self.core
             .store
-            .get_by_idempotency_key(key)
+            .get_summary_by_idempotency_key(key)
             .await
             .map_err(|error| self.handle_store_error(error))
     }
@@ -1488,6 +1489,14 @@ impl QueueWindowGuard {
             self.core.queue.lock().restore_front(tasks);
         }
     }
+
+    /// Returns unstarted work to the back so the scheduler can inspect later
+    /// windows.
+    fn restore_back(&mut self) {
+        if let Some(tasks) = self.tasks.take() {
+            self.core.queue.lock().restore_back(tasks);
+        }
+    }
 }
 
 impl Drop for QueueWindowGuard {
@@ -1503,6 +1512,8 @@ impl Drop for QueueWindowGuard {
 ///
 /// * `core_ref` - Weak shared state upgraded for each scheduling pass.
 async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
+    let mut sweep_remaining = 0_usize;
+    let mut skipped_ids = Vec::new();
     loop {
         let Some(core) = core_ref.upgrade() else {
             return;
@@ -1510,10 +1521,18 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
         if core.store_fault.lock().is_some() {
             return;
         }
+        if sweep_remaining == 0 {
+            if !skipped_ids.is_empty() {
+                core.queue.lock().promote_ids_front(&skipped_ids);
+                skipped_ids.clear();
+            }
+            sweep_remaining = core.queue.lock().len();
+        }
         let now = now_ms();
         let window_tasks = core.queue.lock().take_window(core.scan_budget, now);
         let mut window = QueueWindowGuard::new(Arc::clone(&core), window_tasks);
         let queue = window.tasks_mut();
+        let window_len = queue.len();
         if queue.is_empty() {
             if core.admission.is_closing() && core.admission.is_idle() && core.queue.lock().is_empty() {
                 match task_stats(&core).await {
@@ -1539,13 +1558,18 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             }
             continue;
         }
-        let order = core.policy.order(
+        let scheduling_plan = core.policy.order(
             &QueueSnapshot {
                 tasks: queue.to_vec(),
                 scan_budget: core.scan_budget,
             },
             &core.engine.capacity(),
         );
+        debug_assert!(scheduling_plan.barrier.is_none_or(|barrier| {
+            scheduling_plan.order.len() == 1 && scheduling_plan.order.first() == Some(&barrier)
+        }));
+        let barrier = scheduling_plan.barrier;
+        let order = scheduling_plan.order;
         let original_positions = queue
             .iter()
             .enumerate()
@@ -1788,10 +1812,36 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 item.bypasses = item.bypasses.saturating_add(1);
             }
         }
-        {
+        let waiting_at_barrier = barrier.is_some_and(|id| queue.iter().any(|task| task.id == id));
+        if waiting_at_barrier {
             window.restore();
+            sweep_remaining = 0;
+            skipped_ids.clear();
+        } else if started {
+            window.restore();
+            if !skipped_ids.is_empty() {
+                core.queue.lock().record_bypass_and_promote_front(&skipped_ids);
+                skipped_ids.clear();
+            }
+            sweep_remaining = 0;
+        } else {
+            skipped_ids.extend(
+                queue
+                    .iter()
+                    .filter(|task| task.retry_not_before_ms.is_none())
+                    .map(|task| task.id),
+            );
+            window.restore_back();
+            sweep_remaining = sweep_remaining.saturating_sub(window_len);
+            if sweep_remaining == 0 {
+                core.queue.lock().promote_ids_front(&skipped_ids);
+                skipped_ids.clear();
+            }
         }
         if !started {
+            if !waiting_at_barrier && sweep_remaining > 0 {
+                continue;
+            }
             let wait = core
                 .queue
                 .lock()

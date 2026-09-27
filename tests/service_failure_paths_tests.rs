@@ -167,6 +167,7 @@ impl TaskExecutionEngine for ClosedPrepareEngine {
 struct FailFirstGetStore {
     inner: Arc<dyn TaskStore>,
     should_fail_get: AtomicBool,
+    should_fail_keyed_record_lookup: AtomicBool,
     fail_next_list: AtomicBool,
     release_owner_calls: std::sync::atomic::AtomicUsize,
 }
@@ -176,6 +177,7 @@ impl FailFirstGetStore {
         Self {
             inner: Arc::new(MemoryTaskStore::new(16)),
             should_fail_get: AtomicBool::new(true),
+            should_fail_keyed_record_lookup: AtomicBool::new(false),
             fail_next_list: AtomicBool::new(false),
             release_owner_calls: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -186,6 +188,7 @@ impl FailFirstGetStore {
         Self {
             inner,
             should_fail_get: AtomicBool::new(false),
+            should_fail_keyed_record_lookup: AtomicBool::new(false),
             fail_next_list: AtomicBool::new(false),
             release_owner_calls: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -202,7 +205,18 @@ impl TaskStore for FailFirstGetStore {
     }
 
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
-        self.inner.get_by_idempotency_key(key)
+        if self.should_fail_keyed_record_lookup.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(StoreError::Failure("injected full keyed lookup failure".into())) })
+        } else {
+            self.inner.get_by_idempotency_key(key)
+        }
+    }
+
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        self.inner.get_summary_by_idempotency_key(key)
     }
 
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
@@ -257,6 +271,36 @@ impl TaskStore for FailFirstGetStore {
         self.release_owner_calls.fetch_add(1, Ordering::AcqRel);
         self.inner.release_owner(epoch)
     }
+}
+
+#[tokio_test]
+async fn test_service_idempotency_summary_lookup_does_not_load_full_record() {
+    let store = Arc::new(FailFirstGetStore::new());
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds with the decorated store");
+    let key = "summary-only-service-lookup";
+    let accepted = service
+        .submit(TaskRequest::new("missing-handler", "1", vec![1, 2, 3]).with_idempotency_key(key))
+        .await
+        .expect("task is accepted");
+    store.should_fail_keyed_record_lookup.store(true, Ordering::Release);
+
+    let summary = service
+        .get_by_idempotency_key(key)
+        .await
+        .expect("summary lookup succeeds without a full record read")
+        .expect("accepted task is still retained");
+    assert_eq!(summary.id, accepted.id);
+    assert_eq!(Some(summary.clone()), service.get_summary(accepted.id).await.unwrap());
+    assert!(matches!(
+        store.get_by_idempotency_key(key).await,
+        Err(StoreError::Failure(_))
+    ));
+
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[cfg(feature = "sqlite")]

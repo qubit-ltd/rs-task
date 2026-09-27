@@ -73,6 +73,7 @@ use qubit_task::model::TransitionCommand;
 use qubit_task::scheduling::FairFifoPolicy;
 use qubit_task::scheduling::QueueSnapshot;
 use qubit_task::scheduling::QueuedTask;
+use qubit_task::scheduling::SchedulingPlan;
 use qubit_task::scheduling::SchedulingPolicy;
 use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
@@ -198,15 +199,18 @@ struct PausablePolicy {
 }
 
 impl SchedulingPolicy for PausablePolicy {
-    fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> Vec<TaskId> {
+    fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> SchedulingPlan {
         self.called.notify_one();
         if !queue.tasks.is_empty() {
             self.saw_nonempty.notify_one();
         }
         if self.paused.load(std::sync::atomic::Ordering::Acquire) {
-            Vec::new()
+            SchedulingPlan::default()
         } else {
-            queue.tasks.iter().map(|task| task.id).collect()
+            SchedulingPlan {
+                order: queue.tasks.iter().map(|task| task.id).collect(),
+                barrier: None,
+            }
         }
     }
 }
@@ -466,6 +470,7 @@ async fn test_service_submit_requires_and_exposes_a_stable_idempotency_key() {
         .expect("key lookup succeeds")
         .expect("accepted request is recoverable by key");
     assert_eq!(recovered.id, accepted.id);
+    assert_eq!(Some(recovered.clone()), service.get_summary(accepted.id).await.unwrap());
     assert_eq!(
         service
             .get_by_idempotency_key("unknown-key")
@@ -650,7 +655,7 @@ struct TwoRoundBlockingPolicy {
 }
 
 impl SchedulingPolicy for TwoRoundBlockingPolicy {
-    fn order(&self, queue: &QueueSnapshot, _: &ResourceSnapshot) -> Vec<TaskId> {
+    fn order(&self, queue: &QueueSnapshot, _: &ResourceSnapshot) -> SchedulingPlan {
         let ids: Vec<_> = queue.tasks.iter().map(|task| task.id).collect();
         let mut state = self.gate.state.lock().expect("policy gate lock");
         state.entered += 1;
@@ -662,7 +667,10 @@ impl SchedulingPolicy for TwoRoundBlockingPolicy {
                 state = self.gate.changed.wait(state).expect("policy gate wait");
             }
         }
-        ids
+        SchedulingPlan {
+            order: ids,
+            barrier: None,
+        }
     }
 }
 
@@ -1068,9 +1076,9 @@ fn test_fair_fifo_policy_orders_fit_candidates_before_unschedulable_head() {
         ..ResourceSnapshot::default()
     };
     let ordered = policy.order(&snapshot, &resources);
-    assert_eq!(ordered, vec![head.id]);
+    assert_eq!(ordered.order, vec![head.id]);
     let policy = FairFifoPolicy::new(10);
-    assert_eq!(policy.order(&snapshot, &resources), vec![small.id, head.id]);
+    assert_eq!(policy.order(&snapshot, &resources).order, vec![small.id, head.id]);
 }
 
 #[cfg(feature = "sqlite")]
@@ -1460,10 +1468,9 @@ fn test_spi_builtin_registries_construct_all_component_families() {
         .unwrap()
         .create_configured(&())
         .unwrap();
-    assert_eq!(
-        policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default()),
-        Vec::<TaskId>::new()
-    );
+    let plan = policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default());
+    assert!(plan.order.is_empty());
+    assert!(plan.barrier.is_none());
 
     let capacity = ResourceCapacity {
         cpu_slots: 3,

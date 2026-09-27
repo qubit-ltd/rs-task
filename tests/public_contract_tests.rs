@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0 (the "License");
 // =============================================================================
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -15,17 +16,91 @@ use qubit_task::handler::LocalTaskHandler;
 use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::AcceptOutcome;
 #[cfg(feature = "sqlite")]
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
+use qubit_task::model::TransitionCommand;
+use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::StoreError;
+use qubit_task::store::TaskStore;
 use tokio::sync;
 use tokio::test as tokio_test;
+
+async fn assert_store_summary_lookup(store: &impl TaskStore, key: &str) {
+    let mut request = TaskRequest::new("thumbnail", "v3", b"source payload".to_vec());
+    request.idempotency_key = Some(key.to_owned());
+    assert_eq!(store.get_summary_by_idempotency_key(key).await.unwrap(), None);
+
+    let id = qubit_task::TaskId::generate();
+    let accepted = store.accept(id, request).await.unwrap();
+    let accepted_record = match accepted {
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => panic!("first request is newly accepted"),
+    };
+    let queued = store
+        .get_summary_by_idempotency_key(key)
+        .await
+        .unwrap()
+        .expect("summary is found");
+    assert_eq!(queued, accepted_record.summary());
+    assert_eq!(queued.state, TaskState::Queued);
+    assert_eq!(store.get_summary(id).await.unwrap(), Some(queued.clone()));
+
+    let running = store
+        .transition(TransitionCommand {
+            id,
+            expected_version: 0,
+            expected_attempt: 0,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .expect("queued task transitions to running");
+    assert_eq!(
+        store.get_summary_by_idempotency_key(key).await.unwrap(),
+        Some(running.clone())
+    );
+    assert_eq!(running.state_version, 1);
+
+    let succeeded = store
+        .transition(TransitionCommand {
+            id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Succeeded,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .expect("running task transitions to succeeded");
+    assert_eq!(
+        store.get_summary_by_idempotency_key(key).await.unwrap(),
+        Some(succeeded)
+    );
+    store
+        .prune_terminal_before(
+            accepted_record.accepted_at_ms.saturating_add(1),
+            NonZeroUsize::new(1).expect("one is nonzero"),
+        )
+        .await
+        .expect("terminal history is pruned");
+    assert_eq!(store.get_summary_by_idempotency_key(key).await.unwrap(), None);
+}
+
+#[tokio_test]
+async fn test_memory_summary_lookup_by_idempotency_key_tracks_lifecycle_without_payload() {
+    let store = MemoryTaskStore::new(8);
+    assert_store_summary_lookup(&store, "memory-summary-key").await;
+}
 
 #[test]
 fn test_execution_handle_cancellation_signal_is_a_shared_clone() {
@@ -127,6 +202,24 @@ async fn test_sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
         Err(StoreError::IdempotencyConflict)
     ));
 
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio_test]
+async fn test_sqlite_summary_lookup_by_idempotency_key_tracks_lifecycle_without_payload() {
+    use qubit_task::store::SqliteTaskStore;
+
+    let path = std::env::temp_dir().join(format!(
+        "qubit-task-summary-key-{}.sqlite",
+        qubit_task::TaskId::generate()
+    ));
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+    assert_store_summary_lookup(&store, "sqlite-summary-key").await;
     drop(store);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("owner.lock"));

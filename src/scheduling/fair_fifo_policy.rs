@@ -7,10 +7,10 @@
 // =============================================================================
 use super::QueueSnapshot;
 use super::QueuedTask;
+use super::SchedulingPlan;
 use super::SchedulingPolicy;
 use crate::model::ResourceCapacity;
 use crate::model::ResourceSnapshot;
-use crate::model::TaskId;
 
 /// FIFO-first scheduler with bounded bypass and a configurable starvation
 /// limit.
@@ -24,8 +24,9 @@ use crate::model::TaskId;
 /// use qubit_task::scheduling::FairFifoPolicy;
 ///
 /// let policy = FairFifoPolicy::new(8);
-/// let order = policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default());
-/// assert!(order.is_empty());
+/// let plan = policy.order(&QueueSnapshot::default(), &ResourceSnapshot::default());
+/// assert!(plan.order.is_empty());
+/// assert!(plan.barrier.is_none());
 /// ```
 pub struct FairFifoPolicy {
     /// Successful bypass count after which a head task is protected.
@@ -70,15 +71,18 @@ impl SchedulingPolicy for FairFifoPolicy {
     ///
     /// # Returns
     ///
-    /// Task IDs in scheduling priority order. A task that cannot fit current
-    /// usage but can fit total capacity remains queued and is omitted; a task
-    /// that can never fit total capacity is returned so the service can block
-    /// it.
-    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> Vec<TaskId> {
+    /// Candidate IDs in preferred order with an optional fairness barrier. A
+    /// task that cannot fit current usage but can fit total capacity remains
+    /// queued; a task that can never fit total capacity is returned so the
+    /// service can block it.
+    fn order(&self, queue: &QueueSnapshot, resources: &ResourceSnapshot) -> SchedulingPlan {
         let candidates = queue.tasks.iter().take(queue.scan_budget.max(1)).collect::<Vec<_>>();
         let protected = candidates.iter().find(|task| task.bypasses >= self.max_bypasses);
         if let Some(task) = protected {
-            return vec![task.id];
+            return SchedulingPlan {
+                order: vec![task.id],
+                barrier: Some(task.id),
+            };
         }
         let mut result = Vec::with_capacity(candidates.len());
         result.extend(
@@ -93,7 +97,10 @@ impl SchedulingPolicy for FairFifoPolicy {
                 .filter(|task| !can_fit_capacity(task, &resources.capacity))
                 .map(|task| task.id),
         );
-        result
+        SchedulingPlan {
+            order: result,
+            barrier: None,
+        }
     }
 }
 
