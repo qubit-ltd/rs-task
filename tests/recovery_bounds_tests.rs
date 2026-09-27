@@ -165,6 +165,7 @@ async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
         scan_calls: AtomicUsize::new(0),
         acquire_gate: None,
         scan_gate: None,
+        fail_release: false,
         release_calls: AtomicUsize::new(0),
         release_finished: Mutex::new(None),
     });
@@ -305,6 +306,7 @@ struct BadScanStore {
     scan_calls: AtomicUsize,
     acquire_gate: Option<Arc<AsyncGate>>,
     scan_gate: Option<Arc<AsyncGate>>,
+    fail_release: bool,
     release_calls: AtomicUsize,
     release_finished: Mutex<Option<oneshot::Sender<()>>>,
 }
@@ -390,6 +392,9 @@ impl TaskStore for BadScanStore {
     }
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         self.release_calls.fetch_add(1, Ordering::AcqRel);
+        if self.fail_release {
+            return Box::pin(async { Err(StoreError::Failure("injected owner release failure".into())) });
+        }
         let result = self.inner.release_owner(epoch);
         let finished = self.release_finished.lock().unwrap().take();
         Box::pin(async move {
@@ -460,6 +465,7 @@ async fn test_invalid_recovery_pages_fail_without_looping() {
             scan_calls: AtomicUsize::new(0),
             acquire_gate: None,
             scan_gate: None,
+            fail_release: false,
             release_calls: AtomicUsize::new(0),
             release_finished: Mutex::new(None),
         });
@@ -479,6 +485,41 @@ async fn test_invalid_recovery_pages_fail_without_looping() {
 }
 
 #[tokio::test]
+async fn test_recovery_error_retains_owner_release_failure() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    accept(&inner).await;
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::EmptyWithNext,
+        stored: Mutex::new(None),
+        cursor: TaskId::generate(),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+        acquire_gate: None,
+        scan_gate: None,
+        fail_release: true,
+        release_calls: AtomicUsize::new(0),
+        release_finished: Mutex::new(None),
+    });
+    let result = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .require_recovery(true)
+        .build()
+        .await;
+    let error = match result {
+        Ok(_) => panic!("recovery and cleanup both fail"),
+        Err(error) => error,
+    };
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("empty page returned a next cursor"));
+    assert!(diagnostic.contains("injected owner release failure"));
+    assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+    drop(store);
+    cleanup(&path);
+}
+
+#[tokio::test]
 async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
     let path = temp_db();
     let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
@@ -494,6 +535,7 @@ async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
         scan_calls: AtomicUsize::new(0),
         acquire_gate: Some(Arc::clone(&gate)),
         scan_gate: None,
+        fail_release: false,
         release_calls: AtomicUsize::new(0),
         release_finished: Mutex::new(Some(release_finished)),
     });
@@ -541,6 +583,7 @@ async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
         scan_calls: AtomicUsize::new(0),
         acquire_gate: None,
         scan_gate: Some(Arc::clone(&gate)),
+        fail_release: false,
         release_calls: AtomicUsize::new(0),
         release_finished: Mutex::new(Some(release_finished)),
     });
@@ -589,6 +632,7 @@ async fn test_recovery_prechecks_once_then_scans_each_page_once() {
         scan_calls: AtomicUsize::new(0),
         acquire_gate: None,
         scan_gate: None,
+        fail_release: false,
         release_calls: AtomicUsize::new(0),
         release_finished: Mutex::new(None),
     });
