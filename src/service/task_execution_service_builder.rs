@@ -557,6 +557,7 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Injects the concrete event bus facade for optional status notifications.
+    ///
     /// # Parameters
     ///
     /// * `event_bus` - Event bus used for lifecycle notifications.
@@ -572,6 +573,7 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Sets the number of lifecycle notifications waiting behind the publisher.
+    ///
     /// # Parameters
     ///
     /// * `capacity` - Maximum number of queued notifications.
@@ -588,6 +590,7 @@ impl TaskExecutionServiceBuilder {
 
     /// Sets how long service shutdown waits for the lifecycle notification
     /// worker.
+    ///
     /// # Parameters
     ///
     /// * `timeout` - Maximum worker close wait.
