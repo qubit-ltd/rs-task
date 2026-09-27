@@ -841,6 +841,17 @@ mod tests {
         assert!(guard.transfer().is_none());
     }
 
+    #[tokio::test]
+    async fn test_owner_guard_preserves_release_failure() {
+        let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(4));
+        let mut guard = super::OwnerGuard::new(store, Some(crate::model::OwnerEpoch(1)));
+        assert!(matches!(
+            guard.release().await,
+            Err(crate::store::StoreError::UnsupportedCapability)
+        ));
+        assert!(guard.transfer().is_none());
+    }
+
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_sqlite_builder_recovers_unfinished_records() {
