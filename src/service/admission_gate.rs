@@ -80,6 +80,26 @@ impl AdmissionGate {
         }
     }
 
+    /// Reports whether shutdown has started.
+    ///
+    /// # Returns
+    ///
+    /// Whether the gate has left its open phase.
+    #[must_use]
+    pub(super) fn is_closing(&self) -> bool {
+        !matches!(self.state.lock().phase, Phase::Open)
+    }
+
+    /// Reports whether every operation admitted before close has finished.
+    ///
+    /// # Returns
+    ///
+    /// Whether the active permit count is zero.
+    #[must_use]
+    pub(super) fn is_idle(&self) -> bool {
+        self.state.lock().active == 0
+    }
+
     /// Enters before the first storage operation, or rejects a closed gate.
     ///
     /// # Returns
@@ -112,26 +132,6 @@ impl AdmissionGate {
         state.phase = Phase::Closing;
         self.changed.notify_waiters();
         true
-    }
-
-    /// Reports whether shutdown has started.
-    ///
-    /// # Returns
-    ///
-    /// Whether the gate has left its open phase.
-    #[must_use]
-    pub(super) fn is_closing(&self) -> bool {
-        !matches!(self.state.lock().phase, Phase::Open)
-    }
-
-    /// Reports whether every operation admitted before close has finished.
-    ///
-    /// # Returns
-    ///
-    /// Whether the active permit count is zero.
-    #[must_use]
-    pub(super) fn is_idle(&self) -> bool {
-        self.state.lock().active == 0
     }
 
     /// Waits until permits granted before closing have all been dropped.
