@@ -17,7 +17,6 @@ use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::AcceptOutcome;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
@@ -35,7 +34,7 @@ async fn assert_store_summary_lookup(store: &impl TaskStore, key: &str) {
     request.idempotency_key = Some(key.to_owned());
     assert_eq!(store.get_summary_by_idempotency_key(key).await.unwrap(), None);
 
-    let id = qubit_task::TaskId::generate();
+    let id = TaskId::generate();
     let accepted = store.accept(id, request).await.unwrap();
     let accepted_record = match accepted {
         AcceptOutcome::Accepted(record) => record,
@@ -214,10 +213,7 @@ async fn test_sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
 async fn test_sqlite_summary_lookup_by_idempotency_key_tracks_lifecycle_without_payload() {
     use qubit_task::store::SqliteTaskStore;
 
-    let path = std::env::temp_dir().join(format!(
-        "qubit-task-summary-key-{}.sqlite",
-        qubit_task::TaskId::generate()
-    ));
+    let path = std::env::temp_dir().join(format!("qubit-task-summary-key-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     assert_store_summary_lookup(&store, "sqlite-summary-key").await;
     drop(store);
