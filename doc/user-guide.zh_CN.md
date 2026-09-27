@@ -2,19 +2,30 @@
 
 [English version](user-guide.md)
 
-本指南适用于 Rust 1.94 或更高版本以及 `qubit-task` 0.6.x，面向需要有界后台执行、任务历史，并需选择易失存储或重启恢复方案的 Rust 服务开发者。该 crate 接受无法在当前业务请求中完成的工作，根据资源额度安排执行，并允许业务系统稍后查询任务进度。
+本指南适用于 Rust 1.94 或更高版本以及 `qubit-task` 0.6.x，面向需要把耗时工作移出请求路径、限制后台并发，并查询任务进度的 Rust 服务开发者。
 
-## 概念模型
+## 场景：API 接受 CSV 导入后立即返回
 
-`TaskRequest` 描述可持久化的任务：任务类型、精确的处理器版本、payload、资源需求，以及可选的业务关联键。`TaskRecord` 保存可查询的生命周期状态和有大小上限的输出摘要。`TaskHandler` 负责解释请求；`TaskStore`、`SchedulingPolicy` 和 `TaskExecutionEngine` 分别决定持久化方式、队列选择和执行容量。通过 `submit_local` 提交的闭包则使用独立的进程内结果通道 `LocalTaskHandle`，进程重启后无法重建。
+假设一个管理 API 收到 CSV 导入请求。文件可能很大，导入还会访问数据库；让 HTTP 请求一直等到导入结束会占住连接，也不方便用户刷新页面查看进度。我们希望 API 在任务受理后返回任务 ID，后台按资源额度执行导入，调用方之后能查到成功、失败或需要人工处理的状态。
 
-服务门面负责协调这些组件。存储声明历史是否持久化、未完成任务是否可恢复；资源容量控制受理和并发执行额度，不负责发现或绑定操作系统上的 CPU、GPU。
+本指南按这个业务流程展开：先明确任务是否需要跨进程恢复，再注册处理器并提交请求；随后检查任务结果，按需配置资源、重试、取消和通知。示例中的 `TaskHandler` 用于演示接入边界，生产应用应在其中解析真实导入参数、调用自己的文件与数据库服务，并将业务结果写入应用管理的存储。
 
-## 场景：提交数据导入任务并及时返回
+### 先选任务在进程退出后的去向
 
-假设某个 API 收到 CSV 导入请求，需要尽快响应，同时让导入继续运行。若任务必须支持重启恢复，应把导入参数编码进带版本的 `TaskRequest`，构建服务前注册与请求版本匹配的处理器，再把受理后的任务 ID 返回调用方。调用方随后可通过 `get`、`list` 或 `wait` 查看状态。后续章节会逐步说明这一流程，以及如何选择存储和资源保证。
+如果导入任务只需在当前进程运行，或结果只交还给当前调用代码，可使用 `in_memory()` 和 `submit_local`。进程退出后，尚未完成的任务和历史都会丢失。
 
-## 选择持久化保证
+如果进程重启后还要继续处理已受理任务，应使用可恢复的存储（本指南以 SQLite 为例），通过 `TaskRequest` 保存任务类型、处理器版本和 payload。运行中的任务在进程退出时可能已经产生外部副作用，恢复后可能再次执行；处理器应设计为幂等，或用应用自己的事务方案保护副作用。
+
+| 选择 | 提交方式 | 进程退出后的行为 |
+| --- | --- | --- |
+| 临时、本进程工作 | `submit_local` 闭包 | 未完成工作和内存历史丢失；返回值通过 `LocalTaskHandle` 获取 |
+| 可重建、需要恢复的工作 | 带稳定幂等键的 `TaskRequest` | 持久存储可恢复排队任务；中断的运行任务可能再次执行 |
+
+接下来的[本地任务入门](#本地任务入门使用内存服务执行闭包)给出最短运行路径。真正需要在重启后恢复的导入任务，请继续看[注册版本化处理器并提交任务](#注册版本化处理器并提交任务)。
+
+读者完成主要接入后，可按实际问题继续查阅：资源不足或队列已满时看[资源额度与队列](#让任务按资源额度运行)；需要跨重启恢复时看[SQLite 恢复](#使用-sqlite-在重启后恢复)；需要查看历史、取消或重试时看[查询、取消和重试](#查询取消和重试)；通知和组件替换属于可选集成。
+
+## 选择存储提供的保证
 
 `TaskExecutionService` 对外只有一个门面。服务实际装配的 `TaskStore` 决定历史是否跨重启保留，以及已接受的任务能否恢复。
 
@@ -22,11 +33,11 @@
 | --- | --- | --- |
 | `TaskExecutionService::in_memory()` | 有界内存历史 | 进程退出后丢失 |
 | 具有持久历史的自定义 `TaskStore` | 持久化 | 取决于存储声明的恢复能力 |
-| `recoverable_sqlite(path)` | SQLite | 恢复排队任务；中断的运行任务可能再次执行 |
+| `TaskExecutionServiceBuilder::recoverable_sqlite(path)` | SQLite | 恢复排队任务；中断的运行任务可能再次执行 |
 
 恢复执行提供至少一次保证。进程退出前，处理器可能已经产生外部副作用，因此在重复副作用不安全时，处理器应使用幂等键或自己的事务方案。
 
-## 使用内存服务执行本地任务
+## 本地任务入门：使用内存服务执行闭包
 
 在应用中加入 crate 和异步运行时：
 
@@ -70,11 +81,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `LocalTaskResultError::Cancelled`。成功的 `TaskRunOutcome` 或 `TaskRecord.output`
 不会被迟到的取消请求覆盖。
 
-## 注册版本化处理器
+## 注册版本化处理器并提交任务
 
-对于可以重建的任务，使用 `TaskRequest`。请求会保存任务类型、精确处理器版本、不透明 payload、资源需求和可选的关联键与幂等键。payload 由处理器自行解码；服务不会把旧请求静默交给新版本处理器。
+对于需要从存储中恢复的 CSV 导入，使用 `TaskRequest`。请求会保存任务类型、精确处理器版本、不透明 payload、资源需求和可选的关联键与幂等键。payload 由处理器自行解码；服务不会把旧请求静默交给新版本处理器。提交成功后，API 可把返回的 `TaskId` 发给客户端，客户端用 `get`、`list` 或 `wait` 查询进度。
 
 实现 `TaskHandler`，并在异步构建器调用 `build()` 前注册它的 `Arc`。重复的 `(task_type, version)` 注册会被拒绝。恢复时找不到处理器的任务会进入 `Blocked`，并继续保留供查询；安装相应处理器后，可调用 `retry_blocked` 重新排队。
+
+下面先注册 `csv-import` 的 `1` 版处理器，再提交请求并等待完成。示例的 payload 是不透明字节；真实服务应将文件位置、租户 ID 等必要参数编码进去，而不是把大文件本身复制进任务记录。
 
 ~~~rust,no_run
 use std::sync::Arc;
@@ -109,13 +122,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_idempotency_key("csv-import-request-42");
     let id = service.submit(request).await?.id;
     let finished = service.wait(id).await?;
+    // wait 返回终态摘要；生产代码应将 Failed、Panicked 等结果映射为业务状态。
     assert!(finished.state.is_terminal());
     service.shutdown().await?;
     Ok(())
 }
 ~~~
 
-`TaskOutput` 用于保存小型摘要或引用。较大的结果应由业务系统保存在自己的数据存储中，再返回有大小上限的引用。
+这段演示处理器返回接收字节数摘要，因此 `wait` 返回的 `TaskSummary` 可用于查看最终状态和摘要；需要读取完整请求时再调用 `get` 获取 `TaskRecord`。`TaskOutput` 适合保存小型摘要或引用；较大的结果应由业务系统保存在自己的数据存储中，再返回有大小上限的引用。
 需要重启后重建的任务应使用带精确处理器版本的 `TaskRequest`；现有 SQLite 重启恢复测试覆盖了公共服务门面上的该流程。
 
 服务级 `submit` 必须使用稳定且非空的幂等键，并在首次调用前生成和保存。调用方超时后，
@@ -125,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 需要更长的恢复窗口时应选 SQLite 或其他持久化存储。`shutdown_until(deadline)` 会启动正常排空，
 只限制当前调用者的等待；任务和存储所有权会保持到排空完成。
 
-## 调度 CPU、GPU 和业务自定义资源
+## 让任务按资源额度运行
 
 构建器接受显式的 `ResourceCapacity`。CPU 槽位表示并发预算，不会绑定操作系统 CPU。GPU 设备及标签需要由部署配置提供。自定义整数额度可表示内存单位、许可证数量或其他独占资源，但部署方必须统一这些额度的含义。
 
@@ -261,24 +275,6 @@ let service = TaskExecutionServiceBuilder::in_memory()
 使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它会持久化 `cancel_requested` 并在 `TaskContext` 中设置协作取消信号；这只是取消请求。处理器必须返回 `TaskRunOutcome::Cancelled`，服务才会以 `TaskState::Cancelled` 确认取消。如果处理器返回成功或失败，那个结果仍是权威结果。协作取消集成测试覆盖了这一契约。
 
 处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`；执行引擎报告的 panic 进入 `Panicked`，不再根据业务错误类别字符串推断。自动重试默认采用 1 秒起步、逐次翻倍、最高 60 秒的退避，可用 `TaskExecutionServiceBuilder::retry_policy(RetryPolicy::new(initial, maximum)?)` 配置。到期时间与排队状态一同持久化，重启后不会提前执行；`retry_blocked` 会清除到期时间并立即使任务可运行。队列满时任务进入 `Blocked`，不会突破队列上限。
-
-## 从旧版 API 迁移
-
-本次重设计移除调用方提供的 ID、`submit` 闭包、线程池专属 builder 选项和旧的 `TaskHandle<R, E>`。这里没有通用的持久化句柄：`submit_local` 现在为进程内闭包返回 `LocalTaskHandle<R, E>`；需要重建的任务仍使用 `TaskRequest` 和服务生成的 `TaskId`。第三方 `TaskStore` 需要实现 `count_states()`，并新增 `has_unfinished_over_limit(limit)`；后者必须在一个一致性边界内判断 Queued/Running 记录是否严格超过上限，且不能读取 payload。这些是有意的源码破坏性变更，下游实现和调用点应一起迁移。当前工作区中没有 `rs-*` crate 直接依赖 `rs-task`。
-
-`TaskQuery.states` 现在是 `Vec<TaskStateKind>`；筛选只比较生命周期类别，忽略
-失败消息和阻塞原因等诊断内容。关闭开始后服务会拒绝写操作。SQLite 写入受存储
-所有权 fencing 保护，旧 store 句柄也不能绕过。SQLite 同时只执行一个阻塞数据库
-操作；调用方须在 Tokio runtime 中轮询 store 操作。
-
-历史分页的 `TaskQuery.after` 和 `TaskPage.next` 已改为
-`TaskCursor { accepted_at_ms, id }`。第三方 `SchedulingPolicy` 收到的 `QueuedTask`
-现在包含 `resources`，不再包含完整 `TaskRequest`。`TaskStore` 新增
-`prune_terminal_before`；默认实现返回 `UnsupportedCapability`。
-最终版 `TaskStore` 契约是有意的源码破坏性变更：`transition` 返回
-`TaskSummary`，`list` 分页包含摘要，并且每个存储实现都必须提供不读取 payload 的
-`get_summary`。存储可实现带原子版本和状态检查的 `abandon_blocked`；默认实现返回
-`UnsupportedCapability`。
 
 ## 排障
 
