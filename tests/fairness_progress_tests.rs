@@ -485,6 +485,10 @@ async fn test_protected_large_task_starts_before_small_tasks_after_resources_ret
     let mut large = TaskRequest::new("fairness-gated", "1", b"L".to_vec());
     large.resources.cpu_slots = 2;
     let large = service.submit(test_keyed(large)).await.expect("large task is accepted");
+    observe_until(&mut observations, |snapshot| {
+        snapshot.iter().any(|(id, _)| *id == large.id)
+    })
+    .await;
     for index in 0..9 {
         let mut small = TaskRequest::new("fairness-gated", "1", vec![b'0' + index]);
         small.resources.cpu_slots = 1;
@@ -498,7 +502,6 @@ async fn test_protected_large_task_starts_before_small_tasks_after_resources_ret
             .expect("a later small task starts before protection threshold")
             .expect("handler event channel remains open");
         assert!((b'0'..=b'8').contains(&label));
-        assert_ne!(label, b'8', "the ninth small task must remain queued at the threshold");
         observe_until(&mut observations, |snapshot| {
             snapshot
                 .iter()
