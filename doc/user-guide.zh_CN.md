@@ -215,6 +215,8 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保
 
 `capabilities()` 会报告实际装配的存储能力 `persistent_history` 和 `restart_recovery`。第三方存储也可以持久化历史，但不支持恢复任务。每个 `TaskStore` 实现都必须提供 `count_states()`，在一次聚合中统计所有保留记录。`stats()` 只调用一次该方法，并向调用者传播统计失败。状态计数和执行引擎资源快照先后读取，因此是时间相邻但非原子的两个快照。统计成本是一次聚合查询，不随历史分页数增长。
 
+`count_states()` 描述存储中的一个一致快照，但 future 返回时状态可能已经变化。需要等待状态变化的 provider 应先登记通知，再读取计数，并在唤醒后重新检查条件。`release_owner(epoch)` 是完成屏障：成功返回后，该 epoch 下先前受理的写操作都已结束，之后不会再提交。provider 必须等所有先前写操作结束后才解除所有权隔离；释放失败不能证明排空已完成。
+
 ## 通过 `qubit-spi` 装配组件
 
 `qubit-task` 为 `TaskStore`、`SchedulingPolicy`、`TaskExecutionEngine` 和 `TaskHandler` 定义了 SPI 服务族。启用 `inventory` feature 后，crate 可以收集最终程序链接的扩展 crate 所注册的 provider。应用负责选择 provider，并将创建出的 `Arc<dyn ...>` 传给 `TaskExecutionServiceBuilder::from_components`；SPI 不会推测数据库凭据、文件位置或资源容量。
@@ -224,7 +226,7 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保
 ## 发布状态事件
 
 启用 `event-bus` feature 后，可将 `qubit_event_bus::EventBus` 具体门面注入构建器。状态变化后，服务会发布 `TaskEvent`。通知采用尽力而为语义：发布失败不会回滚任务状态。事件可能重复、延迟或丢失，因此消费者应比较 `state_version`，并在需要权威状态时查询服务。
-当前版本依赖 `qubit-event-bus` 0.14。通用 `NotificationPublisher` 返回 provider receipt；服务再按 `AdmissionOutcome` 映射到现有任务通知统计。
+当前版本面向 `qubit-event-bus` 0.15 API。通用 `NotificationPublisher` 返回 provider receipt；服务再按 `AdmissionOutcome` 映射到现有任务通知统计。
 
 ### Redis Streams provider
 
@@ -380,11 +382,13 @@ let service = TaskExecutionServiceBuilder::in_memory()
 
 使用 `get(TaskId)` 查询最新记录，使用 `list(TaskQuery)` 分页查看保留历史。`wait(TaskId)` 等待任务进入终态；如果任务进入 `Blocked` 并需要人工干预，等待会返回相应错误。`cancel(TaskId)` 可以立即取消排队任务。对于运行中任务，它会持久化 `cancel_requested` 并在 `TaskContext` 中设置协作取消信号；这只是取消请求。处理器必须返回 `TaskRunOutcome::Cancelled`，服务才会以 `TaskState::Cancelled` 确认取消。如果处理器返回成功或失败，那个结果仍是权威结果。协作取消集成测试覆盖了这一契约。
 
+默认 `max_inflight_operations` 为 64，`submit`、`submit_local`、`cancel`、`retry_blocked`、`abandon_blocked` 和 `prune_terminal_before` 共用这些操作名额。提交还共享独立的 64 MiB 在途 payload 预算。名额用尽时，上述任一调用都可能返回 `TaskServiceError::OperationLimitExceeded`；调用方应退避后重试。worker 接纳写操作后，即使调用方取消等待，也不会撤销该写操作或提前释放名额。
+
 处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`；执行引擎报告的 panic 进入 `Panicked`，不再根据业务错误类别字符串推断。自动重试默认采用 1 秒起步、逐次翻倍、最高 60 秒的退避，可用 `TaskExecutionServiceBuilder::retry_policy(RetryPolicy::new(initial, maximum)?)` 配置。到期时间与排队状态一同持久化，重启后不会提前执行；`retry_blocked` 会清除到期时间并立即使任务可运行。队列满时任务进入 `Blocked`，不会突破队列上限。
 
 ## 从 0.5 及更早 API 迁移
 
-0.6 移除了调用方指定任务 ID、用 `submit` 提交闭包、线程池专用构建配置和旧的
+0.6 将原先仅限制提交的名额替换为 `max_inflight_operations`，统一限制六种生命周期写操作；超限错误为 `TaskServiceError::OperationLimitExceeded`。同时移除了调用方指定任务 ID、用 `submit` 提交闭包、线程池专用构建配置和旧的
 `TaskHandle<R, E>`。进程内闭包改用 `submit_local`，并通过
 `LocalTaskHandle<R, E>` 取得类型化结果；需要重建或恢复的任务使用带稳定幂等键的
 `TaskRequest`，服务负责生成 `TaskId`。这两种提交方式分别表达本地结果和可恢复描述，

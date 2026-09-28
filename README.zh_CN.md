@@ -49,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `LocalTaskResultError::Cancelled` 报告取消；`cancel_requested` 只是请求。尚未开始执行的排队任务
 由服务直接完成取消。可恢复任务使用带版本的
 `TaskRequest`，其 `TaskRecord.output` 只保存摘要或引用，不保存完整结果。
+六种生命周期写操作默认共用 64 个 `max_inflight_operations` 名额；名额用尽时返回 `TaskServiceError::OperationLimitExceeded`。写 worker 接纳操作后，取消调用方等待不会取消该操作。
+
 第三方 `TaskStore` provider 必须实现 `count_states()`，一次聚合统计所有保留记录。
 `stats()` 调用该聚合一次，再读取引擎资源，因此两部分是相邻但非原子的快照。
 

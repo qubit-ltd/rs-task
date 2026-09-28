@@ -61,6 +61,8 @@ after the handler acknowledges cancellation with `LocalTaskOutcome::Cancelled`;
 execution are finalized directly by the service. Durable work instead uses a
 versioned `TaskRequest`, and its small persisted `TaskRecord.output` is a
 summary or reference rather than the full result.
+All six lifecycle-write operations share a default `max_inflight_operations` limit of 64 and report `TaskServiceError::OperationLimitExceeded` when it is full. Once an admitted write worker starts, cancelling the caller wait does not cancel that write.
+
 Custom `TaskStore` providers must implement `count_states()` as one aggregate
 over retained records. `stats()` uses that aggregate once and then reads engine
 resources; these are adjacent snapshots, not one atomic snapshot.

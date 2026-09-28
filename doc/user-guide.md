@@ -254,6 +254,14 @@ resource snapshot are collected one after the other, so they are adjacent
 snapshots rather than one atomic view. Their cost is one aggregate query,
 independent of history page count.
 
+`count_states()` describes one consistent store snapshot, but it may already be
+stale when the future returns. A provider that waits for state changes must
+register its notification first, read the count, and recheck the condition after
+waking. `release_owner(epoch)` is a completion barrier: after success, no write
+admitted under that epoch may still be running or commit later. Providers must
+keep ownership fenced until every earlier write has finished; a release error
+does not prove that draining completed.
+
 ## Assemble components with `qubit-spi`
 
 `qubit-task` defines SPI service families for `TaskStore`,
@@ -277,7 +285,7 @@ into the builder. The service publishes `TaskEvent` values after state changes.
 Publishing is best effort: a publish error does not roll back a task transition.
 Events may be repeated, delayed, or missing, so consumers should compare
 `state_version` and query the service for authoritative state.
-This release uses `qubit-event-bus` 0.14. The shared `NotificationPublisher`
+This release targets the `qubit-event-bus` 0.15 API. The shared `NotificationPublisher`
 reports the provider receipt; this service maps its admission outcome to the
 existing task notification counters.
 
@@ -494,6 +502,14 @@ cancellation as `TaskState::Cancelled`. If it returns success or failure, that
 result remains authoritative. This distinction is also exercised by the
 cooperative cancellation integration tests.
 
+The default `max_inflight_operations` limit is 64 and covers `submit`,
+`submit_local`, `cancel`, `retry_blocked`, `abandon_blocked`, and
+`prune_terminal_before`. Submissions also share a separate 64 MiB in-flight
+payload budget. When all operation slots are occupied, any of these calls can
+return `TaskServiceError::OperationLimitExceeded`; apply backoff and retry. Once
+a worker accepts a write, cancelling the caller's wait does not revoke that
+write or release its slot early.
+
 Handlers return a `TaskRunError` with a category, diagnostic, and retryable
 flag. Non-retryable errors become `Failed`; engine-reported panics become `Panicked` regardless of where the handler panicked. A business error whose category happens to be `panic` remains a business error. Retryable
 errors are retried up to the configured maximum (three attempts by default).
@@ -534,7 +550,10 @@ behavior changes the 0.6.0 retry contract.
 ## Migration from 0.5 and earlier APIs
 
 This redesign removes caller-supplied IDs, `submit` closures,
-thread-pool-specific builder settings, and the old `TaskHandle<R, E>` API. There
+thread-pool-specific builder settings, and the old `TaskHandle<R, E>` API. The
+old submission-only admission limit is replaced by the configurable
+`max_inflight_operations` budget for all six lifecycle-write operations, and
+its overload result is now `TaskServiceError::OperationLimitExceeded`. There
 is no generic durable handle: `submit_local` now returns
 `LocalTaskHandle<R, E>` only for process-local closures, and `TaskRequest` plus
 `TaskId` remains the interface for reconstructable work. Third-party
