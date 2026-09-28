@@ -25,7 +25,7 @@ fn database_path(label: &str) -> std::path::PathBuf {
 fn remove_database(path: &std::path::Path) {
     for candidate in [
         path.to_path_buf(),
-        path.with_extension("owner.lock"),
+        crate::sqlite_paths::owner_lock_path(path),
         path.with_extension("sqlite-wal"),
         path.with_extension("sqlite-shm"),
     ] {

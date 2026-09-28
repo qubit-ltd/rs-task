@@ -24,6 +24,12 @@ pub enum StoreError {
     /// The operation requires a capability that this store does not provide.
     #[error("the selected task store does not support the requested capability")]
     UnsupportedCapability,
+    /// This platform cannot verify the SQLite file identity needed for locking.
+    #[error("the SQLite database file identity cannot be verified on this platform")]
+    UnsupportedDatabaseIdentity,
+    /// Another owner holds the database lock or this store already owns it.
+    #[error("the SQLite database already has an active owner")]
+    OwnerConflict,
     /// A task ID already belongs to a different accepted request.
     #[error("task identifier already exists")]
     DuplicateTask,
