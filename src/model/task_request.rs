@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::RequestValidationError;
+use super::RequestValidationField;
+use super::RequestValidationRule;
 use super::ResourceRequest;
 
 /// Maximum number of bytes accepted in a reconstructable task payload.
@@ -123,49 +126,104 @@ impl TaskRequest {
     ///
     /// Returns the first static diagnostic for an empty required identifier or
     /// a field, metadata entry, or combined metadata size over its limit.
-    pub(crate) fn validate_limits(&self) -> Result<(), &'static str> {
+    pub fn validate_limits(&self) -> Result<(), RequestValidationError> {
         self.resources.validate_limits()?;
         if self.task_type.is_empty() || self.handler_version.is_empty() {
-            return Err("task type and handler version must not be empty");
+            let field = if self.task_type.is_empty() {
+                RequestValidationField::TaskType
+            } else {
+                RequestValidationField::HandlerVersion
+            };
+            return Err(RequestValidationError::new(
+                field,
+                RequestValidationRule::Required,
+                None,
+                "task type and handler version must not be empty",
+            ));
         }
         if self.task_type.len() > MAX_TASK_TYPE_BYTES {
-            return Err("task type exceeds the 128-byte limit");
+            return Err(RequestValidationError::new(
+                RequestValidationField::TaskType,
+                RequestValidationRule::MaxBytes,
+                Some(MAX_TASK_TYPE_BYTES),
+                "task type exceeds the 128-byte limit",
+            ));
         }
         if self.handler_version.len() > MAX_HANDLER_VERSION_BYTES {
-            return Err("handler version exceeds the 64-byte limit");
+            return Err(RequestValidationError::new(
+                RequestValidationField::HandlerVersion,
+                RequestValidationRule::MaxBytes,
+                Some(MAX_HANDLER_VERSION_BYTES),
+                "handler version exceeds the 64-byte limit",
+            ));
         }
         if self.payload.len() > MAX_TASK_PAYLOAD_BYTES {
-            return Err("payload exceeds the 16 MiB limit");
+            return Err(RequestValidationError::new(
+                RequestValidationField::Payload,
+                RequestValidationRule::MaxBytes,
+                Some(MAX_TASK_PAYLOAD_BYTES),
+                "payload exceeds the 16 MiB limit",
+            ));
         }
         if self
             .correlation_key
             .as_ref()
             .is_some_and(|value| value.len() > MAX_CORRELATION_KEY_BYTES)
         {
-            return Err("correlation key exceeds the 256-byte limit");
+            return Err(RequestValidationError::new(
+                RequestValidationField::CorrelationKey,
+                RequestValidationRule::MaxBytes,
+                Some(MAX_CORRELATION_KEY_BYTES),
+                "correlation key exceeds the 256-byte limit",
+            ));
         }
         if self
             .idempotency_key
             .as_ref()
             .is_some_and(|value| value.len() > MAX_IDEMPOTENCY_KEY_BYTES)
         {
-            return Err("idempotency key exceeds the 256-byte limit");
+            return Err(RequestValidationError::new(
+                RequestValidationField::IdempotencyKey,
+                RequestValidationRule::MaxBytes,
+                Some(MAX_IDEMPOTENCY_KEY_BYTES),
+                "idempotency key exceeds the 256-byte limit",
+            ));
         }
         if self.metadata.len() > MAX_TASK_METADATA_ENTRIES {
-            return Err("metadata exceeds the 32-entry limit");
+            return Err(RequestValidationError::new(
+                RequestValidationField::Metadata,
+                RequestValidationRule::MaxEntries,
+                Some(MAX_TASK_METADATA_ENTRIES),
+                "metadata exceeds the 32-entry limit",
+            ));
         }
         let mut metadata_bytes = 0_usize;
         for (key, value) in &self.metadata {
             if key.len() > MAX_TASK_METADATA_KEY_BYTES {
-                return Err("metadata key exceeds the 128-byte limit");
+                return Err(RequestValidationError::new(
+                    RequestValidationField::Metadata,
+                    RequestValidationRule::MaxBytes,
+                    Some(MAX_TASK_METADATA_KEY_BYTES),
+                    "metadata key exceeds the 128-byte limit",
+                ));
             }
             if value.len() > MAX_TASK_METADATA_VALUE_BYTES {
-                return Err("metadata value exceeds the 4096-byte limit");
+                return Err(RequestValidationError::new(
+                    RequestValidationField::Metadata,
+                    RequestValidationRule::MaxBytes,
+                    Some(MAX_TASK_METADATA_VALUE_BYTES),
+                    "metadata value exceeds the 4096-byte limit",
+                ));
             }
             metadata_bytes = metadata_bytes.saturating_add(key.len()).saturating_add(value.len());
         }
         if metadata_bytes > MAX_TASK_METADATA_BYTES {
-            return Err("metadata exceeds the 16384-byte limit");
+            return Err(RequestValidationError::new(
+                RequestValidationField::Metadata,
+                RequestValidationRule::MaxBytes,
+                Some(MAX_TASK_METADATA_BYTES),
+                "metadata exceeds the 16384-byte limit",
+            ));
         }
         Ok(())
     }

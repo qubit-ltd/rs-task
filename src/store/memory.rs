@@ -208,7 +208,9 @@ impl TaskStore for MemoryTaskStore {
     /// limit errors.
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         Box::pin(async move {
-            request.validate_limits().map_err(StoreError::InvalidRequest)?;
+            request
+                .validate_limits()
+                .map_err(|error| StoreError::InvalidRequest(error.message()))?;
             let mut state = self.state.lock();
             if let Some(key) = &request.idempotency_key
                 && let Some(existing_id) = state.idempotency.get(key)

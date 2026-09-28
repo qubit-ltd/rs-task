@@ -505,7 +505,7 @@ impl TaskStore for SqliteTaskStore {
     /// Returns validation, idempotency, or SQLite persistence errors.
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         if let Err(error) = request.validate_limits() {
-            return Box::pin(async move { Err(StoreError::InvalidRequest(error)) });
+            return Box::pin(async move { Err(StoreError::InvalidRequest(error.message())) });
         }
         let initial = initial_record(id, request.clone());
         self.run_write(move |connection| {
