@@ -103,6 +103,10 @@ Implement `TaskHandler` and register its `Arc` before calling the asynchronous
 builder `build()` method. Duplicate `(task_type, version)` registrations are
 rejected. A missing handler discovered during recovery becomes `Blocked` and
 remains queryable until the handler is installed and `retry_blocked` is called.
+After a missing handler is diagnosed, stop the old service, register the exact
+`(task_type, handler_version)`, rebuild against the same persistent database,
+query the task in `Blocked`, and call `retry_blocked`. The handler registry is
+fixed when the service is built; startup does not automatically requeue that task.
 
 ~~~rust,no_run
 use std::sync::Arc;
@@ -158,8 +162,8 @@ original record even if configured resource capacity has since decreased; a
 different request with the same key returns an idempotency conflict. New
 requests are still checked against current capacity. The key can be reused after
 its task record is pruned or evicted. The in-memory preset retains up to 64 MiB of request payloads
-and defaults to 64 in-flight submissions sharing a 64 MiB admission payload
-budget. These budgets count payload bytes, not total process memory. Use SQLite
+and defaults to 64 in-flight write operations. Submissions also share a separate
+64 MiB payload budget. These limits do not represent total process memory. Use SQLite
 or another persistent store when the recovery window must outlast in-memory
 retention. `shutdown_until(deadline)` starts the normal drain and only bounds
 that caller's wait; work and store ownership remain active until draining ends.
@@ -196,6 +200,10 @@ bounded number of passes. The queue itself remains bounded; a full queue returns
 `QueueFull` so the caller can apply backpressure. A retry that finds the queue
 full is stored as `Blocked` and can be explicitly retried after capacity is
 available; it never exceeds the queue limit.
+
+Resource descriptions accept at most 32 GPU labels and 32 custom resource
+names, each non-empty and no longer than 128 UTF-8 bytes. GPU labels require
+`gpu_count > 0`; the same validation runs in the service and built-in stores.
 
 I/O-bound handlers can request zero CPU slots, but still count toward
 `max_running_tasks`. Set that limit explicitly to bound concurrent network or
@@ -280,8 +288,56 @@ explicit `EventCodec<TaskEvent>`. Register a JSON codec and select the Redis
 provider explicitly:
 
 ~~~rust,ignore
+use std::sync::Arc;
+
+use qubit_event_bus::CodecError;
+use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::codec::EventCodec;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::model::ContentType;
+use qubit_event_bus::model::SchemaId;
+use qubit_spi::ProviderSelection;
+use qubit_task::event::TaskEvent;
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+struct TaskEventJsonCodec {
+    content_type: ContentType,
+    schema_id: SchemaId,
+}
+
+impl TaskEventJsonCodec {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            content_type: ContentType::new("application/json")?,
+            schema_id: SchemaId::new("task-event-v1")?,
+        })
+    }
+}
+
+impl EventCodec<TaskEvent> for TaskEventJsonCodec {
+    fn content_type(&self) -> &ContentType {
+        &self.content_type
+    }
+
+    fn schema_id(&self) -> Option<&SchemaId> {
+        Some(&self.schema_id)
+    }
+
+    fn encode(&self, value: &TaskEvent) -> Result<Arc<[u8]>, CodecError> {
+        serde_json::to_vec(value)
+            .map(Arc::from)
+            .map_err(|source| CodecError::Encode { source: Box::new(source) })
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<TaskEvent, CodecError> {
+        serde_json::from_slice(bytes).map_err(|source| CodecError::Decode { source: Box::new(source) })
+    }
+}
+
 let mut codecs = CodecRegistry::new();
-codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec::new()));
+codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec::new()?));
 let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
 let config = EventBusConfig::default()
     .with_selection(ProviderSelection::named("redis-streams")?)

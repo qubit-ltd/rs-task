@@ -61,8 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `TaskExecutionService::submit` 要求提供稳定且非空的幂等键。首次调用前生成并保存该键；
 调用方停止等待后，可通过 `get_by_idempotency_key` 查找已受理任务。若查询返回 `None`，
 应使用同一请求和同一键重试。键只在对应记录保留期间有效。内存服务最多保留 64 MiB
-任务 payload，受理中最多 64 个提交，并共享 64 MiB 的受理 payload 预算；需要更长恢复窗口时
-应使用持久化存储。`shutdown_until` 只限制调用方等待时间，超时后已受理任务仍会继续排空。
+任务 payload，受理中最多有 64 个写操作；提交任务另共享 64 MiB 的 payload 预算。
+需要更长恢复窗口时应使用持久化存储。`shutdown_until` 只限制调用方等待时间，超时后已受理任务仍会继续排空。
 `submit_local` 的类型化结果只能通过返回的句柄取得。调用方等待 `submit_local` 时取消或超时后，
 受理仍可能在后台继续，但调用方会失去句柄，无法找回原始类型化结果。调用方需要在请求停止等待后
 继续定位任务时，应使用带稳定键的 `submit`。
@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [用户指南](doc/user-guide.zh_CN.md)
 - [English README](README.md)
 - [TaskExecutionService 详细设计](doc/task_execution_service_design.md)
+- [English design](doc/task_execution_service_design.en.md)
 - [English user guide](doc/user-guide.md)
 
 ## API 与存储契约
@@ -88,7 +89,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 调度器和已跟踪执行结束后再释放存储所有权。
 
 `TaskQuery.states` 使用 `TaskStateKind`；此前用带诊断内容的 `TaskState`
-构造筛选条件的调用方需要迁移。请求文本上限按 UTF-8 字节计算：`task_type`
+构造筛选条件的调用方需要迁移。资源描述最多包含 32 个 GPU label 和 32 个自定义资源名称，每项非空且不超过 128 个 UTF-8 字节；设置 GPU label 时 `gpu_count` 必须大于零。
+
+请求文本上限按 UTF-8 字节计算：`task_type`
 128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键
 128、值 4096、键值合计 16384。持久化诊断类别最多 128 字节，消息最多
 4096 字节；执行诊断会在 UTF-8 字符边界裁剪。SQLite 同时只执行一个阻塞

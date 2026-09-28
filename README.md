@@ -76,8 +76,8 @@ Generate and persist it before the first call. If the caller stops waiting,
 `get_by_idempotency_key` can find an accepted task; if it returns `None`, retry
 the same request with the same key. The key remains reserved only while its
 record is retained. In-memory services retain at most 64 MiB of request
-payloads and allow 64 in-flight submissions, sharing a 64 MiB admission
-payload budget. Use persistent storage for a longer recovery window.
+payloads and allow 64 in-flight write operations. Submissions also share a
+separate 64 MiB payload budget. Use persistent storage for a longer recovery window.
 `shutdown_until` limits the caller's wait; accepted work continues draining
 after a timeout.
 
@@ -104,7 +104,8 @@ before releasing store ownership.
 
 - [User guide](doc/user-guide.md)
 - [中文 README](README.zh_CN.md)
-- [Detailed TaskExecutionService design](doc/task_execution_service_design.md)
+- [Detailed TaskExecutionService design](doc/task_execution_service_design.en.md)
+- [中文设计文档](doc/task_execution_service_design.md)
 - [中文用户指南](doc/user-guide.zh_CN.md)
 
 ## API and storage contracts
