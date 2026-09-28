@@ -242,6 +242,7 @@ use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::SchemaId;
+use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 use qubit_task::event::TaskEvent;
 use qubit_task::service::TaskExecutionServiceBuilder;
@@ -296,9 +297,12 @@ let service = TaskExecutionServiceBuilder::in_memory()
     .build().await?;
 ~~~
 
-Redis provider 应由应用或测试显式依赖，不会进入 `qubit-task` 的生产依赖。
+Redis provider 应由启用了 discovery 的应用显式依赖，并在代码中链接；
+JSON codec 还需要 `serde_json`。这些依赖不会进入 `qubit-task` 的生产依赖。
 provider receipt 表示 Redis 接受了发布命令，不表示订阅者已经处理事件。通知仍是尽力而为，
 任务状态变更与事件发布没有事务绑定。若要求状态与消息原子提交，应使用事务性 outbox。
+文档 codec 与 provider 装配由 `cargo check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`
+编译；可用 `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml` 运行该示例。
 
 服务使用 `rs-event-bus` 的 `NotificationPublisher` 管理串行发布线程和有界队列，默认容量为 256。可通过
 `event_bus_buffer_capacity(NonZeroUsize)` 设置其他正数容量。状态转移只调用
