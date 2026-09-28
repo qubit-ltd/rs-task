@@ -1,5 +1,6 @@
 # Closely coupled private lifecycle types stay beside their owning service state.
 multiple-public-types | src/service/task_execution_service.rs | Task execution wrapper and status-reporting task form one submission boundary.
+multiple-public-types | src/service/task_execution_service/internal/service_core.rs | Service core state and its attempt cancellation token form one internal service contract.
 multiple-public-types | src/engine/local.rs | Resource usage and reservation rollback helpers are private parts of the local engine allocation protocol.
 multiple-public-types | src/model/task_record.rs | Lifecycle state, task records, summaries, cursors, and storage commands form one versioned persistence contract.
 multiple-public-types | src/service/admission_budget.rs | Budget state, reservation token, usage snapshot, and failure types share one admission accounting invariant.

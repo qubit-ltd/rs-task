@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -9,7 +16,6 @@ use tokio::time;
 
 use super::super::EngineError;
 use super::super::QueueSnapshot;
-use super::super::QueuedTask;
 use super::super::RunningCancellation;
 use super::super::ServiceCore;
 use super::super::StoreError;
@@ -25,65 +31,8 @@ use super::super::record_store_fault;
 use super::super::release_core_queue_slot;
 use super::super::task_stats;
 use super::super::transition;
+use super::QueueWindowGuard;
 use super::finish_attempt;
-
-/// Restores unprocessed tasks when a scheduler round exits early.
-struct QueueWindowGuard {
-    /// Shared queue to which unfinished tasks are restored.
-    core: Arc<ServiceCore>,
-    /// Scheduler candidates not yet started or otherwise consumed.
-    tasks: Option<Vec<QueuedTask>>,
-}
-
-impl QueueWindowGuard {
-    /// Owns one bounded scheduler window until it is restored.
-    ///
-    /// # Parameters
-    ///
-    /// * `core` - Service state owning the shared queue.
-    /// * `tasks` - Candidate window removed from that queue.
-    ///
-    /// # Returns
-    ///
-    /// A guard that restores the window unless explicitly consumed.
-    fn new(core: Arc<ServiceCore>, tasks: Vec<QueuedTask>) -> Self {
-        Self {
-            core,
-            tasks: Some(tasks),
-        }
-    }
-
-    /// Borrows the current window for policy ordering and execution.
-    ///
-    /// # Returns
-    ///
-    /// Mutable access to candidates held by this guard.
-    fn tasks_mut(&mut self) -> &mut Vec<QueuedTask> {
-        self.tasks.as_mut().expect("scheduler window is active")
-    }
-
-    /// Returns all unprocessed work to the front of the shared queue.
-    fn restore(&mut self) {
-        if let Some(tasks) = self.tasks.take() {
-            self.core.queue.lock().restore_front(tasks);
-        }
-    }
-
-    /// Returns unstarted work to the back so the scheduler can inspect later
-    /// windows.
-    fn restore_back(&mut self) {
-        if let Some(tasks) = self.tasks.take() {
-            self.core.queue.lock().restore_back(tasks);
-        }
-    }
-}
-
-impl Drop for QueueWindowGuard {
-    /// Restores the window if scheduler control exits early.
-    fn drop(&mut self) {
-        self.restore();
-    }
-}
 
 /// Selects queued work, reserves resources, and starts eligible task attempts.
 ///
