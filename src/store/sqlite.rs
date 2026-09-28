@@ -6,6 +6,8 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 // qubit-style: allow multiple-public-types
+mod internal;
+
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -15,7 +17,8 @@ use std::sync::atomic::AtomicUsize;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
-use fs2::FileExt;
+use internal::DatabaseIdentity;
+use internal::acquire_owner_lock;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -34,9 +37,8 @@ use super::TaskStore;
 use crate::model::AcceptOutcome;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
+use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
-use crate::model::StoredTask;
-use crate::model::StoredTaskPage;
 use crate::model::TaskCursor;
 use crate::model::TaskId;
 use crate::model::TaskOutput;
@@ -74,7 +76,9 @@ const SUMMARY_COLUMNS: &str =
 /// assert!(store.capabilities().restart_recovery);
 /// drop(store);
 /// fs::remove_file(&path)?;
-/// fs::remove_file(path.with_extension("owner.lock"))?;
+/// let mut lock_path = path.as_os_str().to_owned();
+/// lock_path.push(".owner.lock");
+/// fs::remove_file(std::path::PathBuf::from(lock_path))?;
 /// # Ok(())
 /// # }
 /// ```
@@ -353,7 +357,7 @@ fn read_stored_task_row(row: &Row<'_>) -> SqliteResult<StoredTaskRow> {
 }
 
 impl SqliteTaskStore {
-    /// Opens a database, applies its schema, and reserves process ownership.
+    /// Opens a database, applies its schema, and locks its physical file.
     ///
     /// # Parameters
     ///
@@ -361,28 +365,19 @@ impl SqliteTaskStore {
     ///
     /// # Returns
     ///
-    /// An initialized store holding the database's exclusive owner lock.
+    /// An initialized store holding the database file lock. The service owner
+    /// epoch is acquired separately through [`TaskStore::acquire_owner`].
     ///
     /// # Errors
     ///
     /// Returns a store error when opening, locking, initializing, or migrating
     /// the database fails.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).map_err(failure)?;
-        }
-        let lock_path = path.with_extension("owner.lock");
-        let lock = File::options()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .map_err(failure)?;
-        lock.try_lock_exclusive()
-            .map_err(|error| StoreError::Failure(format!("database is owned by another service: {error}")))?;
-        let mut connection = Connection::open(&path).map_err(failure)?;
+        let (identity, _database_file) = DatabaseIdentity::open(path.as_ref())?;
+        let lock = acquire_owner_lock(identity.path())?;
+        identity.verify()?;
+        let mut connection = Connection::open(identity.path()).map_err(failure)?;
+        identity.verify()?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(failure)?;
@@ -953,10 +948,11 @@ impl TaskStore for SqliteTaskStore {
         let owner_state = Arc::clone(&self.owner_state);
         self.run(move |connection| {
             let mut owner_state = owner_state.lock();
+            if owner_state.epoch.is_some() {
+                return Err(StoreError::OwnerConflict);
+            }
             if owner_state.lock_file.is_none() {
-                return Err(StoreError::Failure(
-                    "SQLite owner lock has been released".into(),
-                ));
+                return Err(StoreError::OwnerConflict);
             }
             connection.execute("INSERT INTO metadata(key,value) VALUES('owner_epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1", []).map_err(failure)?;
             let epoch = connection.query_row("SELECT value FROM metadata WHERE key='owner_epoch'", [], |row| row.get::<_, u64>(0)).map(OwnerEpoch).map_err(failure)?;
@@ -1004,20 +1000,18 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns an error if a row is malformed or SQLite access fails.
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.run(move |connection| {
-            let mut statement = connection.prepare("SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,payload, lifecycle_json FROM tasks WHERE state_kind IN ('Queued','Running') AND (?1 IS NULL OR id > ?1) ORDER BY id LIMIT 257").map_err(failure)?;
+            let mut statement = connection.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE state_kind IN ('Queued','Running') AND (?1 IS NULL OR id > ?1) ORDER BY id LIMIT 257")).map_err(failure)?;
             let mut rows = statement.query([cursor.map(|id| id.to_string())]).map_err(failure)?;
             let mut tasks = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
-                tasks.push(StoredTask {
-                    record: decode_stored_task_row(read_stored_task_row(row).map_err(failure)?)?,
-                });
+                tasks.push(decode_stored_summary_row(read_stored_summary_row(row).map_err(failure)?)?);
             }
             let has_more = tasks.len() > 256;
             if has_more { tasks.truncate(256); }
-            let next = has_more.then(|| tasks.last().map(|task| task.record.id)).flatten();
-            Ok(StoredTaskPage { tasks, next })
+            let next = has_more.then(|| tasks.last().map(|task| task.id)).flatten();
+            Ok(RecoveryPage { tasks, next })
         })
     }
 
@@ -1039,14 +1033,10 @@ impl TaskStore for SqliteTaskStore {
         self.run(move |_| {
             let mut owner_state = owner_state.lock();
             if owner_state.epoch != Some(epoch) {
-                return Err(StoreError::Failure(
-                    "SQLite owner epoch does not match the active owner".into(),
-                ));
+                return Err(StoreError::OwnerConflict);
             }
-            let file = owner_state
-                .lock_file
-                .take()
-                .ok_or_else(|| StoreError::Failure("SQLite task store has no active owner".into()))?;
+            let file = owner_state.lock_file.take().ok_or(StoreError::OwnerConflict)?;
+            owner_state.epoch = None;
             file.unlock().map_err(failure)
         })
     }
@@ -1557,7 +1547,9 @@ mod tests {
     /// Removes only disposable files created by this worker test.
     fn remove_database(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".owner.lock");
+        let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }

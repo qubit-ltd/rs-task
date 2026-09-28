@@ -87,7 +87,9 @@ mod sqlite_tests {
     /// Removes only disposable database files created by this test.
     fn remove_database(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".owner.lock");
+        let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
@@ -109,7 +111,7 @@ mod sqlite_tests {
 
         assert!(matches!(
             store.release_owner(OwnerEpoch(epoch.0 + 1)).await,
-            Err(StoreError::Failure(_))
+            Err(StoreError::OwnerConflict)
         ));
         store.release_owner(epoch).await.expect("owner released");
         assert!(matches!(
