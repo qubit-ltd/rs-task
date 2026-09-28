@@ -45,6 +45,17 @@ struct Usage {
     custom: BTreeMap<String, u64>,
 }
 
+/// Usage totals and reservation identities protected by one mutex.
+#[derive(Default)]
+struct ResourceLedger {
+    /// Aggregate resources currently held by active attempts.
+    usage: Usage,
+    /// Resources associated with each reservation token.
+    allocations: AllocationLedger,
+    /// Next unused token; `None` indicates that the token space is exhausted.
+    next_token: Option<u64>,
+}
+
 /// Single-process executor that atomically accounts for CPU, GPU, and custom
 /// resources.
 ///
@@ -61,12 +72,8 @@ struct Usage {
 pub struct LocalTaskExecutionEngine {
     /// Total available resources.
     capacity: ResourceCapacity,
-    /// Current aggregate resource reservations.
-    usage: Arc<Mutex<Usage>>,
-    /// Next unique reservation token.
-    next_token: std::sync::atomic::AtomicU64,
-    /// Reservations that can be released by execution guards.
-    allocations: Arc<Mutex<AllocationLedger>>,
+    /// Current totals and reservations, updated under one lock.
+    ledger: Arc<Mutex<ResourceLedger>>,
 }
 
 impl LocalTaskExecutionEngine {
@@ -83,9 +90,10 @@ impl LocalTaskExecutionEngine {
     pub fn new(capacity: ResourceCapacity) -> Self {
         Self {
             capacity,
-            usage: Arc::new(Mutex::new(Usage::default())),
-            next_token: std::sync::atomic::AtomicU64::new(1),
-            allocations: Arc::new(Mutex::new(HashMap::new())),
+            ledger: Arc::new(Mutex::new(ResourceLedger {
+                next_token: Some(1),
+                ..ResourceLedger::default()
+            })),
         }
     }
 }
@@ -97,12 +105,12 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
     ///
     /// Configured limits and a snapshot of currently held resources.
     fn capacity(&self) -> ResourceSnapshot {
-        let usage = self.usage.lock();
+        let ledger = self.ledger.lock();
         ResourceSnapshot {
             capacity: self.capacity.clone(),
-            used_cpu_slots: usage.cpu,
-            used_gpus: usage.gpus.clone(),
-            used_custom: usage.custom.clone(),
+            used_cpu_slots: ledger.usage.cpu,
+            used_gpus: ledger.usage.gpus.clone(),
+            used_custom: ledger.usage.custom.clone(),
         }
     }
 
@@ -141,19 +149,20 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
         {
             return Err(EngineError::Unsatisfiable);
         }
-        let mut usage = self.usage.lock();
+        let mut ledger = self.ledger.lock();
         let available_gpus = self
             .capacity
             .gpus
             .iter()
             .filter(|(id, labels)| {
-                !usage.gpus.contains(id) && request.gpu_labels.iter().all(|label| labels.contains(label))
+                !ledger.usage.gpus.contains(id) && request.gpu_labels.iter().all(|label| labels.contains(label))
             })
             .map(|(id, _)| id.clone())
             .take(request.gpu_count as usize)
             .collect::<Vec<_>>();
         let available_custom = request.custom.iter().all(|(name, value)| {
-            usage
+            ledger
+                .usage
                 .custom
                 .get(name)
                 .copied()
@@ -161,28 +170,35 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
                 .checked_add(*value)
                 .is_some_and(|total| total <= self.capacity.custom.get(name).copied().unwrap_or(0))
         });
-        let cpu_available = usage
+        let cpu_available = ledger
+            .usage
             .cpu
             .checked_add(request.cpu_slots)
             .is_some_and(|total| total <= self.capacity.cpu_slots);
         if !cpu_available || available_gpus.len() != request.gpu_count as usize || !available_custom {
             return Err(EngineError::TemporarilyUnavailable);
         }
-        usage.cpu += request.cpu_slots;
-        usage.gpus.extend(available_gpus.clone());
+        let Some(token) = ledger.next_token else {
+            return Err(EngineError::ReservationTokenExhausted);
+        };
+        let Some(next_token) = token.checked_add(1) else {
+            return Err(EngineError::ReservationTokenExhausted);
+        };
+        ledger.next_token = Some(next_token);
+        ledger.usage.cpu += request.cpu_slots;
+        ledger.usage.gpus.extend(available_gpus.clone());
         for (name, value) in &request.custom {
-            *usage.custom.entry(name.clone()).or_default() += value;
+            *ledger.usage.custom.entry(name.clone()).or_default() += value;
         }
-        let token = self.next_token.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.allocations
-            .lock()
+        ledger
+            .allocations
             .insert(token, (request.cpu_slots, available_gpus.clone(), request.custom));
-        let allocations = self.allocations.clone();
-        let usage_ref = self.usage.clone();
+        drop(ledger);
+        let ledger = Arc::clone(&self.ledger);
         Ok(PreparedExecution {
             id,
             assigned: available_gpus,
-            release: Some(Box::new(move || release(token, &allocations, &usage_ref))),
+            release: Some(Box::new(move || release(token, &ledger))),
         })
     }
 
@@ -283,23 +299,22 @@ impl Drop for ReservationGuard {
     }
 }
 
-/// Removes one reservation and returns its resources to the shared counters.
+/// Removes one reservation and returns its resources under a single lock.
 ///
 /// # Parameters
 ///
 /// * `token` - Unique key of the reservation to release.
-/// * `allocations` - Ledger containing the reservation's resource amounts.
-/// * `usage` - Shared counters to decrement for the released reservation.
-fn release(token: u64, allocations: &Mutex<AllocationLedger>, usage: &Mutex<Usage>) {
-    if let Some((cpu, gpus, custom)) = allocations.lock().remove(&token) {
-        let mut current = usage.lock();
-        current.cpu = current.cpu.saturating_sub(cpu);
-        current.gpus.retain(|id| !gpus.contains(id));
+/// * `ledger` - Shared resource totals and reservation map.
+fn release(token: u64, ledger: &Mutex<ResourceLedger>) {
+    let mut ledger = ledger.lock();
+    if let Some((cpu, gpus, custom)) = ledger.allocations.remove(&token) {
+        ledger.usage.cpu = ledger.usage.cpu.saturating_sub(cpu);
+        ledger.usage.gpus.retain(|id| !gpus.contains(id));
         for (name, amount) in custom {
-            if let Some(value) = current.custom.get_mut(&name) {
+            if let Some(value) = ledger.usage.custom.get_mut(&name) {
                 *value = value.saturating_sub(amount);
                 if *value == 0 {
-                    current.custom.remove(&name);
+                    ledger.usage.custom.remove(&name);
                 }
             }
         }

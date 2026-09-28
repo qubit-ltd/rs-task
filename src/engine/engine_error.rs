@@ -28,4 +28,7 @@ pub enum EngineError {
     /// Engine cannot accept new task execution.
     #[error("task execution engine is shut down")]
     Closed,
+    /// The engine exhausted its non-reusable reservation identifiers.
+    #[error("task execution reservation identifier space is exhausted")]
+    ReservationTokenExhausted,
 }
