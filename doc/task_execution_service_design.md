@@ -48,7 +48,7 @@
 
 提交时验证请求的每项需求不超过配置容量，无法满足的任务立即拒绝。通过验证但当前没有空闲额度的任务进入有界队列。调度器选择候选任务，`TaskExecutionEngine` 原子预约全部资源并安排执行；任务实际结束后释放预约。不能先占用部分资源再等待其余部分，以免产生资源死锁。容量变更本期仅在重建服务时生效。
 
-队列默认按受理顺序扫描，允许后续较小任务越过暂时无法运行的任务。每轮只从 ready 队列和已到期的 retry deadline 中取至多 `scan_budget` 个候选；远期重试任务按截止时间放在独立有序队列中。队列锁只保护队列操作，不跨越策略、store 或 engine 调用。达到可配置的最大越过次数后，调度器优先为被越过的任务留出所需资源，停止启动会继续占用这些资源的后续任务。在运行任务最终退出、资源正确归还的前提下，这避免大任务被持续插队。队列容量、运行并发上限和扫描预算均可配置；队列满时明确拒绝并允许调用方重试，不无限堆积内存。默认受理 worker 数量上限为 64，受理中 payload 总额度为 64 MiB；预留额度随后台 `accept` 完成后释放，即使调用方取消等待也不会提前释放。
+队列默认按受理顺序扫描，允许后续较小任务越过暂时无法运行的任务。每轮只从 ready 队列和已到期的 retry deadline 中取至多 `scan_budget` 个候选；远期重试任务按截止时间放在独立有序队列中。队列锁只保护队列操作，不跨越策略、store 或 engine 调用。达到可配置的最大越过次数后，调度器优先为被越过的任务留出所需资源，停止启动会继续占用这些资源的后续任务。在运行任务最终退出、资源正确归还的前提下，这避免大任务被持续插队。队列容量、运行并发上限和扫描预算均可配置；队列满时明确拒绝并允许调用方重试，不无限堆积内存。外部生命周期写操作共享默认 64 个操作名额；`submit` 与 `submit_local` 另共享 64 MiB 的在途 payload 额度。操作一经 worker 接纳，调用方取消等待不会撤销它，预算随 worker 完成后释放。
 
 ### 3.3 状态与查询
 
@@ -206,7 +206,7 @@ TaskExecutionService
 ```text
 提交：验证描述和资源 -> 检查容量/去重 -> 写入权威存储 -> 返回 TaskRecord 或 LocalTaskHandle -> 唤醒调度
 启动：选择候选任务 -> 执行引擎 prepare 并预约全部资源 -> TaskStore 提交 Running -> 执行引擎 activate -> 调用处理器
-结束：取得处理器结果 -> 提交终态 -> 释放资源 -> 唤醒调度 -> 锁外通知
+结束：取得处理器结果 -> 引擎释放资源 -> 提交终态 -> 唤醒调度 -> 锁外通知
 取消：已排队则原子移出并提交 Cancelled；运行中则记录请求并通知处理器，处理器返回 Cancelled 才确认
 恢复：取得独占所有权 -> 检查处理器版本 -> 装载未完成记录 -> 重建队列 -> 开始调度
 ```
@@ -219,7 +219,7 @@ TaskExecutionService
 
 SQLite 使用单个连接，因此同时运行的阻塞数据库操作上限为 1。异步 store 调用先取得 Tokio semaphore permit，再通过 `spawn_blocking` 执行同步 SQLite 工作；permit 由阻塞闭包持有到操作完成，即使调用方取消等待中的 future，也不会释放正在执行操作的容量。轮询 SQLite store future 需要 Tokio runtime。
 
-请求及诊断文本限额按 UTF-8 字节计算：`task_type` 128、`handler_version` 64、`correlation_key` 与 `idempotency_key` 各 256；metadata 最多 32 项，键 128、值 4096、键值总计 16384。超限请求在持久化受理前返回 `InvalidRequest`，Memory 和 SQLite store 也执行相同的请求边界检查。诊断类别最多 128 字节，Blocked 原因、Panicked 消息及其他诊断最多 4096 字节。执行阶段的诊断在 UTF-8 字符边界裁剪；`LocalTaskHandle` 的类型化错误通道仍传递原始值。既有单 payload 16 MiB 与 output summary 64 KiB 上限保持不变；受理中另有默认 64 MiB 总 payload 和 64 worker 数量预算，内存存储默认常驻 payload 上限也为 64 MiB。这些预算不构成进程总内存严格上界。
+请求及诊断文本限额按 UTF-8 字节计算：`task_type` 128、`handler_version` 64、`correlation_key` 与 `idempotency_key` 各 256；metadata 最多 32 项，键 128、值 4096、键值总计 16384。资源描述最多 32 个 GPU label 与 32 个 custom 名称，每项非空且不超过 128 UTF-8 字节；`gpu_count == 0` 时 labels 必须为空。超限请求在持久化受理前返回 `InvalidRequest`，Memory 和 SQLite store 也执行相同的请求边界检查。诊断类别最多 128 字节，Blocked 原因、Panicked 消息及其他诊断最多 4096 字节。执行阶段的诊断在 UTF-8 字符边界裁剪；`LocalTaskHandle` 的类型化错误通道仍传递原始值。既有单 payload 16 MiB 与 output summary 64 KiB 上限保持不变；在途外部写操作另有默认 64 个操作名额；提交 payload 另有 64 MiB 总预算，内存存储默认常驻 payload 上限也为 64 MiB。这些预算不构成进程总内存严格上界。
 
 ## 9. 验证与迁移
 

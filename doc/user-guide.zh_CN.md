@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 对于需要从存储中恢复的 CSV 导入，使用 `TaskRequest`。请求会保存任务类型、精确处理器版本、不透明 payload、资源需求和可选的关联键与幂等键。payload 由处理器自行解码；服务不会把旧请求静默交给新版本处理器。提交成功后，API 可把返回的 `TaskId` 发给客户端，客户端用 `get`、`list` 或 `wait` 查询进度。
 
-实现 `TaskHandler`，并在异步构建器调用 `build()` 前注册它的 `Arc`。重复的 `(task_type, version)` 注册会被拒绝。恢复时找不到处理器的任务会进入 `Blocked`，并继续保留供查询；安装相应处理器后，可调用 `retry_blocked` 重新排队。
+实现 `TaskHandler`，并在异步构建器调用 `build()` 前注册它的 `Arc`。重复的 `(task_type, version)` 注册会被拒绝。恢复时找不到处理器的任务会进入 `Blocked`，并继续保留供查询。处理这类任务时，先关闭旧服务，再注册完全匹配的 `(task_type, handler_version)`，用同一个持久化数据库重新构建服务，查询任务的 `Blocked` 状态，最后调用 `retry_blocked`。处理器注册表在 build 完成后固定；重建不会自动重排队。
 
 下面先注册 `csv-import` 的 `1` 版处理器，再提交请求并等待完成。示例的 payload 是不透明字节；真实服务应将文件位置、租户 ID 等必要参数编码进去，而不是把大文件本身复制进任务记录。
 
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 可用 `get_by_idempotency_key` 查询；该接口返回不含 payload 的 `TaskSummary`，返回
 `None` 只代表查询瞬间没有记录，应以相同请求和同一键重试。需要 payload 时调用
 `get(summary.id)`。即使配置容量后来下调，完全相同的重放仍返回原记录；同键但请求不同会返回幂等冲突。新请求仍按当前容量校验。对应任务记录被清理或淘汰后，该键可以重用。内存预设最多保留 64 MiB 的任务 payload，默认最多有
-64 个受理中提交，共享 64 MiB 的受理 payload 预算。这些额度只统计 payload 字节，不是进程总内存上限。
+64 个并发写操作。提交任务另共享 64 MiB 的 payload 预算。这些额度不是进程总内存上限。
 需要更长的恢复窗口时应选 SQLite 或其他持久化存储。`shutdown_until(deadline)` 会启动正常排空，
 只限制当前调用者的等待；任务和存储所有权会保持到排空完成。
 
@@ -232,8 +232,56 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保
 `EventCodec<TaskEvent>`。注册 JSON codec，并显式选择 Redis provider：
 
 ~~~rust,ignore
+use std::sync::Arc;
+
+use qubit_event_bus::CodecError;
+use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::codec::EventCodec;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::model::ContentType;
+use qubit_event_bus::model::SchemaId;
+use qubit_spi::ProviderSelection;
+use qubit_task::event::TaskEvent;
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+struct TaskEventJsonCodec {
+    content_type: ContentType,
+    schema_id: SchemaId,
+}
+
+impl TaskEventJsonCodec {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            content_type: ContentType::new("application/json")?,
+            schema_id: SchemaId::new("task-event-v1")?,
+        })
+    }
+}
+
+impl EventCodec<TaskEvent> for TaskEventJsonCodec {
+    fn content_type(&self) -> &ContentType {
+        &self.content_type
+    }
+
+    fn schema_id(&self) -> Option<&SchemaId> {
+        Some(&self.schema_id)
+    }
+
+    fn encode(&self, value: &TaskEvent) -> Result<Arc<[u8]>, CodecError> {
+        serde_json::to_vec(value)
+            .map(Arc::from)
+            .map_err(|source| CodecError::Encode { source: Box::new(source) })
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<TaskEvent, CodecError> {
+        serde_json::from_slice(bytes).map_err(|source| CodecError::Decode { source: Box::new(source) })
+    }
+}
+
 let mut codecs = CodecRegistry::new();
-codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec::new()));
+codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec::new()?));
 let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
 let config = EventBusConfig::default()
     .with_selection(ProviderSelection::named("redis-streams")?)
