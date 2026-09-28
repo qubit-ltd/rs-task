@@ -14,17 +14,23 @@ use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
+use qubit_task::model::AcceptOutcome;
 use qubit_task::model::MAX_TASK_PAYLOAD_BYTES;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
+use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
+use qubit_task::model::TransitionCommand;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::TaskServiceError;
+use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
+use qubit_task::store::TaskStore;
 use tokio::test as tokio_test;
 
 struct ValidationHandler;
@@ -57,6 +63,74 @@ async fn create_service() -> TaskExecutionService {
 
 fn valid_request() -> TaskRequest {
     TaskRequest::new("validation", "1", b"payload".to_vec())
+}
+
+#[tokio_test]
+async fn test_idempotent_replay_survives_capacity_reduction() {
+    let store = Arc::new(MemoryTaskStore::new(8));
+    let request = TaskRequest {
+        resources: ResourceRequest {
+            cpu_slots: 2,
+            ..ResourceRequest::default()
+        },
+        ..TaskRequest::new("validation", "1", b"payload".to_vec()).with_idempotency_key("capacity-replay")
+    };
+    let accepted = match store
+        .accept(TaskId::generate(), request.clone())
+        .await
+        .expect("seed request is accepted")
+    {
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => panic!("seed request key is new"),
+    };
+    store
+        .transition(TransitionCommand {
+            id: accepted.id,
+            expected_version: accepted.state_version,
+            expected_attempt: accepted.attempt,
+            state: TaskState::Cancelled,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .expect("seed record becomes terminal before service construction");
+
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .store(store)
+        .capacity(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        })
+        .register_handler(Arc::new(ValidationHandler))
+        .expect("handler registration succeeds")
+        .build()
+        .await
+        .expect("service builds with reduced capacity");
+
+    let replay = service
+        .submit(request.clone())
+        .await
+        .expect("an identical retained request returns its original record");
+    assert_eq!(replay.id, accepted.id);
+
+    let mut conflicting = request.clone();
+    conflicting.payload.push(1);
+    assert!(matches!(
+        service.submit(conflicting).await,
+        Err(TaskServiceError::Store(StoreError::IdempotencyConflict))
+    ));
+
+    let new_request = TaskRequest {
+        resources: request.resources.clone(),
+        ..TaskRequest::new("validation", "1", b"new".to_vec()).with_idempotency_key("new-over-capacity")
+    };
+    assert!(matches!(
+        service.submit(new_request).await,
+        Err(TaskServiceError::Unsatisfiable)
+    ));
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio_test]
