@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -28,6 +27,7 @@ use super::admission_budget::AdmissionBudget;
 use super::admission_budget::AdmissionBudgetError;
 use super::admission_budget::AdmissionReservation;
 use super::admission_gate::AdmissionGate;
+use super::cancel_outcome::CancelOutcome;
 use super::local_task_handle::LocalTaskHandle;
 use super::local_task_outcome::LocalTaskOutcome;
 use super::local_task_outcome::adapt_local_outcome;
@@ -40,6 +40,8 @@ use super::task_event_notification_stats::TaskEventNotificationStats;
 use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service_builder::TaskExecutionServiceBuilder;
 use super::task_execution_service_builder::TaskServiceBuildError;
+pub(crate) use super::task_service_capabilities::TaskServiceCapabilities;
+pub(crate) use super::task_service_error::TaskServiceError;
 use super::task_wait_registry::TaskWaitRegistry;
 use crate::engine::EngineError;
 use crate::engine::ExecutionOutcome;
@@ -60,7 +62,6 @@ use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
 use crate::model::ResourceCapacity;
 use crate::model::ResourceRequest;
-use crate::model::StoreCapabilities;
 use crate::model::TaskId;
 use crate::model::TaskOutput;
 use crate::model::TaskPage;
@@ -69,7 +70,6 @@ use crate::model::TaskRecord;
 use crate::model::TaskRequest;
 use crate::model::TaskState;
 use crate::model::TaskStateCounts;
-use crate::model::TaskStateKind;
 use crate::model::TaskStats;
 use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
@@ -79,153 +79,6 @@ use crate::scheduling::QueuedTask;
 use crate::scheduling::SchedulingPolicy;
 use crate::store::StoreError;
 use crate::store::TaskStore;
-
-/// Effective store capabilities and local-closure support.
-///
-/// # Examples
-///
-/// ```
-/// # #[tokio::main]
-/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use qubit_task::TaskExecutionService;
-///
-/// let service = TaskExecutionService::in_memory().await?;
-/// assert!(service.capabilities().submit_local);
-/// service.shutdown().await?;
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TaskServiceCapabilities {
-    /// Capabilities declared by the selected store.
-    pub store: StoreCapabilities,
-    /// Whether local in-process handlers can be submitted.
-    pub submit_local: bool,
-}
-
-/// Failure reported by a service operation.
-///
-/// # Examples
-///
-/// ```
-/// use qubit_task::service::TaskServiceError;
-///
-/// let error = TaskServiceError::QueueFull;
-/// assert_eq!(error.to_string(), "task queue is full");
-/// ```
-#[derive(Debug, thiserror::Error)]
-#[must_use]
-pub enum TaskServiceError {
-    /// The selected store failed an operation.
-    #[error(transparent)]
-    Store(
-        /// Underlying storage failure.
-        #[from]
-        StoreError,
-    ),
-    /// The configured queue has no remaining waiting capacity.
-    #[error("task queue is full")]
-    QueueFull,
-    /// The request payload would exceed the configured in-flight byte budget.
-    #[error(
-        "in-flight task payload budget exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available"
-    )]
-    PayloadBudgetExceeded {
-        /// Payload bytes in the rejected submission.
-        requested_bytes: usize,
-        /// Payload bytes remaining when the submission was checked.
-        available_bytes: usize,
-    },
-    /// The configured number of detached admission workers is already in
-    /// flight.
-    #[error("in-flight task submission limit reached ({limit})")]
-    SubmissionLimitExceeded {
-        /// Maximum number of concurrent admission workers.
-        limit: usize,
-    },
-    /// The request exceeds available configured capacity.
-    #[error("task request cannot be satisfied by configured resources")]
-    Unsatisfiable,
-    /// The request contains invalid metadata or an oversized payload.
-    #[error("invalid task request: {0}")]
-    InvalidRequest(
-        /// Validation diagnostic describing the rejected request field.
-        String,
-    ),
-    /// The requested task is blocked pending intervention.
-    #[error("task is blocked and requires intervention")]
-    Blocked,
-    /// The expected record revision exists, but its lifecycle is not blocked.
-    #[error("task is not blocked (current state: {actual:?})")]
-    NotBlocked {
-        /// Lifecycle state observed when the operation was rejected.
-        actual: TaskStateKind,
-    },
-    /// The task used all configured execution attempts and cannot be requeued.
-    #[error("task exhausted its execution attempt budget ({attempts}/{limit})")]
-    AttemptsExhausted {
-        /// Number of attempts already started.
-        attempts: u32,
-        /// Maximum attempts configured for the service.
-        limit: u32,
-    },
-    /// New task submissions have been stopped.
-    #[error("task execution service is shutting down")]
-    ShuttingDown,
-    /// The caller's shutdown deadline expired while accepted work was draining.
-    #[error("task execution service did not shut down before the deadline")]
-    ShutdownTimedOut,
-    /// A persistence failure suspended task acceptance and scheduling.
-    #[error("task execution service is paused after a task store failure: {0}")]
-    StoreUnavailable(
-        /// First store failure retained by the service.
-        String,
-    ),
-    /// The scheduler or execution engine cannot accept or start more work.
-    #[error("task execution scheduler is unavailable: {0}")]
-    SchedulerUnavailable(
-        /// Scheduler or engine failure retained by the service.
-        String,
-    ),
-    /// The task notification publisher failed while draining during shutdown.
-    #[error("task notification publisher failed to close: {0}")]
-    NotificationClose(
-        /// Notification publisher close or worker failure diagnostic.
-        String,
-    ),
-    /// No handler matches the submitted type and exact version.
-    #[error("no handler registered for `{task_type}` version `{version}`")]
-    MissingHandler {
-        /// Task type requested by the submitted record.
-        task_type: String,
-        /// Exact version requested by the submitted record.
-        version: String,
-    },
-    /// Reconstructable storage cannot accept a local closure.
-    #[error("local closure submission is unavailable with a restart-recoverable store")]
-    UnsupportedCapability,
-}
-
-/// Outcome of a cancellation request.
-///
-/// # Examples
-///
-/// ```
-/// use qubit_task::service::CancelOutcome;
-///
-/// let outcome = CancelOutcome::AlreadyTerminal;
-/// assert!(matches!(outcome, CancelOutcome::AlreadyTerminal));
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use]
-pub enum CancelOutcome {
-    /// The task was cancelled while it was queued.
-    CancelledBeforeStart,
-    /// Cooperative cancellation was signalled to a running handler.
-    CancellationRequested,
-    /// The task had already reached a terminal state.
-    AlreadyTerminal,
-}
 
 /// Components and synchronization state shared by service handle clones.
 pub(crate) struct ServiceCore {
@@ -590,6 +443,22 @@ impl TaskExecutionService {
         accepted_before_ms: u64,
         max_rows: NonZeroUsize,
     ) -> Result<usize, TaskServiceError> {
+        let reservation = self.reserve_admission(0)?;
+        let service = self.clone();
+        await_admission(self.core.runtime_handle.spawn(async move {
+            let _reservation = reservation;
+            service
+                .prune_terminal_before_admitted(accepted_before_ms, max_rows)
+                .await
+        }))
+        .await
+    }
+
+    async fn prune_terminal_before_admitted(
+        &self,
+        accepted_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> Result<usize, TaskServiceError> {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
@@ -636,6 +505,16 @@ impl TaskExecutionService {
     /// Returns `NotFound`, shutdown, store, or scheduler errors when the
     /// request cannot be applied.
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
+        let reservation = self.reserve_admission(0)?;
+        let service = self.clone();
+        await_admission(self.core.runtime_handle.spawn(async move {
+            let _reservation = reservation;
+            service.cancel_admitted(id).await
+        }))
+        .await
+    }
+
+    async fn cancel_admitted(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let _permit = self.core.admission.enter()?;
         let mut record = self
             .core
@@ -733,12 +612,12 @@ impl TaskExecutionService {
     /// Returns `Blocked`, `AttemptsExhausted`, shutdown, capacity, or store
     /// errors if it cannot be requeued.
     pub async fn retry_blocked(&self, id: TaskId) -> Result<TaskSummary, TaskServiceError> {
+        let reservation = self.reserve_admission(0)?;
         let service = self.clone();
-        await_admission(
-            self.core
-                .runtime_handle
-                .spawn(async move { service.retry_blocked_admitted(id).await }),
-        )
+        await_admission(self.core.runtime_handle.spawn(async move {
+            let _reservation = reservation;
+            service.retry_blocked_admitted(id).await
+        }))
         .await
     }
 
@@ -760,6 +639,20 @@ impl TaskExecutionService {
     /// `NotBlocked` if the matching revision is not blocked, or a store or
     /// shutdown error if the operation cannot be completed.
     pub async fn abandon_blocked(&self, id: TaskId, expected_version: u64) -> Result<TaskSummary, TaskServiceError> {
+        let reservation = self.reserve_admission(0)?;
+        let service = self.clone();
+        await_admission(self.core.runtime_handle.spawn(async move {
+            let _reservation = reservation;
+            service.abandon_blocked_admitted(id, expected_version).await
+        }))
+        .await
+    }
+
+    async fn abandon_blocked_admitted(
+        &self,
+        id: TaskId,
+        expected_version: u64,
+    ) -> Result<TaskSummary, TaskServiceError> {
         if let Some(error) = self.last_store_error() {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
@@ -1113,7 +1006,7 @@ impl TaskExecutionService {
     ///
     /// # Errors
     ///
-    /// Returns the configured payload or submission limit error.
+    /// Returns the configured payload or operation limit error.
     fn reserve_admission(&self, payload_bytes: usize) -> Result<AdmissionReservation, TaskServiceError> {
         self.core
             .admission_budget
@@ -1125,8 +1018,8 @@ impl TaskExecutionService {
                         available_bytes: available,
                     }
                 }
-                AdmissionBudgetError::SubmissionLimitExceeded { limit } => {
-                    TaskServiceError::SubmissionLimitExceeded { limit }
+                AdmissionBudgetError::OperationLimitExceeded { limit } => {
+                    TaskServiceError::OperationLimitExceeded { limit }
                 }
             })
     }
@@ -1671,12 +1564,17 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     record_scheduler_fault(&core, "execution engine closed during prepare".into());
                     return;
                 }
+                Err(EngineError::ReservationTokenExhausted) => {
+                    queue.push(task);
+                    record_scheduler_fault(&core, "execution engine exhausted reservation identifiers".into());
+                    return;
+                }
             };
             if core.store_fault.lock().is_some() {
                 queue.push(task);
                 return;
             }
-            let current = match core.store.get(id).await {
+            let mut current = match core.store.get(id).await {
                 Ok(Some(current))
                     if current.state_version == record.state_version
                         && current.attempt == record.attempt
@@ -1706,6 +1604,9 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                     return;
                 }
             };
+            // Keep payload ownership local to activation; the finalizer only
+            // needs the lifecycle record and must not retain a payload copy.
+            let payload = std::mem::take(&mut current.request.payload);
             let mut running_record = current.clone();
             running_record.state = running.state.clone();
             running_record.state_version = running.state_version;
@@ -1738,11 +1639,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
             core.local_handlers.lock().remove(&id);
             let cancelled = Arc::new(AtomicBool::new(false));
             let context = TaskContext::new(id, running.attempt, assigned, cancelled);
-            match core
-                .engine
-                .activate(prepared, handler, current.request.payload.clone(), context)
-                .await
-            {
+            match core.engine.activate(prepared, handler, payload, context).await {
                 Ok(handle) => {
                     let cancellation_signal = Arc::clone(&handle.cancelled);
                     core.cancellations.lock().insert(

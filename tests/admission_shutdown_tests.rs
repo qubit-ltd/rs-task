@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "sqlite")]
+mod common;
 use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -13,6 +15,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+#[cfg(feature = "sqlite")]
+use common::sqlite_paths;
 use parking_lot::Mutex;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::EventBus;
@@ -65,11 +69,11 @@ use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::RecoveryPage;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::ResourceSnapshot;
 use qubit_task::model::StoreCapabilities;
-use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -572,8 +576,8 @@ impl TaskStore for ControlledStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
-        Box::pin(async { Ok(StoredTaskPage::default()) })
+    fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+        Box::pin(async { Ok(RecoveryPage::default()) })
     }
 
     fn release_owner<'a>(&'a self, _epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
@@ -1204,7 +1208,7 @@ async fn test_aborted_submit_keeps_payload_budget_until_accept_finishes() {
     let service = TaskExecutionServiceBuilder::default()
         .store(store.clone())
         .max_inflight_payload_bytes(NonZeroUsize::new(8).expect("budget is nonzero"))
-        .max_inflight_submissions(NonZeroUsize::new(4).expect("limit is nonzero"))
+        .max_inflight_operations(NonZeroUsize::new(4).expect("limit is nonzero"))
         .build()
         .await
         .expect("service builds");
@@ -1269,7 +1273,7 @@ async fn test_aborted_empty_payload_submit_obeys_inflight_submission_limit() {
     });
     let service = TaskExecutionServiceBuilder::default()
         .store(store.clone())
-        .max_inflight_submissions(NonZeroUsize::new(1).expect("limit is nonzero"))
+        .max_inflight_operations(NonZeroUsize::new(1).expect("limit is nonzero"))
         .build()
         .await
         .expect("service builds");
@@ -1291,7 +1295,7 @@ async fn test_aborted_empty_payload_submit_obeys_inflight_submission_limit() {
     second.idempotency_key = Some("count-second-key".into());
     assert!(matches!(
         service.submit(test_keyed(second.clone())).await,
-        Err(TaskServiceError::SubmissionLimitExceeded { .. })
+        Err(TaskServiceError::OperationLimitExceeded { .. })
     ));
 
     store.accept_release.add_permits(1);
@@ -1314,7 +1318,7 @@ async fn test_aborted_empty_payload_submit_obeys_inflight_submission_limit() {
         loop {
             match service.submit(test_keyed(second.clone())).await {
                 Ok(_) => break,
-                Err(TaskServiceError::SubmissionLimitExceeded { .. }) => task::yield_now().await,
+                Err(TaskServiceError::OperationLimitExceeded { .. }) => task::yield_now().await,
                 result => panic!("unexpected retry result after detached accept: {result:?}"),
             }
         }
@@ -1327,7 +1331,7 @@ async fn test_aborted_empty_payload_submit_obeys_inflight_submission_limit() {
 #[tokio_test]
 async fn test_same_key_duplicate_releases_submission_slot() {
     let service = TaskExecutionServiceBuilder::in_memory()
-        .max_inflight_submissions(NonZeroUsize::new(1).expect("limit is nonzero"))
+        .max_inflight_operations(NonZeroUsize::new(1).expect("limit is nonzero"))
         .build()
         .await
         .expect("service builds");
@@ -1359,7 +1363,7 @@ async fn test_local_submission_obeys_inflight_submission_limit() {
     });
     let service = TaskExecutionServiceBuilder::default()
         .store(store.clone())
-        .max_inflight_submissions(NonZeroUsize::new(1).expect("limit is nonzero"))
+        .max_inflight_operations(NonZeroUsize::new(1).expect("limit is nonzero"))
         .build()
         .await
         .expect("service builds");
@@ -1381,7 +1385,7 @@ async fn test_local_submission_obeys_inflight_submission_limit() {
         service
             .submit(TaskRequest::new("other", "1", Vec::new()).with_idempotency_key("during-local-accept"))
             .await,
-        Err(TaskServiceError::SubmissionLimitExceeded { .. })
+        Err(TaskServiceError::OperationLimitExceeded { .. })
     ));
 
     store.accept_release.add_permits(1);
@@ -1648,8 +1652,7 @@ async fn test_shutdown_until_keeps_sqlite_owner_until_drain_finishes() {
         .expect("replacement service builds");
     replacement.shutdown().await.expect("replacement service shuts down");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
-    let _ = std::fs::remove_file(path.with_extension("owner.lock.guard"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
 }
 
 #[tokio_test]
