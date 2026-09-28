@@ -1,0 +1,289 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+use rusqlite::Connection;
+use rusqlite::OptionalExtension;
+use rusqlite::Transaction;
+use rusqlite::params;
+
+use super::super::SCHEMA_VERSION;
+use super::super::failure;
+use super::super::state_kind;
+use super::StoredLifecycle;
+use super::row_codec::decode_legacy_record;
+use super::row_codec::encode_lifecycle;
+use crate::model::TaskRequest;
+use crate::model::TaskRequestInfo;
+use crate::store::StoreError;
+
+/// Initializes the current SQLite schema or upgrades a supported older schema.
+///
+/// # Parameters
+///
+/// * `connection` - Mutable connection used for the schema transaction.
+///
+/// # Returns
+///
+/// Success after the current schema is ready.
+///
+/// # Errors
+///
+/// Returns a store error for unsupported versions, invalid schemas, migration
+/// failures, or SQLite operation failures.
+pub(in crate::store::sqlite) fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(failure)?;
+    if !(0..=SCHEMA_VERSION).contains(&version) {
+        return Err(StoreError::Failure(format!(
+            "unsupported SQLite task schema version {version}; supported version is {SCHEMA_VERSION}"
+        )));
+    }
+
+    let transaction = connection.transaction().map_err(failure)?;
+    let table_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if version == SCHEMA_VERSION {
+        if !table_exists {
+            return Err(StoreError::Failure(
+                "SQLite task schema is missing table `tasks`".into(),
+            ));
+        }
+        validate_schema_three(&transaction)?;
+        transaction
+            .execute_batch("CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);")
+            .map_err(failure)?;
+        transaction.commit().map_err(failure)?;
+        return Ok(());
+    }
+    if table_exists {
+        if version <= 1 {
+            migrate_legacy_schema(&transaction, version)?;
+        }
+        migrate_schema_two_to_three(&transaction)?;
+    } else {
+        transaction.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_info_json TEXT NOT NULL, payload BLOB NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 3, lifecycle_json TEXT NOT NULL);").map_err(failure)?;
+    }
+    transaction
+        .execute_batch("CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);")
+        .map_err(failure)?;
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(failure)?;
+    transaction.commit().map_err(failure)
+}
+
+/// Verifies that schema 3 has the columns expected by the current store.
+///
+/// # Parameters
+///
+/// * `transaction` - Active schema transaction used to inspect the table.
+///
+/// # Returns
+///
+/// Success when every required column is present.
+///
+/// # Errors
+///
+/// Returns a store error when inspection fails or a required column is absent.
+fn validate_schema_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let columns = {
+        let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(failure)?;
+        rows.collect::<Result<std::collections::HashSet<_>, _>>()
+            .map_err(failure)?
+    };
+    for required in [
+        "id",
+        "state_kind",
+        "accepted_at",
+        "correlation_key",
+        "idempotency_key",
+        "request_info_json",
+        "payload",
+        "record_format_version",
+        "lifecycle_json",
+    ] {
+        if !columns.contains(required) {
+            return Err(StoreError::Failure(format!(
+                "SQLite task schema is missing required column `{required}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Migrates schema 2 request JSON into an indexed header and separate payload.
+///
+/// # Parameters
+///
+/// * `transaction` - Active schema transaction that owns the migration.
+///
+/// # Returns
+///
+/// Success after all rows are migrated to schema 3.
+///
+/// # Errors
+///
+/// Returns a store error when the old schema is invalid, a row cannot be
+/// decoded, indexed values disagree, or a SQLite operation fails.
+fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let columns = {
+        let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(failure)?;
+        rows.collect::<Result<std::collections::HashSet<_>, _>>()
+            .map_err(failure)?
+    };
+    if columns.contains("request_info_json") && columns.contains("payload") {
+        return Ok(());
+    }
+    if !columns.contains("request_json") {
+        return Err(StoreError::Failure("SQLite schema 2 is missing `request_json`".into()));
+    }
+    transaction.execute_batch("CREATE TABLE tasks_v3 (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_info_json TEXT NOT NULL, payload BLOB NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 3, lifecycle_json TEXT NOT NULL);").map_err(failure)?;
+    let mut statement = transaction.prepare("SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_json,lifecycle_json FROM tasks ORDER BY id").map_err(failure)?;
+    let mut rows = statement.query([]).map_err(failure)?;
+    while let Some(row) = rows.next().map_err(failure)? {
+        let id: String = row.get(0).map_err(failure)?;
+        let state: String = row.get(1).map_err(failure)?;
+        let accepted: i64 = row.get(2).map_err(failure)?;
+        let correlation: Option<String> = row.get(3).map_err(failure)?;
+        let key: Option<String> = row.get(4).map_err(failure)?;
+        let format: i64 = row.get(5).map_err(failure)?;
+        let request_json: String = row.get(6).map_err(failure)?;
+        let lifecycle_json: String = row.get(7).map_err(failure)?;
+        if format != 2 {
+            return Err(StoreError::Failure(format!(
+                "unsupported SQLite schema 2 record format {format}"
+            )));
+        }
+        let request: TaskRequest = serde_json::from_str(&request_json).map_err(failure)?;
+        let lifecycle: StoredLifecycle = serde_json::from_str(&lifecycle_json).map_err(failure)?;
+        let old_record = lifecycle.into_record(request.clone());
+        if request.correlation_key != correlation || request.idempotency_key != key {
+            return Err(StoreError::Failure(format!(
+                "SQLite schema 2 task row `{id}` disagrees with request_json"
+            )));
+        }
+        if old_record.id.to_string() != id
+            || state_kind(&old_record.state) != state
+            || i64::try_from(old_record.accepted_at_ms).map_err(failure)? != accepted
+        {
+            return Err(StoreError::Failure(format!(
+                "SQLite schema 2 task row `{id}` disagrees with lifecycle_json"
+            )));
+        }
+        let info = serde_json::to_string(&TaskRequestInfo::from(&request)).map_err(failure)?;
+        let lifecycle_json = encode_lifecycle(&old_record)?;
+        transaction.execute("INSERT INTO tasks_v3 (id,state_kind,accepted_at,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,?7,3,?8)", params![id, state, accepted, correlation, key, info, request.payload, lifecycle_json]).map_err(failure)?;
+    }
+    drop(rows);
+    drop(statement);
+    transaction
+        .execute_batch("DROP TABLE tasks; ALTER TABLE tasks_v3 RENAME TO tasks;")
+        .map_err(failure)?;
+    Ok(())
+}
+
+/// Migrates a schema 0 or 1 database inside the caller's transaction.
+///
+/// # Parameters
+///
+/// * `transaction` - Active transaction that owns the migration.
+/// * `schema_version` - Legacy database version being upgraded.
+///
+/// # Returns
+///
+/// Success after legacy records are represented in the schema 2 layout.
+///
+/// # Errors
+///
+/// Returns a store error when required columns are absent, records are invalid,
+/// or a SQLite operation fails.
+fn migrate_legacy_schema(transaction: &Transaction<'_>, schema_version: i64) -> Result<(), StoreError> {
+    let columns = {
+        let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(failure)?;
+        rows.collect::<Result<std::collections::HashSet<_>, _>>()
+            .map_err(failure)?
+    };
+    for required in [
+        "id",
+        "state_kind",
+        "accepted_at",
+        "correlation_key",
+        "idempotency_key",
+        "request_json",
+        "record_json",
+    ] {
+        if !columns.contains(required) {
+            return Err(StoreError::Failure(format!(
+                "SQLite task schema is missing required column `{required}`"
+            )));
+        }
+    }
+    if schema_version == 1 && !columns.contains("record_format_version") {
+        return Err(StoreError::Failure(
+            "SQLite schema 1 is missing `record_format_version`".into(),
+        ));
+    }
+    let migration_table_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks_v2')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if migration_table_exists {
+        return Err(StoreError::Failure(
+            "SQLite schema migration table `tasks_v2` already exists".into(),
+        ));
+    }
+    transaction.execute_batch("CREATE TABLE tasks_v2 (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 2, lifecycle_json TEXT NOT NULL);").map_err(failure)?;
+    let mut cursor: Option<String> = None;
+    loop {
+        let old = if columns.contains("record_format_version") {
+            transaction.query_row("SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,record_json FROM tasks WHERE (?1 IS NULL OR id>?1) ORDER BY id LIMIT 1", [cursor.as_deref()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?))).optional().map_err(failure)?
+        } else {
+            transaction.query_row("SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,1,record_json FROM tasks WHERE (?1 IS NULL OR id>?1) ORDER BY id LIMIT 1", [cursor.as_deref()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?))).optional().map_err(failure)?
+        };
+        let Some((id, state, accepted_at, correlation, idempotency, format, json)) = old else {
+            break;
+        };
+        let record = decode_legacy_record(format, &json)?;
+        let accepted_at_ms = i64::try_from(record.accepted_at_ms).map_err(failure)?;
+        if record.id.to_string() != id
+            || state != state_kind(&record.state)
+            || accepted_at != accepted_at_ms
+            || correlation != record.request.correlation_key
+            || idempotency != record.request.idempotency_key
+        {
+            return Err(StoreError::Failure(format!(
+                "legacy SQLite task row `{id}` disagrees with its record_json"
+            )));
+        }
+        let request_json = serde_json::to_string(&record.request).map_err(failure)?;
+        let lifecycle_json = encode_lifecycle(&record)?;
+        transaction.execute("INSERT INTO tasks_v2 (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,2,?7)", params![id, state, accepted_at, correlation, idempotency, request_json, lifecycle_json]).map_err(failure)?;
+        cursor = Some(id);
+    }
+    transaction
+        .execute_batch("DROP TABLE tasks; ALTER TABLE tasks_v2 RENAME TO tasks;")
+        .map_err(failure)?;
+    Ok(())
+}

@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -17,6 +16,7 @@ use tokio::sync;
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
 
+use super::RunningCancellation;
 use crate::engine::TaskExecutionEngine;
 use crate::handler::TaskHandler;
 use crate::handler::TaskHandlerRegistry;
@@ -93,12 +93,4 @@ pub(crate) struct ServiceCore {
     /// Optional bounded lifecycle event publisher.
     #[cfg(feature = "event-bus")]
     pub(in crate::service) event_bus: Option<TaskEventPublisher>,
-}
-
-/// Signal belonging to one specific execution attempt of a task.
-pub(crate) struct RunningCancellation {
-    /// Execution generation owning this cancellation signal.
-    pub(crate) attempt: u32,
-    /// Shared signal observed by the handler and engine.
-    pub(crate) signal: Arc<AtomicBool>,
 }

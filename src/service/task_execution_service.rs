@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -13,8 +12,28 @@ use std::sync::atomic::Ordering;
 use futures::FutureExt;
 pub(crate) use internal::RunningCancellation;
 pub(crate) use internal::ServiceCore;
+use internal::ServiceHandleLease;
 use internal::begin_shutdown_core;
+#[cfg(test)]
+use internal::combine_shutdown_results;
+use internal::finalize_local;
+use internal::now_ms;
+use internal::panic_message;
+use internal::pause_on_store_fault;
+use internal::publish_record;
+use internal::record_scheduler_fault;
+use internal::record_store_fault;
+use internal::release_core_queue_slot;
+use internal::retry_deadline_ms;
 use internal::scheduler_loop;
+use internal::task_stats;
+use internal::transition;
+use internal::transition_with_deadline;
+use internal::truncate_utf8;
+use internal::try_reserve_core_queue_slot;
+use internal::validate_request;
+use internal::validate_request_capacity;
+use internal::validate_request_format;
 use tokio::pin;
 use tokio::runtime;
 use tokio::sync::oneshot;
@@ -27,8 +46,6 @@ use super::cancel_outcome::CancelOutcome;
 use super::local_task_handle::LocalTaskHandle;
 use super::local_task_outcome::LocalTaskOutcome;
 use super::local_task_outcome::adapt_local_outcome;
-use super::local_task_result_error::LocalTaskResultError;
-use super::retry_policy::RetryPolicy;
 #[cfg(feature = "event-bus")]
 use super::task_event_notification_stats::TaskEventNotificationStats;
 #[cfg(feature = "event-bus")]
@@ -40,8 +57,6 @@ pub(crate) use super::task_service_capabilities::TaskServiceCapabilities;
 pub(crate) use super::task_service_error::TaskServiceError;
 use crate::engine::EngineError;
 use crate::engine::ExecutionOutcome;
-#[cfg(feature = "event-bus")]
-use crate::event::TaskEvent;
 use crate::handler::LocalTaskHandler;
 use crate::handler::TaskContext;
 use crate::handler::TaskHandler;
@@ -52,39 +67,19 @@ use crate::model::MAX_IDEMPOTENCY_KEY_BYTES;
 use crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES;
 use crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
-use crate::model::ResourceCapacity;
 use crate::model::ResourceRequest;
 use crate::model::TaskId;
-use crate::model::TaskOutput;
 use crate::model::TaskPage;
 use crate::model::TaskQuery;
 use crate::model::TaskRecord;
 use crate::model::TaskRequest;
 use crate::model::TaskState;
-use crate::model::TaskStateCounts;
 use crate::model::TaskStats;
 use crate::model::TaskSummary;
-use crate::model::TransitionCommand;
 use crate::model::checked_page_size;
 use crate::scheduling::QueueSnapshot;
 use crate::scheduling::QueuedTask;
 use crate::store::StoreError;
-
-/// Tracks the lifetime of all public service handles and their admission
-/// workers.
-struct ServiceHandleLease {
-    /// Weak reference used to start shutdown after the final handle is dropped.
-    core: std::sync::Weak<ServiceCore>,
-}
-
-impl Drop for ServiceHandleLease {
-    /// Starts asynchronous service shutdown when the last handle lease is gone.
-    fn drop(&mut self) {
-        if let Some(core) = self.core.upgrade() {
-            begin_shutdown_core(core);
-        }
-    }
-}
 
 /// Single service facade over volatile or restart-recoverable components.
 ///
@@ -1132,173 +1127,6 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskSummary, reason: String) 
     Ok(())
 }
 
-/// Sends final state or infrastructure failure to a process-local task handle.
-///
-/// # Parameters
-///
-/// * `core` - Service state owning local finalization senders.
-/// * `id` - Task whose handle should receive the result.
-/// * `result` - Final lifecycle state or infrastructure failure.
-fn finalize_local(core: &ServiceCore, id: TaskId, result: Result<TaskState, LocalTaskResultError>) {
-    let sender = core.local_finalizations.lock().remove(&id);
-    if let Some(sender) = sender {
-        let _ = sender.send(result);
-    }
-}
-
-/// Latches a worker-side store error and suspends service admission.
-///
-/// # Parameters
-///
-/// * `core` - Service state to suspend.
-/// * `error` - Store failure observed by a worker.
-fn pause_on_store_fault(core: &Arc<ServiceCore>, error: StoreError) {
-    record_store_fault(core, error.to_string());
-}
-
-/// Records the first storage failure and closes admission for all waiters.
-///
-/// # Parameters
-///
-/// * `core` - Service state to suspend.
-/// * `diagnostic` - Error message retained for later callers.
-fn record_store_fault(core: &Arc<ServiceCore>, diagnostic: String) {
-    let (diagnostic, finalizations) = {
-        let mut fault = core.store_fault.lock();
-        let diagnostic = fault.get_or_insert(diagnostic).clone();
-        let finalizations = core
-            .local_finalizations
-            .lock()
-            .drain()
-            .map(|(_, sender)| sender)
-            .collect::<Vec<_>>();
-        (diagnostic, finalizations)
-    };
-    core.local_handlers.lock().clear();
-    for sender in finalizations {
-        let _ = sender.send(Err(LocalTaskResultError::StoreUnavailable(diagnostic.clone())));
-    }
-    begin_shutdown_core(Arc::clone(core));
-    core.changed.notify_waiters();
-    core.wait_registry.notify_all();
-}
-
-/// Records the first scheduler panic and starts the shared shutdown
-/// coordinator.
-///
-/// # Parameters
-///
-/// * `core` - Service state whose scheduler failure is retained.
-/// * `diagnostic` - Panic or scheduler failure message.
-fn record_scheduler_fault(core: &Arc<ServiceCore>, diagnostic: String) {
-    let (diagnostic, finalizations) = {
-        let mut fault = core.scheduler_fault.lock();
-        let diagnostic = fault.get_or_insert(diagnostic).clone();
-        let finalizations = core
-            .local_finalizations
-            .lock()
-            .drain()
-            .map(|(_, sender)| sender)
-            .collect::<Vec<_>>();
-        (diagnostic, finalizations)
-    };
-    core.local_handlers.lock().clear();
-    for sender in finalizations {
-        let _ = sender.send(Err(LocalTaskResultError::Infrastructure(diagnostic.clone())));
-    }
-    core.changed.notify_waiters();
-    core.wait_registry.notify_all();
-    begin_shutdown_core(Arc::clone(core));
-}
-
-/// Extracts a useful diagnostic from a caught scheduler panic payload.
-///
-/// # Parameters
-///
-/// * `payload` - Panic payload returned by `catch_unwind`.
-///
-/// # Returns
-///
-/// A string message or a stable fallback for non-string payloads.
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
-        (*message).to_owned()
-    } else {
-        "scheduler panicked with a non-string payload".into()
-    }
-}
-
-/// Reads store state counts and the current execution resource snapshot.
-///
-/// # Parameters
-///
-/// * `core` - Service state whose store and engine are observed.
-///
-/// # Returns
-///
-/// State counts and current resource reservations.
-///
-/// # Errors
-///
-/// Returns a service error if the store count query fails.
-async fn task_stats(core: &ServiceCore) -> Result<TaskStats, TaskServiceError> {
-    let TaskStateCounts {
-        queued,
-        running,
-        blocked,
-        terminal,
-    } = core.store.count_states().await.map_err(TaskServiceError::Store)?;
-    Ok(TaskStats {
-        queued,
-        running,
-        blocked,
-        terminal,
-        resources: core.engine.capacity(),
-    })
-}
-
-/// Combines service convergence and notification worker shutdown results.
-///
-/// A notification close failure becomes the close result when task
-/// convergence succeeded. If both fail, the service error stays primary and
-/// the notification error is appended to its diagnostic.
-///
-/// # Parameters
-///
-/// * `primary` - Result of draining service work and releasing ownership.
-/// * `notification` - Result of closing the optional notification worker.
-///
-/// # Returns
-///
-/// The combined shutdown result, preserving the service error as primary.
-///
-/// # Errors
-///
-/// Returns the service failure, the notification close failure, or a combined
-/// diagnostic when both operations fail.
-fn combine_shutdown_results(
-    primary: Result<(), TaskServiceError>,
-    notification: Result<(), TaskServiceError>,
-) -> Result<(), TaskServiceError> {
-    match (primary, notification) {
-        (Ok(()), result) => result,
-        (Err(primary), Ok(())) => Err(primary),
-        (Err(TaskServiceError::StoreUnavailable(store)), Err(TaskServiceError::NotificationClose(close))) => Err(
-            TaskServiceError::StoreUnavailable(format!("{store}; notification close failed: {close}")),
-        ),
-        (Err(TaskServiceError::SchedulerUnavailable(scheduler)), Err(TaskServiceError::NotificationClose(close))) => {
-            Err(TaskServiceError::SchedulerUnavailable(format!(
-                "{scheduler}; notification close failed: {close}"
-            )))
-        }
-        (Err(primary), Err(close)) => Err(TaskServiceError::StoreUnavailable(format!(
-            "{primary}; notification close failed: {close}"
-        ))),
-    }
-}
-
 /// Awaits an admission worker and maps task-join failures into service errors.
 ///
 /// # Type Parameters
@@ -1320,254 +1148,6 @@ async fn await_admission<T>(handle: task::JoinHandle<Result<T, TaskServiceError>
     handle
         .await
         .map_err(|error| TaskServiceError::StoreUnavailable(format!("task admission worker stopped: {error}")))?
-}
-
-/// Enqueues a best-effort lifecycle event when event-bus support is enabled.
-///
-/// # Parameters
-///
-/// * `core` - Service state containing the optional event publisher.
-/// * `record` - Payload-free lifecycle snapshot to publish.
-fn publish_record(core: &ServiceCore, record: &TaskSummary) {
-    #[cfg(feature = "event-bus")]
-    if let Some(bus) = &core.event_bus {
-        bus.enqueue(TaskEvent::from(record));
-    }
-    #[cfg(not(feature = "event-bus"))]
-    let _ = (core, record);
-}
-
-/// Applies a version-checked store transition and publishes its new revision.
-///
-/// # Parameters
-///
-/// * `core` - Service state owning the store and event lock.
-/// * `record` - Snapshot whose version and attempt guard the update.
-/// * `state` - New lifecycle state.
-/// * `output` - Optional bounded task result summary.
-/// * `assigned_resources` - Resources assigned to the new state.
-/// * `cancel_requested` - Whether cooperative cancellation is pending.
-///
-/// # Returns
-///
-/// The committed task summary.
-///
-/// # Errors
-///
-/// Returns the store error if the expected revision cannot be committed.
-async fn transition(
-    core: &ServiceCore,
-    record: &TaskSummary,
-    state: TaskState,
-    output: Option<TaskOutput>,
-    assigned_resources: Vec<String>,
-    cancel_requested: bool,
-) -> Result<TaskSummary, StoreError> {
-    transition_with_deadline(core, record, state, None, output, assigned_resources, cancel_requested).await
-}
-
-/// Applies a transition with an optional retry deadline and publishes it.
-///
-/// # Parameters
-///
-/// * `core` - Service state owning the store and event lock.
-/// * `record` - Snapshot whose version and attempt guard the update.
-/// * `state` - New lifecycle state.
-/// * `retry_not_before_ms` - Optional earliest retry timestamp.
-/// * `output` - Optional bounded task result summary.
-/// * `assigned_resources` - Resources assigned to the new state.
-/// * `cancel_requested` - Whether cooperative cancellation is pending.
-///
-/// # Returns
-///
-/// The committed task summary.
-///
-/// # Errors
-///
-/// Returns the store error if the expected revision cannot be committed.
-async fn transition_with_deadline(
-    core: &ServiceCore,
-    record: &TaskSummary,
-    state: TaskState,
-    retry_not_before_ms: Option<u64>,
-    output: Option<TaskOutput>,
-    assigned_resources: Vec<String>,
-    cancel_requested: bool,
-) -> Result<TaskSummary, StoreError> {
-    let _guard = core.transition_event_lock.read().await;
-    let updated = core
-        .store
-        .transition(TransitionCommand {
-            id: record.id,
-            expected_version: record.state_version,
-            expected_attempt: record.attempt,
-            state,
-            retry_not_before_ms,
-            output,
-            assigned_resources,
-            cancel_requested,
-        })
-        .await?;
-    publish_record(core, &updated);
-    core.wait_registry.notify(updated.id);
-    Ok(updated)
-}
-
-/// Reads the current Unix epoch time in milliseconds, saturating to `u64`.
-///
-/// # Returns
-///
-/// Current epoch milliseconds, or zero if the clock predates the epoch.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis().min(u64::MAX as u128) as u64)
-}
-
-/// Computes the next retry timestamp using a saturating addition.
-///
-/// # Parameters
-///
-/// * `now_ms` - Current Unix epoch time in milliseconds.
-/// * `policy` - Retry delay policy.
-/// * `attempt` - One-based attempt number that just failed.
-///
-/// # Returns
-///
-/// The earliest next attempt timestamp, saturated at `u64::MAX`.
-fn retry_deadline_ms(now_ms: u64, policy: RetryPolicy, attempt: u32) -> u64 {
-    now_ms.saturating_add(policy.delay_for_attempt(attempt).as_millis().min(u64::MAX as u128) as u64)
-}
-
-/// Validates request syntax and size limits before storage access.
-///
-/// # Parameters
-///
-/// * `request` - Request metadata and resource demand.
-///
-/// # Returns
-///
-/// Success when fields meet their documented syntax and size limits.
-///
-/// # Errors
-///
-/// Returns `InvalidRequest` for malformed fields or oversized request data.
-fn validate_request_format(request: &TaskRequest) -> Result<(), TaskServiceError> {
-    request
-        .validate_limits()
-        .map_err(|error| TaskServiceError::InvalidRequest(error.to_string()))?;
-    if request.resources.custom.keys().any(String::is_empty)
-        || request.resources.gpu_labels.iter().any(String::is_empty)
-    {
-        return Err(TaskServiceError::InvalidRequest(
-            "resource names and GPU labels must not be empty".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Validates whether the configured engine can satisfy a new request.
-///
-/// # Parameters
-///
-/// * `request` - Request whose resource demand is checked.
-/// * `capacity` - Total resources configured for the service.
-///
-/// # Returns
-///
-/// Success when the engine capacity can satisfy the request.
-///
-/// # Errors
-///
-/// Returns `Unsatisfiable` when configured capacity cannot meet the request.
-fn validate_request_capacity(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
-    let matching_gpus = capacity
-        .gpus
-        .values()
-        .filter(|labels| request.resources.gpu_labels.iter().all(|label| labels.contains(label)))
-        .count();
-    if request.resources.cpu_slots > capacity.cpu_slots
-        || request.resources.gpu_count as usize > matching_gpus
-        || request
-            .resources
-            .custom
-            .iter()
-            .any(|(key, value)| capacity.custom.get(key).is_none_or(|limit| value > limit))
-    {
-        return Err(TaskServiceError::Unsatisfiable);
-    }
-    Ok(())
-}
-
-/// Validates request syntax, size, and resource bounds before local submission.
-///
-/// # Parameters
-///
-/// * `request` - Request metadata and resource demand.
-/// * `capacity` - Total resources configured for the service.
-///
-/// # Returns
-///
-/// Success when request bounds and resource requirements are valid.
-///
-/// # Errors
-///
-/// Returns `InvalidRequest` for malformed fields or `Unsatisfiable` when
-/// configured capacity cannot meet the request.
-fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
-    validate_request_format(request)?;
-    validate_request_capacity(request, capacity)
-}
-
-/// Truncates diagnostics at a UTF-8 boundary so persisted values stay valid.
-///
-/// # Parameters
-///
-/// * `value` - Diagnostic string to retain.
-/// * `max_bytes` - Maximum encoded byte length.
-///
-/// # Returns
-///
-/// An owned string no longer than `max_bytes` bytes.
-fn truncate_utf8(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_owned();
-    }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
-}
-
-/// Releases one queue slot reserved by a scheduler worker.
-///
-/// # Parameters
-///
-/// * `core` - Service state whose occupied queue count is decremented.
-fn release_core_queue_slot(core: &ServiceCore) {
-    let _ = core
-        .queue_count
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-            Some(count.saturating_sub(1))
-        });
-}
-
-/// Attempts to reserve a queue slot for an automatic retry.
-///
-/// # Parameters
-///
-/// * `core` - Service state whose queue limit and count are checked.
-///
-/// # Returns
-///
-/// Whether one queue slot was reserved.
-fn try_reserve_core_queue_slot(core: &ServiceCore) -> bool {
-    core.queue_count
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-            (count < core.queue_capacity).then_some(count + 1)
-        })
-        .is_ok()
 }
 
 /// Returns the process-wide runtime used for service-owned background work.
