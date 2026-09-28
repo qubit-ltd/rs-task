@@ -1,0 +1,13 @@
+[package]
+name = "qubit-task-doc-examples"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+qubit-event-bus = { path = "../../../../rs-event-bus" }
+qubit-event-bus-redis = { path = "../../../../rs-event-bus-redis" }
+qubit-spi = "0.13"
+qubit-task = { path = "../../..", features = ["event-bus"] }
+serde_json = "1"
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }

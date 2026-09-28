@@ -298,6 +298,7 @@ use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::SchemaId;
+use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 use qubit_task::event::TaskEvent;
 use qubit_task::service::TaskExecutionServiceBuilder;
@@ -352,12 +353,16 @@ let service = TaskExecutionServiceBuilder::in_memory()
     .build().await?;
 ~~~
 
-The Redis provider is a test or application dependency; it is not pulled into
+The Redis provider is an application dependency with provider discovery enabled;
+link it into the application as shown by `use qubit_event_bus_redis as _;`.
+The JSON codec also requires `serde_json`. Neither dependency is pulled into
 `qubit-task`'s production dependencies. A successful provider receipt means
 Redis accepted the publish command, not that a subscriber processed the event.
 Notification publication remains best effort and is not transactionally
 coupled to task state. Use a transactional outbox when state changes and event
-delivery must commit atomically.
+delivery must commit atomically. The codec and provider assembly are compiled
+by `cargo check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`;
+run the fixture with `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`.
 
 The service uses `rs-event-bus`'s `NotificationPublisher`, which owns one serial publisher thread and a bounded notification queue.
 The default capacity is 256; configure another positive capacity with
