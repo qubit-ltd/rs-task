@@ -28,7 +28,7 @@
 
 ## 2. 现状与重新设计的原因
 
-当前 `TaskExecutionService` 使用 `qubit-thread-pool::ThreadPool`，支持调用方给定的 `qubit_id::Id`、状态查询、提交前取消和默认保留 1024 条终态记录。终态 ID 可重用；历史只有有界内存状态。现有实现不按资源需求决定启动时机，也不能从持久化任务描述重建任务。`rs-execution-services` 已有 CPU、阻塞和 Tokio IO 执行域，可供本机执行后端复用。
+当前实现以 Tokio 服务门面管理受理、调度、执行和关闭。任务通过 `TaskId` 查询；持久请求由精确版本处理器执行，`submit_local` 为进程内闭包提供类型化结果。服务按 CPU、GPU 和命名资源调度，可选择内存或 SQLite 存储，并在单进程内排空和恢复任务。旧 ThreadPool 方案属于历史设计，已由当前实现取代。
 
 新设计保留“执行基础设施”和“业务任务调度”之间的层次：任务执行引擎负责资源预约和运行工作；`qubit-task` 的服务内核负责受理、队列、状态和通知。需要调整现有公开 API，不能把旧版状态和 ID 复用语义直接视为新版契约。
 
@@ -191,7 +191,7 @@ TaskExecutionService
 
 启用 `event-bus` feature 后，应用可以向服务注入 `rs-event-bus` 提供的 `EventBus` 门面。服务向 `task.lifecycle` 主题发布 `TaskEvent`，事件包含 `TaskId`、状态版本、状态和业务关联键，不携带大 payload；不配置事件总线时仍可使用查询接口。这里不另设事件发布 trait、适配器或 SPI 服务族。
 
-当前 Cargo 配置依赖 `qubit-event-bus` 0.14。通用 `NotificationPublisher` 返回 provider receipt；本服务按 `AdmissionOutcome` 映射到原有业务统计字段。
+当前 Cargo 配置面向 `qubit-event-bus` 0.15 API。通用 `NotificationPublisher` 返回 provider receipt；本服务按 `AdmissionOutcome` 映射到原有业务统计字段。
 
 服务使用 `rs-event-bus` 的 `NotificationPublisher` 维护有界串行队列，默认容量为 256，可用 `TaskExecutionServiceBuilder::event_bus_buffer_capacity(NonZeroUsize)` 配置。任务状态转移只尝试非阻塞入队，不等待同步 provider；队列满时丢弃新通知。队列关闭后的入队尝试也会丢弃。通知失败不会回滚已提交的任务状态，通知可能丢失、重复或延迟。消费者按 `TaskId` 和状态版本去重，再查询服务取得权威状态。不同并发状态转移按实际入队顺序串行发布，不保证跨生产者按 `state_version` 全局排序。
 
