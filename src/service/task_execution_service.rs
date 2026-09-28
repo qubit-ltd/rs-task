@@ -898,8 +898,7 @@ impl TaskExecutionService {
             return Err(TaskServiceError::StoreUnavailable(error));
         }
         let _permit = self.core.admission.enter()?;
-        let capacity = self.core.engine.capacity().capacity;
-        validate_request(&request, &capacity)?;
+        validate_request_format(&request)?;
         let idempotency_key = request.idempotency_key.as_deref().ok_or_else(|| {
             TaskServiceError::InvalidRequest("task submission requires a non-empty idempotency key".into())
         })?;
@@ -921,6 +920,8 @@ impl TaskExecutionService {
                 Err(StoreError::IdempotencyConflict.into())
             };
         }
+        let capacity = self.core.engine.capacity().capacity;
+        validate_request_capacity(&request, &capacity)?;
         if self.core.queue_count.load(Ordering::Acquire) >= self.core.queue_capacity {
             if let Some(record) = self
                 .core
@@ -1647,7 +1648,7 @@ async fn scheduler_loop(core_ref: std::sync::Weak<ServiceCore>) {
                 queue.push(task);
                 break;
             };
-            let prepared = match core.engine.prepare(id, record.request.resources.clone()).await {
+            let prepared = match core.engine.try_prepare(id, record.request.resources.clone()) {
                 Ok(value) => value,
                 Err(EngineError::TemporarilyUnavailable) => {
                     queue.push(task);
@@ -2385,22 +2386,20 @@ fn retry_deadline_ms(now_ms: u64, policy: RetryPolicy, attempt: u32) -> u64 {
     now_ms.saturating_add(policy.delay_for_attempt(attempt).as_millis().min(u64::MAX as u128) as u64)
 }
 
-/// Validates request limits and whether configured resources can satisfy it.
+/// Validates request syntax and size limits before storage access.
 ///
 /// # Parameters
 ///
 /// * `request` - Request metadata and resource demand.
-/// * `capacity` - Total resources configured for the service.
 ///
 /// # Returns
 ///
-/// Success when request bounds and resource requirements are valid.
+/// Success when fields meet their documented syntax and size limits.
 ///
 /// # Errors
 ///
-/// Returns `InvalidRequest` for malformed fields or `Unsatisfiable` when
-/// configured capacity cannot meet the request.
-fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
+/// Returns `InvalidRequest` for malformed fields or oversized request data.
+fn validate_request_format(request: &TaskRequest) -> Result<(), TaskServiceError> {
     request
         .validate_limits()
         .map_err(|message| TaskServiceError::InvalidRequest(message.into()))?;
@@ -2411,6 +2410,24 @@ fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Resul
             "resource names and GPU labels must not be empty".into(),
         ));
     }
+    Ok(())
+}
+
+/// Validates whether the configured engine can satisfy a new request.
+///
+/// # Parameters
+///
+/// * `request` - Request whose resource demand is checked.
+/// * `capacity` - Total resources configured for the service.
+///
+/// # Returns
+///
+/// Success when the engine capacity can satisfy the request.
+///
+/// # Errors
+///
+/// Returns `Unsatisfiable` when configured capacity cannot meet the request.
+fn validate_request_capacity(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
     let matching_gpus = capacity
         .gpus
         .values()
@@ -2427,6 +2444,26 @@ fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Resul
         return Err(TaskServiceError::Unsatisfiable);
     }
     Ok(())
+}
+
+/// Validates request syntax, size, and resource bounds before local submission.
+///
+/// # Parameters
+///
+/// * `request` - Request metadata and resource demand.
+/// * `capacity` - Total resources configured for the service.
+///
+/// # Returns
+///
+/// Success when request bounds and resource requirements are valid.
+///
+/// # Errors
+///
+/// Returns `InvalidRequest` for malformed fields or `Unsatisfiable` when
+/// configured capacity cannot meet the request.
+fn validate_request(request: &TaskRequest, capacity: &ResourceCapacity) -> Result<(), TaskServiceError> {
+    validate_request_format(request)?;
+    validate_request_capacity(request, capacity)
 }
 
 /// Truncates diagnostics at a UTF-8 boundary so persisted values stay valid.

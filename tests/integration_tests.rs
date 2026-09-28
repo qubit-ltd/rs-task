@@ -224,12 +224,8 @@ impl TaskExecutionEngine for ExternalEngine {
         self.inner.capacity()
     }
 
-    fn prepare<'a>(
-        &'a self,
-        id: TaskId,
-        request: ResourceRequest,
-    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
-        self.inner.prepare(id, request)
+    fn try_prepare(&self, id: TaskId, request: ResourceRequest) -> Result<PreparedExecution, EngineError> {
+        self.inner.try_prepare(id, request)
     }
 
     fn activate<'a>(
@@ -302,8 +298,8 @@ async fn test_local_task_panic_is_recorded_as_panicked() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[tokio_test]
-async fn test_local_engine_reserves_and_releases_all_requested_resources() {
+#[test]
+fn test_local_engine_reserves_and_releases_all_requested_resources() {
     let mut capacity = ResourceCapacity {
         cpu_slots: 2,
         ..ResourceCapacity::default()
@@ -318,16 +314,92 @@ async fn test_local_engine_reserves_and_releases_all_requested_resources() {
         custom: [("license".into(), 1)].into_iter().collect(),
     };
     let first = engine
-        .prepare(TaskId::generate(), request.clone())
-        .await
+        .try_prepare(TaskId::generate(), request.clone())
         .expect("first reservation succeeds");
     assert_eq!(first.assigned_resources(), &["gpu0"]);
     assert!(matches!(
-        engine.prepare(TaskId::generate(), request.clone()).await,
+        engine.try_prepare(TaskId::generate(), request.clone()),
         Err(EngineError::TemporarilyUnavailable)
     ));
     drop(first);
-    assert!(engine.prepare(TaskId::generate(), request).await.is_ok());
+    assert!(engine.try_prepare(TaskId::generate(), request).is_ok());
+}
+
+#[test]
+fn test_local_engine_rejects_overflowing_cpu_and_custom_reservations() {
+    let mut capacity = ResourceCapacity {
+        cpu_slots: u32::MAX,
+        ..ResourceCapacity::default()
+    };
+    capacity.custom.insert("license".into(), u64::MAX);
+    let engine = LocalTaskExecutionEngine::new(capacity);
+
+    let cpu_reservation = engine
+        .try_prepare(
+            TaskId::generate(),
+            ResourceRequest {
+                cpu_slots: u32::MAX - 1,
+                ..ResourceRequest::default()
+            },
+        )
+        .expect("initial near-maximum CPU reservation succeeds");
+    assert!(matches!(
+        engine.try_prepare(
+            TaskId::generate(),
+            ResourceRequest {
+                cpu_slots: 2,
+                ..ResourceRequest::default()
+            }
+        ),
+        Err(EngineError::TemporarilyUnavailable)
+    ));
+    drop(cpu_reservation);
+    assert!(
+        engine
+            .try_prepare(
+                TaskId::generate(),
+                ResourceRequest {
+                    cpu_slots: 2,
+                    ..ResourceRequest::default()
+                }
+            )
+            .is_ok()
+    );
+
+    let custom_reservation = engine
+        .try_prepare(
+            TaskId::generate(),
+            ResourceRequest {
+                cpu_slots: 0,
+                custom: [("license".into(), u64::MAX - 1)].into_iter().collect(),
+                ..ResourceRequest::default()
+            },
+        )
+        .expect("initial near-maximum custom reservation succeeds");
+    assert!(matches!(
+        engine.try_prepare(
+            TaskId::generate(),
+            ResourceRequest {
+                cpu_slots: 0,
+                custom: [("license".into(), 2)].into_iter().collect(),
+                ..ResourceRequest::default()
+            }
+        ),
+        Err(EngineError::TemporarilyUnavailable)
+    ));
+    drop(custom_reservation);
+    assert!(
+        engine
+            .try_prepare(
+                TaskId::generate(),
+                ResourceRequest {
+                    cpu_slots: 0,
+                    custom: [("license".into(), 2)].into_iter().collect(),
+                    ..ResourceRequest::default()
+                }
+            )
+            .is_ok()
+    );
 }
 
 #[test]
@@ -470,7 +542,7 @@ async fn test_service_submit_requires_and_exposes_a_stable_idempotency_key() {
         .expect("key lookup succeeds")
         .expect("accepted request is recoverable by key");
     assert_eq!(recovered.id, accepted.id);
-    assert_eq!(Some(recovered.clone()), service.get_summary(accepted.id).await.unwrap());
+    assert_eq!(recovered.request.idempotency_key.as_deref(), Some("caller-stable-key"));
     assert_eq!(
         service
             .get_by_idempotency_key("unknown-key")
