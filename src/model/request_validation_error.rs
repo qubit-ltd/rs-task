@@ -62,6 +62,10 @@ impl RequestValidationError {
     }
 
     /// Returns the stable diagnostic used by display and store errors.
+    ///
+    /// # Returns
+    ///
+    /// The static human-readable diagnostic for this validation failure.
     #[must_use]
     pub const fn message(self) -> &'static str {
         self.message
