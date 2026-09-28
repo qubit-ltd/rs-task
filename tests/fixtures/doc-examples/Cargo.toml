@@ -5,8 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-qubit-event-bus = { path = "../../../../rs-event-bus" }
-qubit-event-bus-redis = { path = "../../../../rs-event-bus-redis" }
+qubit-event-bus = "0.15.0"
+qubit-event-bus-redis = { version = "0.4.0", path = "../../../../rs-event-bus-redis" }
 qubit-spi = "0.13"
 qubit-task = { path = "../../..", features = ["event-bus"] }
 serde_json = "1"
