@@ -1,5 +1,10 @@
-use std::sync::atomic::Ordering;
-
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use tokio::sync;
 
 use super::super::ExecutionOutcome;
@@ -20,6 +25,7 @@ use super::super::retry_deadline_ms;
 use super::super::transition_with_deadline;
 use super::super::truncate_utf8;
 use super::super::try_reserve_core_queue_slot;
+use super::AttemptInFlightGuard;
 
 /// Persists an execution result, retry decision, and local-handle completion.
 ///
@@ -155,21 +161,5 @@ pub(in crate::service::task_execution_service) async fn finish_attempt(
     }
     if retry_slot_reserved {
         release_core_queue_slot(&core);
-    }
-}
-
-/// Decrements the tracked execution-attempt count when finalization exits.
-struct AttemptInFlightGuard {
-    /// Service whose active-attempt count this guard owns.
-    core_ref: std::sync::Weak<ServiceCore>,
-}
-
-impl Drop for AttemptInFlightGuard {
-    /// Wakes scheduler-failure shutdown when the last attempt finalizes.
-    fn drop(&mut self) {
-        if let Some(core) = self.core_ref.upgrade() {
-            core.attempts_in_flight.fetch_sub(1, Ordering::AcqRel);
-            core.attempts_changed.notify_waiters();
-        }
     }
 }
