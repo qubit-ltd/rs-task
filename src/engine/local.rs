@@ -125,68 +125,69 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
     ///
     /// Returns `Unsatisfiable` when the request exceeds configured capacity
     /// and `TemporarilyUnavailable` when valid resources are currently held.
-    fn prepare<'a>(
-        &'a self,
-        id: TaskId,
-        request: ResourceRequest,
-    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
-        Box::pin(async move {
-            let matching_gpu_capacity = self
-                .capacity
-                .gpus
-                .values()
-                .filter(|labels| request.gpu_labels.iter().all(|label| labels.contains(label)))
-                .count();
-            if request.cpu_slots > self.capacity.cpu_slots
-                || request.gpu_count as usize > matching_gpu_capacity
-                || request
-                    .custom
-                    .iter()
-                    .any(|(name, value)| self.capacity.custom.get(name).is_none_or(|limit| value > limit))
-            {
-                return Err(EngineError::Unsatisfiable);
-            }
-            let mut usage = self.usage.lock();
-            let available_gpus = self
-                .capacity
-                .gpus
+    fn try_prepare(&self, id: TaskId, request: ResourceRequest) -> Result<PreparedExecution, EngineError> {
+        let matching_gpu_capacity = self
+            .capacity
+            .gpus
+            .values()
+            .filter(|labels| request.gpu_labels.iter().all(|label| labels.contains(label)))
+            .count();
+        if request.cpu_slots > self.capacity.cpu_slots
+            || request.gpu_count as usize > matching_gpu_capacity
+            || request
+                .custom
                 .iter()
-                .filter(|(id, labels)| {
-                    !usage.gpus.contains(id) && request.gpu_labels.iter().all(|label| labels.contains(label))
-                })
-                .map(|(id, _)| id.clone())
-                .take(request.gpu_count as usize)
-                .collect::<Vec<_>>();
-            let available_custom = request.custom.iter().all(|(name, value)| {
-                usage.custom.get(name).copied().unwrap_or(0).saturating_add(*value)
-                    <= self.capacity.custom.get(name).copied().unwrap_or(0)
-            });
-            if usage.cpu.saturating_add(request.cpu_slots) > self.capacity.cpu_slots
-                || available_gpus.len() != request.gpu_count as usize
-                || !available_custom
-            {
-                return Err(EngineError::TemporarilyUnavailable);
-            }
-            usage.cpu += request.cpu_slots;
-            usage.gpus.extend(available_gpus.clone());
-            for (name, value) in &request.custom {
-                *usage.custom.entry(name.clone()).or_default() += value;
-            }
-            let token = self.next_token.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.allocations
-                .lock()
-                .insert(token, (request.cpu_slots, available_gpus.clone(), request.custom));
-            let allocations = self.allocations.clone();
-            let usage_ref = self.usage.clone();
-            Ok(PreparedExecution {
-                id,
-                assigned: available_gpus,
-                release: Some(Box::new(move || release(token, &allocations, &usage_ref))),
+                .any(|(name, value)| self.capacity.custom.get(name).is_none_or(|limit| value > limit))
+        {
+            return Err(EngineError::Unsatisfiable);
+        }
+        let mut usage = self.usage.lock();
+        let available_gpus = self
+            .capacity
+            .gpus
+            .iter()
+            .filter(|(id, labels)| {
+                !usage.gpus.contains(id) && request.gpu_labels.iter().all(|label| labels.contains(label))
             })
+            .map(|(id, _)| id.clone())
+            .take(request.gpu_count as usize)
+            .collect::<Vec<_>>();
+        let available_custom = request.custom.iter().all(|(name, value)| {
+            usage
+                .custom
+                .get(name)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(*value)
+                .is_some_and(|total| total <= self.capacity.custom.get(name).copied().unwrap_or(0))
+        });
+        let cpu_available = usage
+            .cpu
+            .checked_add(request.cpu_slots)
+            .is_some_and(|total| total <= self.capacity.cpu_slots);
+        if !cpu_available || available_gpus.len() != request.gpu_count as usize || !available_custom {
+            return Err(EngineError::TemporarilyUnavailable);
+        }
+        usage.cpu += request.cpu_slots;
+        usage.gpus.extend(available_gpus.clone());
+        for (name, value) in &request.custom {
+            *usage.custom.entry(name.clone()).or_default() += value;
+        }
+        let token = self.next_token.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.allocations
+            .lock()
+            .insert(token, (request.cpu_slots, available_gpus.clone(), request.custom));
+        let allocations = self.allocations.clone();
+        let usage_ref = self.usage.clone();
+        Ok(PreparedExecution {
+            id,
+            assigned: available_gpus,
+            release: Some(Box::new(move || release(token, &allocations, &usage_ref))),
         })
     }
 
-    /// Starts the handler on Tokio's blocking pool and tracks its completion.
+    /// Starts the handler future on a Tokio async worker and tracks its
+    /// completion.
     ///
     /// The reservation remains held until the handler exits, including panic
     /// unwinding, so the returned handle represents the full resource lease.

@@ -41,7 +41,13 @@ pub trait TaskExecutionEngine: Send + Sync {
     #[must_use]
     fn capacity(&self) -> ResourceSnapshot;
 
-    /// Atomically reserves all task resources without starting handler code.
+    /// Attempts to atomically reserve all task resources without starting
+    /// handler code.
+    ///
+    /// Implementations must return promptly when resources are unavailable.
+    /// This synchronous method must not wait, block on external work, or
+    /// run handler code because the scheduler calls it while scanning task
+    /// candidates.
     ///
     /// # Parameters
     ///
@@ -50,17 +56,14 @@ pub trait TaskExecutionEngine: Send + Sync {
     ///
     /// # Returns
     ///
-    /// A future resolving to a reservation or a classified engine error.
+    /// A reservation when all requested resources are available.
     ///
     /// # Errors
     ///
-    /// Resolves to `TemporarilyUnavailable`, `Unsatisfiable`, or `Closed` when
-    /// reservation cannot proceed.
-    fn prepare<'a>(
-        &'a self,
-        id: TaskId,
-        request: ResourceRequest,
-    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>>;
+    /// Returns `TemporarilyUnavailable` for current contention,
+    /// `Unsatisfiable` when the request exceeds engine capacity, or `Closed`
+    /// when the engine cannot accept new work.
+    fn try_prepare(&self, id: TaskId, request: ResourceRequest) -> Result<PreparedExecution, EngineError>;
 
     /// Starts a prepared task attempt and releases its reservation on exit.
     ///

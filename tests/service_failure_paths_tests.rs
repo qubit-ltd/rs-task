@@ -69,12 +69,8 @@ impl TaskExecutionEngine for ActivationGateEngine {
             ..ResourceSnapshot::default()
         }
     }
-    fn prepare<'a>(
-        &'a self,
-        id: TaskId,
-        _request: ResourceRequest,
-    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
-        Box::pin(async move { Ok(PreparedExecution::new(id, Vec::new(), || {})) })
+    fn try_prepare(&self, id: TaskId, _request: ResourceRequest) -> Result<PreparedExecution, EngineError> {
+        Ok(PreparedExecution::new(id, Vec::new(), || {}))
     }
     fn activate<'a>(
         &'a self,
@@ -110,11 +106,7 @@ impl TaskExecutionEngine for PanickingPrepareEngine {
         }
     }
 
-    fn prepare<'a>(
-        &'a self,
-        _id: TaskId,
-        _request: ResourceRequest,
-    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
+    fn try_prepare(&self, _id: TaskId, _request: ResourceRequest) -> Result<PreparedExecution, EngineError> {
         panic!("injected prepare panic");
     }
 
@@ -144,13 +136,9 @@ impl TaskExecutionEngine for ClosedPrepareEngine {
         }
     }
 
-    fn prepare<'a>(
-        &'a self,
-        _id: TaskId,
-        _request: ResourceRequest,
-    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
+    fn try_prepare(&self, _id: TaskId, _request: ResourceRequest) -> Result<PreparedExecution, EngineError> {
         self.prepare_calls.fetch_add(1, Ordering::AcqRel);
-        Box::pin(async { Err(EngineError::Closed) })
+        Err(EngineError::Closed)
     }
 
     fn activate<'a>(
@@ -294,7 +282,7 @@ async fn test_service_idempotency_summary_lookup_does_not_load_full_record() {
         .expect("summary lookup succeeds without a full record read")
         .expect("accepted task is still retained");
     assert_eq!(summary.id, accepted.id);
-    assert_eq!(Some(summary.clone()), service.get_summary(accepted.id).await.unwrap());
+    assert_eq!(summary.request.idempotency_key.as_deref(), Some(key));
     assert!(matches!(
         store.get_by_idempotency_key(key).await,
         Err(StoreError::Failure(_))

@@ -181,12 +181,8 @@ impl TaskExecutionEngine for FailingActivationEngine {
         self.inner.capacity()
     }
 
-    fn prepare<'a>(
-        &'a self,
-        id: TaskId,
-        request: ResourceRequest,
-    ) -> TaskFuture<'a, Result<PreparedExecution, EngineError>> {
-        self.inner.prepare(id, request)
+    fn try_prepare(&self, id: TaskId, request: ResourceRequest) -> Result<PreparedExecution, EngineError> {
+        self.inner.try_prepare(id, request)
     }
 
     fn activate<'a>(
