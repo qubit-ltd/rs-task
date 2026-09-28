@@ -51,6 +51,14 @@ pub(crate) fn acquire_owner_lock(database_path: &Path) -> Result<File, StoreErro
 }
 
 /// Converts an operating-system error into a store diagnostic.
+///
+/// # Parameters
+///
+/// * `error` - Filesystem operation error to retain.
+///
+/// # Returns
+///
+/// A store failure containing the operating-system diagnostic.
 fn failure(error: std::io::Error) -> StoreError {
     StoreError::Failure(error.to_string())
 }

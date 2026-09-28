@@ -66,7 +66,8 @@ pub struct TaskRecord {
     pub cancel_requested: bool,
 }
 
-/// Resource request helper available without opening the original request.
+/// Provides access to the resource request without opening the original
+/// request.
 impl TaskRecord {
     /// Returns the resource demand used to validate and schedule this task.
     ///

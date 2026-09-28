@@ -6,6 +6,15 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 /// Request field that failed a documented validation rule.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::RequestValidationField;
+///
+/// let field = RequestValidationField::Payload;
+/// assert_eq!(field, RequestValidationField::Payload);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RequestValidationField {

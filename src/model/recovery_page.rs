@@ -12,6 +12,16 @@ use super::TaskId;
 use super::TaskSummary;
 
 /// Bounded payload-free projection of unfinished work used during recovery.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::RecoveryPage;
+///
+/// let page = RecoveryPage::default();
+/// assert!(page.tasks.is_empty());
+/// assert!(page.next.is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RecoveryPage {
     /// Unfinished task summaries in ascending task ID order.

@@ -41,7 +41,7 @@ enum CloseFailure {
     ),
 }
 
-/// Admission and shutdown coordination lifecycle.
+/// Lifecycle phase controlling whether new service operations may enter.
 enum Phase {
     /// New operations may enter.
     Open,
@@ -51,7 +51,7 @@ enum Phase {
     Closed,
 }
 
-/// State protected by the admission gate mutex.
+/// Admission phase, permit count, and shared shutdown result under one mutex.
 struct GateState {
     /// Current admission lifecycle phase.
     phase: Phase,
