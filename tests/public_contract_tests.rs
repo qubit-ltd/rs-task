@@ -5,10 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0 (the "License");
 // =============================================================================
+#[cfg(feature = "sqlite")]
+mod common;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+#[cfg(feature = "sqlite")]
+use common::sqlite_paths;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::engine::ExecutionHandle;
 use qubit_task::engine::ExecutionOutcome;
@@ -203,7 +207,7 @@ async fn test_sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
 
     drop(store);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
@@ -218,7 +222,7 @@ async fn test_sqlite_summary_lookup_by_idempotency_key_tracks_lifecycle_without_
     assert_store_summary_lookup(&store, "sqlite-summary-key").await;
     drop(store);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
@@ -239,7 +243,7 @@ async fn test_sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
     ));
     drop(store);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
 }
 
 #[cfg(feature = "sqlite")]

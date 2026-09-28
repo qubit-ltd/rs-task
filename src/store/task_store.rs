@@ -11,8 +11,8 @@ use super::StoreError;
 use super::TaskFuture;
 use crate::model::AcceptOutcome;
 use crate::model::OwnerEpoch;
+use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
-use crate::model::StoredTaskPage;
 use crate::model::TaskId;
 use crate::model::TaskPage;
 use crate::model::TaskQuery;
@@ -273,7 +273,7 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error if recovery scanning is unsupported or fails.
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>>;
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>>;
 
     /// Releases ownership after the service has stopped accepting work.
     ///

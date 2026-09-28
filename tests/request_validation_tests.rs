@@ -223,7 +223,7 @@ async fn test_submit_rejects_empty_custom_resource_name() {
     assert!(matches!(
         result,
         Err(TaskServiceError::InvalidRequest(message))
-            if message == "resource names and GPU labels must not be empty"
+            if message == "custom resource names must not be empty"
     ));
     service.shutdown().await.expect("service shuts down");
 }
@@ -239,7 +239,7 @@ async fn test_submit_rejects_empty_gpu_label() {
     assert!(matches!(
         result,
         Err(TaskServiceError::InvalidRequest(message))
-            if message == "resource names and GPU labels must not be empty"
+            if message == "GPU labels must not be empty"
     ));
     service.shutdown().await.expect("service shuts down");
 }

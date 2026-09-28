@@ -158,15 +158,25 @@ impl SchedulerQueue {
     ///
     /// Matching tasks in the order supplied by `ids`; absent IDs are ignored.
     fn take_ready_ids(&mut self, ids: &[TaskId]) -> Vec<QueuedTask> {
-        let mut tasks = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(index) = self.ready.iter().position(|task| task.id == *id) {
-                let task = self.ready.remove(index).expect("matching ready task exists");
-                self.len -= 1;
-                tasks.push(task);
+        use std::collections::HashMap;
+        use std::collections::HashSet;
+
+        let selected = ids.iter().copied().collect::<HashSet<_>>();
+        let mut extracted = HashMap::with_capacity(selected.len());
+        let mut retained = VecDeque::with_capacity(self.ready.len());
+        while let Some(task) = self.ready.pop_front() {
+            if selected.contains(&task.id) {
+                extracted.insert(task.id, task);
+            } else {
+                retained.push_back(task);
             }
         }
-        tasks
+        self.ready = retained;
+        self.len -= extracted.len();
+
+        // Output order follows the caller's selection order, independent of
+        // queue order; duplicate and absent IDs are ignored.
+        ids.iter().filter_map(|id| extracted.remove(id)).collect()
     }
 
     /// Removes one queued task by ID from either scheduling class.

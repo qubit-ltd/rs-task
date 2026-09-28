@@ -5,8 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "sqlite")]
+mod common;
 use std::sync::Arc;
 
+#[cfg(feature = "sqlite")]
+use common::sqlite_paths;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::error::SpiError;
 #[cfg(feature = "event-bus")]
@@ -1193,7 +1197,7 @@ async fn test_sqlite_store_recovers_interrupted_running_task() {
     service.shutdown().await.expect("service shuts down");
     drop(service);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
@@ -1304,13 +1308,13 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
     let owner = store.acquire_owner().await.unwrap();
     let unfinished = store.scan_unfinished(None).await.unwrap();
     assert_eq!(unfinished.tasks.len(), 2);
-    let cursor = unfinished.tasks.iter().map(|task| task.record.id).min().unwrap();
+    let cursor = unfinished.tasks.iter().map(|task| task.id).min().unwrap();
     assert_eq!(store.scan_unfinished(Some(cursor)).await.unwrap().tasks.len(), 1);
     store.release_owner(owner).await.unwrap();
     assert!(store.acquire_owner().await.is_err());
     drop(store);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
@@ -1410,7 +1414,7 @@ async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
     drop(store);
     for file in [&path, &bad_path] {
         let _ = std::fs::remove_file(file);
-        let _ = std::fs::remove_file(file.with_extension("owner.lock"));
+        let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(file));
         let _ = std::fs::remove_file(file.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(file.with_extension("sqlite-shm"));
     }
@@ -1445,7 +1449,7 @@ async fn test_recovery_blocks_tasks_without_a_registered_handler() {
     service.shutdown().await.expect("service shuts down");
     drop(service);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
@@ -1460,7 +1464,7 @@ fn test_sqlite_store_enforces_one_process_owner() {
     let second = SqliteTaskStore::open(&path).expect("ownership releases after drop");
     drop(second);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
@@ -1587,9 +1591,28 @@ fn test_spi_sqlite_provider_requires_and_accepts_sqlite_configuration() {
     assert!(store.capabilities().restart_recovery);
     drop(store);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn test_spi_sqlite_builtin_registry_works_without_inventory() {
+    use qubit_spi::ProviderSelection;
+    use qubit_task::spi;
+
+    let path = std::env::temp_dir().join(format!("qubit-task-sqlite-registry-{}.sqlite", TaskId::generate()));
+    let provider = spi::sqlite_store_registry()
+        .resolve_selected(&ProviderSelection::named(spi::SQLITE_STORE_PROVIDER_ID).unwrap())
+        .expect("explicit built-in registry contains SQLite");
+    let store = provider
+        .create_configured(&spi::TaskStoreConfig::Sqlite { path: path.clone() })
+        .expect("provider opens SQLite without inventory discovery");
+    assert!(store.capabilities().restart_recovery);
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(&path));
 }
 
 #[cfg(feature = "event-bus")]

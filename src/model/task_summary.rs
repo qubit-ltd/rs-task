@@ -8,41 +8,38 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::ResourceRequest;
 use super::TaskId;
 use super::TaskOutput;
-use super::TaskRequest;
+use super::TaskRecord;
+use super::TaskRequestInfo;
 use super::TaskState;
 
-/// Queryable task lifecycle snapshot.
-///
-/// The state version increases after every successful lifecycle transition.
-/// Timestamps are Unix epoch milliseconds, and `attempt` counts starts rather
-/// than submissions.
+/// Payload-free lifecycle snapshot for listing and waiting on tasks.
 ///
 /// # Examples
 ///
 /// ```
-/// use qubit_task::TaskExecutionService;
-/// use qubit_task::model::TaskRequest;
-///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     use qubit_task::TaskExecutionService;
+///     use qubit_task::model::TaskRequest;
+///
 ///     let service = TaskExecutionService::in_memory().await?;
 ///     let request = TaskRequest::new("report", "1", vec![])
-///         .with_idempotency_key("report-2026-09-26");
-///     let record = service.submit(request).await?;
-///     assert_eq!(record.attempt, 0);
+///         .with_idempotency_key("report-summary-example");
+///     let accepted = service.submit(request).await?;
+///     let summary = service.get_summary(accepted.id).await?.expect("accepted task is retained");
+///     assert_eq!(summary.id, accepted.id);
 ///     service.shutdown().await?;
 ///     Ok(())
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskRecord {
+pub struct TaskSummary {
     /// Stable service-generated identity.
     pub id: TaskId,
-    /// Reconstructible work description.
-    pub request: TaskRequest,
+    /// Immutable request fields without the execution payload.
+    pub request: TaskRequestInfo,
     /// Current lifecycle state.
     pub state: TaskState,
     /// Monotonically increasing state revision.
@@ -50,7 +47,6 @@ pub struct TaskRecord {
     /// Number of execution attempts started.
     pub attempt: u32,
     /// Earliest Unix epoch millisecond when a queued retry may start.
-    #[serde(default)]
     pub retry_not_before_ms: Option<u64>,
     /// Milliseconds since Unix epoch when accepted.
     pub accepted_at_ms: u64,
@@ -66,16 +62,27 @@ pub struct TaskRecord {
     pub cancel_requested: bool,
 }
 
-/// Resource request helper available without opening the original request.
 impl TaskRecord {
-    /// Returns the resource demand used to validate and schedule this task.
+    /// Copies lifecycle and immutable request metadata without its payload.
     ///
     /// # Returns
     ///
-    /// A borrow of the resource request stored inside this record.
+    /// Lifecycle data and immutable request metadata, excluding the payload.
     #[must_use]
-    #[inline]
-    pub fn resource_request(&self) -> &ResourceRequest {
-        &self.request.resources
+    pub fn summary(&self) -> TaskSummary {
+        TaskSummary {
+            id: self.id,
+            request: TaskRequestInfo::from(&self.request),
+            state: self.state.clone(),
+            state_version: self.state_version,
+            attempt: self.attempt,
+            retry_not_before_ms: self.retry_not_before_ms,
+            accepted_at_ms: self.accepted_at_ms,
+            started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+            assigned_resources: self.assigned_resources.clone(),
+            output: self.output.clone(),
+            cancel_requested: self.cancel_requested,
+        }
     }
 }

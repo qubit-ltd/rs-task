@@ -124,6 +124,7 @@ impl TaskRequest {
     /// Returns the first static diagnostic for an empty required identifier or
     /// a field, metadata entry, or combined metadata size over its limit.
     pub(crate) fn validate_limits(&self) -> Result<(), &'static str> {
+        self.resources.validate_limits()?;
         if self.task_type.is_empty() || self.handler_version.is_empty() {
             return Err("task type and handler version must not be empty");
         }
