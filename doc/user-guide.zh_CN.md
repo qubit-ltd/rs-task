@@ -227,6 +227,32 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保
 启用 `event-bus` feature 后，可将 `qubit_event_bus::EventBus` 具体门面注入构建器。状态变化后，服务会发布 `TaskEvent`。通知采用尽力而为语义：发布失败不会回滚任务状态。事件可能重复、延迟或丢失，因此消费者应比较 `state_version`，并在需要权威状态时查询服务。
 当前版本依赖 `qubit-event-bus` 0.14。通用 `NotificationPublisher` 返回 provider receipt；服务再按 `AdmissionOutcome` 映射到现有任务通知统计。
 
+### Redis Streams provider
+
+`TaskEvent` 虽然实现了 serde，event-bus facade 仍要求显式注册
+`EventCodec<TaskEvent>`。注册 JSON codec，并显式选择 Redis provider：
+
+~~~rust,ignore
+let mut codecs = CodecRegistry::new();
+codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec::new()));
+let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
+let config = EventBusConfig::default()
+    .with_selection(ProviderSelection::named("redis-streams")?)
+    .with_provider_options([
+        ("redis.url".into(), "redis://127.0.0.1/".into()),
+        ("redis.namespace".into(), "task-service".into()),
+    ].into())
+    .with_facade_config(facade);
+let bus = EventBusRegistry::discover()?.create(&config)?;
+let service = TaskExecutionServiceBuilder::in_memory()
+    .event_bus(bus.clone())
+    .build().await?;
+~~~
+
+Redis provider 应由应用或测试显式依赖，不会进入 `qubit-task` 的生产依赖。
+provider receipt 表示 Redis 接受了发布命令，不表示订阅者已经处理事件。通知仍是尽力而为，
+任务状态变更与事件发布没有事务绑定。若要求状态与消息原子提交，应使用事务性 outbox。
+
 服务使用 `rs-event-bus` 的 `NotificationPublisher` 管理串行发布线程和有界队列，默认容量为 256。可通过
 `event_bus_buffer_capacity(NonZeroUsize)` 设置其他正数容量。状态转移只调用
 `NotificationPublisher::try_publish`，不会等待事件总线完成发布；队列已满时丢弃新通知。服务关闭并停止接收入队后，晚到的通知也会丢弃，这些丢弃都不会改变任务结果。

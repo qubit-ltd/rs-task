@@ -267,6 +267,36 @@ This release uses `qubit-event-bus` 0.14. The shared `NotificationPublisher`
 reports the provider receipt; this service maps its admission outcome to the
 existing task notification counters.
 
+### Redis Streams provider
+
+`TaskEvent` has serde implementations, but the event-bus facade still needs an
+explicit `EventCodec<TaskEvent>`. Register a JSON codec and select the Redis
+provider explicitly:
+
+~~~rust,ignore
+let mut codecs = CodecRegistry::new();
+codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec::new()));
+let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
+let config = EventBusConfig::default()
+    .with_selection(ProviderSelection::named("redis-streams")?)
+    .with_provider_options([
+        ("redis.url".into(), "redis://127.0.0.1/".into()),
+        ("redis.namespace".into(), "task-service".into()),
+    ].into())
+    .with_facade_config(facade);
+let bus = EventBusRegistry::discover()?.create(&config)?;
+let service = TaskExecutionServiceBuilder::in_memory()
+    .event_bus(bus.clone())
+    .build().await?;
+~~~
+
+The Redis provider is a test or application dependency; it is not pulled into
+`qubit-task`'s production dependencies. A successful provider receipt means
+Redis accepted the publish command, not that a subscriber processed the event.
+Notification publication remains best effort and is not transactionally
+coupled to task state. Use a transactional outbox when state changes and event
+delivery must commit atomically.
+
 The service uses `rs-event-bus`'s `NotificationPublisher`, which owns one serial publisher thread and a bounded notification queue.
 The default capacity is 256; configure another positive capacity with
 `event_bus_buffer_capacity(NonZeroUsize)`. State transitions call
