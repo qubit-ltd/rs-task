@@ -1,3 +1,5 @@
+use qubit_task::model::RequestValidationField;
+use qubit_task::model::RequestValidationRule;
 use qubit_task::model::ResourceRequest;
 
 #[test]
@@ -9,7 +11,9 @@ fn resource_descriptions_enforce_bounds_and_gpu_consistency() {
     };
     assert!(request.validate_limits().is_ok());
     request.gpu_labels = vec!["duplicate".into(), "duplicate".into()];
-    assert!(request.validate_limits().is_err());
+    let error = request.validate_limits().expect_err("duplicate labels are invalid");
+    assert_eq!(error.field, RequestValidationField::GpuLabels);
+    assert_eq!(error.rule, RequestValidationRule::Unique);
     request.gpu_labels = vec!["label".into()];
 
     request.gpu_count = 0;

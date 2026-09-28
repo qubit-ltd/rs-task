@@ -2299,7 +2299,7 @@ fn retry_deadline_ms(now_ms: u64, policy: RetryPolicy, attempt: u32) -> u64 {
 fn validate_request_format(request: &TaskRequest) -> Result<(), TaskServiceError> {
     request
         .validate_limits()
-        .map_err(|message| TaskServiceError::InvalidRequest(message.into()))?;
+        .map_err(|error| TaskServiceError::InvalidRequest(error.to_string()))?;
     if request.resources.custom.keys().any(String::is_empty)
         || request.resources.gpu_labels.iter().any(String::is_empty)
     {
