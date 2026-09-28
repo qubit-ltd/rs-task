@@ -11,12 +11,51 @@ use tokio::pin;
 
 use super::super::ServiceCore;
 use super::super::TaskServiceError;
-use super::super::combine_shutdown_results;
 use super::super::record_store_fault;
 use super::super::task_stats;
 use super::super::wait_for_attempts;
 use super::super::wait_scheduler_finished;
 use crate::store::StoreError;
+
+/// Combines service convergence and notification worker shutdown results.
+///
+/// A notification close failure becomes the close result when task
+/// convergence succeeded. If both fail, the service error stays primary and
+/// the notification error is appended to its diagnostic.
+///
+/// # Parameters
+///
+/// * `primary` - Result of draining service work and releasing ownership.
+/// * `notification` - Result of closing the optional notification worker.
+///
+/// # Returns
+///
+/// The combined shutdown result, preserving the service error as primary.
+///
+/// # Errors
+///
+/// Returns the service failure, the notification close failure, or a combined
+/// diagnostic when both operations fail.
+pub(in crate::service::task_execution_service) fn combine_shutdown_results(
+    primary: Result<(), TaskServiceError>,
+    notification: Result<(), TaskServiceError>,
+) -> Result<(), TaskServiceError> {
+    match (primary, notification) {
+        (Ok(()), result) => result,
+        (Err(primary), Ok(())) => Err(primary),
+        (Err(TaskServiceError::StoreUnavailable(store)), Err(TaskServiceError::NotificationClose(close))) => Err(
+            TaskServiceError::StoreUnavailable(format!("{store}; notification close failed: {close}")),
+        ),
+        (Err(TaskServiceError::SchedulerUnavailable(scheduler)), Err(TaskServiceError::NotificationClose(close))) => {
+            Err(TaskServiceError::SchedulerUnavailable(format!(
+                "{scheduler}; notification close failed: {close}"
+            )))
+        }
+        (Err(primary), Err(close)) => Err(TaskServiceError::StoreUnavailable(format!(
+            "{primary}; notification close failed: {close}"
+        ))),
+    }
+}
 
 /// Closes admission once and starts the shared asynchronous drain coordinator.
 ///
