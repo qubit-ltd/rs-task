@@ -46,6 +46,9 @@ pub(in crate::service::task_execution_service) async fn scheduler_loop(core_ref:
         let Some(core) = core_ref.upgrade() else {
             return;
         };
+        let notified = core.changed.notified();
+        pin!(notified);
+        notified.as_mut().enable();
         if core.store_fault.lock().is_some() {
             return;
         }
@@ -74,9 +77,6 @@ pub(in crate::service::task_execution_service) async fn scheduler_loop(core_ref:
                     _ => {}
                 }
             }
-            let notified = core.changed.notified();
-            pin!(notified);
-            notified.as_mut().enable();
             let deadline = core.queue.lock().next_deadline();
             let wait = deadline.map(|value| std::time::Duration::from_millis(value.saturating_sub(now_ms())));
             if let Some(wait) = wait {
@@ -379,9 +379,6 @@ pub(in crate::service::task_execution_service) async fn scheduler_loop(core_ref:
                 .lock()
                 .next_deadline()
                 .map(|deadline| std::time::Duration::from_millis(deadline.saturating_sub(now_ms())));
-            let notified = core.changed.notified();
-            pin!(notified);
-            notified.as_mut().enable();
             let sleep_for = wait.unwrap_or(std::time::Duration::from_millis(40));
             let notified = Box::pin(notified);
             let timer = Box::pin(time::sleep(sleep_for));

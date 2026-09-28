@@ -194,6 +194,11 @@ pub trait TaskStore: Send + Sync {
     /// Counts every retained lifecycle state in one store snapshot, including
     /// terminal records.
     ///
+    /// The returned counts describe one consistent point in the store's
+    /// history. Concurrent transitions may change the counts before this
+    /// future returns; callers that wait for a state change must register their
+    /// notification before querying and recheck the condition after waking.
+    ///
     /// # Returns
     ///
     /// A future resolving to counts from one consistent store snapshot.
@@ -275,7 +280,13 @@ pub trait TaskStore: Send + Sync {
     /// Resolves to an error if recovery scanning is unsupported or fails.
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>>;
 
-    /// Releases ownership after the service has stopped accepting work.
+    /// Releases ownership after the service has stopped accepting work and
+    /// drained writes admitted under this ownership epoch.
+    ///
+    /// `Ok(())` is a completion barrier: no earlier write under `epoch` may
+    /// still be running or commit after this future resolves. Implementations
+    /// must keep ownership fenced until those writes finish. A release error
+    /// does not authorize another service to assume that draining completed.
     ///
     /// # Parameters
     ///
@@ -283,7 +294,8 @@ pub trait TaskStore: Send + Sync {
     ///
     /// # Returns
     ///
-    /// A future resolving when the ownership lock is released.
+    /// A future resolving after all earlier writes are complete and the
+    /// ownership lock is released.
     ///
     /// # Errors
     ///
