@@ -138,7 +138,7 @@ TaskExecutionService
 | `TaskExecutionServiceBuilder::recoverable_sqlite(path)` | 可选 SQLite `TaskStore`、默认调度策略、本机执行引擎；强制要求恢复能力 | 单节点重启恢复；构建前须注册稳定的处理器 |
 | `TaskExecutionServiceBuilder::from_components(store, engine, policy)` | 由应用传入直接创建或经 SPI 解析的组件 | 自定义装配，不隐式补入内存存储 |
 
-默认 CPU 并发槽位取 `available_parallelism()`，无法取得时使用 1；独立的最大运行任务数默认取相同并行度，最低为 1，零 CPU 资源请求仍消耗一个运行名额。每个任务默认请求 1 个 CPU 槽位。默认队列最多容纳 1024 个等待任务，内存终态历史保留最近 1024 条；默认不自动发现 GPU、不给任何 GPU 额度，GPU 任务需要显式配置设备。默认调度策略按提交顺序扫描，并设置有界越过次数防止大任务长期饥饿。恢复扫描先核算未完成记录数，再分页恢复；上限为 `queue_capacity + max_running_tasks`，超限或存储页无效会使构建失败并保留历史。上述容量均可通过 builder 覆盖。无事件总线时查询和等待接口仍完整可用。
+默认 CPU 并发槽位取 `available_parallelism()`，无法取得时使用 1；独立的最大运行任务数默认取相同并行度，最低为 1，零 CPU 资源请求仍消耗一个运行名额。每个任务默认请求 1 个 CPU 槽位。默认队列最多容纳 1024 个等待任务，内存终态历史保留最近 1024 条；默认不自动发现 GPU、不给任何 GPU 额度，GPU 任务需要显式配置设备。默认调度策略按提交顺序扫描，并设置有界越过次数防止大任务长期饥饿。恢复扫描先核算未完成记录数，再分页恢复；上限为 `queue_capacity + max_running_tasks`，超限或存储页无效会使构建失败并保留历史。遗留 `Running` 记录重新入队时可使待执行队列暂时超过 `queue_capacity`；该恢复积压排空前，新任务受理返回 `QueueFull`。上述容量均可通过 builder 覆盖。无事件总线时查询和等待接口仍完整可用。
 
 便捷入口不会触发全局 SPI 自动选择，不会因为链接了某个第三方 provider 就改变行为。`in_memory()` 可直接用于 `submit_local`；使用 `TaskRequest` 前仍须提供相应处理器。应用需要自定义组件时，可以直接传入实例，也可以从 `rs-spi` registry 解析后装配。通用 builder 在没有显式选择存储或具名预设时必须拒绝构建。`recoverable_sqlite` 只在启用相应 feature 时存在，打开失败或恢复能力检查失败会返回构建错误，不回退到内存。构建返回前必须完成必要的存储初始化与恢复准备；如果恢复扫描是异步的，构造方法也应是异步的，不能返回一个尚未准备好接收任务的服务。
 
@@ -155,7 +155,7 @@ TaskExecutionService
 
 `TaskStore` 的内存队列索引可由 `TaskScheduler` 缓存，以便高效选择候选任务；索引须由已受理记录构建并在恢复时重建，不能成为第二套权威状态。`SchedulingPolicy` 只选择候选任务，实际能否启动由执行引擎的原子预约结果决定；策略实现不能通过直接写存储绕过协调器。执行引擎返回的结果要区分资源暂不足、永久不满足、启动失败、处理器失败、panic 和取消，以便协调器做正确的状态转换。
 
-为避免资源预约与状态写入之间启动用户代码，`TaskExecutionEngine` 使用两阶段执行交接：先 `prepare` 取得一份有界期的 `PreparedExecution`，完成资源预约但不调用处理器；协调器随后把该尝试的 `Running` 状态写入 `TaskStore`；写入成功才 `activate`，写入失败则 `abort` 并归还资源。`PreparedExecution` 在未激活时被丢弃，也必须释放预约。`Running` 表示该尝试已获得执行资源并进入启动流程，不承诺处理器第一行代码已经运行。`activate` 若失败，协调器以相同尝试代际将任务重新排队或标记失败，不能让它永久留在 `Running`。
+为避免资源预约与状态写入之间启动用户代码，`TaskExecutionEngine` 使用两阶段执行交接：先同步调用 `try_prepare` 取得一份有界期的 `PreparedExecution`，快速完成资源预约但不等待或调用处理器；协调器随后把该尝试的 `Running` 状态写入 `TaskStore`；写入成功才 `activate`，写入失败则 `abort` 并归还资源。`PreparedExecution` 在未激活时被丢弃，也必须释放预约。`Running` 表示该尝试已获得执行资源并进入启动流程，不承诺处理器第一行代码已经运行。`activate` 若失败，协调器以相同尝试代际将任务重新排队或标记失败，不能让它永久留在 `Running`。
 
 ### 4.4 装配与启动顺序
 
@@ -199,7 +199,7 @@ TaskExecutionService
 
 `TaskExecutionServiceBuilder::runtime_handle` 可指定服务自有 admission、scheduler、completion、shutdown 和发布器关闭等待使用的 Tokio runtime；默认使用进程级 runtime。调用方须保证注入 runtime 存活到关闭协调器完成。`shutdown()` 等待最终关闭结果；`shutdown_until(deadline)` 先启动或复用同一协调器，再限制当前调用者的等待时间。到期返回 `ShutdownTimedOut` 不会取消任务、释放存储所有权或终止事件发布器；后续 `shutdown()` 可继续等待共享结果。关闭在任务工作收敛并释放存储所有权后关闭通知入队，等待 worker 处理完已入队事件再返回；存储故障路径在服务取得关闭协调权后也执行通知收尾。服务自有 `NotificationPublisher` 占用一条发布线程；服务不订阅时不会产生订阅接收线程。服务不会关闭应用注入的 `EventBus`。直接丢弃服务时，发送端关闭后 worker 也会自然排空队列。worker panic 会记入统计并通知 shutdown worker 已结束；panic 时剩余队列事件可能丢失。发布调用在独立操作系统线程中执行，避免占用 Tokio runtime worker。`shutdown()` 默认最多等待通知发布器 30 秒，可通过 `TaskExecutionServiceBuilder::event_bus_close_timeout(Duration)` 配置；超时返回 `TaskServiceError::NotificationClose`，worker 继续处理已接收的事件，并发或后续关闭调用会收到相同的已保存结果。可靠跨进程投递仍需持久化后端增加事务性 outbox，本期通知不提供 outbox、重试或最终处理保证。
 
-正常关闭只有在 admission 关闭、存储中的 `Queued`/`Running` 数量归零、调度器退出且所有已跟踪执行句柄完成后才释放 store owner。`prepare()` 返回 `EngineError::Closed` 是服务级永久调度故障，排队记录保留并通过 `SchedulerUnavailable` 报告；`activate()` 返回 `Closed` 只阻止对应任务。构建器在稳定的进程级 runtime 上执行恢复准备；调用方取消 `build()` 后，worker 会在恢复页边界停止、释放已取得的 owner，且不启动 scheduler。此清理是异步的。
+正常关闭只有在 admission 关闭、存储中的 `Queued`/`Running` 数量归零、调度器退出且所有已跟踪执行句柄完成后才释放 store owner。同步的 `try_prepare()` 返回 `EngineError::Closed` 是服务级永久调度故障，排队记录保留并通过 `SchedulerUnavailable` 报告；`activate()` 返回 `Closed` 只阻止对应任务。构建器在稳定的进程级 runtime 上执行恢复准备；调用方取消 `build()` 后，worker 会在恢复页边界停止、释放已取得的 owner，且不启动 scheduler。此清理是异步的。
 
 ## 7. 关键操作顺序与不变量
 

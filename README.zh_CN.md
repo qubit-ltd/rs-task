@@ -78,11 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite schema 0/1/2 数据库会在打开时事务性迁移到 schema 3。SQLite 将请求元数据、payload BLOB 与生命周期 JSON 分列保存；状态查询和历史分页不会读取大型 payload。
 
-服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
+服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；恢复的运行中记录会先放入待执行队列，因此队列可暂时超过 `queue_capacity`，队列排空前新受理会返回 `QueueFull`。超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
 
 丢弃最后一个服务句柄会启动异步排空；需要观察排空结果时调用 `shutdown()`。调度器 panic 会返回 `SchedulerUnavailable`，且不会自动重启。自定义引擎契约和零 CPU I/O 配置见[用户指南](doc/user-guide.zh_CN.md)。
 
-若 `TaskExecutionEngine::prepare` 返回 `Closed`，服务会停止调度并返回
+`TaskExecutionEngine::try_prepare` 是同步接口，必须快速预约资源，不得等待或执行处理器工作。若其返回 `Closed`，服务会停止调度并返回
 `SchedulerUnavailable`，排队任务仍可恢复。若 `activate` 返回 `Closed`，只会阻止当前任务。
 取消等待 `build()` 不会中断后台构建 worker；worker 会异步完成 owner 清理。正常关闭会等待
 调度器和已跟踪执行结束后再释放存储所有权。

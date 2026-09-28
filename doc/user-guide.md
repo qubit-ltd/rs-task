@@ -44,10 +44,13 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 It uses local execution, available CPU parallelism (or one slot), a waiting
 queue of 1024 tasks, and a terminal history of 1024 tasks. It does not probe for
 GPUs. `submit_local` accepts an in-process closure and returns a typed
-`LocalTaskHandle<R, E>`; closures run on Tokio's blocking pool. The handle gives
-the closure's in-process value or original error, while `TaskRecord.output`
-retains only the small `TaskOutput` summary. Custom async handlers must move
-long CPU-bound or blocking work off async runtime workers themselves.
+`LocalTaskHandle<R, E>`; synchronous closures run on Tokio's blocking pool. The
+handle gives the closure's in-process value or original error, while
+`TaskRecord.output` retains only the small `TaskOutput` summary. Custom async
+handler futures run on Tokio async workers and must move long CPU-bound or
+blocking work off those workers themselves. The engine's synchronous
+`try_prepare()` only reserves resources promptly; `activate()` starts the
+handler after the service records the attempt as running.
 The default memory store retains at most 2048 nonterminal records, including
 `Blocked` records. Configure a different limit by supplying a
 `MemoryTaskStore::with_limits(history_capacity, payload_budget, unfinished_limit)`
@@ -150,8 +153,11 @@ Every service-level `submit` requires a stable, non-empty key generated and
 saved before the first call. After a caller timeout, query
 `get_by_idempotency_key`; it returns a payload-free `TaskSummary`, and `None` is
 only a snapshot, so retry the identical request with the same key. Call
-`get(summary.id)` when the payload is needed. The key can be reused after its task record is
-pruned or evicted. The in-memory preset retains up to 64 MiB of request payloads
+`get(summary.id)` when the payload is needed. An exact replay returns the
+original record even if configured resource capacity has since decreased; a
+different request with the same key returns an idempotency conflict. New
+requests are still checked against current capacity. The key can be reused after
+its task record is pruned or evicted. The in-memory preset retains up to 64 MiB of request payloads
 and defaults to 64 in-flight submissions sharing a 64 MiB admission payload
 budget. These budgets count payload bytes, not total process memory. Use SQLite
 or another persistent store when the recovery window must outlast in-memory
@@ -321,7 +327,7 @@ restart the process through the application supervisor.
 
 ## Errors and diagnostics
 
-If an engine's `prepare()` returns `EngineError::Closed`, the service treats it
+`TaskExecutionEngine::try_prepare()` is synchronous: it must reserve resources promptly without waiting or running handler work. If it returns `EngineError::Closed`, the service treats it
 as a permanent scheduler failure, stops admission, and reports
 `SchedulerUnavailable`; queued records remain in the store for recovery.
 `EngineError::Closed` from `activate()` applies to the affected attempt and
@@ -415,7 +421,10 @@ Resource slots and task concurrency are separate limits. Configure
 use zero CPU slots. Its default is the available system parallelism, falling
 back to one. On restart, unfinished records must fit within
 `queue_capacity + max_running_tasks`; otherwise construction fails and keeps
-the records intact. Increase one of those limits before restarting again.
+the records intact. Recovered running records are staged in the waiting queue,
+so it may temporarily exceed `queue_capacity`; new submissions receive
+`QueueFull` until that backlog drains. Increase one of those limits before
+restarting again.
 
 ~~~rust,no_run
 use std::num::NonZeroUsize;
