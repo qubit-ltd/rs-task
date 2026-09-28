@@ -33,6 +33,8 @@ pub use builtins::discovered_task_handler_registry;
 pub use builtins::discovered_task_store_registry;
 pub use builtins::memory_store_registry;
 pub use builtins::scheduling_policy_registry;
+#[cfg(feature = "sqlite")]
+pub use builtins::sqlite_store_registry;
 pub use builtins::task_execution_engine_registry;
 pub use builtins::task_handler_registry;
 #[cfg(feature = "inventory")]

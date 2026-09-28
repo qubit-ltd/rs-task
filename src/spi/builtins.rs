@@ -14,6 +14,8 @@ use qubit_spi::error::ProviderInventoryBuildError;
 use super::internal::FairFifoProvider;
 use super::internal::LocalEngineProvider;
 use super::internal::MemoryStoreProvider;
+#[cfg(feature = "sqlite")]
+use super::internal::SqliteStoreProvider;
 use crate::spi::scheduling_policy_spec::SchedulingPolicySpec;
 use crate::spi::task_execution_engine_spec::TaskExecutionEngineSpec;
 use crate::spi::task_handler_spec::TaskHandlerSpec;
@@ -29,6 +31,21 @@ pub fn memory_store_registry() -> ProviderRegistry<TaskStoreSpec> {
     let registry = ProviderRegistry::default();
     registry
         .register(MemoryStoreProvider)
+        .expect("built-in provider ID is unique");
+    registry
+}
+
+/// Returns the built-in SQLite store provider registry.
+///
+/// # Returns
+///
+/// A registry containing the SQLite store provider.
+#[cfg(feature = "sqlite")]
+#[must_use]
+pub fn sqlite_store_registry() -> ProviderRegistry<TaskStoreSpec> {
+    let registry = ProviderRegistry::default();
+    registry
+        .register(SqliteStoreProvider)
         .expect("built-in provider ID is unique");
     registry
 }
