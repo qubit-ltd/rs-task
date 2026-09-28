@@ -89,11 +89,11 @@ after its request stops waiting.
 
 Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite schema 0, 1, and 2 databases migrate transactionally to schema 3 on open. SQLite keeps the immutable request metadata, payload BLOB, and lifecycle JSON in separate columns so hot reads avoid loading large payloads.
 
-The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; startup fails with records preserved if that recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
+The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; recovered running records are staged in the waiting queue and can temporarily exceed `queue_capacity`, so new admissions receive `QueueFull` until the queue drains. Startup fails with records preserved if the recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
 
 Dropping the last service handle starts an asynchronous drain; call `shutdown()` to observe completion. Scheduler panics surface as `SchedulerUnavailable` and are not restarted automatically. See the [user guide](doc/user-guide.md) for the custom engine contract and zero-CPU I/O configuration.
 
-If `TaskExecutionEngine::prepare` reports `Closed`, the service stops scheduling
+`TaskExecutionEngine::try_prepare` is synchronous and must reserve resources promptly without waiting or running handler work. If it reports `Closed`, the service stops scheduling
 and reports `SchedulerUnavailable`; the queued task remains recoverable.
 `Closed` from `activate` applies to that task attempt and blocks its task. A
 cancelled builder call may finish asynchronous owner cleanup in its background

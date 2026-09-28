@@ -47,7 +47,7 @@ qubit-task = "0.6"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ~~~
 
-`in_memory()` 会在调用位置明确表示易失语义。它使用本机执行引擎、系统可用 CPU 并行度（无法获取时为 1）、最多 1024 个等待任务，以及最多 1024 条终态历史。它不会探测 GPU。`submit_local` 接收进程内闭包并返回类型化的 `LocalTaskHandle<R, E>`；闭包在 Tokio 阻塞线程池运行。句柄提供闭包的进程内返回值或原始错误，而 `TaskRecord.output` 只保留较小的 `TaskOutput` 摘要。自定义异步处理器应自行把长时间 CPU 运算或阻塞 I/O 移出异步工作线程。
+`in_memory()` 会在调用位置明确表示易失语义。它使用本机执行引擎、系统可用 CPU 并行度（无法获取时为 1）、最多 1024 个等待任务，以及最多 1024 条终态历史。它不会探测 GPU。`submit_local` 接收进程内闭包并返回类型化的 `LocalTaskHandle<R, E>`；同步闭包在 Tokio 阻塞线程池运行。句柄提供闭包的进程内返回值或原始错误，而 `TaskRecord.output` 只保留较小的 `TaskOutput` 摘要。自定义异步处理器 future 在 Tokio 异步工作线程运行，应自行把长时间 CPU 运算或阻塞 I/O 移出这些线程。引擎的同步 `try_prepare()` 只快速预约资源；服务记录任务进入运行态后，`activate()` 才启动处理器。
 
 内存 store 默认最多保留 2048 条非终态记录，`Blocked` 也计入上限。可将 `MemoryTaskStore::with_limits(history_capacity, payload_budget, unfinished_limit)` 的结果通过 `TaskExecutionServiceBuilder::store(Arc::new(...))` 注入以定制上限；达到上限会返回 `UnfinishedRecordLimitExceeded`，已有记录的幂等重放仍可成功。
 
@@ -135,8 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 服务级 `submit` 必须使用稳定且非空的幂等键，并在首次调用前生成和保存。调用方超时后，
 可用 `get_by_idempotency_key` 查询；该接口返回不含 payload 的 `TaskSummary`，返回
 `None` 只代表查询瞬间没有记录，应以相同请求和同一键重试。需要 payload 时调用
-`get(summary.id)`。
-对应任务记录被清理或淘汰后，该键可以重用。内存预设最多保留 64 MiB 的任务 payload，默认最多有
+`get(summary.id)`。即使配置容量后来下调，完全相同的重放仍返回原记录；同键但请求不同会返回幂等冲突。新请求仍按当前容量校验。对应任务记录被清理或淘汰后，该键可以重用。内存预设最多保留 64 MiB 的任务 payload，默认最多有
 64 个受理中提交，共享 64 MiB 的受理 payload 预算。这些额度只统计 payload 字节，不是进程总内存上限。
 需要更长的恢复窗口时应选 SQLite 或其他持久化存储。`shutdown_until(deadline)` 会启动正常排空，
 只限制当前调用者的等待；任务和存储所有权会保持到排空完成。
@@ -161,7 +160,7 @@ let capacity = ResourceCapacity {
 let builder = TaskExecutionServiceBuilder::in_memory().capacity(capacity);
 ~~~
 
-服务会根据执行引擎公布的容量校验每个请求。超出已配置容量的请求会被拒绝；当前资源不足但以后可能满足的请求会继续排队。默认公平 FIFO 策略允许符合当前资源条件的任务越过队首，并在队首任务多次被越过后为其保留执行机会。等待队列有容量限制；队列满时返回 `QueueFull`，由调用方施加背压。自动重试遇到满队列时，任务会记录为 `Blocked`，等待容量恢复后可显式重试，不会突破队列上限。
+服务会根据执行引擎公布的容量校验每个请求。超出已配置容量的请求会被拒绝；当前资源不足但以后可能满足的请求会继续排队。默认公平 FIFO 策略允许符合当前资源条件的任务越过队首，并在队首任务多次被越过后为其保留执行机会。等待队列有容量限制；正常受理时队列满会返回 `QueueFull`，由调用方施加背压。重启恢复时，遗留运行中记录会暂存在该队列，因此队列可暂时超过 `queue_capacity`；恢复积压排空前，新受理仍返回 `QueueFull`。自动重试遇到满队列时，任务会记录为 `Blocked`，等待容量恢复后可显式重试，不会突破队列上限。
 
 I/O handler 可以请求零 CPU 槽，但仍占用 `max_running_tasks` 名额。显式设置该上限可控制并发网络或磁盘操作。CPU 密集型 handler 应至少请求一个槽，并通过 `spawn_blocking` 或专用执行后端运行阻塞工作。
 
@@ -181,7 +180,7 @@ request.resources.cpu_slots = 0;
 资源槽位和任务并发数是两个独立上限。可用
 `max_running_tasks(NonZeroUsize)` 限制同时运行的尝试数；即使请求零 CPU
 槽，也会占用一个运行名额。默认值为本机可用并行度，无法获取时为 1。
-重启时未完成记录数必须不超过 `queue_capacity + max_running_tasks`；否则构建失败并保留记录。调大其中一个上限后再重启。
+重启时未完成记录数必须不超过 `queue_capacity + max_running_tasks`；否则构建失败并保留记录。遗留运行中记录会暂存在待执行队列，队列可暂时超过 `queue_capacity`，积压排空前新受理会返回 `QueueFull`。调大其中一个上限后再重启。
 
 ~~~rust,no_run
 use std::num::NonZeroUsize;
@@ -244,7 +243,7 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保
 
 ## 错误与诊断
 
-如果引擎的 `prepare()` 返回 `EngineError::Closed`，服务会将其视为永久调度故障，停止受理并返回
+`TaskExecutionEngine::try_prepare()` 是同步接口，必须快速预约资源，不得等待或执行处理器工作。如果它返回 `EngineError::Closed`，服务会将其视为永久调度故障，停止受理并返回
 `SchedulerUnavailable`；排队记录保留在存储中以便恢复。`activate()` 返回同一错误时只影响当前尝试，
 该任务会进入 `Blocked`。取消等待 builder `build()` 的 future 不会取消后台构建 worker：worker 会在恢复页边界
 停止扫描，释放已取得的 owner，并且不启动调度器。调用方取消后，这些清理会在后台异步完成。
