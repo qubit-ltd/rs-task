@@ -2,16 +2,52 @@
   "version": 1,
   "checks": [
     {
-      "name": "default",
-      "commands": ["check", "test", "doc"],
-      "defaultFeatures": true,
-      "features": []
-    },
-    {
-      "name": "no-default-features",
+      "name": "empty",
       "commands": ["check", "test", "doc"],
       "defaultFeatures": false,
       "features": []
+    },
+    {
+      "name": "sqlite",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["sqlite"]
+    },
+    {
+      "name": "inventory",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["inventory"]
+    },
+    {
+      "name": "event-bus",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["event-bus"]
+    },
+    {
+      "name": "sqlite-inventory",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["sqlite", "inventory"]
+    },
+    {
+      "name": "sqlite-event-bus",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["sqlite", "event-bus"]
+    },
+    {
+      "name": "inventory-event-bus",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["inventory", "event-bus"]
+    },
+    {
+      "name": "all-features",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["sqlite", "inventory", "event-bus"]
     }
   ]
 }
