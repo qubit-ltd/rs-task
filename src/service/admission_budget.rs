@@ -24,26 +24,27 @@ pub(super) enum AdmissionBudgetError {
         available: usize,
     },
     /// The number of concurrent admissions has reached its configured limit.
-    SubmissionLimitExceeded {
-        /// Maximum number of concurrent admission workers.
+    OperationLimitExceeded {
+        /// Maximum number of concurrent external write operations.
         limit: usize,
     },
 }
 
 /// Current detached admission counts and retained payload bytes.
 struct BudgetUsage {
-    /// Number of admission workers holding reservations.
-    submissions: usize,
+    /// Number of external write operations holding reservations.
+    operations: usize,
     /// Payload bytes retained by those workers.
     payload_bytes: usize,
 }
 
-/// Bounds the request payload and count held by detached admission workers.
+/// Bounds the request payload and count held by detached external write
+/// operations.
 pub(super) struct AdmissionBudget {
     /// Maximum aggregate payload bytes held by in-flight admissions.
     max_payload_bytes: NonZeroUsize,
-    /// Maximum number of concurrent admission workers.
-    max_submissions: NonZeroUsize,
+    /// Maximum number of concurrent external write operations.
+    max_operations: NonZeroUsize,
     /// Current worker count and payload bytes.
     usage: Mutex<BudgetUsage>,
 }
@@ -63,17 +64,17 @@ impl AdmissionBudget {
     /// # Parameters
     ///
     /// * `max_payload_bytes` - Aggregate payload byte limit.
-    /// * `max_submissions` - Concurrent admission worker limit.
+    /// * `max_operations` - Concurrent admission worker limit.
     ///
     /// # Returns
     ///
     /// A budget with no active reservations.
-    pub(super) fn new(max_payload_bytes: NonZeroUsize, max_submissions: NonZeroUsize) -> Self {
+    pub(super) fn new(max_payload_bytes: NonZeroUsize, max_operations: NonZeroUsize) -> Self {
         Self {
             max_payload_bytes,
-            max_submissions,
+            max_operations,
             usage: Mutex::new(BudgetUsage {
-                submissions: 0,
+                operations: 0,
                 payload_bytes: 0,
             }),
         }
@@ -97,9 +98,9 @@ impl AdmissionBudget {
         payload_bytes: usize,
     ) -> Result<AdmissionReservation, AdmissionBudgetError> {
         let mut usage = self.usage.lock();
-        if usage.submissions >= self.max_submissions.get() {
-            return Err(AdmissionBudgetError::SubmissionLimitExceeded {
-                limit: self.max_submissions.get(),
+        if usage.operations >= self.max_operations.get() {
+            return Err(AdmissionBudgetError::OperationLimitExceeded {
+                limit: self.max_operations.get(),
             });
         }
         let Some(next_payload_bytes) = usage.payload_bytes.checked_add(payload_bytes) else {
@@ -114,7 +115,7 @@ impl AdmissionBudget {
                 available: self.max_payload_bytes.get() - usage.payload_bytes,
             });
         }
-        usage.submissions += 1;
+        usage.operations += 1;
         usage.payload_bytes = next_payload_bytes;
         drop(usage);
         Ok(AdmissionReservation {
@@ -128,9 +129,9 @@ impl Drop for AdmissionReservation {
     /// Returns this reservation's worker and payload accounting to the budget.
     fn drop(&mut self) {
         let mut usage = self.budget.usage.lock();
-        debug_assert!(usage.submissions > 0);
+        debug_assert!(usage.operations > 0);
         debug_assert!(usage.payload_bytes >= self.payload_bytes);
-        usage.submissions -= 1;
+        usage.operations -= 1;
         usage.payload_bytes -= self.payload_bytes;
     }
 }

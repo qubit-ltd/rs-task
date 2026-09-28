@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(feature = "event-bus")]
@@ -24,94 +23,20 @@ use super::scheduler_queue::SchedulerQueue;
 use super::task_event_publisher::TaskEventPublisher;
 use super::task_execution_service::ServiceCore;
 use super::task_execution_service::TaskExecutionService;
+pub(crate) use super::task_service_build_error::TaskServiceBuildError;
 use crate::engine::LocalTaskExecutionEngine;
 use crate::engine::TaskExecutionEngine;
 use crate::handler::TaskHandler;
 use crate::handler::TaskHandlerRegistry;
 use crate::model::ResourceCapacity;
-use crate::model::StoredTask;
 use crate::model::TaskId;
 use crate::model::TaskState;
+use crate::model::TaskSummary;
 use crate::scheduling::FairFifoPolicy;
 use crate::scheduling::QueuedTask;
 use crate::scheduling::SchedulingPolicy;
 use crate::store::MemoryTaskStore;
 use crate::store::TaskStore;
-
-/// Service construction error, including unsupported or unavailable recovery.
-///
-/// # Examples
-///
-/// ```
-/// use qubit_task::service::TaskServiceBuildError;
-///
-/// let error = TaskServiceBuildError::MissingStore;
-/// assert!(error.to_string().contains("must be selected"));
-/// ```
-#[derive(Debug, thiserror::Error)]
-#[must_use]
-pub enum TaskServiceBuildError {
-    /// A generic builder did not select a store explicitly.
-    #[error("a task store must be selected explicitly")]
-    MissingStore,
-    /// Recovery was required but the selected store does not support it.
-    #[error("restart recovery was required but the selected store does not support it")]
-    RecoveryRequired,
-    /// Store initialization or recovery scan failed.
-    #[error(transparent)]
-    Store(
-        /// Store initialization or recovery error.
-        #[from]
-        crate::store::StoreError,
-    ),
-    /// Two handlers claimed the same task type and version.
-    #[error("{0}")]
-    HandlerConflict(
-        /// Diagnostic identifying the conflicting handler registrations.
-        String,
-    ),
-    /// SQLite support is disabled for this crate build.
-    #[error("SQLite support requires the `sqlite` feature")]
-    SqliteFeatureDisabled,
-    /// Existing unfinished work is larger than the configured recovery bound.
-    #[error("unfinished task count exceeds recovery capacity {limit}")]
-    RecoveryCapacityExceeded {
-        /// Maximum unfinished task count accepted by this configuration.
-        limit: usize,
-    },
-    /// A task store returned an invalid recovery page.
-    #[error("invalid recovery page: {0}")]
-    InvalidRecoveryPage(
-        /// Diagnostic describing the malformed recovery page.
-        String,
-    ),
-    /// The selected queue and running capacities overflow the supported range.
-    #[error("invalid service configuration: {0}")]
-    InvalidConfiguration(
-        /// Diagnostic describing the invalid service configuration.
-        String,
-    ),
-    /// Construction worker panicked or stopped before returning a result.
-    #[error("service construction worker stopped unexpectedly")]
-    WorkerStopped,
-    /// Construction failed and releasing the store owner also failed.
-    #[error("{primary}; releasing store ownership also failed: {cleanup}")]
-    CleanupFailed {
-        /// Original construction failure.
-        #[source]
-        primary: Box<TaskServiceBuildError>,
-        /// Failure while releasing the acquired owner.
-        cleanup: crate::store::StoreError,
-    },
-    /// The dedicated lifecycle event publisher thread could not start.
-    #[cfg(feature = "event-bus")]
-    #[error("failed to start task event publisher thread: {0}")]
-    EventPublisherThread(
-        /// Operating system error returned while spawning the publisher.
-        #[source]
-        std::io::Error,
-    ),
-}
 
 /// Explicit component assembly and resource policy for one task service.
 ///
@@ -148,7 +73,7 @@ pub struct TaskExecutionServiceBuilder {
     /// Aggregate payload bytes held by detached admissions.
     max_inflight_payload_bytes: NonZeroUsize,
     /// Maximum detached admission workers.
-    max_inflight_submissions: NonZeroUsize,
+    max_inflight_operations: NonZeroUsize,
     /// Maximum simultaneously running attempts.
     max_running_tasks: NonZeroUsize,
     /// Maximum candidate tasks inspected per scheduler pass.
@@ -256,7 +181,7 @@ impl Default for TaskExecutionServiceBuilder {
             },
             queue_capacity: 1024,
             max_inflight_payload_bytes: NonZeroUsize::new(64 * 1024 * 1024).expect("default payload budget is nonzero"),
-            max_inflight_submissions: NonZeroUsize::new(64).expect("default submission limit is nonzero"),
+            max_inflight_operations: NonZeroUsize::new(64).expect("default operation limit is nonzero"),
             max_running_tasks: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
             scan_budget: 128,
             max_attempts: 3,
@@ -474,8 +399,8 @@ impl TaskExecutionServiceBuilder {
     ///
     /// This builder with the admission worker limit replaced.
     #[must_use]
-    pub fn max_inflight_submissions(mut self, limit: NonZeroUsize) -> Self {
-        self.max_inflight_submissions = limit;
+    pub fn max_inflight_operations(mut self, limit: NonZeroUsize) -> Self {
+        self.max_inflight_operations = limit;
         self
     }
 
@@ -780,7 +705,7 @@ impl TaskExecutionServiceBuilder {
             admission: AdmissionGate::new(),
             admission_budget: Arc::new(AdmissionBudget::new(
                 self.max_inflight_payload_bytes,
-                self.max_inflight_submissions,
+                self.max_inflight_operations,
             )),
             owner: owner.transfer(),
             store_fault: parking_lot::Mutex::new(None),
@@ -817,7 +742,7 @@ const RECOVERY_PAGE_LIMIT: usize = 256;
 /// Returns an invalid-recovery-page error for oversized, empty-with-next, or
 /// non-advancing pages.
 fn validate_recovery_page(
-    tasks: &[StoredTask],
+    tasks: &[TaskSummary],
     previous: Option<TaskId>,
     next: Option<TaskId>,
 ) -> Result<(), TaskServiceBuildError> {
@@ -885,8 +810,7 @@ async fn restore_tasks_paged(
         if count > limit {
             return Err(TaskServiceBuildError::RecoveryCapacityExceeded { limit });
         }
-        for stored in page.tasks {
-            let mut record = stored.record.summary();
+        for mut record in page.tasks {
             if matches!(record.state, TaskState::Queued | TaskState::Running) && record.attempt >= max_attempts {
                 store
                     .transition(crate::model::TransitionCommand {
@@ -1258,7 +1182,9 @@ mod tests {
         service.shutdown().await.unwrap();
         drop(service);
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".owner.lock");
+        let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }

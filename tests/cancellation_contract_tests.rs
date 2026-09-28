@@ -19,8 +19,8 @@ use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
-use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -181,7 +181,7 @@ impl TaskStore for HoldTerminalStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.inner.scan_unfinished(cursor)
     }
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
@@ -445,6 +445,66 @@ async fn test_late_cancel_response_does_not_signal_next_attempt() {
         .expect("wait succeeds");
     assert_eq!(final_record.state, TaskState::Succeeded);
     assert_eq!(final_record.attempt, 2);
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio_test]
+async fn test_dropping_cancel_caller_keeps_persisted_signal_worker_alive() {
+    let store = Arc::new(HoldTerminalStore::for_late_cancel_return());
+    let service = TaskExecutionServiceBuilder::default()
+        .max_inflight_operations(std::num::NonZeroUsize::new(1).expect("positive limit"))
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let (started_tx, started_rx) = sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let id = service
+        .submit_local(move |context| {
+            started_tx
+                .send(context.cancellation_signal())
+                .expect("signal receiver exists");
+            release_rx.recv().expect("test releases handler");
+            assert!(context.is_cancelled());
+            LocalTaskOutcome::<(), std::io::Error>::Cancelled
+        })
+        .await
+        .expect("local task accepted")
+        .task_id();
+    let signal = started_rx.await.expect("handler started");
+    let cancel_service = service.clone();
+    let cancel = spawn(async move { cancel_service.cancel(id).await });
+    time::timeout(Duration::from_secs(2), store.cancel_persisted.notified())
+        .await
+        .expect("cancel request persisted");
+    assert!(matches!(
+        service
+            .prune_terminal_before(0, std::num::NonZeroUsize::new(1).expect("positive row limit"))
+            .await,
+        Err(qubit_task::service::TaskServiceError::OperationLimitExceeded { limit: 1 })
+    ));
+    cancel.abort();
+    store.release_cancel.notify_one();
+    time::timeout(Duration::from_secs(2), async {
+        while !signal.load(Ordering::Acquire) {
+            task::yield_now().await;
+        }
+    })
+    .await
+    .expect("service-owned worker signals the running handler");
+    release_tx.send(()).expect("handler released");
+    assert_eq!(
+        service.wait(id).await.expect("task settles").state,
+        TaskState::Cancelled
+    );
+    assert!(matches!(
+        service
+            .prune_terminal_before(0, std::num::NonZeroUsize::new(1).expect("positive row limit"))
+            .await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            StoreError::UnsupportedCapability
+        ))
+    ));
     service.shutdown().await.expect("service shuts down");
 }
 
