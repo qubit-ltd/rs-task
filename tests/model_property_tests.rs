@@ -1,4 +1,13 @@
-use proptest::prelude::*;
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+use proptest::prop_assert;
+use proptest::prop_assert_eq;
+use proptest::proptest;
 use qubit_task::engine::LocalTaskExecutionEngine;
 use qubit_task::engine::TaskExecutionEngine;
 use qubit_task::model::ResourceCapacity;
@@ -7,7 +16,7 @@ use qubit_task::model::TaskId;
 
 proptest! {
     #[test]
-    fn unique_gpu_labels_within_limits_are_accepted(count in 0_usize..=32, suffix in 0_u32..100_000) {
+    fn test_unique_gpu_labels_within_limits_are_accepted(count in 0_usize..=32, suffix in 0_u32..100_000) {
         let labels = (0..count)
             .map(|index| format!("gpu-{suffix}-{index}"))
             .collect::<Vec<_>>();
@@ -20,7 +29,7 @@ proptest! {
     }
 
     #[test]
-    fn duplicated_gpu_labels_are_rejected(label in "[a-zA-Z][a-zA-Z0-9_-]{0,31}") {
+    fn test_duplicated_gpu_labels_are_rejected(label in "[a-zA-Z][a-zA-Z0-9_-]{0,31}") {
         let request = ResourceRequest {
             gpu_count: 1,
             gpu_labels: vec![label.clone(), label],
@@ -30,7 +39,7 @@ proptest! {
     }
 
     #[test]
-    fn dropped_cpu_reservations_restore_capacity(cpu_slots in 0_u32..=128, attempts in 1_usize..=64) {
+    fn test_dropped_cpu_reservations_restore_capacity(cpu_slots in 0_u32..=128, attempts in 1_usize..=64) {
         let engine = LocalTaskExecutionEngine::new(ResourceCapacity {
             cpu_slots,
             ..ResourceCapacity::default()

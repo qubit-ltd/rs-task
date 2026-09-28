@@ -34,6 +34,7 @@ use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriberId;
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
+use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -196,7 +197,7 @@ async fn test_task_lifecycle_notifications_publish_and_consume_via_redis() -> Re
     assert_eq!(stats.publish_error, 0, "{stats:?}");
 
     subscription.cancel()?;
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)?;
+    bus.shutdown(ShutdownMode::Immediate)?;
     Ok(())
 }
 
@@ -213,6 +214,6 @@ fn test_redis_facade_rejects_task_event_subscription_without_codec() -> Result<(
         |_| Ok::<(), DeliveryError>(()),
     );
     assert!(result.is_err(), "typed subscription without a codec must fail");
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)?;
+    bus.shutdown(ShutdownMode::Immediate)?;
     Ok(())
 }

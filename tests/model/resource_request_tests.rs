@@ -1,9 +1,16 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use qubit_task::model::RequestValidationField;
 use qubit_task::model::RequestValidationRule;
 use qubit_task::model::ResourceRequest;
 
 #[test]
-fn resource_descriptions_enforce_bounds_and_gpu_consistency() {
+fn test_resource_descriptions_enforce_bounds_and_gpu_consistency() {
     let mut request = ResourceRequest {
         gpu_count: 1,
         gpu_labels: vec!["label".into()],
