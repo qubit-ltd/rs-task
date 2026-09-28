@@ -5,15 +5,19 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "sqlite")]
+mod common;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+#[cfg(feature = "sqlite")]
+use common::sqlite_paths;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
-use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
@@ -93,7 +97,7 @@ impl TaskStore for FailListStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.inner.scan_unfinished(cursor)
     }
 
@@ -288,7 +292,7 @@ async fn test_sqlite_store_counts_all_state_categories() {
     drop(store);
     for file in [
         &path,
-        &path.with_extension("owner.lock"),
+        &sqlite_paths::owner_lock_path(&path),
         &path.with_extension("sqlite-wal"),
         &path.with_extension("sqlite-shm"),
     ] {
@@ -329,7 +333,7 @@ async fn test_service_stats_uses_one_sqlite_aggregate_for_large_history() {
     drop(sqlite);
     for file in [
         &path,
-        &path.with_extension("owner.lock"),
+        &sqlite_paths::owner_lock_path(&path),
         &path.with_extension("sqlite-wal"),
         &path.with_extension("sqlite-shm"),
     ] {
@@ -356,7 +360,7 @@ async fn test_sqlite_store_count_rejects_unknown_state_kind() {
     drop(store);
     for file in [
         &path,
-        &path.with_extension("owner.lock"),
+        &sqlite_paths::owner_lock_path(&path),
         &path.with_extension("sqlite-wal"),
         &path.with_extension("sqlite-shm"),
     ] {

@@ -5,14 +5,18 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "sqlite")]
+mod common;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+#[cfg(feature = "sqlite")]
+use common::sqlite_paths;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
-use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -399,7 +403,7 @@ async fn test_task_store_default_pruning_reports_unsupported_capability() {
             self.0.has_unfinished_over_limit(limit)
         }
 
-        fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+        fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
             self.0.scan_unfinished(cursor)
         }
 
@@ -462,7 +466,7 @@ async fn test_service_pruning_uses_admission_and_removes_terminal_history() {
 #[cfg(feature = "sqlite")]
 fn remove_database(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }

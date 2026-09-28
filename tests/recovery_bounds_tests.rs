@@ -7,11 +7,15 @@
 // =============================================================================
 #![cfg(feature = "sqlite")]
 
+#[cfg(feature = "sqlite")]
+mod common;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+#[cfg(feature = "sqlite")]
+use common::sqlite_paths;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskHandler;
@@ -20,9 +24,8 @@ use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
-use qubit_task::model::StoredTask;
-use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -91,7 +94,7 @@ fn temp_db() -> std::path::PathBuf {
 
 fn cleanup(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(path));
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
@@ -391,7 +394,7 @@ enum BadPage {
 struct BadScanStore {
     inner: Arc<SqliteTaskStore>,
     mode: BadPage,
-    stored: Mutex<Option<StoredTask>>,
+    stored: Mutex<Option<TaskSummary>>,
     cursor: TaskId,
     precheck_calls: AtomicUsize,
     scan_calls: AtomicUsize,
@@ -500,7 +503,7 @@ impl TaskStore for BadScanStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.scan_calls.fetch_add(1, Ordering::Relaxed);
         let gate = self.scan_gate.clone();
         Box::pin(async move {
@@ -509,7 +512,7 @@ impl TaskStore for BadScanStore {
             }
             match self.mode {
                 BadPage::Normal => self.inner.scan_unfinished(cursor).await,
-                BadPage::EmptyWithNext => Ok(StoredTaskPage {
+                BadPage::EmptyWithNext => Ok(RecoveryPage {
                     tasks: Vec::new(),
                     next: Some(self.cursor),
                 }),
@@ -521,7 +524,7 @@ impl TaskStore for BadScanStore {
                         }
                     }
                     let task = self.stored.lock().unwrap().clone().ok_or(StoreError::NotFound)?;
-                    Ok(StoredTaskPage {
+                    Ok(RecoveryPage {
                         tasks: vec![task],
                         next: Some(self.cursor),
                     })
@@ -529,7 +532,7 @@ impl TaskStore for BadScanStore {
                 BadPage::TooManyRecords => {
                     let page = self.inner.scan_unfinished(None).await?;
                     let task = page.tasks.first().cloned().ok_or(StoreError::NotFound)?;
-                    Ok(StoredTaskPage {
+                    Ok(RecoveryPage {
                         tasks: vec![task; 257],
                         next: None,
                     })

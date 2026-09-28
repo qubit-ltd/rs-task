@@ -6,6 +6,9 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 #[cfg(feature = "sqlite")]
+mod common;
+
+#[cfg(feature = "sqlite")]
 mod sqlite_tests {
     use std::sync::Arc;
 
@@ -90,7 +93,7 @@ mod sqlite_tests {
     /// Removes only database files created by the SQLite test.
     fn remove_database(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(path.with_extension("owner.lock"));
+        let _ = std::fs::remove_file(crate::common::sqlite_paths::owner_lock_path(path));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }

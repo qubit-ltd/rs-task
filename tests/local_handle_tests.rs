@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "sqlite")]
+mod common;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -12,13 +14,15 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[cfg(feature = "sqlite")]
+use common::sqlite_paths;
 use parking_lot::Mutex;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
+use qubit_task::model::RecoveryPage;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::StoreCapabilities;
-use qubit_task::model::StoredTaskPage;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -158,7 +162,7 @@ impl TaskStore for PauseEvictedGetStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.inner.scan_unfinished(cursor)
     }
 
@@ -230,7 +234,7 @@ impl TaskStore for PauseAfterAcceptStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.inner.scan_unfinished(cursor)
     }
 
@@ -674,7 +678,7 @@ async fn test_recoverable_store_rejects_typed_local_submission() {
     service.shutdown().await.expect("empty service shuts down");
     for suffix in ["", "-wal", "-shm", ".owner.lock"] {
         let file = if suffix == ".owner.lock" {
-            path.with_extension("owner.lock")
+            sqlite_paths::owner_lock_path(&path)
         } else {
             std::path::PathBuf::from(format!("{}{suffix}", path.display()))
         };

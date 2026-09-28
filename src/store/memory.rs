@@ -20,8 +20,8 @@ use super::TaskStore;
 use crate::model::AcceptOutcome;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
+use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
-use crate::model::StoredTaskPage;
 use crate::model::TaskCursor;
 use crate::model::TaskId;
 use crate::model::TaskPage;
@@ -684,7 +684,7 @@ impl TaskStore for MemoryTaskStore {
     ///
     /// Resolves to `UnsupportedCapability` because this store retains no
     /// restart-recovery rows.
-    fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<StoredTaskPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
