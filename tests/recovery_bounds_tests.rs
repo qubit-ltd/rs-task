@@ -41,6 +41,7 @@ use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 use tokio::spawn;
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::test as tokio_test;
 use tokio::time;
@@ -57,6 +58,30 @@ impl TaskHandler for Echo {
 
     fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
+    }
+}
+
+struct GatedEcho {
+    started: mpsc::UnboundedSender<()>,
+    permits: Arc<Semaphore>,
+}
+
+impl TaskHandler for GatedEcho {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
+            task_type: "echo".into(),
+            version: "1".into(),
+        }
+    }
+
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        let started = self.started.clone();
+        let permits = Arc::clone(&self.permits);
+        Box::pin(async move {
+            let _ = started.send(());
+            permits.acquire().await.expect("test gate remains open").forget();
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
     }
 }
 
@@ -212,6 +237,70 @@ async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
         assert!(matches!(service.wait(id).await.unwrap().state, TaskState::Succeeded));
     }
     service.shutdown().await.unwrap();
+    drop(service);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_recovery_running_overflow_uses_recovery_capacity_and_backpressures_new_work() {
+    let path = temp_db();
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let queued = accept(&store).await;
+    let running = accept(&store).await;
+    let running = store
+        .transition(TransitionCommand {
+            id: running.id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .expect("seed running state commits");
+    drop(store);
+
+    let (started, mut started_rx) = mpsc::unbounded_channel();
+    let permits = Arc::new(Semaphore::new(0));
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .queue_capacity(1)
+        .max_running_tasks(std::num::NonZeroUsize::new(1).unwrap())
+        .register_handler(Arc::new(GatedEcho {
+            started,
+            permits: Arc::clone(&permits),
+        }))
+        .unwrap()
+        .build()
+        .await
+        .expect("one queued plus one interrupted running task fit recovery capacity");
+
+    time::timeout(std::time::Duration::from_secs(3), started_rx.recv())
+        .await
+        .expect("one recovered task starts")
+        .expect("start notification is sent");
+    let stats = service
+        .stats()
+        .await
+        .expect("stats succeed after a recovered task starts");
+    assert_eq!(stats.queued, 1);
+    assert_eq!(stats.running, 1);
+
+    let rejected = service
+        .submit(TaskRequest::new("echo", "1", Vec::new()).with_idempotency_key("recovery-capacity-new"))
+        .await;
+    assert!(matches!(rejected, Err(TaskServiceError::QueueFull)));
+
+    permits.add_permits(2);
+    for id in [queued.id, running.id] {
+        time::timeout(std::time::Duration::from_secs(3), service.wait(id))
+            .await
+            .expect("recovered task finishes")
+            .expect("terminal task is returned");
+    }
+    service.shutdown().await.expect("service shuts down");
     drop(service);
     cleanup(&path);
 }
