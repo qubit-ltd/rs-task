@@ -50,4 +50,6 @@ sqlite = ["dep:rusqlite", "dep:fs2"]
 event-bus = ["dep:qubit-event-bus"]
 
 [dev-dependencies]
+qubit-event-bus-redis = { version = "0.1", path = "../rs-event-bus-redis" }
+redis = { version = "0.32.7", default-features = false, features = ["streams"] }
 tokio = { version = "^1.53", features = ["macros", "rt-multi-thread", "time"] }
