@@ -444,7 +444,7 @@ mod tests {
 
         let outcome = bus.shutdown(ShutdownMode::Immediate).expect("bus shutdown");
 
-        assert!(matches!(outcome, ShutdownOutcome::Complete));
+        assert!(matches!(outcome.outcome, ShutdownOutcome::Complete));
     }
 
     #[tokio_crate::test]
