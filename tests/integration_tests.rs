@@ -29,6 +29,8 @@ use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::spi::SpiSubscriptionRequest;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::SubscriptionModes;
 #[cfg(feature = "inventory")]
 use qubit_spi::ProviderDescriptor;
 #[cfg(feature = "inventory")]
@@ -1636,7 +1638,7 @@ impl EventBusSpi for PanicCapabilitiesSpi {
             OrderingCapability::None,
             DelayedDeliveryCapability::None,
             DurabilityCapability::Ephemeral,
-            qubit_event_bus::spi::SubscriptionModes::EPHEMERAL,
+            SubscriptionModes::EPHEMERAL,
             false,
             ReplayCapability::None,
             PublishGuarantee::Accepted,
@@ -1688,7 +1690,7 @@ impl EventBusSpi for BlockingPublishSpi {
             OrderingCapability::None,
             DelayedDeliveryCapability::None,
             DurabilityCapability::Ephemeral,
-            qubit_event_bus::spi::SubscriptionModes::EPHEMERAL,
+            SubscriptionModes::EPHEMERAL,
             false,
             ReplayCapability::None,
             PublishGuarantee::Accepted,

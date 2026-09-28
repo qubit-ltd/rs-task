@@ -56,6 +56,8 @@ use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::spi::SpiSubscriptionRequest;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::SubscriptionModes;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::engine::EngineError;
 use qubit_task::engine::ExecutionHandle;
@@ -363,7 +365,7 @@ impl EventBusSpi for BlockingPublisherSpi {
             OrderingCapability::None,
             DelayedDeliveryCapability::None,
             DurabilityCapability::Ephemeral,
-            qubit_event_bus::spi::SubscriptionModes::EPHEMERAL,
+            SubscriptionModes::EPHEMERAL,
             false,
             ReplayCapability::None,
             PublishGuarantee::Accepted,

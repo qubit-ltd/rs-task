@@ -221,6 +221,7 @@ mod tests {
     use qubit_event_bus::spi::ShutdownMode;
     use qubit_event_bus::spi::ShutdownOutcome;
     use qubit_event_bus::spi::SpiSubscriptionRequest;
+    use qubit_event_bus::spi::SubscriptionModes;
     use qubit_event_bus::spi::TransportPayload;
     use qubit_id::Id;
     use tokio as tokio_crate;
@@ -281,7 +282,7 @@ mod tests {
                 OrderingCapability::None,
                 DelayedDeliveryCapability::None,
                 DurabilityCapability::Ephemeral,
-                qubit_event_bus::spi::SubscriptionModes::EPHEMERAL,
+                SubscriptionModes::EPHEMERAL,
                 false,
                 ReplayCapability::None,
                 PublishGuarantee::Accepted,

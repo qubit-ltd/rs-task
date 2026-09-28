@@ -34,6 +34,7 @@ use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
+use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
@@ -481,7 +482,7 @@ async fn test_dropping_cancel_caller_keeps_persisted_signal_worker_alive() {
         service
             .prune_terminal_before(0, std::num::NonZeroUsize::new(1).expect("positive row limit"))
             .await,
-        Err(qubit_task::service::TaskServiceError::OperationLimitExceeded { limit: 1 })
+        Err(TaskServiceError::OperationLimitExceeded { limit: 1 })
     ));
     cancel.abort();
     store.release_cancel.notify_one();
@@ -501,9 +502,7 @@ async fn test_dropping_cancel_caller_keeps_persisted_signal_worker_alive() {
         service
             .prune_terminal_before(0, std::num::NonZeroUsize::new(1).expect("positive row limit"))
             .await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            StoreError::UnsupportedCapability
-        ))
+        Err(TaskServiceError::Store(StoreError::UnsupportedCapability))
     ));
     service.shutdown().await.expect("service shuts down");
 }
