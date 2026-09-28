@@ -102,6 +102,19 @@ impl DatabaseIdentity {
 }
 
 /// Rejects a file that can be reached through an alias without its owner lock.
+///
+/// # Parameters
+///
+/// * `links` - Physical link count reported for the opened database file.
+///
+/// # Returns
+///
+/// Success only when exactly one filesystem link names the file.
+///
+/// # Errors
+///
+/// Returns `UnsupportedDatabaseIdentity` when the file has multiple or no
+/// links.
 fn ensure_single_link(links: u64) -> Result<(), StoreError> {
     if links != 1 {
         return Err(StoreError::UnsupportedDatabaseIdentity);
@@ -110,6 +123,18 @@ fn ensure_single_link(links: u64) -> Result<(), StoreError> {
 }
 
 /// Returns stable file identity and link count using Unix metadata.
+///
+/// # Parameters
+///
+/// * `file` - Open database handle whose filesystem metadata is inspected.
+///
+/// # Returns
+///
+/// The device/inode pair and physical link count.
+///
+/// # Errors
+///
+/// Returns a store error if metadata access fails.
 #[cfg(unix)]
 fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
     use std::os::unix::fs::MetadataExt;
@@ -119,6 +144,19 @@ fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
 }
 
 /// Returns stable file identity and link count using Windows handle metadata.
+///
+/// # Parameters
+///
+/// * `file` - Open database handle whose filesystem metadata is inspected.
+///
+/// # Returns
+///
+/// The volume/file-index pair and physical link count.
+///
+/// # Errors
+///
+/// Returns `UnsupportedDatabaseIdentity` when Windows cannot supply identity
+/// metadata, or a store error if metadata access fails.
 #[cfg(windows)]
 fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
     use std::os::windows::fs::MetadataExt;
@@ -135,12 +173,32 @@ fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
 }
 
 /// Reports unsupported platforms rather than claiming an unverifiable lock.
+///
+/// # Parameters
+///
+/// * `_file` - Open database handle; identity metadata is unavailable here.
+///
+/// # Returns
+///
+/// This implementation always returns an identity error.
+///
+/// # Errors
+///
+/// Always returns `UnsupportedDatabaseIdentity`.
 #[cfg(not(any(unix, windows)))]
 fn file_identity(_file: &File) -> Result<((u64, u64), u64), StoreError> {
     Err(StoreError::UnsupportedDatabaseIdentity)
 }
 
 /// Converts an operating-system error into a store diagnostic.
+///
+/// # Parameters
+///
+/// * `error` - Filesystem operation error to retain.
+///
+/// # Returns
+///
+/// A store failure containing the operating-system diagnostic.
 fn failure(error: std::io::Error) -> StoreError {
     StoreError::Failure(error.to_string())
 }

@@ -11,6 +11,18 @@ use super::RequestValidationField;
 use super::RequestValidationRule;
 
 /// Structured failure returned by request and resource limit validation.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::RequestValidationField;
+/// use qubit_task::model::TaskRequest;
+///
+/// let error = TaskRequest::new("", "1", Vec::new())
+///     .validate_limits()
+///     .expect_err("task type is required");
+/// assert_eq!(error.field, RequestValidationField::TaskType);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestValidationError {
     /// Field that failed validation.
@@ -24,6 +36,17 @@ pub struct RequestValidationError {
 
 impl RequestValidationError {
     /// Creates a validation error with a stable human-readable diagnostic.
+    ///
+    /// # Parameters
+    ///
+    /// * `field` - Request field that failed validation.
+    /// * `rule` - Validation rule violated by the field.
+    /// * `limit` - Applicable numeric limit, when the rule has one.
+    /// * `message` - Stable diagnostic shown to callers.
+    ///
+    /// # Returns
+    ///
+    /// A structured validation error for the failed request field.
     pub(crate) const fn new(
         field: RequestValidationField,
         rule: RequestValidationRule,
@@ -46,6 +69,19 @@ impl RequestValidationError {
 }
 
 impl fmt::Display for RequestValidationError {
+    /// Writes the stable validation diagnostic without allocating a new string.
+    ///
+    /// # Parameters
+    ///
+    /// * `formatter` - Destination formatter supplied by the caller.
+    ///
+    /// # Returns
+    ///
+    /// The result of writing the diagnostic to the formatter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fmt::Error`] if the destination formatter rejects the write.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.message)
     }

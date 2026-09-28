@@ -389,6 +389,19 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Loads the payload-free summary retained for an exact idempotency key.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Caller-supplied idempotency key to look up.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the matching summary, or `None` when absent.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to a store error if the lookup cannot complete.
     fn get_summary_by_idempotency_key<'a>(
         &'a self,
         key: &'a str,

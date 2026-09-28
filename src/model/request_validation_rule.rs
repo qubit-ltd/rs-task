@@ -6,6 +6,15 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 /// Kind of request rule violated by a field.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::RequestValidationRule;
+///
+/// let rule = RequestValidationRule::MaxBytes;
+/// assert_eq!(rule, RequestValidationRule::MaxBytes);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RequestValidationRule {

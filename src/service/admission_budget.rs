@@ -30,7 +30,7 @@ pub(super) enum AdmissionBudgetError {
     },
 }
 
-/// Current detached admission counts and retained payload bytes.
+/// Current worker count and payload bytes held under the admission lock.
 struct BudgetUsage {
     /// Number of external write operations holding reservations.
     operations: usize,

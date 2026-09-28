@@ -14,6 +14,16 @@ use crate::model::TaskId;
 /// task while it temporarily cannot start. The scheduler still handles a
 /// barrier task that has become terminal, blocked, or permanently
 /// unsatisfiable.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::scheduling::SchedulingPlan;
+///
+/// let plan = SchedulingPlan::default();
+/// assert!(plan.order.is_empty());
+/// assert!(plan.barrier.is_none());
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchedulingPlan {
     /// Candidate task identifiers in preferred order.

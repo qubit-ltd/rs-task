@@ -636,6 +636,18 @@ impl TaskStore for SqliteTaskStore {
     }
 
     /// Reads lifecycle metadata using the payload-free summary projection.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Exact persisted idempotency key to look up.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the matching payload-free summary, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query or persisted summary decoding fails.
     fn get_summary_by_idempotency_key<'a>(
         &'a self,
         key: &'a str,
