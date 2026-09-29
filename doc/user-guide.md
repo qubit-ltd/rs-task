@@ -2,7 +2,7 @@
 
 [Chinese user guide](user-guide.zh_CN.md) · [README](../README.md) · [API reference](https://docs.rs/qubit-task)
 
-This guide covers `qubit-task` 0.6.x on Rust 1.94 or later. It is for Rust service developers who receive requests whose work outlives the request: imports, exports, report generation, media processing, and similar background jobs. Reading through [Check the task result](#check-the-task-result) is enough to accept such work, run it under bounded concurrency, and report its state back to clients. Later sections cover restart recovery, resource budgets, cancellation, retries, history maintenance, status notifications, component assembly, and shutdown. Developers who implement a store, scheduling policy, or execution engine should read [Assemble components with `qubit-spi`](#assemble-components-with-qubit-spi) and the [detailed design](task_execution_service_design.en.md).
+This guide covers `qubit-task` 0.7.x on Rust 1.94 or later. It is for Rust service developers who receive requests whose work outlives the request: imports, exports, report generation, media processing, and similar background jobs. Reading through [Check the task result](#check-the-task-result) is enough to accept such work, run it under bounded concurrency, and report its state back to clients. Later sections cover restart recovery, resource budgets, cancellation, retries, history maintenance, status notifications, component assembly, and shutdown. Developers who implement a store, scheduling policy, or execution engine should read [Assemble components with `qubit-spi`](#assemble-components-with-qubit-spi) and the [detailed design](task_execution_service_design.en.md).
 
 ## Contents
 
@@ -59,7 +59,7 @@ Add the crate, an async runtime, and a payload codec:
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.6", features = ["sqlite"] }
+qubit-task = { version = "0.7", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -330,12 +330,12 @@ For the import example, a normal run prints `import <id> finished: imported 4213
 
 ### Failed, panicked, and blocked
 
-- **`Failed { category, message }`**: the handler returned a `TaskRunError` with `retryable: false`, If the final allowed attempt returns a retryable error, the task becomes `Blocked` because no further attempt can start. `category` is the handler's stable classification (`invalid_payload`, `import_worker`, or whatever the repository chose); `message` is bounded to 4,096 bytes and truncated at a UTF-8 boundary. Keep the full original error in application logs.
+- **`Failed { category, message }`**: the handler returned a `TaskRunError` with `retryable: false`, or the successful handler output exceeded the 64 KiB summary limit. `category` is the handler's stable classification (`invalid_payload`, `import_worker`, or whatever the repository chose); `message` is bounded to 4,096 bytes and truncated at a UTF-8 boundary. Keep the full original error in application logs.
 - **`Panicked { message }`**: the handler future panicked. The engine reports it regardless of where inside the handler it happened. A business error whose category is the string `panic` stays a `Failed`.
-- **`Blocked { reason }`**: the service cannot continue without intervention. Reasons include a missing handler for a recovered `(task_type, handler_version)`, an exhausted attempt budget, a full waiting queue when a retry came due, or `EngineError::Closed` from `activate`. The record stays queryable; see [Retry policy and attempt budget](#retry-policy-and-attempt-budget) for `retry_blocked` and [Browse history and keep it bounded](#browse-history-and-keep-it-bounded) for `abandon_blocked`.
+- **`Blocked { reason }`**: the service cannot continue without intervention. Reasons include a missing handler for a recovered `(task_type, handler_version)`, an exhausted attempt budget, a full waiting queue when the failed attempt is requeued, or `EngineError::Closed` from `activate`. The record stays queryable; see [Retry policy and attempt budget](#retry-policy-and-attempt-budget) for `retry_blocked` and [Browse history and keep it bounded](#browse-history-and-keep-it-bounded) for `abandon_blocked`.
 - **`Cancelled`**: the task was cancelled before it started, or the handler acknowledged a cancellation request. See [Cancel an import](#cancel-an-import).
 
-A retryable error does not produce a terminal state immediately. The record goes back to `Queued` with `retry_not_before_ms` set, and the next attempt starts after the backoff.
+While the attempt budget remains, a retryable error does not produce a terminal state immediately. The record goes back to `Queued` with `retry_not_before_ms` set, and the next attempt starts after the backoff.
 
 The basic integration ends here. The following sections are optional and organised by the question a reader has next.
 
@@ -441,13 +441,12 @@ let builder = TaskExecutionServiceBuilder::in_memory()
     .max_attempts(5);
 ```
 
-`RetryPolicy::new(initial, maximum)` rejects a zero initial delay or a maximum smaller than the initial delay. `max_attempts` counts every start of the task, across process restarts included. When the budget is used up the task becomes `Blocked` rather than retrying forever, and `TaskContext::attempt()` tells the handler which attempt it is on. Each retry uses a normal queue slot; if the waiting queue is full when the retry comes due, the task becomes `Blocked` with a queue-capacity reason instead of exceeding the limit.
+`RetryPolicy::new(initial, maximum)` rejects a zero initial delay or a maximum smaller than the initial delay. `max_attempts` counts every start of the task, across process restarts included. When the budget is used up the task becomes `Blocked` rather than retrying forever, and `TaskContext::attempt()` tells the handler which attempt it is on. Each retry uses a normal queue slot; if the waiting queue is full when the failed attempt is requeued, the task becomes `Blocked` with a queue-capacity reason instead of exceeding the limit.
 
 An operator who has fixed the cause (restored the database, installed the missing handler, freed queue capacity) requeues the task with `retry_blocked`:
 
 ```rust
-use qubit_task::model::{TaskId, TaskState};
-use qubit_task::service::TaskServiceError;
+use qubit_task::model::TaskState;
 
 pub async fn retry_after_fix(
     tasks: &TaskExecutionService,
@@ -498,6 +497,10 @@ Observable startup outcomes:
 Retry due times are persisted with the record, so a restart does not start a retry early. `submit_local` is unavailable on a store that declares restart recovery (`TaskServiceError::UnsupportedCapability`), because a closure cannot be rebuilt from a database; `capabilities().submit_local` reports this. `capabilities().store` reports the `persistent_history` and `restart_recovery` flags of the store that was actually assembled.
 
 SQLite schema 3 stores request metadata, the payload BLOB, and lifecycle JSON in separate columns; summary reads and transitions never select the BLOB. Opening a schema 0, 1, or 2 database migrates it to schema 3 in one transaction and keeps payloads, idempotency keys, and lifecycle values. A newer schema or an unknown record format is rejected explicitly. SQLite runs one blocking database operation at a time on Tokio's blocking pool, so callers must poll from a Tokio runtime. After the service releases ownership during shutdown, an old store handle can no longer write.
+
+### Safe SQLite upgrade
+
+Stop every old service and await successful draining before backing up the database. Deploy the new version, open the same database through a new store instance, inspect recovered summaries, and then reopen the business entry points. A shutdown timeout does not prove a safe handoff; do not run old and new processes concurrently. The lock name appends `.owner.lock` to the complete database filename, for example `jobs.sqlite.owner.lock`. Unix and Windows validate physical file identity; databases with multiple hard links are rejected. Keep the containing directory and lock file trusted and stable. Schema 0, 1, and 2 still migrate to schema 3 without discarding task data.
 
 ## Run process-local closures
 
@@ -568,7 +571,7 @@ let builder = TaskExecutionServiceBuilder::in_memory()
     .queue_capacity(4_096);
 
 // The import is I/O-bound: no CPU slot, but one of the four pooled connections.
-let mut import = TaskRequest::new("csv-import", "1", payload);
+let mut import = TaskRequest::new("csv-import", "1", payload.clone());
 import.resources.cpu_slots = 0;
 import.resources.custom.insert("import_db_connections".into(), 1);
 
@@ -585,6 +588,9 @@ embedding.resources.gpu_labels = vec!["cuda".into()];
 Two more limits are independent of resources. `max_running_tasks` caps concurrently running attempts even when they request zero CPU slots; its default is the available parallelism, falling back to one. Set it explicitly to bound concurrent network or database work such as the import above. `queue_capacity` (default 1,024) bounds the waiting queue; a full queue rejects new submissions with `QueueFull`, which the API maps to HTTP 429.
 
 The default fair FIFO policy lets a task that fits current free resources pass a blocked head-of-queue task, then protects a task that has been bypassed a bounded number of times so it eventually runs. The service also caps in-flight write operations (default 64, `OperationLimitExceeded`) and in-flight request payload bytes (default 64 MiB, `PayloadBudgetExceeded`); a single payload may not exceed 16 MiB. `stats()` returns the current `queued`, `running`, `blocked`, and `terminal` counts plus a `ResourceSnapshot` of free capacity; the counts and the snapshot are taken one after another, not atomically.
+
+
+`submit`, `submit_local`, `cancel`, `retry_blocked`, `abandon_blocked`, and `prune_terminal_before` share `max_inflight_operations` (default 64). `cancel` can also return `OperationLimitExceeded`; apply backoff and retry. Once admitted, dropping or timing out the caller does not cancel the service-owned write worker or undo its store and cancellation side effects. Submission payload bytes have a separate budget.
 
 ## Browse history and keep it bounded
 
@@ -737,7 +743,7 @@ let tasks = TaskExecutionServiceBuilder::in_memory()
     .await?;
 ```
 
-The Redis provider, `qubit-spi`, and `serde_json` are application dependencies; `use qubit_event_bus_redis as _;` links the provider so `discover()` finds it. None of them enter `qubit-task`'s production dependencies. A successful provider receipt means Redis accepted the publish command, not that a subscriber processed the event. Task state and event publication are not one transaction; use a transactional outbox when they must commit together. This assembly is compiled in CI with `cargo check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml` and run with `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`.
+The Redis provider, `qubit-spi`, and `serde_json` are application dependencies; `use qubit_event_bus_redis as _;` links the provider so `discover()` finds it. The Redis adapter and `serde_json` are application dependencies for this example; the task crate itself also depends on `qubit-spi` and `serde_json`. A successful provider receipt means Redis accepted the publish command, not that a subscriber processed the event. Task state and event publication are not one transaction; use a transactional outbox when they must commit together. The default fixture assembles and closes the provider without publishing, so running it does not prove Redis connectivity. To exercise publication, start Redis at `redis://127.0.0.1:6379/`, submit a task, and inspect its notification receipt and subscriber output. This assembly is compiled in CI with `cargo check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml` and run with `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`.
 
 ### Notification counters and shutdown
 
@@ -783,9 +789,13 @@ pub fn assemble(
 
 Implementers of a third-party `TaskStore` must provide `count_states()` as one aggregate, `get_summary` without reading payload bytes, `has_unfinished_over_limit(limit)` without decoding payloads, `transition` returning `TaskSummary`, and summary-based `list` pages; `prune_terminal_before` and `abandon_blocked` may report `UnsupportedCapability`. A `TaskExecutionEngine::try_prepare` is synchronous and must reserve resources promptly without waiting or running handler work; `activate` starts the handler after the service has recorded the attempt as running and must return a trackable execution handle whenever it starts work. The [detailed design](task_execution_service_design.en.md) describes these contracts.
 
+A successful `TaskStore::release_owner(epoch)` is a completion barrier: every write previously admitted under that owner has finished, even if its caller dropped the write future. No old-owner write may commit after release; prevent a new owner from overlapping unfinished old writes. An error is not evidence of a safe handoff. Aggregate counts represent one store consistency boundary, but may already be stale by the time the future returns.
+
+For explicit built-in SPI selection and runnable component assembly, see [`spi_selection.rs`](../tests/fixtures/doc-examples/src/bin/spi_selection.rs). Run it with `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml --bin spi_selection`. Linked external-provider registration is exercised by the provider and consumer fixtures.
+
 ## Lifecycle and shutdown
 
-Startup order: build the service (which recovers stored work), create subscriptions if a bus is used, then open the business entry points. Shutdown order: stop accepting business requests, shut the service down, then cancel event subscriptions and shut down the bus.
+Startup order: create the bus and subscriptions if used, build the service (which recovers stored work), then open the business entry points. Shutdown order: stop accepting business requests, shut the service down, then cancel event subscriptions and shut down the bus.
 
 ```rust
 use std::time::Duration;
@@ -799,18 +809,18 @@ pub async fn stop(tasks: &TaskExecutionService) -> Result<(), Box<dyn std::error
         Ok(()) => Ok(()),
         Err(TaskServiceError::ShutdownTimedOut) => {
             eprintln!("accepted imports are still draining in the background");
-            Ok(())
+            Err(TaskServiceError::ShutdownTimedOut.into())
         }
         Err(TaskServiceError::NotificationClose(reason)) => {
             eprintln!("notifications did not close cleanly: {reason}");
-            Ok(())
+            Err(TaskServiceError::NotificationClose(reason).into())
         }
         Err(error) => Err(error.into()),
     }
 }
 ```
 
-`shutdown()` rejects new writes with `ShuttingDown`, waits for in-flight submissions to finish acceptance, waits for running attempts and the scheduler to settle, drains notifications, and finally releases store ownership. `Ok(())` means all of that completed; the SQLite file can then be opened by the next process. `shutdown_until(deadline)` starts the same drain but bounds only this caller's wait; `ShutdownTimedOut` means the drain continues in the background and ownership has not been released yet. Cancellation is still cooperative during shutdown: a handler that ignores its flag holds the drain. Dropping the last service handle also starts an asynchronous drain, but nobody observes its result; call `shutdown()` when completion matters.
+`shutdown()` rejects new writes with `ShuttingDown`, waits for in-flight submissions to finish acceptance, waits for running attempts and the scheduler to settle, releases store ownership, and then drains notifications. `Ok(())` means all of that completed; the SQLite file can then be opened by the next process. `shutdown_until(deadline)` starts the same drain but bounds only this caller's wait; `ShutdownTimedOut` means the drain continues in the background and ownership has not been released yet. Cancellation is still cooperative during shutdown: a handler that ignores its flag holds the drain. Dropping the last service handle also starts an asynchronous drain, but nobody observes its result; call `shutdown()` when completion matters.
 
 `TaskExecutionServiceBuilder::runtime_handle(Handle)` selects the runtime for service-owned background tasks; keep that runtime alive until shutdown or the drain has finished. Cancelling the future that awaits `build()` does not stop the background construction worker: it stops at a recovery page boundary, releases any owner it acquired, and does not start the scheduler.
 
@@ -843,6 +853,14 @@ Persisted diagnostics are bounded: categories to 128 bytes, messages and blocked
 0.6 removed caller-supplied task IDs, `submit` with closures, thread-pool-specific builder settings, and the old `TaskHandle<R, E>`. Process-local closures now use `submit_local` and receive a `LocalTaskHandle<R, E>`; reconstructable work uses `TaskRequest` with a stable idempotency key, and the service generates the `TaskId`. There is no generic durable handle.
 
 Query and extension contracts also changed: `TaskQuery.states` is `Vec<TaskStateKind>`; history cursors are `TaskCursor { accepted_at_ms, id }`; `SchedulingPolicy` implementations receive `QueuedTask.resources` instead of a full request; `TaskStore` gained `count_states()`, `get_summary()`, `has_unfinished_over_limit(limit)`, `prune_terminal_before`, and `abandon_blocked`, and `transition` returns `TaskSummary`. `max_attempts` now counts starts across process restarts, so a recovered record at the limit becomes `Blocked` instead of running again. Service writes are rejected after shutdown starts, and SQLite writes are fenced by store ownership. Update call sites and custom stores together, then run the application's compile and recovery tests.
+
+| Earlier contract | Current contract |
+| --- | --- |
+| Submission-only concurrency limit | All six writes share `max_inflight_operations`; saturation returns `OperationLimitExceeded` |
+| `StoredTaskPage<StoredTask>` | Payload-free `RecoveryPage<TaskSummary>` |
+| Owner release without a drain contract | `release_owner` is a completion barrier for admitted writes |
+
+This line uses Event Bus 0.16 and Redis adapter 0.4. The bounded `NotificationPublisher` and `AdmissionOutcome` APIs used by task notifications already exist in Event Bus 0.14; that integration needs no call-site migration solely for the version bump. Check provider-specific release notes when upgrading adapters.
 
 ## Boundaries and a practice checklist
 

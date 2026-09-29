@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![中文文档](https://img.shields.io/badge/文档-中文版-blue.svg)](README.zh_CN.md)
 
-`qubit-task` solves a common problem in Rust services: a request arrives whose work takes far longer than the request should stay open, such as importing a large CSV file into the database. Running the import inside the request handler ties up the connection, offers no progress view, and loses the work if the process restarts. This crate lets the handler describe the work as a versioned `TaskRequest`, hand it to one `TaskExecutionService`, and return a task ID immediately. The service runs the matching `TaskHandler` under bounded queue, concurrency, and resource limits, keeps task records queryable within the selected store's retention policy, and, with a recoverable store, reconciles accepted unfinished work after a restart. It schedules within one process and does not turn business side effects into exactly-once operations.
+`qubit-task` solves a common problem in Rust services: a request arrives whose work takes far longer than the request should stay open, such as importing a large CSV file into the database. Running the import inside the request handler ties up the connection, offers no progress view, and loses the work if the process restarts. This crate lets the handler describe the work as a versioned `TaskRequest`, hand it to one `TaskExecutionService`, and return a task ID immediately. The service runs the matching `TaskHandler` under bounded queue, concurrency, and resource limits, keeps a queryable record of every task, and, with a recoverable store, resumes accepted work after a restart. It schedules within one process and does not turn business side effects into exactly-once operations.
 
 ## A data import service example
 
@@ -17,13 +17,18 @@ A tenant administrator uploads a CSV file to object storage and calls `POST /imp
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.6", features = ["sqlite"] }
+qubit-task = { version = "0.7", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 ```
 
 The `sqlite` feature enables restart recovery through `TaskExecutionServiceBuilder::recoverable_sqlite`. Omit it when volatile in-memory execution is enough. The quick start also uses `serde` and `serde_json` to encode task payloads.
+
+| Feature | Effect |
+| --- | --- |
+| Default (empty) | In-memory service and explicit SPI registration |
+| `sqlite` | Persistent history and restart recovery |
+| `inventory` | Discover providers linked into the application |
+| `event-bus` | Publish best-effort lifecycle notifications |
 
 ## Quick start
 
@@ -212,7 +217,7 @@ tasks.shutdown().await?;
 
 `repository` is the application's `Arc<dyn ImportRepository>`. `recoverable_sqlite` takes an operating-system lock on the database, scans unfinished work before returning, and fails startup instead of falling back to memory when the lock or recovery check fails. Replace it with `TaskExecutionServiceBuilder::in_memory()` for volatile execution, where pending work and history are lost on exit.
 
-What the client observes: `start_import` returns within the request; the import runs under `max_running_tasks` and the default single CPU slot per request; `import_status` reports `Pending`, `Running`, and then a terminal state. A retryable `ImportError` is retried with exponential backoff (1 second initially, capped at 60 seconds) up to three attempts by default, after which the task becomes `Blocked` for operator review. A recovered task without a registered `(task_type, handler_version)` also becomes `Blocked`; register the handler, rebuild against the same database, and call `retry_blocked`. `tasks.cancel(id)` only sets the cooperative flag; the handler must return `TaskRunOutcome::Cancelled` for the task to end as `Cancelled`. Recovery is at-least-once, so `ImportRepository` must make repeated batches safe. See the [user guide](doc/user-guide.md) for resource capacity, local closures, notifications, and maintenance.
+What the client observes: `start_import` returns within the request; the import runs under `max_running_tasks` and the default single CPU slot per request; `import_status` reports `Pending`, `Running`, and then a terminal state. A retryable `ImportError` is retried with exponential backoff (1 second initially, capped at 60 seconds) up to three attempts by default, after which the task becomes `Blocked` for operator review. A recovered task without a registered `(task_type, handler_version)` also becomes `Blocked`; register the handler, rebuild against the same database, and call `retry_blocked`. `tasks.cancel(id)` immediately cancels queued or blocked tasks. For running work it requests cooperative cancellation; the handler must acknowledge it with `TaskRunOutcome::Cancelled`. Recovery is at-least-once, so `ImportRepository` must make repeated batches safe. See the [user guide](doc/user-guide.md) for resource capacity, local closures, notifications, and maintenance.
 
 ## What it provides
 
@@ -226,7 +231,7 @@ What the client observes: `start_import` returns within the request; the import 
 
 The crate does not provide multi-node or distributed scheduling, workflow dependencies, cron-style scheduling, forced interruption of arbitrary code, or exactly-once business side effects. `submit_local` is unavailable with a restart-recoverable store because a closure cannot be rebuilt from a database. Notifications are best effort: a full queue (256 entries by default) drops the event, and a publish failure never rolls back a task transition.
 
-Limits that shape a deployment: the in-memory preset keeps a waiting queue of 1,024 tasks, 1,024 terminal records, 2,048 nonterminal records (including `Blocked`), and 64 MiB of request payloads; each request payload is at most 16 MiB, submissions share a 64 MiB in-flight payload budget and 64 in-flight write operations, and history pages return at most 256 records. Request text limits are measured in UTF-8 bytes: `task_type` 128, `handler_version` 64, correlation and idempotency keys 256, and metadata 32 entries with 128-byte keys, 4,096-byte values, and 16,384 combined bytes; persisted diagnostics are bounded to 128-byte categories and 4,096-byte messages. Resource descriptions allow at most 32 GPU labels and 32 custom resource names, each non-empty and at most 128 UTF-8 bytes; GPU labels require a positive `gpu_count`. On restart, unfinished records must fit within `queue_capacity + max_running_tasks` or construction fails with the records preserved. SQLite runs one blocking database operation at a time and keeps history until the application calls `prune_terminal_before`; pruning releases idempotency keys for reuse. `shutdown_until` bounds only the caller's wait, dropping the last service handle starts an asynchronous drain, and a scheduler panic is reported as `SchedulerUnavailable` without automatic restart. See the [user guide](doc/user-guide.md#operational-limits) for the full list.
+Limits that shape a deployment: the in-memory preset keeps a waiting queue of 1,024 tasks, 1,024 terminal records, 2,048 nonterminal records (including `Blocked`), and 64 MiB of request payloads; each request payload is at most 16 MiB, submissions share a 64 MiB in-flight payload budget and 64 in-flight write operations, and history pages return at most 256 records. Request text limits are measured in UTF-8 bytes: `task_type` 128, `handler_version` 64, correlation and idempotency keys 256, and metadata 32 entries with 128-byte keys, 4,096-byte values, and 16,384 combined bytes; persisted diagnostics are bounded to 128-byte categories and 4,096-byte messages. On restart, unfinished records must fit within `queue_capacity + max_running_tasks` or construction fails with the records preserved. SQLite runs one blocking database operation at a time and keeps history until the application calls `prune_terminal_before`; pruning releases idempotency keys for reuse. `shutdown_until` bounds only the caller's wait, dropping the last service handle starts an asynchronous drain, and a scheduler panic is reported as `SchedulerUnavailable` without automatic restart. See the [user guide](doc/user-guide.md#boundaries-and-a-practice-checklist) for the full list.
 
 ## Learn more
 
