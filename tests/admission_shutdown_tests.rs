@@ -17,6 +17,7 @@ use std::time::Duration;
 
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
+use futures::poll;
 use parking_lot::Mutex;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::EventBus;
@@ -94,6 +95,8 @@ use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::LocalTaskResultError;
 use qubit_task::service::TaskExecutionService;
+#[cfg(feature = "sqlite")]
+use qubit_task::service::TaskServiceBuildError;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
@@ -1636,9 +1639,7 @@ async fn test_shutdown_until_keeps_sqlite_owner_until_drain_finishes() {
     ));
     assert!(matches!(
         TaskExecutionServiceBuilder::recoverable_sqlite(&path),
-        Err(qubit_task::service::TaskServiceBuildError::Store(
-            StoreError::OwnerConflict
-        ))
+        Err(TaskServiceBuildError::Store(StoreError::OwnerConflict))
     ));
     assert_eq!(
         service
@@ -2139,7 +2140,7 @@ async fn test_store_fault_shutdown_waits_for_inflight_accept_side_effects() {
 
     let closing = service.shutdown();
     pin!(closing);
-    assert!(matches!(futures::poll!(closing.as_mut()), std::task::Poll::Pending));
+    assert!(matches!(poll!(closing.as_mut()), std::task::Poll::Pending));
     store.accept_release.add_permits(1);
     let accepted_handle = time::timeout(Duration::from_secs(2), submission)
         .await

@@ -12,7 +12,11 @@ mod support;
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
 use qubit_task::store::MemoryTaskStore;
+#[cfg(feature = "sqlite")]
+use qubit_task::store::SqliteTaskStore;
 use tokio::test as tokio_test;
+#[cfg(feature = "sqlite")]
+use uuid::Uuid;
 
 #[tokio_test]
 async fn test_memory_store_obeys_core_contract() {
@@ -23,9 +27,7 @@ async fn test_memory_store_obeys_core_contract() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_store_obeys_core_contract() {
-    use qubit_task::store::SqliteTaskStore;
-
-    let path = std::env::temp_dir().join(format!("rs-task-contract-{}.sqlite", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!("rs-task-contract-{}.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).expect("sqlite store opens");
     support::store_contract::check_core_contract(&store).await;
     drop(store);

@@ -18,6 +18,7 @@ use qubit_task::store::DEFAULT_MAX_UNFINISHED_RECORDS;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
+use tokio::test as tokio_test;
 
 /// Accepts a keyed zero-payload record in the supplied store.
 async fn accept(store: &MemoryTaskStore, key: &str) -> Result<AcceptOutcome, StoreError> {
@@ -48,7 +49,7 @@ async fn transition(store: &MemoryTaskStore, id: TaskId, state: TaskState) -> Re
 }
 
 /// Rejects distinct zero-payload records at the configured nonterminal limit.
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_unfinished_limit_rejects_zero_payload_records() {
     let store = MemoryTaskStore::with_limits(
         4,
@@ -80,7 +81,7 @@ async fn test_memory_store_unfinished_limit_rejects_zero_payload_records() {
 }
 
 /// Keeps blocked and requeued records charged until they become terminal.
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_unfinished_limit_tracks_blocked_transitions() {
     let store = MemoryTaskStore::with_limits(
         0,
@@ -123,7 +124,7 @@ async fn test_memory_store_unfinished_limit_tracks_blocked_transitions() {
     ));
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_summary_reads_preserve_large_payload_and_lifecycle_metadata() {
     let store = MemoryTaskStore::new(8);
     let request =
@@ -181,7 +182,7 @@ async fn test_memory_summary_reads_preserve_large_payload_and_lifecycle_metadata
 }
 
 /// Applies the documented default cap to zero-payload nonterminal records.
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_default_unfinished_limit() {
     let store = MemoryTaskStore::new(0);
     for _ in 0..DEFAULT_MAX_UNFINISHED_RECORDS {
@@ -203,7 +204,7 @@ async fn test_memory_store_default_unfinished_limit() {
 }
 
 /// Enforces the common history page cap while retaining cursor order.
-#[tokio::test]
+#[tokio_test]
 async fn test_memory_store_task_query_limit() {
     let store = MemoryTaskStore::new(300);
     for index in 0..=MAX_TASK_QUERY_LIMIT {

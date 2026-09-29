@@ -43,6 +43,9 @@ use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
 use qubit_task::service::LocalTaskOutcome;
 use redis::Client;
+use serde_json as json;
+use tokio::runtime::Handle;
+use tokio::test as tokio_test;
 
 struct RedisContainer {
     container_id: String,
@@ -108,7 +111,7 @@ impl EventCodec<TaskEvent> for TaskEventJsonCodec {
     }
 
     fn encode(&self, value: &TaskEvent) -> Result<Arc<[u8]>, CodecError> {
-        serde_json::to_vec(value)
+        json::to_vec(value)
             .map(Arc::<[u8]>::from)
             .map_err(|source| CodecError::Encode {
                 source: Box::new(source),
@@ -116,7 +119,7 @@ impl EventCodec<TaskEvent> for TaskEventJsonCodec {
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<TaskEvent, CodecError> {
-        serde_json::from_slice(bytes).map_err(|source| CodecError::Decode {
+        json::from_slice(bytes).map_err(|source| CodecError::Decode {
             source: Box::new(source),
         })
     }
@@ -142,7 +145,7 @@ fn create_event_bus(url: &str, namespace: &str, register_task_codec: bool) -> Re
     Ok(EventBusRegistry::discover()?.create(&config)?)
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio_test(flavor = "multi_thread")]
 async fn test_task_lifecycle_notifications_publish_and_consume_via_redis() -> Result<(), Box<dyn Error>> {
     let redis = RedisContainer::start()?;
     let bus = create_event_bus(&redis.url, "task-redis-integration", true)?;
@@ -163,7 +166,7 @@ async fn test_task_lifecycle_notifications_publish_and_consume_via_redis() -> Re
     )?;
 
     let service = TaskExecutionServiceBuilder::in_memory()
-        .runtime_handle(tokio::runtime::Handle::current())
+        .runtime_handle(Handle::current())
         .event_bus(bus.clone())
         .build()
         .await?;

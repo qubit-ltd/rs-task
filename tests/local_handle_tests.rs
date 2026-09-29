@@ -16,6 +16,7 @@ use std::time::Duration;
 
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
+use futures::poll;
 use parking_lot::Mutex;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::AcceptOutcome;
@@ -378,7 +379,7 @@ async fn test_evicted_cancel_waits_for_authoritative_transition_response() {
         .expect("replacement succeeds");
 
     let mut result = Box::pin(handle.result());
-    assert!(matches!(futures::poll!(result.as_mut()), std::task::Poll::Pending));
+    assert!(matches!(poll!(result.as_mut()), std::task::Poll::Pending));
     store.cancel_release.add_permits(1);
     assert_eq!(
         time::timeout(WAIT_LIMIT, cancellation)

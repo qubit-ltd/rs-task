@@ -28,6 +28,8 @@ use qubit_task::model::TaskState;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
+use qubit_task::store::SqliteTaskStore;
+#[cfg(feature = "sqlite")]
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 use tokio::sync;
@@ -197,9 +199,6 @@ async fn test_local_task_handler_rejects_a_second_run() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
-    use qubit_task::store::SqliteTaskStore;
-    use qubit_task::store::TaskStore;
-
     let path = std::env::temp_dir().join(format!("qubit-task-find-idempotent-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
 
@@ -251,8 +250,6 @@ async fn test_sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_summary_lookup_by_idempotency_key_tracks_lifecycle_without_payload() {
-    use qubit_task::store::SqliteTaskStore;
-
     let path = std::env::temp_dir().join(format!("qubit-task-summary-key-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     assert_store_summary_lookup(&store, "sqlite-summary-key").await;
@@ -266,9 +263,6 @@ async fn test_sqlite_summary_lookup_by_idempotency_key_tracks_lifecycle_without_
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
-    use qubit_task::store::SqliteTaskStore;
-    use qubit_task::store::TaskStore;
-
     let path = std::env::temp_dir().join(format!("qubit-task-invalid-request-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     let request = TaskRequest::new("", "v1", Vec::new());
@@ -285,8 +279,6 @@ async fn test_sqlite_accept_rejects_invalid_requests_before_queueing_a_write() {
 #[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_open_reports_a_non_directory_parent() {
-    use qubit_task::store::SqliteTaskStore;
-
     let parent = std::env::temp_dir().join(format!("qubit-task-not-directory-{}", TaskId::generate()));
     std::fs::write(&parent, b"not a directory").expect("parent fixture is created");
     let result = SqliteTaskStore::open(parent.join("tasks.sqlite"));

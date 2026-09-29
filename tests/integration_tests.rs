@@ -12,9 +12,25 @@ use std::sync::Arc;
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
 #[cfg(feature = "event-bus")]
+use qubit_event_bus::DeliveryError;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::EventBus;
+#[cfg(feature = "event-bus")]
 use qubit_event_bus::error::SpiError;
 #[cfg(feature = "event-bus")]
+use qubit_event_bus::local::LocalEventBusConfig;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::model::ProviderId;
+#[cfg(feature = "event-bus")]
 use qubit_event_bus::model::PublishAcknowledgement;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::model::SubscribeRequest;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::model::Topic;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::DelayedDeliveryCapability;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::DurabilityCapability;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::spi::EventBusCapabilities;
 #[cfg(feature = "event-bus")]
@@ -22,7 +38,19 @@ use qubit_event_bus::spi::EventBusSpi;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::spi::EventSubscriptionSpi;
 #[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::OrderingCapability;
+#[cfg(feature = "event-bus")]
 use qubit_event_bus::spi::OutboundMessage;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::PayloadModes;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::PublishGuarantee;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::PublishVisibility;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::ReplayCapability;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::SettlementCapabilities;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::spi::ShutdownMode;
 #[cfg(feature = "event-bus")]
@@ -35,7 +63,7 @@ use qubit_event_bus::spi::SubscriptionModes;
 use qubit_spi::ProviderDescriptor;
 #[cfg(feature = "inventory")]
 use qubit_spi::ProviderMetadata;
-#[cfg(feature = "inventory")]
+#[cfg(any(feature = "sqlite", feature = "inventory"))]
 use qubit_spi::ProviderSelection;
 #[cfg(feature = "inventory")]
 use qubit_spi::ServiceProvider;
@@ -85,6 +113,8 @@ use qubit_task::service::CancelOutcome;
 use qubit_task::service::LocalTaskOutcome;
 use qubit_task::service::TaskServiceBuildError;
 use qubit_task::service::TaskServiceError;
+#[cfg(any(feature = "sqlite", feature = "inventory"))]
+use qubit_task::spi;
 #[cfg(feature = "inventory")]
 use qubit_task::spi::MEMORY_STORE_PROVIDER_ID;
 #[cfg(feature = "inventory")]
@@ -101,6 +131,8 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+#[cfg(feature = "sqlite")]
+use rusqlite::Connection;
 use tokio::runtime;
 use tokio::spawn;
 use tokio::sync;
@@ -1208,8 +1240,6 @@ async fn test_sqlite_store_recovers_interrupted_running_task() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
-    use qubit_task::store::SqliteTaskStore;
-
     let path = std::env::temp_dir().join(format!("qubit-task-query-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     let mut request = TaskRequest::new("echo", "1", Vec::new());
@@ -1325,8 +1355,6 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
-    use qubit_task::store::SqliteTaskStore;
-
     let path = std::env::temp_dir().join(format!("qubit-task-state-kinds-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     let states = [
@@ -1404,7 +1432,7 @@ async fn test_sqlite_store_maps_corrupt_records_and_terminal_states() {
         _ => panic!("task is new"),
     };
     drop(bad_store);
-    rusqlite::Connection::open(&bad_path)
+    Connection::open(&bad_path)
         .unwrap()
         .execute(
             "UPDATE tasks SET lifecycle_json='not-json' WHERE id=?1",
@@ -1523,9 +1551,6 @@ fn test_spi_inventory_discovers_builtin_and_linked_store_providers() {
 #[cfg(feature = "inventory")]
 #[test]
 fn test_spi_builtin_registries_construct_all_component_families() {
-    use qubit_spi::ProviderSelection;
-    use qubit_task::spi;
-
     let memory_config = spi::TaskStoreConfig::Memory { history_capacity: 5 };
     let memory_registry = spi::memory_store_registry();
     let memory = memory_registry
@@ -1575,9 +1600,6 @@ fn test_spi_builtin_registries_construct_all_component_families() {
 #[cfg(all(feature = "inventory", feature = "sqlite"))]
 #[test]
 fn test_spi_sqlite_provider_requires_and_accepts_sqlite_configuration() {
-    use qubit_spi::ProviderSelection;
-    use qubit_task::spi;
-
     let registry = spi::discovered_task_store_registry().expect("store providers are discovered");
     let provider = registry
         .resolve_selected(&ProviderSelection::named(spi::SQLITE_STORE_PROVIDER_ID).unwrap())
@@ -1602,9 +1624,6 @@ fn test_spi_sqlite_provider_requires_and_accepts_sqlite_configuration() {
 #[cfg(feature = "sqlite")]
 #[test]
 fn test_spi_sqlite_builtin_registry_works_without_inventory() {
-    use qubit_spi::ProviderSelection;
-    use qubit_task::spi;
-
     let path = std::env::temp_dir().join(format!("qubit-task-sqlite-registry-{}.sqlite", TaskId::generate()));
     let provider = spi::sqlite_store_registry()
         .resolve_selected(&ProviderSelection::named(spi::SQLITE_STORE_PROVIDER_ID).unwrap())
@@ -1624,15 +1643,6 @@ struct PanicCapabilitiesSpi;
 #[cfg(feature = "event-bus")]
 impl EventBusSpi for PanicCapabilitiesSpi {
     fn capabilities(&self) -> EventBusCapabilities {
-        use qubit_event_bus::spi::DelayedDeliveryCapability;
-        use qubit_event_bus::spi::DurabilityCapability;
-        use qubit_event_bus::spi::OrderingCapability;
-        use qubit_event_bus::spi::PayloadModes;
-        use qubit_event_bus::spi::PublishGuarantee;
-        use qubit_event_bus::spi::PublishVisibility;
-        use qubit_event_bus::spi::ReplayCapability;
-        use qubit_event_bus::spi::SettlementCapabilities;
-
         EventBusCapabilities::new(
             PayloadModes::Native,
             SettlementCapabilities::None,
@@ -1676,15 +1686,6 @@ struct BlockingPublishSpi {
 #[cfg(feature = "event-bus")]
 impl EventBusSpi for BlockingPublishSpi {
     fn capabilities(&self) -> EventBusCapabilities {
-        use qubit_event_bus::spi::DelayedDeliveryCapability;
-        use qubit_event_bus::spi::DurabilityCapability;
-        use qubit_event_bus::spi::OrderingCapability;
-        use qubit_event_bus::spi::PayloadModes;
-        use qubit_event_bus::spi::PublishGuarantee;
-        use qubit_event_bus::spi::PublishVisibility;
-        use qubit_event_bus::spi::ReplayCapability;
-        use qubit_event_bus::spi::SettlementCapabilities;
-
         EventBusCapabilities::new(
             PayloadModes::Native,
             SettlementCapabilities::None,
@@ -1731,12 +1732,6 @@ impl EventBusSpi for BlockingPublishSpi {
 #[cfg(feature = "event-bus")]
 #[tokio_test]
 async fn test_event_bus_receives_status_changes_without_becoming_authoritative() {
-    use qubit_event_bus::DeliveryError;
-    use qubit_event_bus::EventBus;
-    use qubit_event_bus::local::LocalEventBusConfig;
-    use qubit_event_bus::model::SubscribeRequest;
-    use qubit_event_bus::model::Topic;
-
     let bus = EventBus::local(LocalEventBusConfig::default()).expect("local event bus starts");
     let topic = Topic::<TaskEvent>::new("task.lifecycle").expect("topic is valid");
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1819,11 +1814,6 @@ async fn test_event_bus_receives_status_changes_without_becoming_authoritative()
 #[cfg(feature = "event-bus")]
 #[tokio_test]
 async fn test_notification_provider_panic_is_reported_without_stopping_worker() {
-    use qubit_event_bus::EventBus;
-    use qubit_event_bus::model::ProviderId;
-    use qubit_event_bus::spi::ShutdownMode;
-    use qubit_task::service::TaskExecutionServiceBuilder;
-
     let event_bus = EventBus::from_spi(
         ProviderId::new("panic-capabilities").expect("provider ID is valid"),
         Arc::new(PanicCapabilitiesSpi),
@@ -1873,11 +1863,6 @@ async fn test_notification_provider_panic_is_reported_without_stopping_worker() 
 #[cfg(feature = "event-bus")]
 #[tokio_test]
 async fn test_notification_close_timeout_is_reported_by_service_shutdown() {
-    use qubit_event_bus::EventBus;
-    use qubit_event_bus::model::ProviderId;
-    use qubit_task::service::TaskExecutionServiceBuilder;
-    use qubit_task::service::TaskServiceError;
-
     let (entered, entered_receiver) = std::sync::mpsc::sync_channel(1);
     let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let event_bus = EventBus::from_spi(
@@ -1934,9 +1919,6 @@ async fn test_notification_close_timeout_is_reported_by_service_shutdown() {
 #[cfg(feature = "event-bus")]
 #[tokio_test]
 async fn test_event_bus_publish_failure_does_not_change_task_result() {
-    use qubit_event_bus::EventBus;
-    use qubit_event_bus::local::LocalEventBusConfig;
-
     let bus = EventBus::local(LocalEventBusConfig::default()).expect("local event bus starts");
     bus.shutdown(ShutdownMode::Immediate)
         .expect("event bus shuts down before notification");
