@@ -36,7 +36,7 @@ done < <(
     awk -F'"' '
         /^\[rs-infra-/ { name = substr($0, 2, length($0) - 2); source = ""; revision = "" }
         /^[[:space:]]*source[[:space:]]*=/ { source = $2 }
-        /^[[:space:]]*revision[[:space:]]*=/ { revision = $2; if (name != "" && source != "" && revision != "" && name != "rs-infra-dependency") print name "\t" source "\t" revision }
+        /^[[:space:]]*revision[[:space:]]*=/ { revision = $2; if (name != "" && source != "" && revision != "") print name "\t" source "\t" revision }
     ' "$tools_config"
     source=$(awk -F'"' '/^[[:space:]]*source[[:space:]]*=/ { print $2; exit }' "$policy_config")
     revision=$(awk -F'"' '/^[[:space:]]*revision[[:space:]]*=/ { print $2; exit }' "$policy_config")
