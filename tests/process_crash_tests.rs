@@ -10,9 +10,11 @@
 //! execution.
 #![cfg(feature = "sqlite")]
 
+use std::fs::OpenOptions;
 use std::fs::Permissions;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -116,8 +118,21 @@ fn build_worker() -> WorkerInstance {
     });
     let workspace = Database::new();
     let path = workspace.0.join(format!("worker{}", std::env::consts::EXE_SUFFIX));
-    std::fs::write(&path, &fixture.bytes).expect("private worker executable is materialized");
-    std::fs::set_permissions(&path, fixture.permissions.clone()).expect("worker executable permissions are restored");
+    let temporary_path = workspace.0.join(format!("worker.tmp{}", std::env::consts::EXE_SUFFIX));
+    let mut temporary_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+        .expect("private worker temporary file is created");
+    temporary_file
+        .write_all(&fixture.bytes)
+        .expect("private worker executable bytes are written");
+    temporary_file
+        .set_permissions(fixture.permissions.clone())
+        .expect("worker executable permissions are restored");
+    temporary_file.sync_all().expect("worker executable is flushed");
+    drop(temporary_file);
+    std::fs::rename(&temporary_path, &path).expect("complete worker executable is published atomically");
     WorkerInstance {
         path,
         _workspace: workspace,
@@ -192,16 +207,32 @@ struct Ready {
 /// guard.
 async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize) {
     let worker = spawn_blocking(build_worker).await.expect("fixture build task finishes");
-    let child = Command::new(&worker.path)
+    let mut command = Command::new(&worker.path);
+    command
         .arg(database.path())
         .arg(mode)
         .arg(id.to_string())
         .arg(count.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("crash worker starts");
+        .stderr(Stdio::inherit());
+    let mut etxtbsy_attempts = 0_u32;
+    let child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                // Under heavily parallel CI the temporary filesystem can
+                // briefly report the atomically published executable as busy.
+                // Retry only this transient exec error with a bounded delay.
+                if etxtbsy_attempts >= 5 {
+                    panic!("crash worker remains busy at {}: {error}", worker.path.display());
+                }
+                tokio::time::sleep(Duration::from_millis(1 << etxtbsy_attempts)).await;
+                etxtbsy_attempts += 1;
+            }
+            Err(error) => panic!("crash worker starts at {}: {error}", worker.path.display()),
+        }
+    };
     let mut child = ChildGuard(child);
     let output = child.0.stdout.take().expect("protocol stdout is piped");
     let reader = spawn_blocking(move || {
