@@ -73,6 +73,12 @@ def merge(left, right):
 inherited_source_overrides = sorted(key for key in os.environ if key.startswith("CARGO_SOURCE_"))
 if inherited_source_overrides:
     raise SystemExit("Inherited CARGO_SOURCE_* Cargo overrides are forbidden for packaged verification: " + ", ".join(inherited_source_overrides))
+inherited_registry_indexes = sorted(
+    key for key in os.environ
+    if key.startswith("CARGO_REGISTRIES_") and key.endswith("_INDEX")
+)
+if inherited_registry_indexes:
+    raise SystemExit("Inherited CARGO_REGISTRIES_*_INDEX overrides are forbidden for packaged verification: " + ", ".join(inherited_registry_indexes))
 
 for filename in sys.argv[1:]:
     with open(filename, "rb") as cargo_config:
@@ -95,7 +101,7 @@ for filename in sys.argv[1:]:
     registries = merge(registries, config.get("registries", {}))
 
 crates_io = sources.get("crates-io", {})
-replacement = os.environ.get("CARGO_SOURCE_CRATES_IO_REPLACE_WITH") or crates_io.get("replace-with")
+replacement = crates_io.get("replace-with")
 direct_registry = crates_io.get("registry")
 if "directory" in crates_io or "local-registry" in crates_io:
     raise SystemExit("crates-io is configured as a local directory/registry; refusing packaged verification")
@@ -131,7 +137,7 @@ elif direct_registry:
         raise SystemExit("Configured crates-io registry is not a remote HTTPS registry")
     print(f"Validated Cargo registry index: {redact_url(direct_registry)}")
 else:
-    configured_index = os.environ.get("CARGO_REGISTRIES_CRATES_IO_INDEX") or registries.get("crates-io", {}).get("index")
+    configured_index = registries.get("crates-io", {}).get("index")
     if configured_index:
         normalized = configured_index.removeprefix("sparse+")
         if urlparse(normalized).scheme != "https":
