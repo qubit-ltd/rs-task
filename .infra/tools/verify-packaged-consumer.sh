@@ -79,6 +79,9 @@ for filename in sys.argv[1:]:
         config = tomllib.load(cargo_config)
     if config.get("patch"):
         raise SystemExit(f"Cargo config contains [patch], refusing packaged verification: {filename}")
+    for source_name, source in config.get("source", {}).items():
+        if isinstance(source, dict) and ("directory" in source or "local-registry" in source):
+            raise SystemExit(f"Cargo source {source_name!r} in {filename} uses a local directory/registry")
     sources = merge(sources, config.get("source", {}))
     registries = merge(registries, config.get("registries", {}))
 
