@@ -77,6 +77,7 @@ use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::ResourceSnapshot;
 use qubit_task::model::StoreCapabilities;
+use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -581,7 +582,7 @@ impl TaskStore for ControlledStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         Box::pin(async { Ok(RecoveryPage::default()) })
     }
 

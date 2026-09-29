@@ -14,6 +14,7 @@ use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
+use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
@@ -142,7 +143,7 @@ impl TaskStore for DelayedWriteStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.inner.scan_unfinished(cursor)
     }
 

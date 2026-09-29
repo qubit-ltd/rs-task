@@ -18,6 +18,7 @@ use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
+use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -400,7 +401,10 @@ async fn test_task_store_default_pruning_reports_unsupported_capability() {
             self.0.has_unfinished_over_limit(limit)
         }
 
-        fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+        fn scan_unfinished<'a>(
+            &'a self,
+            cursor: Option<TaskCursor>,
+        ) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
             self.0.scan_unfinished(cursor)
         }
 

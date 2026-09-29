@@ -742,30 +742,48 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
-    /// Loads at most 256 unfinished records after an exclusive task ID.
+    /// Loads at most 256 unfinished summaries after an exclusive time/ID key.
     ///
     /// # Parameters
     ///
-    /// * `cursor` - Last task ID returned by the preceding page.
+    /// * `cursor` - Exclusive acceptance-time/ID lower bound, or `None` for the
+    ///   first page.
     ///
     /// # Returns
     ///
-    /// A future resolving to records and an optional next cursor.
+    /// A payload-free page strictly ordered by `(accepted_at_ms, id)`.
+    /// Its next cursor equals the last row key only when more rows exist;
+    /// full terminal pages and empty pages return `None`.
     ///
     /// # Errors
     ///
     /// Returns an error if a row is malformed or SQLite access fails.
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.run(move |connection| {
-            let mut statement = connection.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE state_kind IN ('Queued','Running') AND (?1 IS NULL OR id > ?1) ORDER BY id LIMIT 257")).map_err(failure)?;
-            let mut rows = statement.query([cursor.map(|id| id.to_string())]).map_err(failure)?;
+            let mut sql = format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE state_kind IN ('Queued','Running')");
+            let mut values = Vec::new();
+            if let Some(cursor) = cursor {
+                let accepted_at = i64::try_from(cursor.accepted_at_ms).map_err(|_| {
+                    StoreError::InvalidRequest("recovery cursor timestamp exceeds the SQLite integer range")
+                })?;
+                sql.push_str(" AND (accepted_at, id) > (?1, ?2)");
+                values.push(Value::Integer(accepted_at));
+                values.push(Value::Text(cursor.id.to_string()));
+            }
+            sql.push_str(" ORDER BY accepted_at, id LIMIT 257");
+            let mut statement = connection.prepare(&sql).map_err(failure)?;
+            let mut rows = statement.query(params_from_iter(values)).map_err(failure)?;
             let mut tasks = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
-                tasks.push(decode_stored_summary_row(read_stored_summary_row(row).map_err(failure)?)?);
+                tasks.push(decode_stored_summary_row(
+                    read_stored_summary_row(row).map_err(failure)?,
+                )?);
             }
             let has_more = tasks.len() > 256;
-            if has_more { tasks.truncate(256); }
-            let next = has_more.then(|| tasks.last().map(|task| task.id)).flatten();
+            if has_more {
+                tasks.truncate(256);
+            }
+            let next = has_more.then(|| tasks.last().map(TaskCursor::from)).flatten();
             Ok(RecoveryPage { tasks, next })
         })
     }

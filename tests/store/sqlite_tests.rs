@@ -8,6 +8,7 @@
 use qubit_task::TaskId;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::MAX_TASK_QUERY_LIMIT;
+use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
@@ -787,6 +788,23 @@ async fn test_sqlite_store_accepts_retry_deadlines_only_while_queued() {
         .await
         .unwrap();
     assert_eq!(running.retry_not_before_ms, None);
+    drop(store);
+    remove_database(&path);
+}
+
+/// Recovery rejects cursors that cannot be represented by SQLite timestamps.
+#[tokio_test]
+async fn test_sqlite_recovery_rejects_cursor_timestamp_outside_integer_range() {
+    let path = database_path("recovery-cursor-range");
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+    assert!(matches!(
+        store
+            .scan_unfinished(Some(TaskCursor::new(u64::MAX, TaskId::generate())))
+            .await,
+        Err(StoreError::InvalidRequest(
+            "recovery cursor timestamp exceeds the SQLite integer range"
+        ))
+    ));
     drop(store);
     remove_database(&path);
 }
