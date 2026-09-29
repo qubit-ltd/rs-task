@@ -19,7 +19,6 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
 use support::delayed_write_store::DelayedWriteStore;
 use tokio::spawn;
-use tokio::sync::oneshot;
 use tokio::test as tokio_test;
 use tokio::time;
 
@@ -27,7 +26,7 @@ use tokio::time;
 async fn test_release_owner_waits_for_previously_admitted_write() {
     let path = std::env::temp_dir().join(format!("qubit-task-owner-barrier-{}.sqlite", TaskId::generate()));
     let inner = SqliteTaskStore::open(&path).expect("SQLite provider opens");
-    let (store, accept_started) = DelayedWriteStore::new(inner);
+    let (store, accept_started, release_waiting) = DelayedWriteStore::new(inner);
     let store = Arc::new(store);
     let epoch = store.acquire_owner().await.expect("owner lease acquired");
 
@@ -35,16 +34,18 @@ async fn test_release_owner_waits_for_previously_admitted_write() {
     let accepting = spawn(async move { accept_store.accept(TaskId::generate(), keyed_request()).await });
     accept_started.await.expect("write entered provider");
 
-    let (release_started_sender, release_started_receiver) = oneshot::channel();
     let release_store = Arc::clone(&store);
-    let mut releasing = spawn(async move {
-        let _ = release_started_sender.send(());
-        release_store.release_owner(epoch).await
-    });
-    release_started_receiver.await.expect("release began");
+    let releasing = spawn(async move { release_store.release_owner(epoch).await });
     assert!(
-        time::timeout(Duration::from_millis(50), &mut releasing).await.is_err(),
-        "owner release must wait for the earlier write"
+        time::timeout(Duration::from_secs(2), release_waiting)
+            .await
+            .expect("owner release reaches the active-write barrier")
+            .is_ok(),
+        "owner release signals that it is waiting for the earlier write"
+    );
+    assert!(
+        !releasing.is_finished(),
+        "release remains pending while a write is active"
     );
 
     store.release_accept();
