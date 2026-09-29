@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// Admits detached lifecycle writes and manages bounded queue reservations.
+mod admission;
 // Finalizes an attempt and releases its in-flight reservation.
 mod attempt_finalizer;
 // Tracks attempts that still own execution resources.
@@ -54,6 +56,3 @@ pub(super) use validation::release_core_queue_slot;
 pub(super) use validation::retry_deadline_ms;
 pub(super) use validation::truncate_utf8;
 pub(super) use validation::try_reserve_core_queue_slot;
-pub(super) use validation::validate_request;
-pub(super) use validation::validate_request_capacity;
-pub(super) use validation::validate_request_format;
