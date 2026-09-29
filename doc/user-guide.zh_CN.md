@@ -307,6 +307,12 @@ provider receipt 表示 Redis 接受了发布命令，不表示订阅者已经�
 任务状态变更与事件发布没有事务绑定。若要求状态与消息原子提交，应使用事务性 outbox。
 文档 codec 与 provider 装配由 `cargo check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`
 编译；可用 `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml` 运行该示例。
+同一 fixture 还会编译指南中的内存任务、协作取消和版本化请求流程，可运行
+`cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml --bin task_service`。
+它也启用了 `sqlite` feature，并提供重启恢复示例：
+`cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml --bin sqlite_recovery`。
+内置 provider 选择与 `from_components` 装配示例可运行：
+`cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml --bin spi_selection`。
 示例使用 `redis://127.0.0.1/`；实际发布时该地址必须能连接到 Redis 服务。只创建
 provider 并在没有发布事件时关闭服务，不能证明 Redis 连通。应在真实 Redis 服务上运行
 Redis 集成测试，以验证网络和 stream 行为。
