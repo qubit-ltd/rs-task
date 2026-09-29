@@ -12,7 +12,9 @@ use super::ResourceRequest;
 use super::TaskId;
 use super::TaskOutput;
 use super::TaskRequest;
+use super::TaskRequestInfo;
 use super::TaskState;
+use super::TaskSummary;
 
 /// Queryable task lifecycle snapshot.
 ///
@@ -78,5 +80,28 @@ impl TaskRecord {
     #[inline]
     pub fn resource_request(&self) -> &ResourceRequest {
         &self.request.resources
+    }
+
+    /// Copies lifecycle and immutable request metadata without its payload.
+    ///
+    /// # Returns
+    ///
+    /// Lifecycle data and immutable request metadata, excluding the payload.
+    #[must_use]
+    pub fn summary(&self) -> TaskSummary {
+        TaskSummary {
+            id: self.id,
+            request: TaskRequestInfo::from(&self.request),
+            state: self.state.clone(),
+            state_version: self.state_version,
+            attempt: self.attempt,
+            retry_not_before_ms: self.retry_not_before_ms,
+            accepted_at_ms: self.accepted_at_ms,
+            started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+            assigned_resources: self.assigned_resources.clone(),
+            output: self.output.clone(),
+            cancel_requested: self.cancel_requested,
+        }
     }
 }

@@ -5,61 +5,19 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
 //! Coordinates admission with one service-wide shutdown result.
+// Stores the shutdown phase, retained error, and active operation permit.
+mod internal;
 
+use internal::AdmissionPermit;
+use internal::CloseFailure;
+use internal::GateState;
+use internal::Phase;
 use parking_lot::Mutex;
 use tokio::pin;
 use tokio::sync::Notify;
 
 use super::task_execution_service::TaskServiceError;
-
-/// Copyable shutdown failure retained for every caller awaiting close.
-#[derive(Clone)]
-#[must_use]
-enum CloseFailure {
-    /// A shutdown failure without a dedicated service error category.
-    Other(
-        /// Display message retained for later shutdown callers.
-        String,
-    ),
-    /// A task store failure that must be returned to every shutdown caller.
-    Store(
-        /// Store diagnostic retained for later shutdown callers.
-        String,
-    ),
-    /// A scheduler worker failure that must be returned to every shutdown
-    /// caller.
-    Scheduler(
-        /// Scheduler diagnostic retained for later shutdown callers.
-        String,
-    ),
-    /// An event notification worker failed while closing.
-    NotificationClose(
-        /// Notification worker diagnostic retained for later callers.
-        String,
-    ),
-}
-
-/// Lifecycle phase controlling whether new service operations may enter.
-enum Phase {
-    /// New operations may enter.
-    Open,
-    /// No new operations may enter; existing permits are draining.
-    Closing,
-    /// Shutdown has published its final result.
-    Closed,
-}
-
-/// Admission phase, permit count, and shared shutdown result under one mutex.
-struct GateState {
-    /// Current admission lifecycle phase.
-    phase: Phase,
-    /// Operations admitted before shutdown that have not finished.
-    active: usize,
-    /// Shared final shutdown outcome, once published.
-    close_result: Option<Result<(), CloseFailure>>,
-}
 
 /// Serializes admission against shutdown and tracks operations already inside.
 pub(super) struct AdmissionGate {
@@ -67,12 +25,6 @@ pub(super) struct AdmissionGate {
     state: Mutex<GateState>,
     /// Notifies admissions and shutdown waiters when gate state changes.
     changed: Notify,
-}
-
-/// Keeps one accepted operation in the gate until all its side effects finish.
-pub(super) struct AdmissionPermit<'a> {
-    /// Gate whose active-operation count this permit holds.
-    gate: &'a AdmissionGate,
 }
 
 impl AdmissionGate {
@@ -98,6 +50,7 @@ impl AdmissionGate {
     ///
     /// Whether the gate has left its open phase.
     #[must_use]
+    #[inline]
     pub(super) fn is_closing(&self) -> bool {
         !matches!(self.state.lock().phase, Phase::Open)
     }
@@ -108,6 +61,7 @@ impl AdmissionGate {
     ///
     /// Whether the active permit count is zero.
     #[must_use]
+    #[inline]
     pub(super) fn is_idle(&self) -> bool {
         self.state.lock().active == 0
     }
@@ -208,15 +162,6 @@ impl AdmissionGate {
             }
             notified.await;
         }
-    }
-}
-
-impl Drop for AdmissionPermit<'_> {
-    /// Decrements the active count and wakes tasks waiting for idle state.
-    fn drop(&mut self) {
-        let mut state = self.gate.state.lock();
-        state.active -= 1;
-        self.gate.changed.notify_waiters();
     }
 }
 

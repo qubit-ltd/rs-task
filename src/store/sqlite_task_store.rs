@@ -5,9 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
-mod internal;
-
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -56,6 +53,8 @@ use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
 use crate::model::checked_page_size;
 
+mod internal;
+
 const SCHEMA_VERSION: i64 = 3;
 const RECORD_FORMAT_VERSION: i64 = 3;
 const SUMMARY_COLUMNS: &str =
@@ -92,6 +91,7 @@ pub struct SqliteTaskStore {
     owner_state: Arc<Mutex<SqliteOwnerState>>,
     /// Bounds connection operations to one blocking worker at a time.
     operation_slot: Arc<sync::Semaphore>,
+    /// Tracks blocking worker overlap in unit tests.
     #[cfg(test)]
     worker_counts: Arc<WorkerCounts>,
 }

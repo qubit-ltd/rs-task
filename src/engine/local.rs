@@ -5,13 +5,16 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
+// Owns private resource-accounting and reservation-guard types.
+mod internal;
+
 use std::any::Any;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::FutureExt;
+use internal::ReservationGuard;
+use internal::ResourceLedger;
+use internal::release_reservation;
 use parking_lot::Mutex;
 use tokio::spawn;
 use tokio::sync::oneshot;
@@ -28,33 +31,6 @@ use crate::model::ResourceRequest;
 use crate::model::ResourceSnapshot;
 use crate::model::TaskId;
 use crate::store::TaskFuture;
-
-/// Resource amounts held by one execution reservation.
-type Allocation = (u32, Vec<String>, BTreeMap<String, u64>);
-/// Active reservations indexed by their release token.
-type AllocationLedger = HashMap<u64, Allocation>;
-
-/// Mutable aggregate of resources currently reserved by active attempts.
-#[derive(Default)]
-struct Usage {
-    /// Reserved CPU slots.
-    cpu: u32,
-    /// Reserved GPU identifiers.
-    gpus: Vec<String>,
-    /// Reserved custom resource amounts.
-    custom: BTreeMap<String, u64>,
-}
-
-/// Usage totals and reservation identities protected by one mutex.
-#[derive(Default)]
-struct ResourceLedger {
-    /// Aggregate resources currently held by active attempts.
-    usage: Usage,
-    /// Resources associated with each reservation token.
-    allocations: AllocationLedger,
-    /// Next unused token; `None` indicates that the token space is exhausted.
-    next_token: Option<u64>,
-}
 
 /// Single-process executor that atomically accounts for CPU, GPU, and custom
 /// resources.
@@ -198,7 +174,7 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
         Ok(PreparedExecution {
             id,
             assigned: available_gpus,
-            release: Some(Box::new(move || release(token, &ledger))),
+            release: Some(Box::new(move || release_reservation(token, &ledger))),
         })
     }
 
@@ -282,41 +258,5 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
         (*message).to_owned()
     } else {
         "task handler panicked with a non-string payload".into()
-    }
-}
-
-/// Releases a prepared reservation when its execution worker exits or unwinds.
-struct ReservationGuard(
-    /// Callback that releases the attempt's reserved resources.
-    Option<Box<dyn FnOnce() + Send>>,
-);
-impl Drop for ReservationGuard {
-    /// Releases the held resource reservation exactly once.
-    fn drop(&mut self) {
-        if let Some(release) = self.0.take() {
-            release();
-        }
-    }
-}
-
-/// Removes one reservation and returns its resources under a single lock.
-///
-/// # Parameters
-///
-/// * `token` - Unique key of the reservation to release.
-/// * `ledger` - Shared resource totals and reservation map.
-fn release(token: u64, ledger: &Mutex<ResourceLedger>) {
-    let mut ledger = ledger.lock();
-    if let Some((cpu, gpus, custom)) = ledger.allocations.remove(&token) {
-        ledger.usage.cpu = ledger.usage.cpu.saturating_sub(cpu);
-        ledger.usage.gpus.retain(|id| !gpus.contains(id));
-        for (name, amount) in custom {
-            if let Some(value) = ledger.usage.custom.get_mut(&name) {
-                *value = value.saturating_sub(amount);
-                if *value == 0 {
-                    ledger.usage.custom.remove(&name);
-                }
-            }
-        }
     }
 }

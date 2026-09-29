@@ -5,13 +5,16 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
+// Owns per-task notification entries and subscriber lifetime tracking.
+mod internal;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use internal::Entry;
+use internal::WaitSubscription;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
-use tokio::sync::futures::Notified;
 
 use crate::model::TaskId;
 
@@ -20,22 +23,6 @@ use crate::model::TaskId;
 pub(super) struct TaskWaitRegistry {
     /// Entries retained while they have at least one subscriber.
     entries: Mutex<HashMap<TaskId, Entry>>,
-}
-/// Notification primitive and subscriber count for one task ID.
-struct Entry {
-    /// Shared wakeup source for callers waiting on this task.
-    notify: Arc<Notify>,
-    /// Number of live subscriptions keeping this entry registered.
-    subscribers: usize,
-}
-/// Keeps one task notification registered until the subscription is dropped.
-pub(super) struct WaitSubscription {
-    /// Registry whose subscriber count this value owns.
-    registry: Arc<TaskWaitRegistry>,
-    /// Task whose notifications this value observes.
-    id: TaskId,
-    /// Shared notification primitive for this task.
-    notify: Arc<Notify>,
 }
 impl TaskWaitRegistry {
     /// Registers a subscriber and returns its task-specific notification
@@ -58,11 +45,7 @@ impl TaskWaitRegistry {
             entry.subscribers += 1;
             entry.notify.clone()
         };
-        WaitSubscription {
-            registry: self.clone(),
-            id,
-            notify,
-        }
+        WaitSubscription::new(self.clone(), id, notify)
     }
     /// Wakes all current subscribers for one task ID.
     ///
@@ -88,30 +71,6 @@ impl TaskWaitRegistry {
         }
     }
 }
-impl WaitSubscription {
-    /// Creates the notification future used to await a task update.
-    ///
-    /// # Returns
-    ///
-    /// A future that completes after the next notification for this task.
-    #[inline]
-    pub fn notified(&self) -> Notified<'_> {
-        self.notify.notified()
-    }
-}
-impl Drop for WaitSubscription {
-    /// Removes the registry entry after its final subscriber is gone.
-    fn drop(&mut self) {
-        let mut entries = self.registry.entries.lock();
-        if let Some(entry) = entries.get_mut(&self.id) {
-            entry.subscribers -= 1;
-            if entry.subscribers == 0 {
-                entries.remove(&self.id);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
