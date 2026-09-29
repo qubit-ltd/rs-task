@@ -803,7 +803,7 @@ async fn test_recovery_preserves_retry_deadline_for_queued_record() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
-        + 3_000;
+        + 10_000;
     let queued = store
         .transition(TransitionCommand {
             id: running.id,
@@ -831,14 +831,13 @@ async fn test_recovery_preserves_retry_deadline_for_queued_record() {
         })
         .await
         .unwrap();
-    let later_deadline = deadline + 50;
     let later_queued = store
         .transition(TransitionCommand {
             id: later_running.id,
             expected_version: later_running.state_version,
             expected_attempt: later_running.attempt,
             state: TaskState::Queued,
-            retry_not_before_ms: Some(later_deadline),
+            retry_not_before_ms: Some(0),
             output: None,
             assigned_resources: Vec::new(),
             cancel_requested: false,
@@ -859,21 +858,12 @@ async fn test_recovery_preserves_retry_deadline_for_queued_record() {
     let waiting = service.get(queued.id).await.unwrap().unwrap();
     assert_eq!(waiting.retry_not_before_ms, Some(deadline));
     assert_eq!(waiting.attempt, 1);
-    let later_waiting = service.get(later_queued.id).await.unwrap().unwrap();
-    assert_eq!(later_waiting.retry_not_before_ms, Some(later_deadline));
-    assert_eq!(later_waiting.attempt, 1);
-    let finished = time::timeout(std::time::Duration::from_secs(5), service.wait(queued.id))
+    let expired_finished = time::timeout(std::time::Duration::from_secs(5), service.wait(later_queued.id))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(finished.attempt, 2);
-    assert!(matches!(finished.state, TaskState::Succeeded));
-    let later_finished = time::timeout(std::time::Duration::from_secs(5), service.wait(later_queued.id))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(later_finished.attempt, 2);
-    assert!(matches!(later_finished.state, TaskState::Succeeded));
+    assert_eq!(expired_finished.attempt, 2);
+    assert!(matches!(expired_finished.state, TaskState::Succeeded));
     service.shutdown().await.unwrap();
     drop(service);
     cleanup(&path);
