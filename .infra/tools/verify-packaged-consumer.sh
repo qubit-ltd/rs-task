@@ -80,8 +80,17 @@ for filename in sys.argv[1:]:
     if config.get("patch"):
         raise SystemExit(f"Cargo config contains [patch], refusing packaged verification: {filename}")
     for source_name, source in config.get("source", {}).items():
-        if isinstance(source, dict) and ("directory" in source or "local-registry" in source):
+        if not isinstance(source, dict):
+            continue
+        if "directory" in source or "local-registry" in source:
             raise SystemExit(f"Cargo source {source_name!r} in {filename} uses a local directory/registry")
+        registry = source.get("registry")
+        if registry and urlparse(registry.removeprefix("sparse+")).scheme != "https":
+            raise SystemExit(f"Cargo source {source_name!r} in {filename} is not a remote HTTPS registry")
+    for registry_name, registry in config.get("registries", {}).items():
+        index = registry.get("index") if isinstance(registry, dict) else None
+        if index and urlparse(index.removeprefix("sparse+")).scheme != "https":
+            raise SystemExit(f"Cargo registry {registry_name!r} in {filename} is not a remote HTTPS index")
     sources = merge(sources, config.get("source", {}))
     registries = merge(registries, config.get("registries", {}))
 
