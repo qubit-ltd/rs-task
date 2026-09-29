@@ -68,7 +68,11 @@ async fn test_task_service_idempotency_lookup_rejects_invalid_key_lengths() {
 /// Counts blocked service submissions against the memory store limit.
 #[tokio::test]
 async fn test_task_service_memory_limit_includes_blocked_records() {
-    let store = MemoryTaskStore::with_limits(4, NonZeroUsize::new(64).unwrap(), NonZeroUsize::new(1).unwrap());
+    let store = MemoryTaskStore::with_limits(
+        4,
+        NonZeroUsize::new(64).expect("payload limit is positive"),
+        NonZeroUsize::new(1).expect("record limit is positive"),
+    );
     let service = TaskExecutionServiceBuilder::default()
         .store(Arc::new(store))
         .build()

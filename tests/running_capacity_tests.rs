@@ -70,36 +70,44 @@ async fn test_zero_cpu_tasks_obey_independent_running_limit() {
         peak: peak.clone(),
     });
     let service = TaskExecutionServiceBuilder::in_memory()
-        .max_running_tasks(NonZeroUsize::new(2).unwrap())
+        .max_running_tasks(NonZeroUsize::new(2).expect("running limit is positive"))
         .register_handler(handler)
-        .unwrap()
+        .expect("handler registers")
         .build()
         .await
-        .unwrap();
+        .expect("service builds");
     let mut ids = Vec::new();
     for _ in 0..4 {
         let mut request = TaskRequest::new("hold", "1", Vec::new());
         request.resources.cpu_slots = 0;
-        ids.push(service.submit(test_keyed(request)).await.unwrap().id);
+        ids.push(service.submit(test_keyed(request)).await.expect("task is accepted").id);
     }
     time::timeout(std::time::Duration::from_secs(2), async {
-        started_rx.recv().await.unwrap();
-        started_rx.recv().await.unwrap();
+        started_rx.recv().await.expect("first running task starts");
+        started_rx.recv().await.expect("second running task starts");
     })
     .await
-    .unwrap();
-    time::sleep(std::time::Duration::from_millis(100)).await;
+    .expect("two running tasks start");
+    assert!(
+        time::timeout(std::time::Duration::from_millis(100), started_rx.recv())
+            .await
+            .is_err(),
+        "a third zero-CPU task must remain queued"
+    );
     assert_eq!(peak.load(Ordering::SeqCst), 2);
     assert_eq!(active.load(Ordering::SeqCst), 2);
-    assert_eq!(service.stats().await.unwrap().queued, 2);
+    assert_eq!(
+        service.stats().await.expect("service statistics are available").queued,
+        2
+    );
     release.add_permits(4);
     for id in ids {
         time::timeout(std::time::Duration::from_secs(2), service.wait(id))
             .await
-            .unwrap()
-            .unwrap();
+            .expect("task settles")
+            .expect("task record is returned");
     }
-    service.shutdown().await.unwrap();
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio_test]
@@ -113,39 +121,47 @@ async fn test_zero_cpu_tasks_still_obey_max_running_tasks() {
         peak: Arc::new(AtomicUsize::new(0)),
     });
     let service = TaskExecutionServiceBuilder::in_memory()
-        .max_running_tasks(NonZeroUsize::new(1).unwrap())
+        .max_running_tasks(NonZeroUsize::new(1).expect("running limit is positive"))
         .register_handler(handler)
-        .unwrap()
+        .expect("handler registers")
         .build()
         .await
-        .unwrap();
+        .expect("service builds");
     let mut first = TaskRequest::new("hold", "1", Vec::new());
     first.resources.cpu_slots = 0;
-    let first = service.submit(test_keyed(first)).await.unwrap();
+    let first = service.submit(test_keyed(first)).await.expect("first task is accepted");
     let mut second = TaskRequest::new("hold", "1", Vec::new());
     second.resources.cpu_slots = 0;
-    let second = service.submit(test_keyed(second)).await.unwrap();
+    let second = service
+        .submit(test_keyed(second))
+        .await
+        .expect("second task is accepted");
 
     time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("first handler starts")
+        .expect("start event arrives");
     assert!(matches!(
-        service.get(second.id).await.unwrap().unwrap().state,
+        service
+            .get(second.id)
+            .await
+            .expect("queued task lookup succeeds")
+            .expect("accepted task remains retained")
+            .state,
         TaskState::Queued
     ));
     release.add_permits(1);
     time::timeout(std::time::Duration::from_secs(2), service.wait(first.id))
         .await
-        .unwrap()
-        .unwrap();
+        .expect("first task settles")
+        .expect("first task record is returned");
     time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("second handler starts")
+        .expect("start event arrives");
     release.add_permits(1);
-    service.wait(second.id).await.unwrap();
-    service.shutdown().await.unwrap();
+    service.wait(second.id).await.expect("second task settles");
+    service.shutdown().await.expect("service shuts down");
 }
 
 struct PanicThenSucceed(AtomicUsize);
@@ -173,32 +189,31 @@ impl TaskHandler for PanicThenSucceed {
 async fn test_running_permit_is_returned_after_panicked_attempt() {
     let handler = Arc::new(PanicThenSucceed(AtomicUsize::new(0)));
     let service = TaskExecutionServiceBuilder::in_memory()
-        .max_running_tasks(NonZeroUsize::new(1).unwrap())
+        .max_running_tasks(NonZeroUsize::new(1).expect("running limit is positive"))
         .register_handler(handler)
-        .unwrap()
+        .expect("handler registers")
         .build()
         .await
-        .unwrap();
+        .expect("service builds");
     let first = service
         .submit(test_keyed(TaskRequest::new("panic-once", "1", Vec::new())))
         .await
-        .unwrap();
+        .expect("first task is accepted");
     let second = service
         .submit(test_keyed(TaskRequest::new("panic-once", "1", Vec::new())))
         .await
-        .unwrap();
+        .expect("second task is accepted");
     assert!(matches!(
-        service.wait(first.id).await.unwrap().state,
+        service.wait(first.id).await.expect("first task settles").state,
         TaskState::Panicked { .. }
     ));
     assert!(matches!(
-        service.wait(second.id).await.unwrap().state,
+        service.wait(second.id).await.expect("second task settles").state,
         TaskState::Succeeded
     ));
-    service.shutdown().await.unwrap();
+    service.shutdown().await.expect("service shuts down");
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {

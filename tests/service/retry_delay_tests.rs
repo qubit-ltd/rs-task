@@ -99,20 +99,26 @@ async fn test_retry_is_persisted_and_waits_until_deadline() {
         std::sync::Arc::new(FairFifoPolicy::default()),
     )
     .register_handler(handler.clone())
-    .unwrap()
-    .retry_policy(RetryPolicy::new(Duration::from_millis(250), Duration::from_millis(250)).unwrap())
+    .expect("handler registers")
+    .retry_policy(
+        RetryPolicy::new(Duration::from_millis(250), Duration::from_millis(250)).expect("retry delay range is valid"),
+    )
     .max_attempts(2)
     .require_recovery(false)
     .build()
     .await
-    .unwrap();
+    .expect("service builds");
     let accepted = service
         .submit(test_keyed(TaskRequest::new("retry-delay", "1", Vec::new())))
         .await
-        .unwrap();
+        .expect("task is accepted");
     time::timeout(Duration::from_secs(1), async {
         loop {
-            let record = store.get(accepted.id).await.unwrap().unwrap();
+            let record = store
+                .get(accepted.id)
+                .await
+                .expect("retrying task lookup succeeds")
+                .expect("accepted task remains stored");
             if record.retry_not_before_ms.is_some() {
                 break;
             }
@@ -120,7 +126,7 @@ async fn test_retry_is_persisted_and_waits_until_deadline() {
         }
     })
     .await
-    .unwrap();
+    .expect("first retry deadline is persisted");
     assert_eq!(handler.0.load(Ordering::SeqCst), 1);
     time::sleep(Duration::from_millis(80)).await;
     assert_eq!(
@@ -130,11 +136,11 @@ async fn test_retry_is_persisted_and_waits_until_deadline() {
     );
     let finished = time::timeout(Duration::from_secs(2), service.wait(accepted.id))
         .await
-        .unwrap()
-        .unwrap();
+        .expect("retry completes")
+        .expect("retry completion returns its record");
     assert_eq!(finished.attempt, 2);
     assert!(finished.retry_not_before_ms.is_none());
-    service.shutdown().await.unwrap();
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio_test]
@@ -149,14 +155,16 @@ async fn test_task_record_without_retry_deadline_deserializes_as_ready() {
     let record = match store
         .accept(TaskId::generate(), TaskRequest::new("legacy-json", "1", Vec::new()))
         .await
-        .unwrap()
+        .expect("legacy task is accepted")
     {
         AcceptOutcome::Accepted(record) => record,
         AcceptOutcome::Existing(_) => panic!("new task cannot already exist"),
     };
-    let mut json = serde_json::to_value(record).unwrap();
-    json.as_object_mut().unwrap().remove("retry_not_before_ms");
-    let restored: TaskRecord = serde_json::from_value(json).unwrap();
+    let mut json = serde_json::to_value(record).expect("task record serializes");
+    json.as_object_mut()
+        .expect("serialized record is an object")
+        .remove("retry_not_before_ms");
+    let restored: TaskRecord = serde_json::from_value(json).expect("legacy task record deserializes");
     assert_eq!(restored.retry_not_before_ms, None);
 }
 
@@ -177,24 +185,26 @@ async fn test_delayed_retry_can_be_cancelled_before_its_next_attempt() {
         std::sync::Arc::new(FairFifoPolicy::default()),
     )
     .register_handler(handler.clone())
-    .unwrap()
-    .retry_policy(RetryPolicy::new(Duration::from_millis(300), Duration::from_millis(300)).unwrap())
+    .expect("handler registers")
+    .retry_policy(
+        RetryPolicy::new(Duration::from_millis(300), Duration::from_millis(300)).expect("retry delay range is valid"),
+    )
     .max_attempts(2)
     .require_recovery(false)
     .build()
     .await
-    .unwrap();
+    .expect("service builds");
     let accepted = service
         .submit(test_keyed(TaskRequest::new("retry-delay", "1", Vec::new())))
         .await
-        .unwrap();
+        .expect("task is accepted");
     time::timeout(Duration::from_secs(1), async {
         loop {
             if store
                 .get(accepted.id)
                 .await
-                .unwrap()
-                .unwrap()
+                .expect("retrying task lookup succeeds")
+                .expect("accepted task remains stored")
                 .retry_not_before_ms
                 .is_some()
             {
@@ -204,21 +214,20 @@ async fn test_delayed_retry_can_be_cancelled_before_its_next_attempt() {
         }
     })
     .await
-    .unwrap();
+    .expect("retry deadline is persisted");
     assert_eq!(
-        service.cancel(accepted.id).await.unwrap(),
+        service.cancel(accepted.id).await.expect("retrying task is cancelled"),
         CancelOutcome::CancelledBeforeStart
     );
     assert!(matches!(
-        service.wait(accepted.id).await.unwrap().state,
+        service.wait(accepted.id).await.expect("cancelled task settles").state,
         TaskState::Cancelled
     ));
     time::sleep(Duration::from_millis(350)).await;
     assert_eq!(handler.0.load(Ordering::SeqCst), 1);
-    service.shutdown().await.unwrap();
+    service.shutdown().await.expect("service shuts down");
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
