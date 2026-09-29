@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![English Document](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 
-`qubit-task` 解决 Rust 服务里一个常见的难题：请求触发的工作远比请求本身耗时，例如把一个很大的 CSV 文件导入数据库。如果在请求处理函数里直接执行导入，连接会被长时间占用，用户看不到进度，进程一旦重启工作也随之丢失。使用本库时，请求处理函数只需把工作描述成带版本的 `TaskRequest`，交给同一个 `TaskExecutionService`，然后立刻把任务 ID 返回给调用方。服务会在有界队列、并发上限和资源额度约束下调用匹配的 `TaskHandler`，并根据所选存储的保留策略提供可查询的任务记录；搭配支持恢复的存储，还会在进程重启后协调已受理的未完成任务。本库只在单个进程内调度，也不会把业务副作用变成恰好一次的操作。
+`qubit-task` 解决 Rust 服务里一个常见的难题：请求触发的工作远比请求本身耗时，例如把一个很大的 CSV 文件导入数据库。如果在请求处理函数里直接执行导入，连接会被长时间占用，用户看不到进度，进程一旦重启工作也随之丢失。使用本库时，请求处理函数只需把工作描述成带版本的 `TaskRequest`，交给同一个 `TaskExecutionService`，然后立刻把任务 ID 返回给调用方。服务会在有界队列、并发上限和资源额度约束下调用匹配的 `TaskHandler`，为每个任务保留可查询的记录；搭配可恢复的存储，还能在进程重启后继续执行已受理的任务。本库只在单个进程内调度，也不会把业务副作用变成恰好一次的操作。
 
 ## 数据导入服务实战场景
 
@@ -17,13 +17,18 @@
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.6", features = ["sqlite"] }
+qubit-task = { version = "0.7", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 ```
 
 `sqlite` feature 启用 `TaskExecutionServiceBuilder::recoverable_sqlite` 提供的重启恢复能力；只需要易失的内存执行时可以不启用。快速开始的示例还使用 `serde` 和 `serde_json` 编码任务 payload。
+
+| Feature | 作用 |
+| --- | --- |
+| 默认（空） | 内存服务与显式 SPI 注册 |
+| `sqlite` | 持久化历史与重启恢复 |
+| `inventory` | 发现已链接到应用的 provider |
+| `event-bus` | 尽力发布生命周期通知 |
 
 ## 快速开始
 
@@ -212,7 +217,7 @@ tasks.shutdown().await?;
 
 `repository` 是应用持有的 `Arc<dyn ImportRepository>`。`recoverable_sqlite` 会对数据库加操作系统级文件锁，在返回前扫描未完成的任务；加锁或恢复预检失败时直接让启动失败，不会退回内存存储。若只需要易失执行，可改用 `TaskExecutionServiceBuilder::in_memory()`，此时进程退出后未完成任务和历史都会丢失。
 
-从客户端看到的效果：`start_import` 在请求内即可返回；导入在 `max_running_tasks` 以及每个请求默认一个 CPU 槽的约束下运行；`import_status` 先报告 `Pending`、`Running`，再进入终态。可重试的 `ImportError` 会按指数退避自动重试（初始 1 秒，上限 60 秒），默认最多 3 次尝试，用尽后任务进入 `Blocked` 等待运维处理。恢复出来的任务若找不到对应的 `(task_type, handler_version)` 处理器，同样会进入 `Blocked`；注册处理器、基于同一个数据库重新构建服务，再调用 `retry_blocked` 即可。`tasks.cancel(id)` 只是设置协作取消标记，处理器必须返回 `TaskRunOutcome::Cancelled`，任务才会以 `Cancelled` 结束。恢复执行是至少一次语义，因此 `ImportRepository` 必须让重复处理同一批数据是安全的。资源额度、本地闭包、通知和运维维护见[用户手册](doc/user-guide.zh_CN.md)。
+从客户端看到的效果：`start_import` 在请求内即可返回；导入在 `max_running_tasks` 以及每个请求默认一个 CPU 槽的约束下运行；`import_status` 先报告 `Pending`、`Running`，再进入终态。可重试的 `ImportError` 会按指数退避自动重试（初始 1 秒，上限 60 秒），默认最多 3 次尝试，用尽后任务进入 `Blocked` 等待运维处理。恢复出来的任务若找不到对应的 `(task_type, handler_version)` 处理器，同样会进入 `Blocked`；注册处理器、基于同一个数据库重新构建服务，再调用 `retry_blocked` 即可。`tasks.cancel(id)` 会直接取消排队或阻塞中的任务；对运行中的任务，它只请求协作取消，处理器须返回 `TaskRunOutcome::Cancelled` 才能确认取消。恢复执行是至少一次语义，因此 `ImportRepository` 必须让重复处理同一批数据是安全的。资源额度、本地闭包、通知和运维维护见[用户手册](doc/user-guide.zh_CN.md)。
 
 ## 能力与边界
 
@@ -226,7 +231,7 @@ tasks.shutdown().await?;
 
 本库不提供多节点或分布式调度、工作流依赖、定时（cron）调度、对任意代码的强制中断，也不保证业务副作用恰好执行一次。存储声明支持重启恢复时，`submit_local` 不可用，因为闭包无法从数据库重建。通知是尽力而为的：队列（默认 256 条）满时会丢弃事件，发布失败也不会回滚任务状态。
 
-影响部署的主要限额：内存预设的等待队列为 1024 个任务，终态记录 1024 条，非终态记录 2048 条（含 `Blocked`），请求 payload 总量 64 MiB；单个请求 payload 最多 16 MiB，提交共享 64 MiB 的受理中 payload 预算和 64 个受理中写操作，历史分页每页最多 256 条。请求文本上限按 UTF-8 字节计：`task_type` 128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键 128 字节、值 4096 字节、合计 16384 字节；持久化诊断类别不超过 128 字节，消息不超过 4096 字节。资源描述最多包含 32 个 GPU 标签和 32 个自定义资源名称，每项非空且不超过 128 个 UTF-8 字节；设置 GPU 标签时 `gpu_count` 必须大于零。重启时未完成记录数必须不超过 `queue_capacity + max_running_tasks`，否则构建失败并保留记录。SQLite 同一时刻只执行一个阻塞数据库操作，历史会一直保留，直到应用调用 `prune_terminal_before`；清理后对应的幂等键可以重新使用。`shutdown_until` 只限制调用方的等待时间；丢弃最后一个服务句柄会启动异步排空；调度器 panic 以 `SchedulerUnavailable` 报告，且不会自动重启。完整清单见[用户手册](doc/user-guide.zh_CN.md#运行限制)。
+影响部署的主要限额：内存预设的等待队列为 1024 个任务，终态记录 1024 条，非终态记录 2048 条（含 `Blocked`），请求 payload 总量 64 MiB；单个请求 payload 最多 16 MiB，提交共享 64 MiB 的受理中 payload 预算和 64 个受理中写操作，历史分页每页最多 256 条。请求文本上限按 UTF-8 字节计：`task_type` 128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键 128 字节、值 4096 字节、合计 16384 字节；持久化诊断类别不超过 128 字节，消息不超过 4096 字节。重启时未完成记录数必须不超过 `queue_capacity + max_running_tasks`，否则构建失败并保留记录。SQLite 同一时刻只执行一个阻塞数据库操作，历史会一直保留，直到应用调用 `prune_terminal_before`；清理后对应的幂等键可以重新使用。`shutdown_until` 只限制调用方的等待时间；丢弃最后一个服务句柄会启动异步排空；调度器 panic 以 `SchedulerUnavailable` 报告，且不会自动重启。完整清单见[用户手册](doc/user-guide.zh_CN.md#边界与实践清单)。
 
 ## 延伸阅读
 
