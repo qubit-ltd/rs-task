@@ -3,6 +3,7 @@ name = "qubit-task-doc-examples"
 version = "0.1.0"
 edition = "2024"
 publish = false
+default-run = "qubit-task-doc-examples"
 
 [[bin]]
 name = "task_service"
@@ -10,7 +11,7 @@ path = "../../../examples/task_service.rs"
 
 [dependencies]
 qubit-event-bus = "0.15.0"
-qubit-event-bus-redis = { version = "0.4.0", path = "../../../../rs-event-bus-redis" }
+qubit-event-bus-redis = "0.4.0"
 qubit-spi = "0.13"
 qubit-task = { path = "../../..", features = ["event-bus", "inventory", "sqlite"] }
 serde_json = "1"
