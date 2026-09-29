@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// let config = TaskStoreConfig::default();
 /// assert!(matches!(config, TaskStoreConfig::Memory { .. }));
 /// ```
+#[must_use = "store configuration has no effect unless passed to a provider"]
 #[derive(Clone)]
 pub enum TaskStoreConfig {
     /// Volatile records with a bounded terminal history.
@@ -64,7 +65,6 @@ impl TaskStoreConfig {
     /// # Returns
     ///
     /// A custom configuration holding the value behind shared type erasure.
-    #[must_use]
     pub fn custom<T: Any + Send + Sync>(config: T) -> Self {
         Self::Custom(Arc::new(config))
     }
