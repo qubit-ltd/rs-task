@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+//! Compiles the documented Event Bus provider-selection and task-service setup.
+
 use std::sync::Arc;
 
 use qubit_event_bus::CodecError;
@@ -42,12 +44,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Minimal JSON codec used by this provider-discovery fixture.
 struct TaskEventJsonCodec {
     content_type: ContentType,
     schema_id: SchemaId,
 }
 
 impl TaskEventJsonCodec {
+    /// Builds the codec with valid content-type and schema identifiers.
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             content_type: ContentType::new("application/json")?,

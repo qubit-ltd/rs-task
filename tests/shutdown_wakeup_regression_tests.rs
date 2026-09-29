@@ -90,7 +90,11 @@ impl TaskStore for DelayedCountsStore {
                 let ticket = self.snapshots.fetch_add(1, Ordering::SeqCst);
                 println!("shutdown count snapshot {ticket}: {snapshot:?}");
                 self.observed.add_permits(1);
-                self.resume.acquire().await.unwrap().forget();
+                self.resume
+                    .acquire()
+                    .await
+                    .expect("shutdown resumes delayed count snapshot")
+                    .forget();
             }
             Ok(snapshot)
         })
@@ -122,7 +126,7 @@ impl TaskStore for DelayedCountsStore {
 }
 
 #[tokio_test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_drains_when_terminal_notification_precedes_count_return() {
+async fn test_shutdown_drains_when_terminal_notification_precedes_count_return() {
     let (send, recv) = mpsc::channel();
     let store = Arc::new(DelayedCountsStore {
         inner: Arc::new(MemoryTaskStore::new(8)),
@@ -135,22 +139,27 @@ async fn shutdown_drains_when_terminal_notification_precedes_count_return() {
         .store(store.clone())
         .build()
         .await
-        .unwrap();
+        .expect("service builds");
     let handle = service
         .submit_local(move |_| {
-            recv.recv().unwrap();
+            recv.recv().expect("test releases local handler");
             LocalTaskOutcome::<u32, String>::Succeeded {
                 value: 42,
                 summary: TaskOutput::default(),
             }
         })
         .await
-        .unwrap();
+        .expect("local task is accepted");
     let id = handle.task_id();
     timeout(Duration::from_secs(5), async {
         loop {
             if matches!(
-                service.get_summary(id).await.unwrap().unwrap().state,
+                service
+                    .get_summary(id)
+                    .await
+                    .expect("running summary lookup succeeds")
+                    .expect("task summary is retained")
+                    .state,
                 TaskState::Running
             ) {
                 break;
@@ -164,27 +173,39 @@ async fn shutdown_drains_when_terminal_notification_precedes_count_return() {
     let closing = service.clone();
     let shutdown = spawn(async move { closing.shutdown_until(Instant::now() + Duration::from_secs(5)).await });
     timeout(Duration::from_secs(5), async {
-        store.observed.acquire_many(2).await.unwrap().forget();
+        store
+            .observed
+            .acquire_many(2)
+            .await
+            .expect("both count snapshots arrive")
+            .forget();
     })
     .await
     .expect("scheduler and shutdown did not both acquire running snapshots");
-    send.send(()).unwrap();
+    send.send(()).expect("local handler is waiting");
     let value = timeout(Duration::from_secs(5), handle.result())
         .await
         .expect("task did not finalize")
-        .unwrap()
-        .unwrap();
+        .expect("local handle returns its result")
+        .expect("local handler succeeds");
     assert_eq!(value, 42);
     // finish_attempt notifies changed before finalizing this public local handle.
     // Returning stale-but-consistent snapshots now deterministically exercises
     // the notification registration window, without timing sleeps.
     store.resume.add_permits(2);
-    assert!(shutdown.await.unwrap().is_ok(), "shutdown lost the final notification");
-    let counts = store.inner.count_states().await.unwrap();
+    shutdown
+        .await
+        .expect("shutdown task completes")
+        .expect("shutdown observes the final notification");
+    let counts = store
+        .inner
+        .count_states()
+        .await
+        .expect("final store counts are available");
     assert_eq!(counts.running, 0);
     assert_eq!(counts.queued, 0);
     service
         .shutdown_until(Instant::now() + Duration::from_secs(5))
         .await
-        .unwrap();
+        .expect("service shuts down");
 }

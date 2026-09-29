@@ -507,7 +507,6 @@ async fn test_dropping_cancel_caller_keeps_persisted_signal_worker_alive() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {

@@ -273,7 +273,7 @@ async fn test_empty_scheduler_rounds_do_not_increment_bypasses() {
         observed,
     });
     let service = TaskExecutionServiceBuilder::in_memory()
-        .policy(policy)
+        .policy(policy.clone())
         .build()
         .await
         .expect("service builds");
@@ -301,6 +301,12 @@ async fn test_empty_scheduler_rounds_do_not_increment_bypasses() {
             .iter()
             .all(|snapshot| { snapshot.iter().find(|(id, _)| *id == task_id).map(|(_, count)| *count) == Some(0) })
     );
+    policy.allow_later.store(true, Ordering::Release);
+    handle
+        .result()
+        .await
+        .expect("task completes after scheduling is enabled");
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio_test]
@@ -346,6 +352,7 @@ async fn test_only_a_successfully_started_later_task_counts_as_a_bypass() {
     );
     assert!(first.result().await.expect("first outcome arrives").is_ok());
     assert!(second.result().await.expect("second outcome arrives").is_ok());
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio_test]
@@ -397,6 +404,10 @@ async fn test_failed_activation_does_not_count_as_a_bypass() {
         Some(0),
         "an engine activation error must not advance the earlier task's bypass budget"
     );
+    service
+        .shutdown()
+        .await
+        .expect("service shuts down after activation errors");
 }
 
 #[test]
@@ -496,6 +507,7 @@ async fn test_protected_large_task_starts_before_small_tasks_after_resources_ret
     }
 
     let mut observed_bypasses = 0;
+    let mut bypassed = HashMap::new();
     for _ in 0..8 {
         let label = time::timeout(Duration::from_secs(3), starts.recv())
             .await
@@ -510,6 +522,10 @@ async fn test_protected_large_task_starts_before_small_tasks_after_resources_ret
         })
         .await;
         observed_bypasses += 1;
+        assert!(
+            bypassed.insert(label, ()).is_none(),
+            "each bypass starts a distinct task"
+        );
         release[&label].add_permits(1);
     }
 
@@ -520,6 +536,15 @@ async fn test_protected_large_task_starts_before_small_tasks_after_resources_ret
         .expect("a queued task starts after the preoccupier releases its slot")
         .expect("handler event channel remains open");
     assert_eq!(first_after_release, b'L', "the protected large task starts first");
+    release[&b'L'].add_permits(1);
+    let final_small_task = time::timeout(Duration::from_secs(3), starts.recv())
+        .await
+        .expect("remaining small task starts after the large task releases resources")
+        .expect("handler event channel remains open");
+    assert!((b'0'..=b'8').contains(&final_small_task));
+    assert!(!bypassed.contains_key(&final_small_task));
+    release[&final_small_task].add_permits(1);
+    service.shutdown().await.expect("all queued tasks drain");
 }
 
 #[tokio_test]
@@ -640,9 +665,9 @@ async fn test_missing_handler_is_classified_without_bypass_counting() {
         snapshot.iter().find(|(id, _)| *id == task_id).map(|(_, count)| *count),
         Some(0)
     );
+    service.shutdown().await.expect("blocked task service shuts down");
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {

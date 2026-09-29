@@ -162,8 +162,6 @@ mod sqlite_tests {
             .build()
             .await
             .expect("recoverable service builds");
-        time::sleep(std::time::Duration::from_millis(20)).await;
-
         drop(service);
 
         let replacement = time::timeout(std::time::Duration::from_secs(2), async {
@@ -181,7 +179,6 @@ mod sqlite_tests {
     }
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {

@@ -36,10 +36,16 @@ use tokio::test as tokio_test;
 async fn assert_store_summary_lookup(store: &impl TaskStore, key: &str) {
     let mut request = TaskRequest::new("thumbnail", "v3", b"source payload".to_vec());
     request.idempotency_key = Some(key.to_owned());
-    assert_eq!(store.get_summary_by_idempotency_key(key).await.unwrap(), None);
+    assert_eq!(
+        store
+            .get_summary_by_idempotency_key(key)
+            .await
+            .expect("missing idempotency key lookup succeeds"),
+        None
+    );
 
     let id = TaskId::generate();
-    let accepted = store.accept(id, request).await.unwrap();
+    let accepted = store.accept(id, request).await.expect("task is accepted");
     let accepted_record = match accepted {
         AcceptOutcome::Accepted(record) => record,
         AcceptOutcome::Existing(_) => panic!("first request is newly accepted"),
@@ -47,11 +53,14 @@ async fn assert_store_summary_lookup(store: &impl TaskStore, key: &str) {
     let queued = store
         .get_summary_by_idempotency_key(key)
         .await
-        .unwrap()
+        .expect("summary lookup succeeds")
         .expect("summary is found");
     assert_eq!(queued, accepted_record.summary());
     assert_eq!(queued.state, TaskState::Queued);
-    assert_eq!(store.get_summary(id).await.unwrap(), Some(queued.clone()));
+    assert_eq!(
+        store.get_summary(id).await.expect("summary lookup succeeds"),
+        Some(queued.clone())
+    );
 
     let running = store
         .transition(TransitionCommand {
@@ -67,7 +76,10 @@ async fn assert_store_summary_lookup(store: &impl TaskStore, key: &str) {
         .await
         .expect("queued task transitions to running");
     assert_eq!(
-        store.get_summary_by_idempotency_key(key).await.unwrap(),
+        store
+            .get_summary_by_idempotency_key(key)
+            .await
+            .expect("running summary lookup succeeds"),
         Some(running.clone())
     );
     assert_eq!(running.state_version, 1);
@@ -86,7 +98,10 @@ async fn assert_store_summary_lookup(store: &impl TaskStore, key: &str) {
         .await
         .expect("running task transitions to succeeded");
     assert_eq!(
-        store.get_summary_by_idempotency_key(key).await.unwrap(),
+        store
+            .get_summary_by_idempotency_key(key)
+            .await
+            .expect("terminal summary lookup succeeds"),
         Some(succeeded)
     );
     store
@@ -96,7 +111,13 @@ async fn assert_store_summary_lookup(store: &impl TaskStore, key: &str) {
         )
         .await
         .expect("terminal history is pruned");
-    assert_eq!(store.get_summary_by_idempotency_key(key).await.unwrap(), None);
+    assert_eq!(
+        store
+            .get_summary_by_idempotency_key(key)
+            .await
+            .expect("pruned key lookup succeeds"),
+        None
+    );
 }
 
 #[tokio_test]
@@ -182,19 +203,34 @@ async fn test_sqlite_get_by_idempotency_key_returns_the_record_for_a_key() {
     let path = std::env::temp_dir().join(format!("qubit-task-find-idempotent-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
 
-    assert_eq!(store.get_by_idempotency_key("thumbnail-source-42").await.unwrap(), None);
+    assert_eq!(
+        store
+            .get_by_idempotency_key("thumbnail-source-42")
+            .await
+            .expect("missing record lookup succeeds"),
+        None
+    );
     let mut request = TaskRequest::new("thumbnail", "v3", b"source".to_vec());
     request.idempotency_key = Some("thumbnail-source-42".into());
-    assert_eq!(store.get_by_idempotency_key("thumbnail-source-42").await.unwrap(), None);
+    assert_eq!(
+        store
+            .get_by_idempotency_key("thumbnail-source-42")
+            .await
+            .expect("unaccepted record lookup succeeds"),
+        None
+    );
 
     let id = TaskId::generate();
-    let accepted = store.accept(id, request.clone()).await.unwrap();
+    let accepted = store.accept(id, request.clone()).await.expect("task is accepted");
     let accepted_record = match accepted {
         AcceptOutcome::Accepted(record) => record,
         AcceptOutcome::Existing(_) => panic!("first request is newly accepted"),
     };
     assert_eq!(
-        store.get_by_idempotency_key("thumbnail-source-42").await.unwrap(),
+        store
+            .get_by_idempotency_key("thumbnail-source-42")
+            .await
+            .expect("accepted record lookup succeeds"),
         Some(accepted_record)
     );
 
@@ -259,7 +295,6 @@ fn test_sqlite_open_reports_a_non_directory_parent() {
     std::fs::remove_file(parent).expect("parent fixture is removed");
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {

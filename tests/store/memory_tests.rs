@@ -128,11 +128,19 @@ async fn test_memory_summary_reads_preserve_large_payload_and_lifecycle_metadata
     let store = MemoryTaskStore::new(8);
     let request =
         TaskRequest::new("large-summary", "v1", vec![9; 1024 * 1024]).with_idempotency_key("large-summary-key");
-    let accepted = match store.accept(TaskId::generate(), request).await.unwrap() {
+    let accepted = match store
+        .accept(TaskId::generate(), request)
+        .await
+        .expect("large record is accepted")
+    {
         AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => unreachable!(),
+        AcceptOutcome::Existing(_) => panic!("summary key is new"),
     };
-    let summary = store.get_summary(accepted.id).await.unwrap().unwrap();
+    let summary = store
+        .get_summary(accepted.id)
+        .await
+        .expect("summary lookup succeeds")
+        .expect("accepted summary is retained");
     assert_eq!(summary.request.task_type, "large-summary");
     assert_eq!(
         store
@@ -141,7 +149,7 @@ async fn test_memory_summary_reads_preserve_large_payload_and_lifecycle_metadata
                 ..TaskQuery::default()
             })
             .await
-            .unwrap()
+            .expect("summary page lookup succeeds")
             .records[0],
         summary
     );
@@ -157,11 +165,17 @@ async fn test_memory_summary_reads_preserve_large_payload_and_lifecycle_metadata
             cancel_requested: false,
         })
         .await
-        .unwrap();
+        .expect("record transitions to running");
     assert!(matches!(running.state, TaskState::Running));
     assert_eq!(running.state_version, summary.state_version + 1);
     assert_eq!(
-        store.get(accepted.id).await.unwrap().unwrap().request.payload,
+        store
+            .get(accepted.id)
+            .await
+            .expect("record lookup succeeds")
+            .expect("record is retained")
+            .request
+            .payload,
         vec![9; 1024 * 1024]
     );
 }
@@ -226,6 +240,6 @@ async fn test_memory_store_task_query_limit() {
             ..TaskQuery::default()
         })
         .await
-        .unwrap();
+        .expect("zero limit selects the default one-row page");
     assert_eq!(first.records.len(), 1);
 }
