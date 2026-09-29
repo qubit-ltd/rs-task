@@ -111,11 +111,44 @@ impl TaskExecutionService {
         TaskExecutionServiceBuilder::in_memory().build().await
     }
 
+    /// Starts the background scheduler and wraps its shared service state.
+    ///
+    /// # Parameters
+    ///
+    /// * `core` - Fully assembled component and service state.
+    ///
+    /// # Returns
+    ///
+    /// A public service handle with its scheduler worker started.
+    pub(crate) fn start(core: ServiceCore) -> Self {
+        let core = Arc::new(core);
+        let service = Self {
+            _lease: Arc::new(ServiceHandleLease {
+                core: Arc::downgrade(&core),
+            }),
+            core,
+        };
+        let weak = Arc::downgrade(&service.core);
+        let supervisor_weak = weak.clone();
+        service.core.runtime_handle.spawn(async move {
+            let result = std::panic::AssertUnwindSafe(scheduler_loop(weak)).catch_unwind().await;
+            if let Some(core) = supervisor_weak.upgrade() {
+                if let Err(payload) = result {
+                    record_scheduler_fault(&core, panic_message(payload));
+                }
+                core.scheduler_finished.store(true, Ordering::Release);
+                core.scheduler_finished_notify.notify_waiters();
+            }
+        });
+        service
+    }
+
     /// Reports the selected store's history and recovery guarantees.
     ///
     /// # Returns
     ///
     /// The selected store capabilities and local closure availability.
+    #[inline]
     #[must_use]
     pub fn capabilities(&self) -> TaskServiceCapabilities {
         let store = self.core.store.capabilities();
@@ -132,6 +165,7 @@ impl TaskExecutionService {
     ///
     /// The first latched store diagnostic, or `None` if storage remains
     /// available.
+    #[inline]
     #[must_use]
     pub fn last_store_error(&self) -> Option<String> {
         self.core.store_fault.lock().clone()
@@ -143,6 +177,7 @@ impl TaskExecutionService {
     ///
     /// The first scheduler diagnostic, or `None` if scheduling remains
     /// available.
+    #[inline]
     #[must_use]
     pub fn last_scheduler_error(&self) -> Option<String> {
         self.core.scheduler_fault.lock().clone()
@@ -154,6 +189,7 @@ impl TaskExecutionService {
     /// # Returns
     ///
     /// A counter snapshot when event publication is configured.
+    #[inline]
     #[cfg(feature = "event-bus")]
     #[must_use]
     pub fn notification_stats(&self) -> Option<TaskEventNotificationStats> {
@@ -564,40 +600,6 @@ async fn wait_scheduler_finished(core: &ServiceCore) {
             return;
         }
         notified.await;
-    }
-}
-
-impl TaskExecutionService {
-    /// Starts the background scheduler and wraps its shared service state.
-    ///
-    /// # Parameters
-    ///
-    /// * `core` - Fully assembled component and service state.
-    ///
-    /// # Returns
-    ///
-    /// A public service handle with its scheduler worker started.
-    pub(crate) fn start(core: ServiceCore) -> Self {
-        let core = Arc::new(core);
-        let service = Self {
-            _lease: Arc::new(ServiceHandleLease {
-                core: Arc::downgrade(&core),
-            }),
-            core,
-        };
-        let weak = Arc::downgrade(&service.core);
-        let supervisor_weak = weak.clone();
-        service.core.runtime_handle.spawn(async move {
-            let result = std::panic::AssertUnwindSafe(scheduler_loop(weak)).catch_unwind().await;
-            if let Some(core) = supervisor_weak.upgrade() {
-                if let Err(payload) = result {
-                    record_scheduler_fault(&core, panic_message(payload));
-                }
-                core.scheduler_finished.store(true, Ordering::Release);
-                core.scheduler_finished_notify.notify_waiters();
-            }
-        });
-        service
     }
 }
 

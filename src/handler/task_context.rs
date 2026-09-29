@@ -123,6 +123,7 @@ impl TaskContext {
     ///
     /// A shared handle to the cancellation flag.
     #[must_use]
+    #[inline]
     pub fn cancellation_signal(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
     }

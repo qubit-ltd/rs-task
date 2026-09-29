@@ -50,6 +50,10 @@ pub struct ResourceRequest {
 impl ResourceRequest {
     /// Validates the bounded textual resource description.
     ///
+    /// # Returns
+    ///
+    /// Success when all resource labels and names satisfy their constraints.
+    ///
     /// # Errors
     ///
     /// Returns a static diagnostic when labels or custom names exceed their

@@ -29,7 +29,8 @@ pub(in crate::service::task_execution_service) fn publish_record(core: &ServiceC
     let _ = (core, record);
 }
 
-/// Applies a version-checked store transition and publishes its new revision.
+/// Applies a version-checked store transition and publishes its new revision
+/// before allowing shutdown to close the event publisher.
 ///
 /// # Parameters
 ///

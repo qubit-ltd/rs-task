@@ -193,13 +193,14 @@ async fn test_memory_store_default_unfinished_limit() {
 async fn test_memory_store_task_query_limit() {
     let store = MemoryTaskStore::new(300);
     for index in 0..=MAX_TASK_QUERY_LIMIT {
-        store
+        let accepted = store
             .accept(
                 TaskId::generate(),
                 TaskRequest::new("page", "1", index.to_le_bytes().to_vec()),
             )
             .await
             .expect("record is accepted");
+        assert!(matches!(accepted, AcceptOutcome::Accepted(_)));
     }
     assert!(matches!(
         store

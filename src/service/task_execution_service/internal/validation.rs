@@ -18,6 +18,7 @@ use crate::service::TaskServiceError;
 /// # Returns
 ///
 /// Current epoch milliseconds, or zero if the clock predates the epoch.
+#[must_use]
 pub(in crate::service::task_execution_service) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -35,6 +36,7 @@ pub(in crate::service::task_execution_service) fn now_ms() -> u64 {
 /// # Returns
 ///
 /// The earliest next attempt timestamp, saturated at `u64::MAX`.
+#[must_use]
 pub(in crate::service::task_execution_service) fn retry_deadline_ms(
     now_ms: u64,
     policy: RetryPolicy,
@@ -141,6 +143,7 @@ pub(in crate::service::task_execution_service) fn validate_request(
 /// # Returns
 ///
 /// An owned string no longer than `max_bytes` bytes.
+#[must_use]
 pub(in crate::service::task_execution_service) fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();

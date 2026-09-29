@@ -70,7 +70,7 @@ pub(crate) struct ServiceCore {
     pub(crate) changed: Notify,
     /// Per-task notification registry used by waiters.
     pub(in crate::service) wait_registry: Arc<TaskWaitRegistry>,
-    /// Serializes lifecycle event publication across transitions.
+    /// Coordinates lifecycle transitions with shutdown of the event publisher.
     pub(crate) transition_event_lock: sync::RwLock<()>,
     /// Prevents new admissions after shutdown starts.
     pub(in crate::service) admission: AdmissionGate,

@@ -907,10 +907,11 @@ async fn test_memory_store_is_idempotent_and_rejects_illegal_transitions() {
 async fn test_memory_store_rejects_oversized_lifecycle_diagnostics() {
     let store = MemoryTaskStore::new(1);
     let id = TaskId::generate();
-    store
+    let accepted = store
         .accept(id, TaskRequest::new("diagnostic", "1", Vec::new()))
         .await
         .expect("task is accepted");
+    assert!(matches!(accepted, AcceptOutcome::Accepted(_)));
 
     for state in [
         TaskState::Blocked {

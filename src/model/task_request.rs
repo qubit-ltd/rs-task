@@ -113,6 +113,7 @@ impl TaskRequest {
     ///
     /// The request with the supplied key attached.
     #[must_use]
+    #[inline]
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self

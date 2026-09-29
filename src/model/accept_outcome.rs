@@ -41,6 +41,7 @@ use super::TaskRecord;
 /// assert_eq!(record.state, TaskState::Queued);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub enum AcceptOutcome {
     /// A new task was accepted.
     Accepted(

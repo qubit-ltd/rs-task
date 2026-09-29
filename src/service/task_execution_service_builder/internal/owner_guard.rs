@@ -40,6 +40,7 @@ impl OwnerGuard {
     /// # Returns
     ///
     /// The lease epoch, if this guard still owns one.
+    #[must_use]
     pub(in crate::service::task_execution_service_builder) fn transfer(&mut self) -> Option<crate::model::OwnerEpoch> {
         self.epoch.take()
     }
