@@ -86,6 +86,7 @@ jobs:
           cargo +1.94.0 check --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --no-default-features --features sqlite,conformance
           cargo +1.94.0 run --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --no-default-features --features sqlite,conformance
           cargo +1.94.0 check --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --all-features
+          cargo +1.94.0 check --locked --manifest-path tests/fixtures/all-features-consumer/Cargo.toml --all-features
           cargo +1.94.0 check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml
           cargo +1.94.0 run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml
       - name: Install documentation toolchain
