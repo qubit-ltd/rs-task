@@ -21,6 +21,7 @@ use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
+use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -130,7 +131,7 @@ impl TaskStore for ShutdownStore {
         { let _ = limit; Box::pin(async { Ok(false) }) }
     }
 
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         { let _ = cursor; Box::pin(async { Ok(RecoveryPage { tasks: vec![], next: None }) }) }
     }
 
