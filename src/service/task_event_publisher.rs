@@ -19,6 +19,7 @@ use qubit_event_bus::NotificationOutcome;
 use qubit_event_bus::NotificationPublisher;
 use qubit_event_bus::TryPublishError;
 use qubit_event_bus::model::AdmissionOutcome;
+use qubit_event_bus::model::PublishEffect;
 use qubit_event_bus::model::Topic;
 use tokio::runtime;
 
@@ -76,6 +77,12 @@ impl TaskEventPublisher {
         let topic = Topic::<TaskEvent>::new("task.lifecycle").expect("fixed task lifecycle topic is valid");
         let publisher = NotificationPublisher::new(bus, topic, capacity, move |outcome| match outcome {
             NotificationOutcome::Published(receipt) => record_admission(&worker_counters, receipt.admission_outcome()),
+            NotificationOutcome::PublishFailed(failure) => {
+                increment(&worker_counters.publish_error);
+                if failure.effect() == PublishEffect::MayHaveBeenAccepted {
+                    increment(&worker_counters.uncertain_publish);
+                }
+            }
             _ => increment(&worker_counters.publish_error),
         })?;
         Ok(Self {
@@ -114,6 +121,7 @@ impl TaskEventPublisher {
             unaccepted: load(&self.counters.unaccepted),
             partial_rejection: load(&self.counters.partial_rejection),
             publish_error: load(&self.counters.publish_error),
+            uncertain_publish: load(&self.counters.uncertain_publish),
             worker_panicked: self.publisher.stats().worker_panicked(),
         }
     }
@@ -185,6 +193,7 @@ mod tests {
     use qubit_event_bus::model::DestinationAdmission;
     use qubit_event_bus::model::ProviderId;
     use qubit_event_bus::model::PublishAcknowledgement;
+    use qubit_event_bus::model::PublishEffect;
     use qubit_event_bus::model::SubscribeRequest;
     use qubit_event_bus::model::SubscriberId;
     use qubit_event_bus::model::Topic;
@@ -233,6 +242,7 @@ mod tests {
         AllRejected,
         Partial,
         Error,
+        CertainError,
         Empty,
         Dropped,
         Panic,
@@ -314,6 +324,14 @@ mod tests {
                     kind: "scripted",
                     retryable: Some(false),
                     source: Box::new(std::io::Error::other("scripted error")),
+                }),
+                Outcome::CertainError => Err(SpiError::Publish {
+                    provider_id: "fake".into(),
+                    resource: None,
+                    kind: "not-accepted",
+                    retryable: Some(false),
+                    effect: PublishEffect::NotAccepted,
+                    source: Box::new(std::io::Error::other("not submitted")),
                 }),
                 Outcome::Panic => panic!("scripted worker panic"),
             }
@@ -457,6 +475,7 @@ mod tests {
         assert_eq!(*spi.calls.lock().expect("calls lock"), vec![1, 2]);
         assert_eq!(publisher.stats().enqueued, 2);
         assert_eq!(publisher.stats().opaque_accepted, 2);
+        assert_eq!(publisher.stats().uncertain_publish, 0);
     }
 
     #[tokio_crate::test]
@@ -465,6 +484,7 @@ mod tests {
             Outcome::AllRejected,
             Outcome::Partial,
             Outcome::Error,
+            Outcome::CertainError,
             Outcome::Empty,
             Outcome::Dropped,
             Outcome::Panic,
@@ -485,11 +505,18 @@ mod tests {
                 }
                 Outcome::Error => {
                     assert_eq!(stats.publish_error, 1);
+                    assert_eq!(stats.uncertain_publish, 1);
                     close_result.expect("publish errors do not panic the worker");
+                }
+                Outcome::CertainError => {
+                    assert_eq!(stats.publish_error, 1);
+                    assert_eq!(stats.uncertain_publish, 0);
+                    close_result.expect("definite publish failures do not panic the worker");
                 }
                 Outcome::Panic => {
                     assert_eq!(stats.publish_error, 1);
                     assert_eq!(stats.worker_panicked, 0);
+                    assert_eq!(stats.uncertain_publish, 1);
                     close_result.expect("SPI publish panics are converted to publish errors");
                 }
                 Outcome::Opaque => unreachable!(),
