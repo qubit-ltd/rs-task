@@ -20,6 +20,10 @@ use crate::model::TaskRequest;
 use crate::model::TaskRequestInfo;
 use crate::store::StoreError;
 
+/// Canonical recovery index SQL; equality makes reopen repairs idempotent.
+const UNFINISHED_INDEX_SQL: &str =
+    "CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE +state_kind IN ('Queued','Running')";
+
 /// Initializes the current SQLite schema or upgrades a supported older schema.
 ///
 /// # Parameters
@@ -88,20 +92,43 @@ pub(in crate::store::sqlite_task_store) fn initialize_schema(connection: &mut Co
 
 /// Ensures every history/recovery index exists in the schema transaction.
 ///
-/// Existing indexes and record bytes are retained; SQLite DDL failures roll
-/// back with the caller's transaction. This applies to fresh, upgraded and
-/// version-3 databases.
+/// History indexes and record bytes are retained. An older recovery index
+/// definition is replaced atomically in the caller's transaction. SQLite DDL
+/// failures roll back every change for fresh, upgraded and version-3 databases.
 fn ensure_indexes(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     transaction
         .execute_batch(
             "CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at);
          CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id);
          CREATE INDEX IF NOT EXISTS tasks_correlation_accepted_id ON tasks(correlation_key, accepted_at, id);
-         CREATE INDEX IF NOT EXISTS tasks_state_accepted_id ON tasks(state_kind, accepted_at, id);
-         CREATE INDEX IF NOT EXISTS tasks_unfinished_accepted_id ON tasks(accepted_at, id)
-         WHERE state_kind IN ('Queued','Running');",
+         CREATE INDEX IF NOT EXISTS tasks_state_accepted_id ON tasks(state_kind, accepted_at, id);",
         )
-        .map_err(failure)
+        .map_err(failure)?;
+    ensure_unfinished_index(transaction)
+}
+
+/// Installs or atomically repairs the recovery index without rewriting tasks.
+///
+/// The canonical SQL is checked before DDL, so repeated opens do not rebuild
+/// the index. A failed replacement is rolled back with the schema transaction.
+fn ensure_unfinished_index(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let existing: Option<String> = transaction
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='tasks_unfinished_accepted_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failure)?;
+    if existing.as_deref() == Some(UNFINISHED_INDEX_SQL) {
+        return Ok(());
+    }
+    if existing.is_some() {
+        transaction
+            .execute_batch("DROP INDEX tasks_unfinished_accepted_id;")
+            .map_err(failure)?;
+    }
+    transaction.execute_batch(UNFINISHED_INDEX_SQL).map_err(failure)
 }
 
 /// Verifies that schema 3 has the columns expected by the current store.
@@ -308,4 +335,87 @@ fn migrate_legacy_schema(transaction: &Transaction<'_>, schema_version: i64) -> 
         .execute_batch("DROP TABLE tasks; ALTER TABLE tasks_v2 RENAME TO tasks;")
         .map_err(failure)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+    use rusqlite::types::Value;
+
+    use super::ensure_indexes;
+    use super::failure;
+    use super::initialize_schema;
+    use crate::store::StoreError;
+
+    /// A failure after rebuilding rolls back the real schema transaction
+    /// completely.
+    #[test]
+    fn test_schema_unfinished_index_rebuild_rolls_back_on_later_sql_failure() {
+        let mut connection = Connection::open_in_memory().expect("rollback database opens");
+        initialize_schema(&mut connection).expect("rollback schema initializes");
+        connection.execute_batch("INSERT INTO tasks (id,state_kind,accepted_at,request_info_json,payload,lifecycle_json) VALUES ('sentinel','Queued',42,'{}',X'00FF','{}'); INSERT INTO metadata VALUES ('sentinel',17); DROP INDEX tasks_unfinished_accepted_id; CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at,id) WHERE state_kind IN ('Queued','Running');").expect("old index and data seed");
+        let original_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='tasks_unfinished_accepted_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("original index SQL reads");
+        let original_row: Vec<Value> = connection
+            .query_row("SELECT * FROM tasks", [], |row| {
+                (0..9).map(|column| row.get(column)).collect()
+            })
+            .expect("original task values read");
+        let original_schema: i64 = connection
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .expect("original DDL revision reads");
+        let result = (|| -> Result<(), StoreError> {
+            let transaction = connection.transaction().map_err(failure)?;
+            ensure_indexes(&transaction)?;
+            let rebuilt_sql: String = transaction
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name='tasks_unfinished_accepted_id'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(failure)?;
+            assert!(
+                rebuilt_sql.contains("WHERE +state_kind"),
+                "rebuild must happen before injected failure"
+            );
+            transaction
+                .execute_batch("INSERT INTO metadata VALUES ('sentinel',99);")
+                .map_err(failure)?;
+            transaction.commit().map_err(failure)
+        })();
+        assert!(matches!(result, Err(StoreError::Failure(_))));
+        let restored_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='tasks_unfinished_accepted_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("restored index SQL reads");
+        assert_eq!(restored_sql, original_sql);
+        let restored_row: Vec<Value> = connection
+            .query_row("SELECT * FROM tasks", [], |row| {
+                (0..9).map(|column| row.get(column)).collect()
+            })
+            .expect("restored task values read");
+        assert_eq!(restored_row, original_row);
+        let metadata: (String, i64) = connection
+            .query_row("SELECT key,value FROM metadata", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .expect("restored metadata reads");
+        assert_eq!(metadata, ("sentinel".into(), 17));
+        let restored_schema: i64 = connection
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .expect("restored DDL revision reads");
+        assert_eq!(restored_schema, original_schema);
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("restored user version reads");
+        assert_eq!(version, 3);
+    }
 }
