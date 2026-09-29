@@ -2,7 +2,7 @@
 
 [English version](user-guide.md)
 
-本指南适用于 Rust 1.94 或更高版本以及 `qubit-task` 0.6.x，面向需要把耗时工作移出请求路径、限制后台并发，并查询任务进度的 Rust 服务开发者。
+本指南适用于 Rust 1.94 或更高版本以及 `qubit-task` 0.7.x，面向需要把耗时工作移出请求路径、限制后台并发，并查询任务进度的 Rust 服务开发者。
 
 ## 场景：API 接受 CSV 导入后立即返回
 
@@ -43,7 +43,7 @@
 
 ~~~toml
 [dependencies]
-qubit-task = "0.6"
+qubit-task = "0.7"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ~~~
 
@@ -201,7 +201,7 @@ let builder = TaskExecutionServiceBuilder::in_memory()
 
 ~~~toml
 [dependencies]
-qubit-task = { version = "0.6", features = ["sqlite"] }
+qubit-task = { version = "0.7", features = ["sqlite"] }
 ~~~
 
 ~~~rust,ignore

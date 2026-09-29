@@ -2,7 +2,7 @@
 
 [中文版本](user-guide.zh_CN.md)
 
-This guide covers `qubit-task` 0.6.x on Rust 1.94 or later. It is for Rust service developers who need bounded background execution, task history, and a clear choice between volatile work and restart recovery. The crate accepts work that cannot finish during the caller's request, schedules it against resource budgets, and lets the application inspect its progress later.
+This guide covers `qubit-task` 0.7.x on Rust 1.94 or later. It is for Rust service developers who need bounded background execution, task history, and a clear choice between volatile work and restart recovery. The crate accepts work that cannot finish during the caller's request, schedules it against resource budgets, and lets the application inspect its progress later.
 
 ## Conceptual model
 
@@ -36,7 +36,7 @@ Add the crate and an async runtime to the application:
 
 ~~~toml
 [dependencies]
-qubit-task = "0.6"
+qubit-task = "0.7"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ~~~
 
@@ -227,7 +227,7 @@ Enable the optional feature and configure a durable path:
 
 ~~~toml
 [dependencies]
-qubit-task = { version = "0.6", features = ["sqlite"] }
+qubit-task = { version = "0.7", features = ["sqlite"] }
 ~~~
 
 ~~~rust,ignore

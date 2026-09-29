@@ -13,7 +13,7 @@
 
 ```toml
 [dependencies]
-qubit-task = "0.6"
+qubit-task = "0.7"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
