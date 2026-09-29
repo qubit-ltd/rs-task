@@ -9,18 +9,18 @@
 
 use std::sync::Arc;
 
-use qubit_event_bus::CodecError;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::EventBusRegistry;
 use qubit_event_bus::codec::CodecRegistry;
-use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::facade::EventBusFacadeConfig;
-use qubit_event_bus::model::ContentType;
-use qubit_event_bus::model::SchemaId;
 use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 use qubit_task::event::TaskEvent;
 use qubit_task::service::TaskExecutionServiceBuilder;
+
+mod task_event_codec;
+
+use task_event_codec::TaskEventJsonCodec;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,40 +42,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     service.shutdown().await?;
     Ok(())
-}
-
-/// Minimal JSON codec used by this provider-discovery fixture.
-struct TaskEventJsonCodec {
-    content_type: ContentType,
-    schema_id: SchemaId,
-}
-
-impl TaskEventJsonCodec {
-    /// Builds the codec with valid content-type and schema identifiers.
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
-            content_type: ContentType::new("application/json")?,
-            schema_id: SchemaId::new("task-event-v1")?,
-        })
-    }
-}
-
-impl EventCodec<TaskEvent> for TaskEventJsonCodec {
-    fn content_type(&self) -> &ContentType {
-        &self.content_type
-    }
-
-    fn schema_id(&self) -> Option<&SchemaId> {
-        Some(&self.schema_id)
-    }
-
-    fn encode(&self, value: &TaskEvent) -> Result<Arc<[u8]>, CodecError> {
-        serde_json::to_vec(value)
-            .map(Arc::from)
-            .map_err(|source| CodecError::Encode { source: Box::new(source) })
-    }
-
-    fn decode(&self, bytes: &[u8]) -> Result<TaskEvent, CodecError> {
-        serde_json::from_slice(bytes).map_err(|source| CodecError::Decode { source: Box::new(source) })
-    }
 }

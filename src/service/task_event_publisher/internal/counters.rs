@@ -26,6 +26,8 @@ pub(in crate::service::task_event_publisher) struct Counters {
     pub(in crate::service::task_event_publisher) unaccepted: AtomicU64,
     /// Events with mixed accepted and rejected destinations.
     pub(in crate::service::task_event_publisher) partial_rejection: AtomicU64,
+    /// Failed publish calls whose provider effect may already have occurred.
+    pub(in crate::service::task_event_publisher) uncertain_publish: AtomicU64,
     /// Failed publish calls.
     pub(in crate::service::task_event_publisher) publish_error: AtomicU64,
 }

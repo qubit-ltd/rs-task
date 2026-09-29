@@ -9,6 +9,8 @@
 
 /// Publication admission counters. Acceptance reports enqueue or provider
 /// admission only; it does not report subscriber handler completion.
+/// Each counter is sampled independently. A snapshot taken while the worker
+/// is publishing may observe counters from different instants.
 ///
 /// # Examples
 ///
@@ -37,6 +39,11 @@ pub struct TaskEventNotificationStats {
     pub partial_rejection: u64,
     /// Calls to the event bus that returned an error.
     pub publish_error: u64,
+    /// Failed publish calls that may already have been accepted by the
+    /// provider. These failures are included in `publish_error`; they do
+    /// not prove delivery. The subset relationship need not hold within a
+    /// concurrent snapshot.
+    pub uncertain_publish: u64,
     /// Publisher worker panics.
     pub worker_panicked: u64,
 }
