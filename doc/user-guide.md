@@ -2,7 +2,7 @@
 
 [Chinese user guide](user-guide.zh_CN.md) · [README](../README.md) · [API reference](https://docs.rs/qubit-task)
 
-This guide covers `qubit-task` 0.7.x on Rust 1.94 or later. It is for Rust service developers who receive requests whose work outlives the request: imports, exports, report generation, media processing, and similar background jobs. Reading through [Check the task result](#check-the-task-result) is enough to accept such work, run it under bounded concurrency, and report its state back to clients. Later sections cover restart recovery, resource budgets, cancellation, retries, history maintenance, status notifications, component assembly, and shutdown. Developers who implement a store, scheduling policy, or execution engine should read [Assemble components with `qubit-spi`](#assemble-components-with-qubit-spi) and the [detailed design](task_execution_service_design.en.md).
+This guide covers `qubit-task` 0.8.x on Rust 1.94 or later. It is for Rust service developers who receive requests whose work outlives the request: imports, exports, report generation, media processing, and similar background jobs. Reading through [Check the task result](#check-the-task-result) is enough to accept such work, run it under bounded concurrency, and report its state back to clients. Later sections cover restart recovery, resource budgets, cancellation, retries, history maintenance, status notifications, component assembly, and shutdown. Developers who implement a store, scheduling policy, or execution engine should read [Assemble components with `qubit-spi`](#assemble-components-with-qubit-spi) and the [detailed design](task_execution_service_design.en.md).
 
 ## Contents
 
@@ -62,7 +62,7 @@ Add the crate, an async runtime, and a payload codec:
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.7", features = ["sqlite"] }
+qubit-task = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -655,9 +655,9 @@ pub async fn prune_old_terminal(
 
 ## Publish status changes
 
-Polling `GET /imports/{id}` is enough for many clients. When another module should react to state changes, for example to push a WebSocket update or refresh a per-tenant dashboard, enable the `event-bus` feature and give the builder a `qubit_event_bus::EventBus`. After every state change the service publishes a `TaskEvent { task_id, state_version, state, correlation_key }` on the topic `task.lifecycle`. This release uses `qubit-event-bus` 0.16.
+Polling `GET /imports/{id}` is enough for many clients. When another module should react to state changes, for example to push a WebSocket update or refresh a per-tenant dashboard, enable the `event-bus` feature and give the builder a `qubit_event_bus::EventBus`. After every state change the service publishes a `TaskEvent { task_id, state_version, state, correlation_key }` on the topic `task.lifecycle`. This release uses `qubit-event-bus` 0.17.
 
-Publication is best effort. It never rolls back a task transition, events may be delayed, repeated, or dropped, and a consumer should treat the service's own query API as the authority and compare `state_version` before overwriting a newer state.
+Publication is best effort. It never rolls back a task transition, events may be delayed, repeated, or dropped, and a consumer should treat the service's own query API as the authority and compare `state_version` before overwriting a newer state. Keep the highest version separately for each TaskId; equal-version duplicates and older versions do not replace it. Notifications do not guarantee arrival in increasing version order. After a gap or uncertain publish, query the service to repair the view rather than repeating a task transition.
 
 ### Subscribe inside the process
 
@@ -706,29 +706,26 @@ let tasks = TaskExecutionServiceBuilder::in_memory()
 
 To notify other processes, select a cross-process provider such as `qubit-event-bus-redis`. `TaskEvent` implements serde, but the event-bus facade requires an explicit `EventCodec<TaskEvent>`; register a JSON codec and select the provider by name:
 
+<!-- task-event-codec:start -->
 ```rust
 use std::sync::Arc;
 
 use qubit_event_bus::CodecError;
-use qubit_event_bus::EventBusConfig;
-use qubit_event_bus::EventBusRegistry;
-use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::codec::EventCodec;
-use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::SchemaId;
-use qubit_event_bus_redis as _;
-use qubit_spi::ProviderSelection;
+use qubit_event_bus::spi::EncodedPayload;
 use qubit_task::event::TaskEvent;
-use qubit_task::service::TaskExecutionServiceBuilder;
 
-struct TaskEventJsonCodec {
+/// Minimal JSON codec used by this provider-discovery fixture.
+pub struct TaskEventJsonCodec {
     content_type: ContentType,
     schema_id: SchemaId,
 }
 
 impl TaskEventJsonCodec {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    /// Builds the codec with valid content-type and schema identifiers.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             content_type: ContentType::new("application/json")?,
             schema_id: SchemaId::new("task-event-v1")?,
@@ -745,16 +742,50 @@ impl EventCodec<TaskEvent> for TaskEventJsonCodec {
         Some(&self.schema_id)
     }
 
+    /// Accepts the v1 JSON contract and its historical schema-less encoding.
+    /// Other MIME texts and schema identifiers are configuration mismatches.
+    fn validate_metadata(&self, payload: &EncodedPayload) -> Result<(), CodecError> {
+        if payload.content_type() == &self.content_type
+            && (payload.schema_id().is_none() || payload.schema_id() == Some(&self.schema_id))
+        {
+            return Ok(());
+        }
+        Err(CodecError::MetadataMismatch {
+            expected_content_type: self.content_type.clone(),
+            actual_content_type: payload.content_type().clone(),
+            expected_schema_id: Some(self.schema_id.clone()),
+            actual_schema_id: payload.schema_id().cloned(),
+        })
+    }
+
     fn encode(&self, value: &TaskEvent) -> Result<Arc<[u8]>, CodecError> {
         serde_json::to_vec(value)
             .map(Arc::from)
             .map_err(|source| CodecError::Encode { source: Box::new(source) })
     }
 
-    fn decode(&self, bytes: &[u8]) -> Result<TaskEvent, CodecError> {
-        serde_json::from_slice(bytes).map_err(|source| CodecError::Decode { source: Box::new(source) })
+    fn decode(&self, payload: &EncodedPayload) -> Result<TaskEvent, CodecError> {
+        serde_json::from_slice(payload.bytes()).map_err(|source| CodecError::Decode { source: Box::new(source) })
     }
 }
+```
+<!-- task-event-codec:end -->
+
+Place this codec in the application module `task_event_codec`. It writes `task-event-v1` and explicitly accepts the historical schema-less JSON with the same exact content type; other schema IDs stop the subscription. Then assemble the service at startup:
+
+```rust
+use std::sync::Arc;
+
+use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus_redis as _;
+use qubit_spi::ProviderSelection;
+use qubit_task::event::TaskEvent;
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+use task_event_codec::TaskEventJsonCodec;
 
 let mut codecs = CodecRegistry::new();
 codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec::new()?));
@@ -789,9 +820,10 @@ The service publishes through `qubit-event-bus`'s `NotificationPublisher`: one s
 | `opaque_accepted` | Provider accepted without exposing destinations (Redis). |
 | `unaccepted` | Receipts with no accepting destination, including empty destination lists and interceptor drops. |
 | `publish_error` | Publish calls that returned an error. |
+| `uncertain_publish` | Subset of `publish_error` with `MayHaveBeenAccepted`; the event may already have reached the provider. |
 | `worker_panicked` | The publisher thread panicked; queued events may be lost. |
 
-These are admission and worker counters, not proof that a subscriber ran. They are monotonic, saturate at `u64::MAX`, and the fields of one snapshot are not from the same instant.
+`uncertain_publish` never proves that a subscriber ran, and is not a new retry queue. A generic provider error or panic is conservatively uncertain. Default `DuplicateRiskPolicy::Forbid` prevents blind retries of uncertain publication. A publish error never rolls back the task state, and there is no built-in transactional outbox. These are admission and worker counters, not proof that a subscriber ran. Each counter is monotonic and saturates at `u64::MAX`. Independent atomic loads may observe different instants while publishing is active: uncertainty is a subset by cumulative classification, but a live snapshot need not show `uncertain_publish <= publish_error`.
 
 `shutdown()` closes notification enqueue after accepted work has settled, then drains the queue. It waits at most 30 seconds for the publisher thread by default (`event_bus_close_timeout(Duration)`). On timeout, `shutdown()` returns `TaskServiceError::NotificationClose` while the thread keeps draining what it already holds. A thread panic or join failure also returns `NotificationClose`; remaining events may be lost. Concurrent and later `shutdown` callers receive the same stored result. The service does not shut down the application-owned bus; do that after the service.
 
@@ -887,7 +919,7 @@ Two failures change the service permanently. A store failure sets the service to
 | `build()` fails with `RecoveryCapacityExceeded` | More unfinished records than `queue_capacity + max_running_tasks`. Raise one limit; the records are intact. |
 | `build()` fails with `SqliteFeatureDisabled` or a store error | Enable the `sqlite` feature; check the path and that no other process owns the database. There is no fallback to memory. |
 | `StoreUnavailable` or `SchedulerUnavailable` everywhere | The service is permanently degraded. Read `last_store_error()` / `last_scheduler_error()`, shut down, fix the cause, restart. |
-| No status events arrive | Check `notification_stats()` for `queue_full`, `publish_error`, or `worker_panicked`; confirm the subscriber's topic is `task.lifecycle`. Events are best effort; query the service for authoritative state. |
+| No status events arrive | Check `notification_stats()` for `queue_full`, `publish_error`, `uncertain_publish`, or `worker_panicked`; confirm the subscriber's topic is `task.lifecycle`. Events are best effort; query the service for authoritative state. |
 | `shutdown()` returns `NotificationClose` | The publisher thread did not finish within `event_bus_close_timeout`, or it panicked. Task state is unaffected. |
 
 Persisted diagnostics are bounded: categories to 128 bytes, messages and blocked reasons to 4,096 bytes, truncated at a UTF-8 boundary. Log the original error with the task ID, attempt number, and tenant in the application's own logs.
@@ -904,7 +936,7 @@ Query and extension contracts also changed: `TaskQuery.states` is `Vec<TaskState
 | `StoredTaskPage<StoredTask>` | Payload-free `RecoveryPage<TaskSummary>` |
 | Owner release without a drain contract | `release_owner` is a completion barrier for admitted writes |
 
-This line uses Event Bus 0.16 and Redis adapter 0.4. The bounded `NotificationPublisher` and `AdmissionOutcome` APIs used by task notifications already exist in Event Bus 0.14; that integration needs no call-site migration solely for the version bump. Check provider-specific release notes when upgrading adapters.
+Version 0.8 uses Event Bus 0.17 and Redis adapter 0.5. Migrate codecs to `decode(&EncodedPayload)`, choose explicit schema compatibility and positive payload limits, and handle `PublishFailure` instead of assuming every error means no admission. See the [0.8 migration guide](migration.md) and core/provider migration guides before updating dependencies.
 
 ## Boundaries and a practice checklist
 

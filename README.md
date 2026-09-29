@@ -19,7 +19,7 @@ A tenant administrator uploads a CSV file to object storage and calls `POST /imp
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.7", features = ["sqlite"] }
+qubit-task = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -234,6 +234,8 @@ What the client observes: `start_import` returns within the request; the import 
 The crate does not provide multi-node or distributed scheduling, workflow dependencies, cron-style scheduling, forced interruption of arbitrary code, or exactly-once business side effects. `submit_local` is unavailable with a restart-recoverable store because a closure cannot be rebuilt from a database. Notifications are best effort: a full queue (256 entries by default) drops the event, and a publish failure never rolls back a task transition.
 
 Limits that shape a deployment: the in-memory preset keeps a waiting queue of 1,024 tasks, 1,024 terminal records, 2,048 nonterminal records (including `Blocked`), and 64 MiB of request payloads; each request payload is at most 16 MiB, submissions share a 64 MiB in-flight payload budget and 64 in-flight write operations, and history pages return at most 256 records. Request text limits are measured in UTF-8 bytes: `task_type` 128, `handler_version` 64, correlation and idempotency keys 256, and metadata 32 entries with 128-byte keys, 4,096-byte values, and 16,384 combined bytes; persisted diagnostics are bounded to 128-byte categories and 4,096-byte messages. On restart, unfinished records must fit within `queue_capacity + max_running_tasks` or construction fails with the records preserved. SQLite runs one blocking database operation at a time and keeps history until the application calls `prune_terminal_before`; pruning releases idempotency keys for reuse. `shutdown_until` bounds only the caller's wait, dropping the last service handle starts an asynchronous drain, and a scheduler panic is reported as `SchedulerUnavailable` without automatic restart. See the [user guide](doc/user-guide.md#boundaries-and-a-practice-checklist) for the full list.
+
+The `event-bus` feature uses `qubit-event-bus` 0.17; Redis applications use provider 0.5 and explicitly register their JSON codec. The guide's codec writes `task-event-v1` and accepts historical schema-less JSON only through an explicit metadata override. `notification_stats().uncertain_publish` counts publication failures that may already have been accepted and is a subset of `publish_error` by cumulative classification; independently read live snapshot fields may reflect different instants. Default uncertain retry is forbidden; consumers compare `state_version` per TaskId and query the service rather than replaying a task transition because its notification failed. See the [0.8 migration guide](doc/migration.md).
 
 ## Learn more
 

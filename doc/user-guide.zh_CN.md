@@ -2,7 +2,7 @@
 
 [中文 README](../README.zh_CN.md) · [English user guide](user-guide.md) · [API 文档](https://docs.rs/qubit-task)
 
-本文适用于 `qubit-task` 0.7.x，要求 Rust 1.94 或更高版本。面向那些会收到「工作比请求活得更久」的 Rust 服务开发者：导入、导出、报表生成、媒体处理以及类似的后台作业。读到[检查任务结果](#检查任务结果)，就足以受理这类工作、在有限并发下运行，并把状态回报给客户端。后续章节覆盖重启恢复、资源预算、取消、重试、历史维护、状态通知、组件组装与停机。若要自行实现存储、调度策略或执行引擎，请阅读[用 qubit-spi 组装组件](#用-qubit-spi-组装组件)以及[详细设计](task_execution_service_design.md)。
+本文适用于 `qubit-task` 0.8.x，要求 Rust 1.94 或更高版本。面向那些会收到「工作比请求活得更久」的 Rust 服务开发者：导入、导出、报表生成、媒体处理以及类似的后台作业。读到[检查任务结果](#检查任务结果)，就足以受理这类工作、在有限并发下运行，并把状态回报给客户端。后续章节覆盖重启恢复、资源预算、取消、重试、历史维护、状态通知、组件组装与停机。若要自行实现存储、调度策略或执行引擎，请阅读[用 qubit-spi 组装组件](#用-qubit-spi-组装组件)以及[详细设计](task_execution_service_design.md)。
 
 ## 目录
 
@@ -60,7 +60,7 @@
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.7", features = ["sqlite"] }
+qubit-task = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -653,9 +653,11 @@ pub async fn prune_old_terminal(
 
 ## 发布状态变更
 
-对许多客户端，轮询 `GET /imports/{id}` 已足够。当其他模块应响应状态变更（例如推送 WebSocket 或刷新租户仪表盘）时，启用 `event-bus` 特性并向 builder 提供 `qubit_event_bus::EventBus`。每次状态变更后，服务在主题 `task.lifecycle` 上发布 `TaskEvent { task_id, state_version, state, correlation_key }`。本版本使用 `qubit-event-bus` 0.16。
+对许多客户端，轮询 `GET /imports/{id}` 已足够。当其他模块应响应状态变更（例如推送 WebSocket 或刷新租户仪表盘）时，启用 `event-bus` 特性并向 builder 提供 `qubit_event_bus::EventBus`。每次状态变更后，服务在主题 `task.lifecycle` 上发布 `TaskEvent { task_id, state_version, state, correlation_key }`。本版本使用 `qubit-event-bus` 0.17。
 
 发布是尽力而为。它不会回滚任务迁移；事件可能延迟、重复或丢失；消费者应以服务自身的查询 API 为权威，并在覆盖较新状态前比较 `state_version`。
+
+消费者为每个 TaskId 保存最高 `state_version`；同版本重复事件和旧版本都不覆盖现有视图。并发通知不保证按版本递增到达。发生缺口或发布结果未知时，查询服务修复视图，而不是重做任务状态迁移。
 
 ### 在进程内订阅
 
@@ -704,29 +706,26 @@ let tasks = TaskExecutionServiceBuilder::in_memory()
 
 要通知其他进程，选择跨进程 provider，例如 `qubit-event-bus-redis`。`TaskEvent` 实现 serde，但事件总线门面要求显式 `EventCodec<TaskEvent>`；注册 JSON 编解码器并按名称选择 provider：
 
+<!-- task-event-codec:start -->
 ```rust
 use std::sync::Arc;
 
 use qubit_event_bus::CodecError;
-use qubit_event_bus::EventBusConfig;
-use qubit_event_bus::EventBusRegistry;
-use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::codec::EventCodec;
-use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::SchemaId;
-use qubit_event_bus_redis as _;
-use qubit_spi::ProviderSelection;
+use qubit_event_bus::spi::EncodedPayload;
 use qubit_task::event::TaskEvent;
-use qubit_task::service::TaskExecutionServiceBuilder;
 
-struct TaskEventJsonCodec {
+/// Minimal JSON codec used by this provider-discovery fixture.
+pub struct TaskEventJsonCodec {
     content_type: ContentType,
     schema_id: SchemaId,
 }
 
 impl TaskEventJsonCodec {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    /// Builds the codec with valid content-type and schema identifiers.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             content_type: ContentType::new("application/json")?,
             schema_id: SchemaId::new("task-event-v1")?,
@@ -743,16 +742,50 @@ impl EventCodec<TaskEvent> for TaskEventJsonCodec {
         Some(&self.schema_id)
     }
 
+    /// Accepts the v1 JSON contract and its historical schema-less encoding.
+    /// Other MIME texts and schema identifiers are configuration mismatches.
+    fn validate_metadata(&self, payload: &EncodedPayload) -> Result<(), CodecError> {
+        if payload.content_type() == &self.content_type
+            && (payload.schema_id().is_none() || payload.schema_id() == Some(&self.schema_id))
+        {
+            return Ok(());
+        }
+        Err(CodecError::MetadataMismatch {
+            expected_content_type: self.content_type.clone(),
+            actual_content_type: payload.content_type().clone(),
+            expected_schema_id: Some(self.schema_id.clone()),
+            actual_schema_id: payload.schema_id().cloned(),
+        })
+    }
+
     fn encode(&self, value: &TaskEvent) -> Result<Arc<[u8]>, CodecError> {
         serde_json::to_vec(value)
             .map(Arc::from)
             .map_err(|source| CodecError::Encode { source: Box::new(source) })
     }
 
-    fn decode(&self, bytes: &[u8]) -> Result<TaskEvent, CodecError> {
-        serde_json::from_slice(bytes).map_err(|source| CodecError::Decode { source: Box::new(source) })
+    fn decode(&self, payload: &EncodedPayload) -> Result<TaskEvent, CodecError> {
+        serde_json::from_slice(payload.bytes()).map_err(|source| CodecError::Decode { source: Box::new(source) })
     }
 }
+```
+<!-- task-event-codec:end -->
+
+将 codec 放在应用的 `task_event_codec` 模块中。它写入 `task-event-v1`，并明确允许相同 content type 下的历史无 schema JSON；其他 schema 会停止订阅。随后在启动阶段装配服务：
+
+```rust
+use std::sync::Arc;
+
+use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus_redis as _;
+use qubit_spi::ProviderSelection;
+use qubit_task::event::TaskEvent;
+use qubit_task::service::TaskExecutionServiceBuilder;
+
+use task_event_codec::TaskEventJsonCodec;
 
 let mut codecs = CodecRegistry::new();
 codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec::new()?));
@@ -787,9 +820,12 @@ Redis provider、`qubit-spi` 与 `serde_json` 是应用依赖；`use qubit_event
 | `opaque_accepted` | provider 接受但未暴露目标（Redis）。 |
 | `unaccepted` | 无接受目标的回执，含空目标列表与拦截器丢弃。 |
 | `publish_error` | 返回错误的 publish 调用。 |
+| `uncertain_publish` | `publish_error` 的子集，效果为 `MayHaveBeenAccepted`，通知可能已到达 provider。 |
 | `worker_panicked` | 发布线程 panic；队列中事件可能丢失。 |
 
 这些是准入与 worker 计数，不是订阅者已执行的证明。单调递增，在 `u64::MAX` 饱和；单次快照的各字段不是同一瞬间。
+
+各字段独立原子读取，活动中的快照可能来自不同瞬间；累计分类上未知发布属于发布失败子集，但快照不保证 `uncertain_publish <= publish_error`。`uncertain_publish` 不代表 handler 完成，也不是新重试队列；通用 provider 错误或 panic 保守视为未知。默认 `DuplicateRiskPolicy::Forbid` 防止盲重发，通知失败不会回滚任务状态，本库也不内置事务 outbox。
 
 `shutdown()` 在已接受工作 settle 后关闭通知入队，再排空队列。默认最多等待发布线程 30 秒（`event_bus_close_timeout(Duration)`）。超时时，`shutdown()` 返回 `TaskServiceError::NotificationClose`，线程仍会继续排空已持有内容。线程 panic 或 join 失败也返回 `NotificationClose`；剩余事件可能丢失。并发与后续的 `shutdown` 调用方收到相同存储结果。服务不会 shutdown 应用拥有的总线；应在服务之后由应用关闭。
 
@@ -885,7 +921,7 @@ pub async fn stop(tasks: &TaskExecutionService) -> Result<(), Box<dyn std::error
 | `build()` 失败 `RecoveryCapacityExceeded` | 未完成记录多于 `queue_capacity + max_running_tasks`。提高其一；记录完整。 |
 | `build()` 失败 `SqliteFeatureDisabled` 或存储错误 | 启用 `sqlite` 特性；检查路径且无其他进程持有库。不会回退内存。 |
 | 处处 `StoreUnavailable` 或 `SchedulerUnavailable` | 服务永久降级。读 `last_store_error()` / `last_scheduler_error()`，shutdown、修复原因、重启。 |
-| 收不到状态事件 | 查 `notification_stats()` 的 `queue_full`、`publish_error`、`worker_panicked`；确认订阅主题为 `task.lifecycle`。事件是尽力而为；以查询服务为权威状态。 |
+| 收不到状态事件 | 查 `notification_stats()` 的 `queue_full`、`publish_error`、`uncertain_publish`、`worker_panicked`；确认订阅主题为 `task.lifecycle`。事件是尽力而为；以查询服务为权威状态。 |
 | `shutdown()` 返回 `NotificationClose` | 发布线程未在 `event_bus_close_timeout` 内结束，或 panic。任务状态不受影响。 |
 
 持久化诊断有界：category 128 字节，message 与 blocked reason 4,096 字节，在 UTF-8 边界截断。在应用日志中记录原始错误及任务 ID、尝试序号与租户。
@@ -902,7 +938,7 @@ pub async fn stop(tasks: &TaskExecutionService) -> Result<(), Box<dyn std::error
 | `StoredTaskPage<StoredTask>` | 不含 payload 的 `RecoveryPage<TaskSummary>` |
 | owner 释放未约定排空 | `release_owner` 是准入写入的完成屏障 |
 
-当前版本使用 Event Bus 0.16 与 Redis adapter 0.4。任务通知使用的有界 `NotificationPublisher` 与 `AdmissionOutcome` API 在 Event Bus 0.14 中已存在，因此仅升级该集成的依赖版本不要求迁移应用调用点；升级 adapter 时仍须核对其专属版本说明。
+0.8 使用 Event Bus 0.17 和 Redis adapter 0.5。codec 须迁移到 `decode(&EncodedPayload)`，明确 schema 兼容规则和正数容量上限，并处理 `PublishFailure`，不能再假定报错表示未接纳。升级应用依赖前，请阅读 [0.8 迁移指南](migration.zh_CN.md) 及核心/provider 迁移说明。
 
 ## 边界与实践清单
 

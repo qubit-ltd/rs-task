@@ -19,7 +19,7 @@
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.7", features = ["sqlite"] }
+qubit-task = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -234,6 +234,8 @@ tasks.shutdown().await?;
 本库不提供多节点或分布式调度、工作流依赖、定时（cron）调度、对任意代码的强制中断，也不保证业务副作用恰好执行一次。存储声明支持重启恢复时，`submit_local` 不可用，因为闭包无法从数据库重建。通知是尽力而为的：队列（默认 256 条）满时会丢弃事件，发布失败也不会回滚任务状态。
 
 影响部署的主要限额：内存预设的等待队列为 1024 个任务，终态记录 1024 条，非终态记录 2048 条（含 `Blocked`），请求 payload 总量 64 MiB；单个请求 payload 最多 16 MiB，提交共享 64 MiB 的受理中 payload 预算和 64 个受理中写操作，历史分页每页最多 256 条。请求文本上限按 UTF-8 字节计：`task_type` 128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键 128 字节、值 4096 字节、合计 16384 字节；持久化诊断类别不超过 128 字节，消息不超过 4096 字节。重启时未完成记录数必须不超过 `queue_capacity + max_running_tasks`，否则构建失败并保留记录。SQLite 同一时刻只执行一个阻塞数据库操作，历史会一直保留，直到应用调用 `prune_terminal_before`；清理后对应的幂等键可以重新使用。`shutdown_until` 只限制调用方的等待时间；丢弃最后一个服务句柄会启动异步排空；调度器 panic 以 `SchedulerUnavailable` 报告，且不会自动重启。完整清单见[用户手册](doc/user-guide.zh_CN.md#边界与实践清单)。
+
+`event-bus` feature 使用 `qubit-event-bus` 0.17，Redis 应用使用 provider 0.5，并显式注册 JSON codec。指南 codec 写入 `task-event-v1`，仅通过明确的元数据验证规则允许历史无 schema JSON。`notification_stats().uncertain_publish` 统计可能已经接纳的发布失败，累计分类上是 `publish_error` 的子集；活动中的独立字段快照可能来自不同瞬间。默认不自动重试未知接纳。消费者按 TaskId 比较 `state_version` 并查询服务，不能因通知失败重新执行任务状态迁移。升级步骤见 [0.8 迁移指南](doc/migration.zh_CN.md)。
 
 ## 延伸阅读
 
