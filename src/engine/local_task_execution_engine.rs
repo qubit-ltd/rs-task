@@ -216,8 +216,8 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
             let cancelled = context.cancellation_signal();
             let release = prepared.release.take();
             let task_context = context;
+            let guard = ReservationGuard(release);
             spawn(async move {
-                let guard = ReservationGuard(release);
                 let handler_future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     handler.run(&payload, task_context)
                 })) {
@@ -258,5 +258,72 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
         (*message).to_owned()
     } else {
         "task handler panicked with a non-string payload".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use super::LocalTaskExecutionEngine;
+    use crate::engine::TaskExecutionEngine;
+    use crate::handler::TaskContext;
+    use crate::handler::TaskHandler;
+    use crate::handler::TaskHandlerDescriptor;
+    use crate::handler::TaskRunOutcome;
+    use crate::handler::TaskRunResult;
+    use crate::model::ResourceCapacity;
+    use crate::model::ResourceRequest;
+    use crate::model::TaskId;
+    use crate::model::TaskOutput;
+    use crate::store::TaskFuture;
+
+    struct NoopHandler;
+
+    impl TaskHandler for NoopHandler {
+        fn descriptor(&self) -> TaskHandlerDescriptor {
+            TaskHandlerDescriptor {
+                task_type: "noop".into(),
+                version: "1".into(),
+            }
+        }
+
+        fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+            Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
+        }
+    }
+
+    #[test]
+    fn runtime_drop_releases_unpolled_execution_reservation() {
+        let engine = LocalTaskExecutionEngine::new(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        });
+        let id = TaskId::generate();
+        let prepared = engine
+            .try_prepare(
+                id,
+                ResourceRequest {
+                    cpu_slots: 1,
+                    ..ResourceRequest::default()
+                },
+            )
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _handle = runtime
+            .block_on(engine.activate(
+                prepared,
+                Arc::new(NoopHandler),
+                Vec::new(),
+                TaskContext::new(id, 1, Vec::new(), Arc::new(AtomicBool::new(false))),
+            ))
+            .unwrap();
+        assert_eq!(engine.capacity().used_cpu_slots, 1);
+        drop(runtime);
+        assert_eq!(engine.capacity().used_cpu_slots, 0);
     }
 }
