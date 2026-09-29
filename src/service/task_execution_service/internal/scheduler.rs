@@ -33,7 +33,7 @@ use super::super::release_core_queue_slot;
 use super::super::task_stats;
 use super::super::transition;
 use super::QueueWindowGuard;
-use super::spawn_attempt_finalizer;
+use super::attempt_finalizer_supervisor::spawn_attempt_finalizer;
 use crate::scheduling::SchedulingPlan;
 
 /// Selects queued work, reserves resources, and starts eligible task attempts.

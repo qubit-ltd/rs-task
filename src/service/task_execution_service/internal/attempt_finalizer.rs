@@ -23,7 +23,7 @@ use super::super::pause_on_store_fault;
 use super::super::retry_deadline_ms;
 use super::super::transition_with_deadline;
 use super::super::truncate_utf8;
-use super::RetryQueueReservation;
+use super::retry_queue_reservation::RetryQueueReservation;
 
 /// Persists an execution result, retry decision, and local-handle completion.
 ///

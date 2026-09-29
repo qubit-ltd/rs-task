@@ -7,9 +7,9 @@
 // =============================================================================
 use std::sync::Arc;
 
+use super::super::try_reserve_core_queue_slot;
 use super::ServiceCore;
 use super::release_core_queue_slot;
-use super::super::try_reserve_core_queue_slot;
 
 /// Owns a retry queue slot until the corresponding queue entry is installed.
 pub(super) struct RetryQueueReservation {
@@ -22,7 +22,10 @@ pub(super) struct RetryQueueReservation {
 impl RetryQueueReservation {
     /// Reserves one slot, returning `None` when the queue is full.
     pub(super) fn try_new(core: &Arc<ServiceCore>) -> Option<Self> {
-        try_reserve_core_queue_slot(core).then(|| Self { core: Arc::clone(core), armed: true })
+        try_reserve_core_queue_slot(core).then(|| Self {
+            core: Arc::clone(core),
+            armed: true,
+        })
     }
 
     /// Transfers the count to an entry already installed in the queue.
@@ -34,6 +37,8 @@ impl RetryQueueReservation {
 impl Drop for RetryQueueReservation {
     /// Reclaims a slot after cancellation, panic, conflict exit, or failure.
     fn drop(&mut self) {
-        if self.armed { release_core_queue_slot(&self.core); }
+        if self.armed {
+            release_core_queue_slot(&self.core);
+        }
     }
 }

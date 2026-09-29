@@ -10,7 +10,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures::FutureExt;
-
 use tokio::pin;
 
 use super::super::ServiceCore;
@@ -150,7 +149,9 @@ async fn release_owner_after_drain(
             core.store.release_owner(epoch).await?;
         }
         Ok::<(), crate::store::StoreError>(())
-    }).catch_unwind().await;
+    })
+    .catch_unwind()
+    .await;
     let diagnostic = match release {
         Ok(Ok(())) => return primary,
         Ok(Err(error)) => format!("owner release failed: {error}"),
@@ -212,7 +213,8 @@ async fn supervise_notification_close(
     match AssertUnwindSafe(close).catch_unwind().await {
         Ok(result) => result,
         Err(payload) => Err(TaskServiceError::NotificationClose(format!(
-            "notification publisher close panicked: {}", panic_message(payload)
+            "notification publisher close panicked: {}",
+            panic_message(payload)
         ))),
     }
 }
@@ -226,7 +228,9 @@ mod tests {
     async fn test_shutdown_notification_close_panic_is_classified() {
         let error = supervise_notification_close(async {
             panic!("injected close future panic");
-        }).await.expect_err("notification fault");
+        })
+        .await
+        .expect_err("notification fault");
         assert!(matches!(error, TaskServiceError::NotificationClose(message)
             if message.contains("injected close future panic")));
     }
