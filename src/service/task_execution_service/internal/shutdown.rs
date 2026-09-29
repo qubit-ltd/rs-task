@@ -5,7 +5,11 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+
+use futures::FutureExt;
 
 use tokio::pin;
 
@@ -15,7 +19,7 @@ use super::super::record_store_fault;
 use super::super::task_stats;
 use super::super::wait_for_attempts;
 use super::super::wait_scheduler_finished;
-use crate::store::StoreError;
+use super::panic_message;
 
 /// Combines service convergence and notification worker shutdown results.
 ///
@@ -67,8 +71,17 @@ pub(in crate::service::task_execution_service) fn begin_shutdown_core(core: Arc<
         core.changed.notify_waiters();
         let runtime_handle = core.runtime_handle.clone();
         runtime_handle.spawn(async move {
-            let primary = coordinate_shutdown(Arc::clone(&core)).await;
-            let notification = close_notification_publisher(&core).await;
+            let primary = match AssertUnwindSafe(coordinate_shutdown(&core)).catch_unwind().await {
+                Ok(result) => result,
+                Err(payload) => {
+                    let diagnostic = format!("shutdown coordinator panicked: {}", panic_message(payload));
+                    record_store_fault(&core, diagnostic.clone());
+                    let primary = core.store_fault.lock().clone().unwrap_or(diagnostic);
+                    Err(TaskServiceError::StoreUnavailable(primary))
+                }
+            };
+            let primary = release_owner_after_drain(&core, primary).await;
+            let notification = supervise_notification_close(close_notification_publisher(&core)).await;
             let result = combine_shutdown_results(primary, notification);
             core.admission.finish_close(result);
             core.changed.notify_waiters();
@@ -76,148 +89,84 @@ pub(in crate::service::task_execution_service) fn begin_shutdown_core(core: Arc<
     }
 }
 
-/// Drains accepted work and releases store ownership after admission becomes
-/// idle.
+/// Drains accepted work until it settles or a service fault is observed.
 ///
-/// # Parameters
-///
-/// * `core` - Service state whose accepted work must settle.
-///
-/// # Returns
-///
-/// Success after workers stop and ownership is released.
-///
-/// # Errors
-///
-/// Returns a latched service or store cleanup error.
-async fn coordinate_shutdown(core: Arc<ServiceCore>) -> Result<(), TaskServiceError> {
+/// Waits for admitted writes before examining counts. Store errors stop the
+/// scheduler and are returned as the primary shutdown failure. Panics are
+/// handled by the coordinator's caller; ownership is released separately only
+/// after scheduler and attempt barriers have completed.
+async fn coordinate_shutdown(core: &Arc<ServiceCore>) -> Result<(), TaskServiceError> {
     core.admission.wait_idle().await;
-    let initial_store_fault = { core.store_fault.lock().clone() };
-    if let Some(error) = initial_store_fault {
-        return finish_failed_shutdown(&core, TaskServiceError::StoreUnavailable(error)).await;
-    }
-    let scheduler_fault = { core.scheduler_fault.lock().clone() };
-    if let Some(error) = scheduler_fault {
-        wait_scheduler_finished(&core).await;
-        wait_for_attempts(&core).await;
-        if let Some(epoch) = core.owner
-            && let Err(release_error) = core.store.release_owner(epoch).await
-        {
-            return Err(TaskServiceError::SchedulerUnavailable(format!(
-                "{error}; owner release failed: {release_error}"
-            )));
-        }
-        return Err(TaskServiceError::SchedulerUnavailable(error));
-    }
-    let transition_guard = loop {
+    loop {
         let notified = core.changed.notified();
         pin!(notified);
         notified.as_mut().enable();
-        let store_fault = { core.store_fault.lock().clone() };
-        if let Some(error) = store_fault {
-            return finish_failed_shutdown(&core, TaskServiceError::StoreUnavailable(error)).await;
+        if let Some(error) = core.store_fault.lock().clone() {
+            return Err(TaskServiceError::StoreUnavailable(error));
         }
-        let scheduler_fault = { core.scheduler_fault.lock().clone() };
-        if let Some(error) = scheduler_fault {
-            wait_scheduler_finished(&core).await;
-            wait_for_attempts(&core).await;
-            if let Some(epoch) = core.owner
-                && let Err(store_error) = core.store.release_owner(epoch).await
-            {
-                record_store_fault(&core, store_error.to_string());
-                return Err(TaskServiceError::Store(store_error));
-            }
+        if let Some(error) = core.scheduler_fault.lock().clone() {
             return Err(TaskServiceError::SchedulerUnavailable(error));
         }
-        let stats_result = task_stats(&core).await.inspect_err(|error| {
-            if let TaskServiceError::Store(store_error) = error
-                && matches!(store_error, StoreError::Failure(_))
-            {
-                record_store_fault(&core, store_error.to_string());
-            }
-        });
-        let stats = match stats_result {
+        let stats = match task_stats(core).await {
             Ok(stats) => stats,
-            Err(_error) if core.store_fault.lock().is_some() => continue,
-            Err(error) => return Err(error),
+            Err(error) => {
+                record_store_fault(core, error.to_string());
+                return Err(TaskServiceError::StoreUnavailable(error.to_string()));
+            }
         };
         if stats.queued == 0 && stats.running == 0 {
-            wait_scheduler_finished(&core).await;
-            wait_for_attempts(&core).await;
-            let transition_guard = core.transition_event_lock.write().await;
-            let settled_result = task_stats(&core).await.inspect_err(|error| {
-                if let TaskServiceError::Store(store_error) = error
-                    && matches!(store_error, StoreError::Failure(_))
-                {
-                    record_store_fault(&core, store_error.to_string());
-                }
-            });
-            let settled_stats = match settled_result {
-                Ok(stats) => stats,
-                Err(_error) if core.store_fault.lock().is_some() => {
-                    drop(transition_guard);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let scheduler_fault = { core.scheduler_fault.lock().clone() };
-            if let Some(error) = scheduler_fault {
-                drop(transition_guard);
-                wait_scheduler_finished(&core).await;
-                wait_for_attempts(&core).await;
-                if let Some(epoch) = core.owner
-                    && let Err(store_error) = core.store.release_owner(epoch).await
-                {
-                    record_store_fault(&core, store_error.to_string());
-                    return Err(TaskServiceError::Store(store_error));
-                }
-                return Err(TaskServiceError::SchedulerUnavailable(error));
-            }
-            if settled_stats.queued == 0 && settled_stats.running == 0 {
-                break transition_guard;
-            }
+            return Ok(());
         }
         notified.await;
-    };
-    if let Some(epoch) = core.owner
-        && let Err(error) = core.store.release_owner(epoch).await
-    {
-        record_store_fault(&core, error.to_string());
-        wait_scheduler_finished(&core).await;
-        wait_for_attempts(&core).await;
-        return Err(TaskServiceError::StoreUnavailable(error.to_string()));
     }
-    drop(transition_guard);
-    Ok(())
 }
 
-/// Finishes shutdown after a service fault and attempts owner cleanup.
+/// Releases ownership exactly once after every possible writer has drained.
 ///
-/// # Parameters
-///
-/// * `core` - Service state whose workers must stop.
-/// * `primary` - Fault that caused shutdown.
-///
-/// # Returns
-///
-/// The primary failure after all workers stop.
-///
-/// # Errors
-///
-/// Returns the primary service failure, enriched when owner release also fails.
-async fn finish_failed_shutdown(core: &Arc<ServiceCore>, primary: TaskServiceError) -> Result<(), TaskServiceError> {
+/// `primary` retains the convergence failure, if any. A blocked admission,
+/// scheduler, or finalizer keeps this future pending and retains ownership.
+/// Release errors and panics are recorded and appended to the primary failure;
+/// cleanup never restarts the coordinator or retries release.
+async fn release_owner_after_drain(
+    core: &Arc<ServiceCore>,
+    primary: Result<(), TaskServiceError>,
+) -> Result<(), TaskServiceError> {
+    core.admission.wait_idle().await;
     wait_scheduler_finished(core).await;
     wait_for_attempts(core).await;
-    if let Some(epoch) = core.owner
-        && let Err(release_error) = core.store.release_owner(epoch).await
-    {
-        let diagnostic = core.store_fault.lock().clone().unwrap_or_else(|| primary.to_string());
-        record_store_fault(core, format!("{diagnostic}; owner release failed: {release_error}"));
-        return Err(TaskServiceError::StoreUnavailable(format!(
-            "{diagnostic}; owner release failed: {release_error}"
-        )));
+    let _transition_guard = core.transition_event_lock.write().await;
+    // A worker may have faulted while the normal drain was awaiting its exit.
+    let primary = primary.and_then(|()| {
+        if let Some(error) = core.store_fault.lock().clone() {
+            Err(TaskServiceError::StoreUnavailable(error))
+        } else if let Some(error) = core.scheduler_fault.lock().clone() {
+            Err(TaskServiceError::SchedulerUnavailable(error))
+        } else {
+            Ok(())
+        }
+    });
+    let release = AssertUnwindSafe(async {
+        if let Some(epoch) = core.owner {
+            core.store.release_owner(epoch).await?;
+        }
+        Ok::<(), crate::store::StoreError>(())
+    }).catch_unwind().await;
+    let diagnostic = match release {
+        Ok(Ok(())) => return primary,
+        Ok(Err(error)) => format!("owner release failed: {error}"),
+        Err(payload) => format!("owner release panicked: {}", panic_message(payload)),
+    };
+    record_store_fault(core, diagnostic.clone());
+    match primary {
+        Ok(()) => Err(TaskServiceError::StoreUnavailable(diagnostic)),
+        Err(TaskServiceError::StoreUnavailable(error)) => {
+            Err(TaskServiceError::StoreUnavailable(format!("{error}; {diagnostic}")))
+        }
+        Err(TaskServiceError::SchedulerUnavailable(error)) => {
+            Err(TaskServiceError::SchedulerUnavailable(format!("{error}; {diagnostic}")))
+        }
+        Err(error) => Err(TaskServiceError::StoreUnavailable(format!("{error}; {diagnostic}"))),
     }
-    Err(primary)
 }
 
 /// Stops and drains the service-owned notification worker before shutdown
@@ -251,4 +200,34 @@ async fn close_notification_publisher(core: &Arc<ServiceCore>) -> Result<(), Tas
     #[cfg(not(feature = "event-bus"))]
     let _ = core;
     Ok(())
+}
+
+/// Polls the notification close future inside its own panic boundary.
+///
+/// A panicked close is a notification failure, not a storage fault, and must
+/// still allow the coordinator to publish the shared close result.
+async fn supervise_notification_close(
+    close: impl Future<Output = Result<(), TaskServiceError>>,
+) -> Result<(), TaskServiceError> {
+    match AssertUnwindSafe(close).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => Err(TaskServiceError::NotificationClose(format!(
+            "notification publisher close panicked: {}", panic_message(payload)
+        ))),
+    }
+}
+
+#[cfg(all(test, feature = "event-bus"))]
+mod tests {
+    use super::supervise_notification_close;
+    use crate::service::TaskServiceError;
+
+    #[tokio::test]
+    async fn test_shutdown_notification_close_panic_is_classified() {
+        let error = supervise_notification_close(async {
+            panic!("injected close future panic");
+        }).await.expect_err("notification fault");
+        assert!(matches!(error, TaskServiceError::NotificationClose(message)
+            if message.contains("injected close future panic")));
+    }
 }

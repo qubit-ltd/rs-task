@@ -20,12 +20,10 @@ use super::super::TaskState;
 use super::super::finalize_local;
 use super::super::now_ms;
 use super::super::pause_on_store_fault;
-use super::super::release_core_queue_slot;
 use super::super::retry_deadline_ms;
 use super::super::transition_with_deadline;
 use super::super::truncate_utf8;
-use super::super::try_reserve_core_queue_slot;
-use super::AttemptInFlightGuard;
+use super::RetryQueueReservation;
 
 /// Persists an execution result, retry decision, and local-handle completion.
 ///
@@ -41,9 +39,6 @@ pub(in crate::service::task_execution_service) async fn finish_attempt(
     receiver: sync::oneshot::Receiver<ExecutionOutcome>,
     _running_permit: sync::OwnedSemaphorePermit,
 ) {
-    let _attempt_guard = AttemptInFlightGuard {
-        core_ref: core_ref.clone(),
-    };
     let outcome = receiver
         .await
         .unwrap_or_else(|_| ExecutionOutcome::WorkerStopped("execution worker stopped".into()));
@@ -104,10 +99,10 @@ pub(in crate::service::task_execution_service) async fn finish_attempt(
     } else {
         None
     };
-    let mut retry_slot_reserved = false;
+    let mut retry_reservation = None;
     if matches!(final_state, TaskState::Queued) {
-        retry_slot_reserved = try_reserve_core_queue_slot(&core);
-        if !retry_slot_reserved {
+        retry_reservation = RetryQueueReservation::try_new(&core);
+        if retry_reservation.is_none() {
             retry_deadline = None;
             final_state = TaskState::Blocked {
                 reason: "retry queue is full; call retry_blocked when capacity is available".into(),
@@ -145,6 +140,9 @@ pub(in crate::service::task_execution_service) async fn finish_attempt(
                         retry_not_before_ms: updated.retry_not_before_ms,
                         bypasses: 0,
                     });
+                    if let Some(reservation) = retry_reservation.take() {
+                        reservation.commit_to_queue();
+                    }
                 }
                 core.changed.notify_waiters();
                 if !matches!(updated.state, TaskState::Queued | TaskState::Running) {
@@ -158,8 +156,5 @@ pub(in crate::service::task_execution_service) async fn finish_attempt(
                 break;
             }
         }
-    }
-    if retry_slot_reserved {
-        release_core_queue_slot(&core);
     }
 }

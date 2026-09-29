@@ -33,7 +33,7 @@ use super::super::release_core_queue_slot;
 use super::super::task_stats;
 use super::super::transition;
 use super::QueueWindowGuard;
-use super::finish_attempt;
+use super::spawn_attempt_finalizer;
 use crate::scheduling::SchedulingPlan;
 
 /// Selects queued work, reserves resources, and starts eligible task attempts.
@@ -291,9 +291,7 @@ pub(in crate::service::task_execution_service) async fn scheduler_loop(core_ref:
                         },
                     );
                     core.attempts_in_flight.fetch_add(1, Ordering::AcqRel);
-                    let weak = Arc::downgrade(&core);
-                    core.runtime_handle
-                        .spawn(finish_attempt(weak, running_record, handle.receiver, running_permit));
+                    spawn_attempt_finalizer(Arc::clone(&core), running_record, handle.receiver, running_permit);
                     activated_positions.push(original_positions[&id]);
                     started = true;
                     match core.store.get_summary(id).await {
