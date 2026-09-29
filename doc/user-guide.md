@@ -295,7 +295,7 @@ into the builder. The service publishes `TaskEvent` values after state changes.
 Publishing is best effort: a publish error does not roll back a task transition.
 Events may be repeated, delayed, or missing, so consumers should compare
 `state_version` and query the service for authoritative state.
-This release targets the `qubit-event-bus` 0.15 API. The shared `NotificationPublisher`
+This release targets the `qubit-event-bus` 0.16 API. The shared `NotificationPublisher`
 reports the provider receipt; this service maps its admission outcome to the
 existing task notification counters.
 
@@ -584,8 +584,8 @@ compile, recovery, and shutdown tests before deployment.
 
 The task notification integration uses the bounded `NotificationPublisher`
 and `AdmissionOutcome` APIs, which are also present in the published
-`qubit-event-bus` 0.14 crate. Upgrading this integration to 0.15 does not by
-itself require an application call-site migration; check provider-specific
+`qubit-event-bus` 0.14 crate. Upgrading this integration through 0.16 does not
+by itself require an application call-site migration; check provider-specific
 release notes for changes when upgrading a provider.
 
 This redesign removes caller-supplied IDs, `submit` closures,
