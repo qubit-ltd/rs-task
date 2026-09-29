@@ -407,10 +407,13 @@ let service = TaskExecutionServiceBuilder::in_memory()
 | `TaskQuery.states` 使用 `TaskState` | 改为 `Vec<TaskStateKind>` |
 | 调度策略接收完整 `TaskRequest` | `QueuedTask.resources` 只暴露资源需求 |
 | 旧版 `TaskStore` 契约 | 实现聚合 `count_states`、摘要读取、有界恢复预检和 `release_owner` 完成屏障 |
-| `qubit-event-bus` 0.14 通过 `EventBus::publish(PublishRequest)` 发布，并检查 `PublishReceipt::acknowledgement()` | 0.15 改为创建有界 `NotificationPublisher`，通过 `try_publish(event)` 入队，并将回调中的 `NotificationOutcome::Published(receipt).admission_outcome()`（`AdmissionOutcome`）映射到任务通知统计 |
 
 这些变化有意不保留兼容别名。请同时更新应用调用点和 provider 实现，部署前
 运行应用编译、恢复和关闭测试。
+
+任务通知集成使用有界 `NotificationPublisher` 和 `AdmissionOutcome` API；已发布的
+`qubit-event-bus` 0.14 crate 也包含这些 API。因此，仅将该集成升级到 0.15
+本身不要求应用调用点迁移；升级 provider 时请检查其专属的版本说明。
 
 0.6 将原先仅限制提交的名额替换为 `max_inflight_operations`，统一限制六种生命周期写操作；超限错误为 `TaskServiceError::OperationLimitExceeded`。同时移除了调用方指定任务 ID、用 `submit` 提交闭包、线程池专用构建配置和旧的
 `TaskHandle<R, E>`。进程内闭包改用 `submit_local`，并通过

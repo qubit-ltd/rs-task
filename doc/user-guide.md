@@ -577,11 +577,16 @@ behavior changes the 0.6.0 retry contract.
 | `TaskQuery.states` built from `TaskState` | `Vec<TaskStateKind>` |
 | Full `TaskRequest` passed to scheduling policies | `QueuedTask.resources` exposes only resource demand |
 | Earlier `TaskStore` contract | Implement aggregate `count_states`, summary reads, bounded recovery precheck, and the `release_owner` completion barrier |
-| `qubit-event-bus` 0.14 calls `EventBus::publish(PublishRequest)` and inspects `PublishReceipt::acknowledgement()` | With 0.15, create a bounded `NotificationPublisher`, enqueue with `try_publish(event)`, and map the callback's `NotificationOutcome::Published(receipt).admission_outcome()` (`AdmissionOutcome`) into task notification statistics |
 
 These changes intentionally have no compatibility aliases. Update application
 call sites and provider implementations together, then run the application's
 compile, recovery, and shutdown tests before deployment.
+
+The task notification integration uses the bounded `NotificationPublisher`
+and `AdmissionOutcome` APIs, which are also present in the published
+`qubit-event-bus` 0.14 crate. Upgrading this integration to 0.15 does not by
+itself require an application call-site migration; check provider-specific
+release notes for changes when upgrading a provider.
 
 This redesign removes caller-supplied IDs, `submit` closures,
 thread-pool-specific builder settings, and the old `TaskHandle<R, E>` API. The
