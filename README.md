@@ -31,6 +31,7 @@ The `sqlite` feature enables restart recovery through `TaskExecutionServiceBuild
 | `sqlite` | Persistent history and restart recovery |
 | `inventory` | Discover providers linked into the application |
 | `event-bus` | Publish best-effort lifecycle notifications |
+| `conformance` | Reusable black-box store contract suites for backend authors |
 
 ## Quick start
 

@@ -44,10 +44,28 @@
       "features": ["inventory", "event-bus"]
     },
     {
-      "name": "all-features",
+      "name": "sqlite-inventory-event-bus",
       "commands": ["check", "test", "doc"],
       "defaultFeatures": false,
       "features": ["sqlite", "inventory", "event-bus"]
+    },
+    {
+      "name": "all-features",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["sqlite", "inventory", "event-bus", "conformance"]
+    },
+    {
+      "name": "conformance",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["conformance"]
+    },
+    {
+      "name": "sqlite-conformance",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["sqlite", "conformance"]
     }
   ]
 }

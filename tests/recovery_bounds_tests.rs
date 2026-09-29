@@ -26,6 +26,7 @@ use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
+use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
@@ -190,13 +191,16 @@ async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
         inner,
         mode: BadPage::Normal,
         stored: Mutex::new(None),
-        cursor: TaskId::generate(),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
         precheck_calls: AtomicUsize::new(0),
         scan_calls: AtomicUsize::new(0),
         acquire_gate: None,
         scan_gate: None,
         fail_release: false,
         release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
         release_finished: Mutex::new(None),
     });
 
@@ -383,25 +387,35 @@ async fn test_retry_blocked_rejects_exhausted_budget_without_mutation() {
     cleanup(&path);
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum BadPage {
     Normal,
     EmptyWithNext,
     StuckCursor,
     TooManyRecords,
+    Duplicate,
+    Reversed,
+    AtOrBeforeCursor,
+    BeforeCursor,
+    NextNotLast,
+    Blocked,
+    Terminal,
 }
 
 struct BadScanStore {
     inner: Arc<SqliteTaskStore>,
     mode: BadPage,
     stored: Mutex<Option<TaskSummary>>,
-    cursor: TaskId,
+    cursor: TaskCursor,
     precheck_calls: AtomicUsize,
     scan_calls: AtomicUsize,
     acquire_gate: Option<Arc<AsyncGate>>,
     scan_gate: Option<Arc<AsyncGate>>,
     fail_release: bool,
     release_calls: AtomicUsize,
+    transition_calls: AtomicUsize,
+    get_calls: AtomicUsize,
+    events: Mutex<Vec<&'static str>>,
     release_finished: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -448,6 +462,7 @@ impl TaskStore for BadScanStore {
         self.inner.get_summary_by_idempotency_key(key)
     }
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+        self.transition_calls.fetch_add(1, Ordering::AcqRel);
         self.inner.transition(command)
     }
 
@@ -455,6 +470,7 @@ impl TaskStore for BadScanStore {
         self.inner.get_summary(id)
     }
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        self.get_calls.fetch_add(1, Ordering::AcqRel);
         self.inner.get(id)
     }
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
@@ -491,6 +507,7 @@ impl TaskStore for BadScanStore {
         let finished = self.release_finished.lock().unwrap().take();
         Box::pin(async move {
             let result = result.await;
+            self.events.lock().unwrap().push("released");
             if let Some(finished) = finished {
                 let _ = finished.send(());
             }
@@ -503,14 +520,14 @@ impl TaskStore for BadScanStore {
         self.inner.has_unfinished_over_limit(limit)
     }
 
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.scan_calls.fetch_add(1, Ordering::Relaxed);
         let gate = self.scan_gate.clone();
         Box::pin(async move {
             if let Some(gate) = gate {
                 gate.wait().await;
             }
-            match self.mode {
+            let result = match self.mode {
                 BadPage::Normal => self.inner.scan_unfinished(cursor).await,
                 BadPage::EmptyWithNext => Ok(RecoveryPage {
                     tasks: Vec::new(),
@@ -525,8 +542,8 @@ impl TaskStore for BadScanStore {
                     }
                     let task = self.stored.lock().unwrap().clone().ok_or(StoreError::NotFound)?;
                     Ok(RecoveryPage {
+                        next: Some(TaskCursor::from(&task)),
                         tasks: vec![task],
-                        next: Some(self.cursor),
                     })
                 }
                 BadPage::TooManyRecords => {
@@ -537,7 +554,52 @@ impl TaskStore for BadScanStore {
                         next: None,
                     })
                 }
-            }
+                BadPage::Duplicate
+                | BadPage::Reversed
+                | BadPage::NextNotLast
+                | BadPage::Blocked
+                | BadPage::Terminal => {
+                    let mut page = self.inner.scan_unfinished(None).await?;
+                    match self.mode {
+                        BadPage::Duplicate => page.tasks.push(page.tasks[0].clone()),
+                        BadPage::Reversed => {
+                            page.tasks.sort_by_key(|task| TaskCursor::from(task));
+                            page.tasks.reverse();
+                        }
+                        BadPage::NextNotLast => page.next = Some(self.cursor),
+                        BadPage::Blocked => {
+                            page.tasks.last_mut().unwrap().state = TaskState::Blocked {
+                                reason: "injected".into(),
+                            }
+                        }
+                        BadPage::Terminal => page.tasks.last_mut().unwrap().state = TaskState::Succeeded,
+                        _ => unreachable!(),
+                    }
+                    Ok(page)
+                }
+                BadPage::AtOrBeforeCursor | BadPage::BeforeCursor => {
+                    if cursor.is_none() {
+                        let page = self.inner.scan_unfinished(None).await?;
+                        let task = page.tasks.first().cloned().ok_or(StoreError::NotFound)?;
+                        *self.stored.lock().unwrap() = Some(task.clone());
+                        Ok(RecoveryPage {
+                            next: Some(TaskCursor::from(&task)),
+                            tasks: vec![task],
+                        })
+                    } else {
+                        let mut task = self.stored.lock().unwrap().clone().ok_or(StoreError::NotFound)?;
+                        if matches!(self.mode, BadPage::BeforeCursor) {
+                            task.accepted_at_ms -= 1;
+                        }
+                        Ok(RecoveryPage {
+                            next: None,
+                            tasks: vec![task],
+                        })
+                    }
+                }
+            };
+            self.events.lock().unwrap().push("scan completed");
+            result
         })
     }
 }
@@ -547,26 +609,47 @@ async fn test_invalid_recovery_pages_fail_without_looping() {
     for mode in [BadPage::EmptyWithNext, BadPage::StuckCursor, BadPage::TooManyRecords] {
         let path = temp_db();
         let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
-        accept(&inner).await;
+        let before = accept(&inner).await;
         let store = Arc::new(BadScanStore {
             inner,
             mode,
             stored: Mutex::new(None),
-            cursor: TaskId::generate(),
+            cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
             precheck_calls: AtomicUsize::new(0),
             scan_calls: AtomicUsize::new(0),
             acquire_gate: None,
             scan_gate: None,
             fail_release: false,
             release_calls: AtomicUsize::new(0),
+            transition_calls: AtomicUsize::new(0),
+            get_calls: AtomicUsize::new(0),
+            events: Mutex::new(Vec::new()),
             release_finished: Mutex::new(None),
         });
         let result = TaskExecutionServiceBuilder::default()
             .store(store.clone())
             .require_recovery(true)
+            .register_handler(Arc::new(Echo))
+            .expect("handler registers")
             .build()
             .await;
         assert!(matches!(result, Err(TaskServiceBuildError::InvalidRecoveryPage(_))));
+        assert_eq!(store.transition_calls.load(Ordering::Acquire), 0);
+        assert_eq!(
+            store.get_calls.load(Ordering::Acquire),
+            0,
+            "recovery never reads payloads"
+        );
+        assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events.last(), Some(&"released"));
+        let after = store
+            .inner
+            .get_summary(before.id)
+            .await
+            .expect("summary reads")
+            .expect("task remains");
+        assert_eq!(after.state_version, before.state_version);
         drop(store);
         let reopened = SqliteTaskStore::open(&path).unwrap();
         let epoch = reopened.acquire_owner().await.unwrap();
@@ -585,13 +668,16 @@ async fn test_recovery_error_retains_owner_release_failure() {
         inner,
         mode: BadPage::EmptyWithNext,
         stored: Mutex::new(None),
-        cursor: TaskId::generate(),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
         precheck_calls: AtomicUsize::new(0),
         scan_calls: AtomicUsize::new(0),
         acquire_gate: None,
         scan_gate: None,
         fail_release: true,
         release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
         release_finished: Mutex::new(None),
     });
     let result = TaskExecutionServiceBuilder::default()
@@ -622,13 +708,16 @@ async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
         inner,
         mode: BadPage::Normal,
         stored: Mutex::new(None),
-        cursor: TaskId::generate(),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
         precheck_calls: AtomicUsize::new(0),
         scan_calls: AtomicUsize::new(0),
         acquire_gate: Some(Arc::clone(&gate)),
         scan_gate: None,
         fail_release: false,
         release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
         release_finished: Mutex::new(Some(release_finished)),
     });
     let builder_store = Arc::clone(&store);
@@ -670,13 +759,16 @@ async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
         inner,
         mode: BadPage::Normal,
         stored: Mutex::new(None),
-        cursor: TaskId::generate(),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
         precheck_calls: AtomicUsize::new(0),
         scan_calls: AtomicUsize::new(0),
         acquire_gate: None,
         scan_gate: Some(Arc::clone(&gate)),
         fail_release: false,
         release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
         release_finished: Mutex::new(Some(release_finished)),
     });
     let builder_store = Arc::clone(&store);
@@ -719,13 +811,16 @@ async fn test_recovery_prechecks_once_then_scans_each_page_once() {
         inner,
         mode: BadPage::Normal,
         stored: Mutex::new(None),
-        cursor: TaskId::generate(),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
         precheck_calls: AtomicUsize::new(0),
         scan_calls: AtomicUsize::new(0),
         acquire_gate: None,
         scan_gate: None,
         fail_release: false,
         release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
         release_finished: Mutex::new(None),
     });
     let service = TaskExecutionServiceBuilder::default()
@@ -739,6 +834,11 @@ async fn test_recovery_prechecks_once_then_scans_each_page_once() {
     assert_eq!(store.precheck_calls.load(Ordering::Relaxed), 1);
     assert_eq!(store.scan_calls.load(Ordering::Relaxed), 2);
     assert_eq!(service.stats().await.unwrap().blocked, 257);
+    assert_eq!(
+        store.get_calls.load(Ordering::Acquire),
+        0,
+        "recovery blocks tasks without payload reads"
+    );
     service.shutdown().await.unwrap();
     drop(service);
     drop(store);
@@ -854,17 +954,115 @@ async fn test_recovery_preserves_retry_deadline_for_queued_record() {
         .build()
         .await
         .unwrap();
-    time::sleep(std::time::Duration::from_millis(100)).await;
-    let waiting = service.get(queued.id).await.unwrap().unwrap();
-    assert_eq!(waiting.retry_not_before_ms, Some(deadline));
-    assert_eq!(waiting.attempt, 1);
     let expired_finished = time::timeout(std::time::Duration::from_secs(5), service.wait(later_queued.id))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(expired_finished.attempt, 2);
     assert!(matches!(expired_finished.state, TaskState::Succeeded));
+    let waiting = service.get(queued.id).await.unwrap().unwrap();
+    assert_eq!(waiting.retry_not_before_ms, Some(deadline));
+    assert_eq!(waiting.attempt, 1);
     service.shutdown().await.unwrap();
     drop(service);
     cleanup(&path);
+}
+
+/// Invalid rows are rejected before transitions, then ownership is released.
+#[tokio_test]
+async fn test_invalid_recovery_rows_have_no_page_side_effects_and_cleanup_follows_scan() {
+    for mode in [
+        BadPage::Duplicate,
+        BadPage::Reversed,
+        BadPage::NextNotLast,
+        BadPage::Blocked,
+        BadPage::Terminal,
+        BadPage::AtOrBeforeCursor,
+        BadPage::BeforeCursor,
+    ] {
+        let path = temp_db();
+        let inner = Arc::new(SqliteTaskStore::open(&path).expect("store opens"));
+        let first = accept(&inner).await;
+        let first = if matches!(mode, BadPage::AtOrBeforeCursor | BadPage::BeforeCursor) {
+            first.summary()
+        } else {
+            inner
+                .transition(TransitionCommand {
+                    id: first.id,
+                    expected_version: first.state_version,
+                    expected_attempt: first.attempt,
+                    state: TaskState::Running,
+                    retry_not_before_ms: None,
+                    output: None,
+                    assigned_resources: Vec::new(),
+                    cancel_requested: false,
+                })
+                .await
+                .expect("interrupted attempt persists")
+        };
+        let second = accept(&inner).await.summary();
+        let store = Arc::new(BadScanStore {
+            inner,
+            mode,
+            stored: Mutex::new(None),
+            cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
+            precheck_calls: AtomicUsize::new(0),
+            scan_calls: AtomicUsize::new(0),
+            acquire_gate: None,
+            scan_gate: None,
+            fail_release: false,
+            release_calls: AtomicUsize::new(0),
+            transition_calls: AtomicUsize::new(0),
+            get_calls: AtomicUsize::new(0),
+            events: Mutex::new(Vec::new()),
+            release_finished: Mutex::new(None),
+        });
+        let result = TaskExecutionServiceBuilder::default()
+            .store(store.clone())
+            .require_recovery(true)
+            .register_handler(Arc::new(Echo))
+            .expect("handler registers")
+            .build()
+            .await;
+        match result {
+            Err(TaskServiceBuildError::InvalidRecoveryPage(_)) => {}
+            Err(error) => panic!("invalid {mode:?} rows returned {error:?}; expected InvalidRecoveryPage"),
+            Ok(service) => {
+                let _ = service.shutdown().await;
+                panic!("invalid {mode:?} rows must produce InvalidRecoveryPage; build returned Ok");
+            }
+        }
+        assert_eq!(
+            store.transition_calls.load(Ordering::Acquire),
+            0,
+            "no row is changed before full-page validation"
+        );
+        assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            store.get_calls.load(Ordering::Acquire),
+            0,
+            "invalid-page recovery never reads payloads"
+        );
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events.last(), Some(&"released"));
+        assert!(
+            events[..events.len() - 1]
+                .iter()
+                .all(|event| *event == "scan completed")
+        );
+        for record in [first, second] {
+            let after = store
+                .inner
+                .get_summary(record.id)
+                .await
+                .expect("summary reads")
+                .expect("task remains");
+            assert_eq!(after.state, record.state);
+            assert_eq!(after.state_version, record.state_version);
+        }
+        drop(store);
+        let reopened = SqliteTaskStore::open(&path).expect("invalid-page cleanup releases owner");
+        drop(reopened);
+        cleanup(&path);
+    }
 }

@@ -7,8 +7,10 @@
 // =============================================================================
 // Admits detached lifecycle writes and manages bounded queue reservations.
 mod admission;
-// Finalizes an attempt and releases its in-flight reservation.
+// Persists attempt outcomes and installs retries.
 mod attempt_finalizer;
+// Supervises persistence panics and owns pre-poll attempt guards.
+mod attempt_finalizer_supervisor;
 // Tracks attempts that still own execution resources.
 mod attempt_in_flight_guard;
 // Latches storage and scheduler failures and wakes blocked work.
@@ -17,6 +19,8 @@ mod fault;
 mod query;
 // Returns unused candidate reservations to the scheduler queue.
 mod queue_window_guard;
+// Returns retry queue capacity on every uncommitted exit.
+mod retry_queue_reservation;
 // Cancels one running attempt through its completion signal.
 mod running_cancellation;
 // Selects and starts runnable tasks.

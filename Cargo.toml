@@ -22,12 +22,18 @@ include = [
     "/resources/**",
     "/src/**",
     "/tests/**",
+    "/benches/**",
 ]
 
 [lib]
 name = "qubit_task"
 doctest = true
 test = true
+
+[[bench]]
+name = "sqlite_history"
+harness = false
+required-features = ["sqlite"]
 
 [dependencies]
 futures = "^0.3"
@@ -45,6 +51,7 @@ uuid = { version = "^1.26", features = ["v4", "serde"] }
 
 [features]
 default = []
+conformance = []
 inventory = ["qubit-spi/inventory"]
 sqlite = ["dep:rusqlite", "dep:fs2"]
 event-bus = ["dep:qubit-event-bus"]
