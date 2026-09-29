@@ -17,6 +17,17 @@ qubit-task = "0.6"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
+### Optional features
+
+| Feature | Enables |
+| --- | --- |
+| `sqlite` | SQLite persistence and restart recovery |
+| `inventory` | Discovery of linked SPI providers |
+| `event-bus` | Best-effort task lifecycle notifications |
+
+Default features are empty. The `sqlite` and `event-bus` integrations are
+independent; `inventory` is only needed for linked-provider discovery.
+
 ## Start with volatile local work
 
 This named preset keeps task state in memory. Pending tasks are lost when the

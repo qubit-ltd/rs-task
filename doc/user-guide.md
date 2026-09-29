@@ -245,6 +245,16 @@ recovery capability fails startup; there is no fallback to volatile memory. If
 a recovered task has no registered handler, it remains stored in the `Blocked`
 state and service construction succeeds.
 
+For an in-place upgrade, stop the old service and wait for `shutdown()` to
+complete; a `shutdown_until` timeout is not proof that draining finished. Back
+up the database, deploy the new binary, and let a new store instance open the
+same database. Inspect the recovered summaries before accepting new work. Do
+not run old and new service instances against the database in parallel. Keep
+the database in a stable, trusted directory: SQLite ownership uses a sibling
+lock file formed by appending `.owner.lock` to the complete database filename,
+and databases with multiple hard links are rejected. The schema 0/1/2 migration
+is transactional and retains the database contents.
+
 `capabilities()` reports `persistent_history` and `restart_recovery` for the
 store that was actually assembled. Persistent history without recovery is a
 valid combination for a third-party store. Every `TaskStore` implementation
@@ -371,6 +381,10 @@ coupled to task state. Use a transactional outbox when state changes and event
 delivery must commit atomically. The codec and provider assembly are compiled
 by `cargo check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`;
 run the fixture with `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`.
+The example uses `redis://127.0.0.1/`; a Redis server must be reachable there
+for actual publication. Constructing the provider and shutting down without
+publishing does not verify Redis connectivity. Run the Redis integration test
+against a real service to validate network and stream behavior.
 
 The service uses `rs-event-bus`'s `NotificationPublisher`, which owns one serial publisher thread and a bounded notification queue.
 The default capacity is 256; configure another positive capacity with
@@ -548,6 +562,20 @@ for an exhausted record; submit a new task ID for a fresh attempt budget. This
 behavior changes the 0.6.0 retry contract.
 
 ## Migration from 0.5 and earlier APIs
+
+| Previous contract | 0.6 contract |
+| --- | --- |
+| Caller-supplied task IDs or closure-based `submit` | `submit_local` for process-local results; `TaskRequest` and a stable idempotency key for reconstructable work; the service creates `TaskId` values |
+| Submission-only in-flight limit | `max_inflight_operations` shared by six lifecycle writes; overload returns `OperationLimitExceeded` |
+| `StoredTaskPage<StoredTask>` recovery pages | `RecoveryPage<TaskSummary>` with payload-free recovery records |
+| `TaskQuery.states` built from `TaskState` | `Vec<TaskStateKind>` |
+| Full `TaskRequest` passed to scheduling policies | `QueuedTask.resources` exposes only resource demand |
+| Earlier `TaskStore` contract | Implement aggregate `count_states`, summary reads, bounded recovery precheck, and the `release_owner` completion barrier |
+| Event notification code coupled to a concrete bus | Target `qubit-event-bus` 0.15; use `NotificationPublisher` and map provider `AdmissionOutcome` results into task notification statistics |
+
+These changes intentionally have no compatibility aliases. Update application
+call sites and provider implementations together, then run the application's
+compile, recovery, and shutdown tests before deployment.
 
 This redesign removes caller-supplied IDs, `submit` closures,
 thread-pool-specific builder settings, and the old `TaskHandle<R, E>` API. The

@@ -17,6 +17,17 @@ qubit-task = "0.6"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
+### 可选 feature
+
+| Feature | 功能 |
+| --- | --- |
+| `sqlite` | SQLite 持久化与重启恢复 |
+| `inventory` | 发现最终程序链接的 SPI provider |
+| `event-bus` | 尽力而为的任务生命周期通知 |
+
+默认不启用任何 feature。`sqlite` 与 `event-bus` 相互独立；只有需要链接期
+provider 自动发现时才启用 `inventory`。
+
 ## 从易失型本机任务开始
 
 这个具名预设把任务状态保存在内存中。进程退出时未完成任务会丢失，终态历史最多保留 1024 条；非终态记录默认最多 2048 条，`Blocked` 也占用名额。每页历史查询最多返回 256 条。
