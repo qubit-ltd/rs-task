@@ -137,15 +137,15 @@ jobs:
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}\rs-task-windows-sqlite-target
-        run: >-
-          cargo test --locked --features sqlite
-          --test recovery_order_tests
-          --test sqlite_query_tests
-          --test sqlite_tests
-          --test owner_release_barrier_tests
-          --test owner_identity_tests
-          --test ownership_lifecycle_tests
-          --test recovery_bounds_tests
+        run: |
+          cargo test --locked --features sqlite --test integration_tests store::sqlite_tests
+          cargo test --locked --features sqlite \
+            --test recovery_order_tests \
+            --test sqlite_query_tests \
+            --test owner_release_barrier_tests \
+            --test owner_identity_tests \
+            --test ownership_lifecycle_tests \
+            --test recovery_bounds_tests
 
   coverage:
     needs: [verify]
