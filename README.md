@@ -1,4 +1,4 @@
-# Qubit Task
+# Qubit Task (`rs-task`)
 
 [![Rust CI](https://github.com/qubit-ltd/rs-task/actions/workflows/ci.yml/badge.svg)](https://github.com/qubit-ltd/rs-task/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://qubit-ltd.github.io/rs-task/coverage-badge.json)](https://qubit-ltd.github.io/rs-task/coverage/)
@@ -7,165 +7,232 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![中文文档](https://img.shields.io/badge/文档-中文版-blue.svg)](README.zh_CN.md)
 
-`qubit-task` lets Rust services accept work that outlives a request, schedule it against CPU, GPU, and named resource budgets, and expose one queryable task service. It is for applications that need bounded background execution and task history without coupling business code to a particular store or execution engine. Storage, scheduling, execution, and versioned handlers can be assembled directly or selected through `qubit-spi`.
+`qubit-task` solves a common problem in Rust services: a request arrives whose work takes far longer than the request should stay open, such as importing a large CSV file into the database. Running the import inside the request handler ties up the connection, offers no progress view, and loses the work if the process restarts. This crate lets the handler describe the work as a versioned `TaskRequest`, hand it to one `TaskExecutionService`, and return a task ID immediately. The service runs the matching `TaskHandler` under bounded queue, concurrency, and resource limits, keeps task records queryable within the selected store's retention policy, and, with a recoverable store, reconciles accepted unfinished work after a restart. It schedules within one process and does not turn business side effects into exactly-once operations.
 
-## Install
+## A data import service example
+
+A tenant administrator uploads a CSV file to object storage and calls `POST /imports`. The API encodes the tenant ID and object key into a `csv-import` task, submits it with a client-generated request key, and returns the task ID with HTTP 202. The `CsvImportV1` handler decodes the payload, imports rows in batches through the application's repository, and stops between batches when cancellation is requested. `GET /imports/{id}` maps the stored task state to an API status. If the process restarts with the SQLite store, queued imports resume and an interrupted running import may run again, so the repository must tolerate repeated batches. The imported rows live in the application database; the task record keeps only a short summary.
+
+## Installation
 
 ```toml
 [dependencies]
-qubit-task = "0.6"
+qubit-task = { version = "0.6", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ```
 
-### Optional features
+The `sqlite` feature enables restart recovery through `TaskExecutionServiceBuilder::recoverable_sqlite`. Omit it when volatile in-memory execution is enough. The quick start also uses `serde` and `serde_json` to encode task payloads.
 
-| Feature | Enables |
-| --- | --- |
-| `sqlite` | SQLite persistence and restart recovery |
-| `inventory` | Discovery of linked SPI providers |
-| `event-bus` | Best-effort task lifecycle notifications |
+## Quick start
 
-Default features are empty. The `sqlite` and `event-bus` integrations are
-independent; `inventory` is only needed for linked-provider discovery.
+Complete, runnable programs live in [`examples/task_service.rs`](examples/task_service.rs) (local closures, cooperative cancellation, versioned requests) and [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs) (operator review of blocked tasks). The excerpts below show how the import feature connects to the service; `ImportRepository` is an application interface that you connect to your own storage.
 
-## Start with volatile local work
+The handler module owns the payload format and the versioned handler:
 
-This named preset keeps task state in memory. Pending tasks are lost when the
-process exits; completed history is bounded to 1024 records.
-The default in-memory store also caps nonterminal records at 2048, including
-`Blocked` tasks. History queries return at most 256 records per page.
+```rust
+// src/imports/handler.rs
+use std::sync::Arc;
 
-```rust,no_run
-use qubit_task::TaskExecutionService;
-use qubit_task::model::TaskOutput;
-use qubit_task::service::LocalTaskOutcome;
+use qubit_task::handler::{TaskContext, TaskHandler, TaskHandlerDescriptor, TaskRunOutcome, TaskRunResult};
+use qubit_task::model::{TaskOutput, TaskRunError};
+use qubit_task::store::TaskFuture;
+use serde::{Deserialize, Serialize};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = TaskExecutionService::in_memory().await?;
-    let handle = service.submit_local(|_| LocalTaskOutcome::<String, std::io::Error>::Succeeded {
-        value: "finished".to_owned(),
-        summary: TaskOutput { summary: b"finished".to_vec() },
-    }).await?;
-    let value = handle.result().await??;
-    assert_eq!(value, "finished");
-    service.shutdown().await?;
-    Ok(())
+// The payload stores import parameters; the CSV file itself stays in object storage.
+#[derive(Serialize, Deserialize)]
+pub struct CsvImportJob {
+    pub tenant_id: String,
+    pub object_key: String,
+}
+
+// Application error classified by the repository.
+pub struct ImportError {
+    pub category: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+// The application implements this against its object store and database.
+pub trait ImportRepository: Send + Sync {
+    // Imports the next batch after `imported_rows` rows; `None` means the file is exhausted.
+    fn import_next_batch(&self, job: &CsvImportJob, imported_rows: usize)
+        -> Result<Option<usize>, ImportError>;
+}
+
+pub struct CsvImportV1 {
+    repository: Arc<dyn ImportRepository>,
+}
+
+impl CsvImportV1 {
+    pub fn new(repository: Arc<dyn ImportRepository>) -> Self {
+        Self { repository }
+    }
+}
+
+impl From<ImportError> for TaskRunError {
+    fn from(error: ImportError) -> Self {
+        TaskRunError { category: error.category, message: error.message, retryable: error.retryable }
+    }
+}
+
+impl TaskHandler for CsvImportV1 {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor { task_type: "csv-import".into(), version: "1".into() }
+    }
+
+    fn run<'a>(&'a self, payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        Box::pin(async move {
+            let job: Arc<CsvImportJob> = serde_json::from_slice(payload)
+                .map(Arc::new)
+                .map_err(|error| TaskRunError {
+                    category: "invalid_payload".into(),
+                    message: error.to_string(),
+                    retryable: false,
+                })?;
+            let mut imported_rows = 0_usize;
+            loop {
+                // Cancellation is cooperative: stop between batches when requested.
+                if context.is_cancelled() {
+                    return Ok(TaskRunOutcome::Cancelled);
+                }
+                let repository = Arc::clone(&self.repository);
+                let job = Arc::clone(&job);
+                // Parsing and database writes block; keep them off the async workers.
+                let batch = tokio::task::spawn_blocking(move || repository.import_next_batch(&job, imported_rows))
+                    .await
+                    .map_err(|error| TaskRunError {
+                        category: "import_worker".into(),
+                        message: error.to_string(),
+                        retryable: false,
+                    })??;
+                match batch {
+                    Some(rows) => imported_rows += rows,
+                    None => break,
+                }
+            }
+            // Only this small summary is persisted; imported rows live in the application database.
+            Ok(TaskRunOutcome::Succeeded(TaskOutput {
+                summary: format!("imported {imported_rows} rows").into_bytes(),
+            }))
+        })
+    }
 }
 ```
 
-For work that must survive restart, enable `sqlite` and use
-`TaskExecutionServiceBuilder::recoverable_sqlite(path)`. Register a handler for
-each stored `(task_type, handler_version)` before building the service. See the
-[user guide](doc/user-guide.md) for recovery, resource scheduling, SPI assembly,
-and event notifications. Optional lifecycle notifications use a bounded queue
-(256 entries by default); a full queue drops the notification. Explicit
-`shutdown()` waits up to 30 seconds for the notification worker by default and
-returns an error on timeout while the worker continues draining. Dropping the
-last service handle starts an asynchronous drain; a provider that never returns
-can keep that drain running. See the user guide for shutdown details.
+The API module submits tasks and translates task state for clients. It depends on the payload type, not on the handler:
 
-`LocalTaskHandle<R, E>` returns the full process-local value or application
-error. For running work, `LocalTaskResultError::Cancelled` is delivered only
-after the handler acknowledges cancellation with `LocalTaskOutcome::Cancelled`;
-`cancel_requested` alone is only a request. Queued tasks cancelled before
-execution are finalized directly by the service. Durable work instead uses a
-versioned `TaskRequest`, and its small persisted `TaskRecord.output` is a
-summary or reference rather than the full result.
-All six lifecycle-write operations share a default `max_inflight_operations` limit of 64 and report `TaskServiceError::OperationLimitExceeded` when it is full. Once an admitted write worker starts, cancelling the caller wait does not cancel that write.
+```rust
+// src/imports/api.rs
+use qubit_task::TaskExecutionService;
+use qubit_task::model::{TaskId, TaskRequest, TaskState};
+use qubit_task::service::TaskServiceError;
 
-Custom `TaskStore` providers must implement `count_states()` as one aggregate
-over retained records. `stats()` uses that aggregate once and then reads engine
-resources; these are adjacent snapshots, not one atomic snapshot.
+use super::handler::CsvImportJob;
 
-## Why this project exists
+pub enum StartImport {
+    // Return the task ID to the client so it can poll the status endpoint.
+    Accepted { task_id: TaskId },
+    // The waiting queue is full; answer with HTTP 429 and let the client retry.
+    Busy,
+}
 
-A request handler can submit an import, return a task ID, and let a versioned handler process the payload under the service's resource limits. The caller can then query progress without keeping the original request open. Choose `submit_local` when the result must return to code in the same process; use `TaskRequest` when the work must be reconstructable or recoverable after restart.
+pub enum ImportStatus {
+    Pending,
+    Running,
+    Done { summary: String },
+    Failed { category: String, message: String },
+    NeedsOperator { reason: String },
+    Cancelled,
+    Unknown,
+}
 
-The crate provides bounded queues, resource-aware scheduling, local or pluggable execution, query and cancellation APIs, and optional SQLite recovery and lifecycle notifications. It does not provide distributed multi-node scheduling, workflow dependencies, cron scheduling, forced interruption of arbitrary code, or exactly-once business side effects.
+// `request_key` is generated once per import by the client and reused on retries.
+pub async fn start_import(
+    tasks: &TaskExecutionService,
+    request_key: &str,
+    job: &CsvImportJob,
+) -> Result<StartImport, Box<dyn std::error::Error>> {
+    let payload = serde_json::to_vec(job)?;
+    let mut request = TaskRequest::new("csv-import", "1", payload)
+        .with_idempotency_key(request_key);
+    request.correlation_key = Some(job.tenant_id.clone());
+    match tasks.submit(request).await {
+        // An identical retry with the same key returns the original record.
+        Ok(record) => Ok(StartImport::Accepted { task_id: record.id }),
+        Err(TaskServiceError::QueueFull) => Ok(StartImport::Busy),
+        Err(error) => Err(error.into()),
+    }
+}
 
-`TaskExecutionService::submit` requires a stable, non-empty idempotency key.
-Generate and persist it before the first call. If the caller stops waiting,
-`get_by_idempotency_key` can find an accepted task; if it returns `None`, retry
-the same request with the same key. The key remains reserved only while its
-record is retained. In-memory services retain at most 64 MiB of request
-payloads and allow 64 in-flight write operations. Submissions also share a
-separate 64 MiB payload budget. Use persistent storage for a longer recovery window.
-`shutdown_until` limits the caller's wait; accepted work continues draining
-after a timeout.
+pub async fn import_status(
+    tasks: &TaskExecutionService,
+    task_id: TaskId,
+) -> Result<ImportStatus, TaskServiceError> {
+    // `get_summary` never loads the payload.
+    let Some(summary) = tasks.get_summary(task_id).await? else {
+        return Ok(ImportStatus::Unknown);
+    };
+    Ok(match summary.state {
+        TaskState::Queued => ImportStatus::Pending,
+        TaskState::Running => ImportStatus::Running,
+        TaskState::Succeeded => ImportStatus::Done {
+            summary: summary
+                .output
+                .map(|output| String::from_utf8_lossy(&output.summary).into_owned())
+                .unwrap_or_default(),
+        },
+        TaskState::Failed { category, message } => ImportStatus::Failed { category, message },
+        TaskState::Panicked { message } => ImportStatus::Failed { category: "panic".into(), message },
+        TaskState::Blocked { reason } => ImportStatus::NeedsOperator { reason },
+        TaskState::Cancelled => ImportStatus::Cancelled,
+    })
+}
+```
 
-`submit_local` returns its typed result only through the returned handle. If
-the caller cancels or times out while awaiting `submit_local`, acceptance may
-continue in the background, but the caller loses that handle and cannot recover
-the original typed result. Use keyed `submit` when the caller must find work
-after its request stops waiting.
+At startup, the application builds one service, registers every handler version it may need to recover, and shares clones of the service with its request handlers. Shut it down explicitly so the result of draining accepted work is observable:
 
-Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite recovery preserves that deadline across restarts. See the [user guide](doc/user-guide.md) for schema upgrades and database operations.
+```rust
+// src/main.rs (startup excerpt)
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 
-The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; recovered running records are staged in the waiting queue and can temporarily exceed `queue_capacity`, so new admissions receive `QueueFull` until the queue drains. Startup fails with records preserved if the recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
+use qubit_task::TaskExecutionServiceBuilder;
 
-Dropping the last service handle starts an asynchronous drain; call `shutdown()` to observe completion. Scheduler panics surface as `SchedulerUnavailable` and are not restarted automatically. See the [user guide](doc/user-guide.md) for the custom engine contract and zero-CPU I/O configuration.
+let tasks = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sqlite")?
+    .register_handler(Arc::new(CsvImportV1::new(repository)))?
+    .max_running_tasks(NonZeroUsize::new(4).expect("positive limit"))
+    .build()
+    .await?;
+let api_tasks = tasks.clone();
+// ... serve HTTP requests with `api_tasks` ...
+tasks.shutdown().await?;
+```
 
-`TaskExecutionEngine::try_prepare` is synchronous and must reserve resources promptly without waiting or running handler work. If it reports `Closed`, the service stops scheduling
-and reports `SchedulerUnavailable`; the queued task remains recoverable.
-`Closed` from `activate` applies to that task attempt and blocks its task. A
-cancelled builder call may finish asynchronous owner cleanup in its background
-worker. Successful shutdown waits for the scheduler and tracked executions
-before releasing store ownership.
+`repository` is the application's `Arc<dyn ImportRepository>`. `recoverable_sqlite` takes an operating-system lock on the database, scans unfinished work before returning, and fails startup instead of falling back to memory when the lock or recovery check fails. Replace it with `TaskExecutionServiceBuilder::in_memory()` for volatile execution, where pending work and history are lost on exit.
 
-## Project documents
+What the client observes: `start_import` returns within the request; the import runs under `max_running_tasks` and the default single CPU slot per request; `import_status` reports `Pending`, `Running`, and then a terminal state. A retryable `ImportError` is retried with exponential backoff (1 second initially, capped at 60 seconds) up to three attempts by default, after which the task becomes `Blocked` for operator review. A recovered task without a registered `(task_type, handler_version)` also becomes `Blocked`; register the handler, rebuild against the same database, and call `retry_blocked`. `tasks.cancel(id)` only sets the cooperative flag; the handler must return `TaskRunOutcome::Cancelled` for the task to end as `Cancelled`. Recovery is at-least-once, so `ImportRepository` must make repeated batches safe. See the [user guide](doc/user-guide.md) for resource capacity, local closures, notifications, and maintenance.
+
+## What it provides
+
+- A versioned `TaskRequest` (task type, exact handler version, opaque payload, resource demand, correlation and idempotency keys, small metadata) and a queryable `TaskRecord`/`TaskSummary` lifecycle with `Queued`, `Running`, `Blocked`, `Succeeded`, `Failed`, `Panicked`, and `Cancelled` states.
+- One `TaskExecutionService` facade: `submit`, `submit_local`, `get`, `get_summary`, `get_by_idempotency_key`, `list`, `wait`, `cancel`, `retry_blocked`, `abandon_blocked`, `prune_terminal_before`, `stats`, `shutdown`, and `shutdown_until`.
+- Bounded waiting queue with `QueueFull` backpressure, a fair FIFO policy, CPU slot, GPU, and named resource budgets, and an independent `max_running_tasks` limit.
+- Automatic retry of retryable handler errors with persisted backoff, an attempt budget that survives restarts, and `Blocked` records for missing handlers, exhausted attempts, or full retry queues.
+- `TaskExecutionService::in_memory()` for volatile work, including `submit_local` closures with a typed `LocalTaskHandle<R, E>`, and an optional `sqlite` store with restart recovery and schema migration.
+- Pluggable `TaskStore`, `SchedulingPolicy`, `TaskExecutionEngine`, and `TaskHandler` providers assembled directly or discovered through `qubit-spi`.
+- Optional `event-bus` feature that publishes best-effort `TaskEvent` notifications through a `qubit-event-bus` `EventBus` supplied by the application.
+
+The crate does not provide multi-node or distributed scheduling, workflow dependencies, cron-style scheduling, forced interruption of arbitrary code, or exactly-once business side effects. `submit_local` is unavailable with a restart-recoverable store because a closure cannot be rebuilt from a database. Notifications are best effort: a full queue (256 entries by default) drops the event, and a publish failure never rolls back a task transition.
+
+Limits that shape a deployment: the in-memory preset keeps a waiting queue of 1,024 tasks, 1,024 terminal records, 2,048 nonterminal records (including `Blocked`), and 64 MiB of request payloads; each request payload is at most 16 MiB, submissions share a 64 MiB in-flight payload budget and 64 in-flight write operations, and history pages return at most 256 records. Request text limits are measured in UTF-8 bytes: `task_type` 128, `handler_version` 64, correlation and idempotency keys 256, and metadata 32 entries with 128-byte keys, 4,096-byte values, and 16,384 combined bytes; persisted diagnostics are bounded to 128-byte categories and 4,096-byte messages. Resource descriptions allow at most 32 GPU labels and 32 custom resource names, each non-empty and at most 128 UTF-8 bytes; GPU labels require a positive `gpu_count`. On restart, unfinished records must fit within `queue_capacity + max_running_tasks` or construction fails with the records preserved. SQLite runs one blocking database operation at a time and keeps history until the application calls `prune_terminal_before`; pruning releases idempotency keys for reuse. `shutdown_until` bounds only the caller's wait, dropping the last service handle starts an asynchronous drain, and a scheduler panic is reported as `SchedulerUnavailable` without automatic restart. See the [user guide](doc/user-guide.md#operational-limits) for the full list.
+
+## Learn more
 
 - [User guide](doc/user-guide.md)
-- [中文 README](README.zh_CN.md)
-- [Detailed TaskExecutionService design](doc/task_execution_service_design.en.md)
-- [中文设计文档](doc/task_execution_service_design.md)
-- [中文用户指南](doc/user-guide.zh_CN.md)
-
-## API and storage contracts
-
-`TaskQuery.states` uses `TaskStateKind`; migrate callers that previously built
-filters from payload-bearing `TaskState` values. Request text limits are
-measured in UTF-8 bytes: task type 128, handler version 64, correlation and
-idempotency keys 256 each, and metadata 32 entries, 128-byte keys, 4096-byte
-values, and 16384 combined bytes. Persisted diagnostic categories are limited
-to 128 bytes and messages to 4096 bytes; execution diagnostics are truncated at
-a UTF-8 boundary. SQLite runs one blocking database operation at a time.
-Shutdown rejects new service writes, and a SQLite handle cannot write after
-releasing its ownership.
-
-History pages use `TaskCursor { accepted_at_ms, id }` and are ordered by
-acceptance time, then task ID. SQLite history is retained until explicitly
-pruned with `prune_terminal_before`; each call has a caller supplied row limit,
-and deleted idempotency keys become available for reuse. The scheduler policy's
-public `QueuedTask` now contains `resources` rather than the full request.
-Third-party `TaskStore` implementations must provide
-`has_unfinished_over_limit(limit)` for payload-free recovery prechecks.
-Applications may select the runtime for service background tasks with
-`TaskExecutionServiceBuilder::runtime_handle`; that runtime must stay alive
-until shutdown and any asynchronous drain complete. See the user guide for
-last-handle drop behavior and scheduler failure reporting.
-
-Task history and waiting paths return `TaskSummary`, whose request metadata omits
-`payload`. Use `get_summary`, `list`, `wait`, and `retry_blocked` for status
-handling; `get` returns the full `TaskRecord`, while
-`get_by_idempotency_key` returns a payload-free `TaskSummary`. Call `get(summary.id)`
-when payload access is needed. The user guide documents the SQLite storage
-layout, migration behavior, and operational steps.
-
-SQLite history is retained until the application explicitly prunes it. A typical
-maintenance job can archive records older than 30 days, then call
-`prune_terminal_before(cutoff, 100)` repeatedly until fewer than 100 rows are
-removed. Only terminal tasks are pruned. Review `Blocked` summaries separately;
-use `abandon_blocked(id, state_version)` when policy allows, then prune them in a
-later pass. Pruning releases idempotency keys, so the retry window ends when the
-record is removed.
-
-After a store failure, waiters and local handles receive the fault immediately.
-The shared shutdown result waits for the scheduler and tracked executions to
-exit, then releases SQLite ownership. `shutdown_until` can time out while this
-background drain continues. Operators can inspect aged `Blocked` summaries and
-call `abandon_blocked(id, state_version)`; a stale revision returns a conflict.
-Use bounded `prune_terminal_before` afterward to reclaim terminal history.
+- [Detailed design](doc/task_execution_service_design.en.md)
+- [API reference](https://docs.rs/qubit-task)
 
 ## Testing
 

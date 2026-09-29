@@ -1,4 +1,4 @@
-# qubit-task
+# Qubit Task（`rs-task`）
 
 [![Rust CI](https://github.com/qubit-ltd/rs-task/actions/workflows/ci.yml/badge.svg)](https://github.com/qubit-ltd/rs-task/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://qubit-ltd.github.io/rs-task/coverage-badge.json)](https://qubit-ltd.github.io/rs-task/coverage/)
@@ -7,134 +7,232 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![English Document](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 
-`qubit-task` 让 Rust 服务能够接收耗时较长的后台任务，按 CPU、GPU 和具名资源额度调度，并通过统一门面查询任务状态。它适合需要有界后台执行和任务历史、又不希望业务代码绑定特定存储或执行引擎的应用。存储、调度、执行引擎和版本化处理器既可直接装配，也可通过 `qubit-spi` 选择。
+`qubit-task` 解决 Rust 服务里一个常见的难题：请求触发的工作远比请求本身耗时，例如把一个很大的 CSV 文件导入数据库。如果在请求处理函数里直接执行导入，连接会被长时间占用，用户看不到进度，进程一旦重启工作也随之丢失。使用本库时，请求处理函数只需把工作描述成带版本的 `TaskRequest`，交给同一个 `TaskExecutionService`，然后立刻把任务 ID 返回给调用方。服务会在有界队列、并发上限和资源额度约束下调用匹配的 `TaskHandler`，并根据所选存储的保留策略提供可查询的任务记录；搭配支持恢复的存储，还会在进程重启后协调已受理的未完成任务。本库只在单个进程内调度，也不会把业务副作用变成恰好一次的操作。
+
+## 数据导入服务实战场景
+
+租户管理员把 CSV 文件上传到对象存储后调用 `POST /imports`。API 把租户 ID 和对象键编码成一个 `csv-import` 任务，附上客户端生成的请求键提交，然后以 HTTP 202 返回任务 ID。`CsvImportV1` 处理器解码 payload，通过应用自己的仓储分批导入数据，并在收到取消请求时于两批之间停下。`GET /imports/{id}` 把任务状态映射为对外的导入状态。若使用 SQLite 存储且进程重启，排队中的导入会继续执行，被中断的运行中导入可能再次运行，因此仓储必须容忍同一批数据被重复处理。导入的数据行存放在应用数据库中，任务记录只保留一段简短摘要。
 
 ## 安装
 
 ```toml
 [dependencies]
-qubit-task = "0.6"
+qubit-task = { version = "0.6", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ```
 
-### 可选 feature
+`sqlite` feature 启用 `TaskExecutionServiceBuilder::recoverable_sqlite` 提供的重启恢复能力；只需要易失的内存执行时可以不启用。快速开始的示例还使用 `serde` 和 `serde_json` 编码任务 payload。
 
-| Feature | 功能 |
-| --- | --- |
-| `sqlite` | SQLite 持久化与重启恢复 |
-| `inventory` | 发现最终程序链接的 SPI provider |
-| `event-bus` | 尽力而为的任务生命周期通知 |
+## 快速开始
 
-默认不启用任何 feature。`sqlite` 与 `event-bus` 相互独立；只有需要链接期
-provider 自动发现时才启用 `inventory`。
+完整可运行的程序位于 [`examples/task_service.rs`](examples/task_service.rs)（本地闭包、协作取消、带版本的请求）和 [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs)（运维人员处理 Blocked 任务）。下面的片段展示导入功能如何与服务相接；`ImportRepository` 是应用自己的接口，由应用连接实际存储。
 
-## 从易失型本机任务开始
+处理器模块负责 payload 格式和带版本的处理器：
 
-这个具名预设把任务状态保存在内存中。进程退出时未完成任务会丢失，终态历史最多保留 1024 条；非终态记录默认最多 2048 条，`Blocked` 也占用名额。每页历史查询最多返回 256 条。
+```rust
+// src/imports/handler.rs
+use std::sync::Arc;
 
-```rust,no_run
-use qubit_task::TaskExecutionService;
-use qubit_task::model::TaskOutput;
-use qubit_task::service::LocalTaskOutcome;
+use qubit_task::handler::{TaskContext, TaskHandler, TaskHandlerDescriptor, TaskRunOutcome, TaskRunResult};
+use qubit_task::model::{TaskOutput, TaskRunError};
+use qubit_task::store::TaskFuture;
+use serde::{Deserialize, Serialize};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = TaskExecutionService::in_memory().await?;
-    let handle = service.submit_local(|_| LocalTaskOutcome::<String, std::io::Error>::Succeeded {
-        value: "完成".to_owned(),
-        summary: TaskOutput { summary: "完成".as_bytes().to_vec() },
-    }).await?;
-    let value = handle.result().await??;
-    assert_eq!(value, "完成");
-    service.shutdown().await?;
-    Ok(())
+// payload 只保存导入参数，CSV 文件本身留在对象存储中。
+#[derive(Serialize, Deserialize)]
+pub struct CsvImportJob {
+    pub tenant_id: String,
+    pub object_key: String,
+}
+
+// 由仓储分类过的应用错误。
+pub struct ImportError {
+    pub category: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+// 应用基于自己的对象存储和数据库实现该接口。
+pub trait ImportRepository: Send + Sync {
+    // 导入已完成 `imported_rows` 行之后的下一批数据；返回 `None` 表示文件已处理完。
+    fn import_next_batch(&self, job: &CsvImportJob, imported_rows: usize)
+        -> Result<Option<usize>, ImportError>;
+}
+
+pub struct CsvImportV1 {
+    repository: Arc<dyn ImportRepository>,
+}
+
+impl CsvImportV1 {
+    pub fn new(repository: Arc<dyn ImportRepository>) -> Self {
+        Self { repository }
+    }
+}
+
+impl From<ImportError> for TaskRunError {
+    fn from(error: ImportError) -> Self {
+        TaskRunError { category: error.category, message: error.message, retryable: error.retryable }
+    }
+}
+
+impl TaskHandler for CsvImportV1 {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor { task_type: "csv-import".into(), version: "1".into() }
+    }
+
+    fn run<'a>(&'a self, payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        Box::pin(async move {
+            let job: Arc<CsvImportJob> = serde_json::from_slice(payload)
+                .map(Arc::new)
+                .map_err(|error| TaskRunError {
+                    category: "invalid_payload".into(),
+                    message: error.to_string(),
+                    retryable: false,
+                })?;
+            let mut imported_rows = 0_usize;
+            loop {
+                // 取消是协作式的：收到请求后在两批之间停止。
+                if context.is_cancelled() {
+                    return Ok(TaskRunOutcome::Cancelled);
+                }
+                let repository = Arc::clone(&self.repository);
+                let job = Arc::clone(&job);
+                // 解析和写库都是阻塞操作，不要放在异步工作线程上执行。
+                let batch = tokio::task::spawn_blocking(move || repository.import_next_batch(&job, imported_rows))
+                    .await
+                    .map_err(|error| TaskRunError {
+                        category: "import_worker".into(),
+                        message: error.to_string(),
+                        retryable: false,
+                    })??;
+                match batch {
+                    Some(rows) => imported_rows += rows,
+                    None => break,
+                }
+            }
+            // 只有这段简短摘要会被持久化；导入的数据行保存在应用数据库中。
+            Ok(TaskRunOutcome::Succeeded(TaskOutput {
+                summary: format!("已导入 {imported_rows} 行").into_bytes(),
+            }))
+        })
+    }
 }
 ```
 
-需要重启后恢复任务时，启用 `sqlite` feature，并使用 `TaskExecutionServiceBuilder::recoverable_sqlite(path)`。构建服务前，为每个已保存的 `(task_type, handler_version)` 注册对应处理器。
+API 模块负责提交任务，并把任务状态翻译给客户端。它只依赖 payload 类型，不依赖处理器：
 
-可选的生命周期通知使用有界队列，默认容量为 256；队列满时会丢弃新通知。显式调用 `shutdown()` 时，默认最多等待通知线程 30 秒；超时会返回错误，后台线程仍会继续排空。丢弃最后一个服务句柄会启动异步排空；如果 provider 一直不返回，后台排空也可能持续运行。关闭行为和通知统计见[用户指南](doc/user-guide.zh_CN.md)。
+```rust
+// src/imports/api.rs
+use qubit_task::TaskExecutionService;
+use qubit_task::model::{TaskId, TaskRequest, TaskState};
+use qubit_task::service::TaskServiceError;
 
-`LocalTaskHandle<R, E>` 返回仅存在于当前进程的完整值或业务错误。对于运行中任务，
-只有处理器返回 `LocalTaskOutcome::Cancelled` 确认取消后，句柄才会以
-`LocalTaskResultError::Cancelled` 报告取消；`cancel_requested` 只是请求。尚未开始执行的排队任务
-由服务直接完成取消。可恢复任务使用带版本的
-`TaskRequest`，其 `TaskRecord.output` 只保存摘要或引用，不保存完整结果。
-六种生命周期写操作默认共用 64 个 `max_inflight_operations` 名额；名额用尽时返回 `TaskServiceError::OperationLimitExceeded`。写 worker 接纳操作后，取消调用方等待不会取消该操作。
+use super::handler::CsvImportJob;
 
-第三方 `TaskStore` provider 必须实现 `count_states()`，一次聚合统计所有保留记录。
-`stats()` 调用该聚合一次，再读取引擎资源，因此两部分是相邻但非原子的快照。
+pub enum StartImport {
+    // 把任务 ID 返回给客户端，供其轮询状态接口。
+    Accepted { task_id: TaskId },
+    // 等待队列已满：返回 HTTP 429，让客户端稍后重试。
+    Busy,
+}
 
-## 适用场景与能力边界
+pub enum ImportStatus {
+    Pending,
+    Running,
+    Done { summary: String },
+    Failed { category: String, message: String },
+    NeedsOperator { reason: String },
+    Cancelled,
+    Unknown,
+}
 
-例如，接口收到数据导入请求后，可以提交任务并立即返回任务 ID；服务再按资源上限调用对应版本的处理器，调用方随后查询执行状态，无须让原始请求一直等待。若结果只需在当前进程内交还给调用代码，可使用 `submit_local`；若任务需要重建或在进程重启后恢复，应使用 `TaskRequest`。
+// `request_key` 由客户端为每次导入生成一次，重试时沿用同一个键。
+pub async fn start_import(
+    tasks: &TaskExecutionService,
+    request_key: &str,
+    job: &CsvImportJob,
+) -> Result<StartImport, Box<dyn std::error::Error>> {
+    let payload = serde_json::to_vec(job)?;
+    let mut request = TaskRequest::new("csv-import", "1", payload)
+        .with_idempotency_key(request_key);
+    request.correlation_key = Some(job.tenant_id.clone());
+    match tasks.submit(request).await {
+        // 用同一个键重试完全相同的请求时，会返回最初受理的记录。
+        Ok(record) => Ok(StartImport::Accepted { task_id: record.id }),
+        Err(TaskServiceError::QueueFull) => Ok(StartImport::Busy),
+        Err(error) => Err(error.into()),
+    }
+}
 
-本 crate 提供有界队列、资源感知调度、本地或可插拔执行、查询与取消接口，以及可选的 SQLite 恢复和生命周期通知。它不负责多节点分布式调度、工作流依赖、定时任务、强制中断任意代码，也不保证业务副作用恰好执行一次。
+pub async fn import_status(
+    tasks: &TaskExecutionService,
+    task_id: TaskId,
+) -> Result<ImportStatus, TaskServiceError> {
+    // `get_summary` 不会加载 payload。
+    let Some(summary) = tasks.get_summary(task_id).await? else {
+        return Ok(ImportStatus::Unknown);
+    };
+    Ok(match summary.state {
+        TaskState::Queued => ImportStatus::Pending,
+        TaskState::Running => ImportStatus::Running,
+        TaskState::Succeeded => ImportStatus::Done {
+            summary: summary
+                .output
+                .map(|output| String::from_utf8_lossy(&output.summary).into_owned())
+                .unwrap_or_default(),
+        },
+        TaskState::Failed { category, message } => ImportStatus::Failed { category, message },
+        TaskState::Panicked { message } => ImportStatus::Failed { category: "panic".into(), message },
+        TaskState::Blocked { reason } => ImportStatus::NeedsOperator { reason },
+        TaskState::Cancelled => ImportStatus::Cancelled,
+    })
+}
+```
 
-`TaskExecutionService::submit` 要求提供稳定且非空的幂等键。首次调用前生成并保存该键；
-调用方停止等待后，可通过 `get_by_idempotency_key` 查找已受理任务。若查询返回 `None`，
-应使用同一请求和同一键重试。键只在对应记录保留期间有效。内存服务最多保留 64 MiB
-任务 payload，受理中最多有 64 个写操作；提交任务另共享 64 MiB 的 payload 预算。
-需要更长恢复窗口时应使用持久化存储。`shutdown_until` 只限制调用方等待时间，超时后已受理任务仍会继续排空。
-`submit_local` 的类型化结果只能通过返回的句柄取得。调用方等待 `submit_local` 时取消或超时后，
-受理仍可能在后台继续，但调用方会失去句柄，无法找回原始类型化结果。调用方需要在请求停止等待后
-继续定位任务时，应使用带稳定键的 `submit`。
+应用启动时只构建一个服务，注册所有可能需要恢复的处理器版本，再把服务的克隆句柄交给各个请求处理函数。退出前显式关闭服务，才能观察到已受理任务排空的结果：
 
-## 项目文档
+```rust
+// src/main.rs（启动装配片段）
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 
-- [用户指南](doc/user-guide.zh_CN.md)
-- [English README](README.md)
-- [TaskExecutionService 详细设计](doc/task_execution_service_design.md)
-- [English design](doc/task_execution_service_design.en.md)
-- [English user guide](doc/user-guide.md)
+use qubit_task::TaskExecutionServiceBuilder;
 
-## API 与存储契约
+let tasks = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sqlite")?
+    .register_handler(Arc::new(CsvImportV1::new(repository)))?
+    .max_running_tasks(NonZeroUsize::new(4).expect("positive limit"))
+    .build()
+    .await?;
+let api_tasks = tasks.clone();
+// ... 使用 `api_tasks` 对外提供 HTTP 服务 ...
+tasks.shutdown().await?;
+```
 
-自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite 恢复会在重启后保留该截止时间。schema 升级和数据库运维步骤见[用户指南](doc/user-guide.zh_CN.md)。
+`repository` 是应用持有的 `Arc<dyn ImportRepository>`。`recoverable_sqlite` 会对数据库加操作系统级文件锁，在返回前扫描未完成的任务；加锁或恢复预检失败时直接让启动失败，不会退回内存存储。若只需要易失执行，可改用 `TaskExecutionServiceBuilder::in_memory()`，此时进程退出后未完成任务和历史都会丢失。
 
-服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；恢复的运行中记录会先放入待执行队列，因此队列可暂时超过 `queue_capacity`，队列排空前新受理会返回 `QueueFull`。超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
+从客户端看到的效果：`start_import` 在请求内即可返回；导入在 `max_running_tasks` 以及每个请求默认一个 CPU 槽的约束下运行；`import_status` 先报告 `Pending`、`Running`，再进入终态。可重试的 `ImportError` 会按指数退避自动重试（初始 1 秒，上限 60 秒），默认最多 3 次尝试，用尽后任务进入 `Blocked` 等待运维处理。恢复出来的任务若找不到对应的 `(task_type, handler_version)` 处理器，同样会进入 `Blocked`；注册处理器、基于同一个数据库重新构建服务，再调用 `retry_blocked` 即可。`tasks.cancel(id)` 只是设置协作取消标记，处理器必须返回 `TaskRunOutcome::Cancelled`，任务才会以 `Cancelled` 结束。恢复执行是至少一次语义，因此 `ImportRepository` 必须让重复处理同一批数据是安全的。资源额度、本地闭包、通知和运维维护见[用户手册](doc/user-guide.zh_CN.md)。
 
-丢弃最后一个服务句柄会启动异步排空；需要观察排空结果时调用 `shutdown()`。调度器 panic 会返回 `SchedulerUnavailable`，且不会自动重启。自定义引擎契约和零 CPU I/O 配置见[用户指南](doc/user-guide.zh_CN.md)。
+## 能力与边界
 
-`TaskExecutionEngine::try_prepare` 是同步接口，必须快速预约资源，不得等待或执行处理器工作。若其返回 `Closed`，服务会停止调度并返回
-`SchedulerUnavailable`，排队任务仍可恢复。若 `activate` 返回 `Closed`，只会阻止当前任务。
-取消等待 `build()` 不会中断后台构建 worker；worker 会异步完成 owner 清理。正常关闭会等待
-调度器和已跟踪执行结束后再释放存储所有权。
+- 带版本的 `TaskRequest`（任务类型、精确处理器版本、不透明 payload、资源需求、关联键与幂等键、少量 metadata），以及可查询的 `TaskRecord`/`TaskSummary` 生命周期，状态包括 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked` 和 `Cancelled`。
+- 统一的 `TaskExecutionService` 门面：`submit`、`submit_local`、`get`、`get_summary`、`get_by_idempotency_key`、`list`、`wait`、`cancel`、`retry_blocked`、`abandon_blocked`、`prune_terminal_before`、`stats`、`shutdown` 和 `shutdown_until`。
+- 有界等待队列与 `QueueFull` 背压、公平 FIFO 调度策略、CPU 槽 / GPU / 具名资源额度，以及独立的 `max_running_tasks` 运行并发上限。
+- 对可重试处理器错误的自动重试（退避时间持久化）、跨重启计数的尝试次数预算，以及针对处理器缺失、尝试耗尽或重试队列已满的 `Blocked` 记录。
+- 面向易失工作的 `TaskExecutionService::in_memory()`，其中 `submit_local` 闭包通过类型化的 `LocalTaskHandle<R, E>` 返回结果；可选的 `sqlite` 存储提供重启恢复和 schema 迁移。
+- 可插拔的 `TaskStore`、`SchedulingPolicy`、`TaskExecutionEngine` 和 `TaskHandler` provider，既可直接装配，也可通过 `qubit-spi` 发现。
+- 可选的 `event-bus` feature：通过应用提供的 `qubit-event-bus` `EventBus` 以尽力而为的方式发布 `TaskEvent` 通知。
 
-`TaskQuery.states` 使用 `TaskStateKind`；此前用带诊断内容的 `TaskState`
-构造筛选条件的调用方需要迁移。资源描述最多包含 32 个 GPU label 和 32 个自定义资源名称，每项非空且不超过 128 个 UTF-8 字节；设置 GPU label 时 `gpu_count` 必须大于零。
+本库不提供多节点或分布式调度、工作流依赖、定时（cron）调度、对任意代码的强制中断，也不保证业务副作用恰好执行一次。存储声明支持重启恢复时，`submit_local` 不可用，因为闭包无法从数据库重建。通知是尽力而为的：队列（默认 256 条）满时会丢弃事件，发布失败也不会回滚任务状态。
 
-请求文本上限按 UTF-8 字节计算：`task_type`
-128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键
-128、值 4096、键值合计 16384。持久化诊断类别最多 128 字节，消息最多
-4096 字节；执行诊断会在 UTF-8 字符边界裁剪。SQLite 同时只执行一个阻塞
-数据库操作。开始关闭后服务拒绝新的写入，SQLite 所有权释放后旧句柄不能写入。
+影响部署的主要限额：内存预设的等待队列为 1024 个任务，终态记录 1024 条，非终态记录 2048 条（含 `Blocked`），请求 payload 总量 64 MiB；单个请求 payload 最多 16 MiB，提交共享 64 MiB 的受理中 payload 预算和 64 个受理中写操作，历史分页每页最多 256 条。请求文本上限按 UTF-8 字节计：`task_type` 128、`handler_version` 64、关联键和幂等键各 256；metadata 最多 32 项，键 128 字节、值 4096 字节、合计 16384 字节；持久化诊断类别不超过 128 字节，消息不超过 4096 字节。资源描述最多包含 32 个 GPU 标签和 32 个自定义资源名称，每项非空且不超过 128 个 UTF-8 字节；设置 GPU 标签时 `gpu_count` 必须大于零。重启时未完成记录数必须不超过 `queue_capacity + max_running_tasks`，否则构建失败并保留记录。SQLite 同一时刻只执行一个阻塞数据库操作，历史会一直保留，直到应用调用 `prune_terminal_before`；清理后对应的幂等键可以重新使用。`shutdown_until` 只限制调用方的等待时间；丢弃最后一个服务句柄会启动异步排空；调度器 panic 以 `SchedulerUnavailable` 报告，且不会自动重启。完整清单见[用户手册](doc/user-guide.zh_CN.md#运行限制)。
 
-历史分页使用 `TaskCursor { accepted_at_ms, id }`，按受理时间、再按任务 ID
-排序。SQLite 历史默认保留；调用方可显式调用 `prune_terminal_before`，并为每次
-清理指定最大行数。被删除记录的幂等键可以重新使用。公开调度策略中的
-`QueuedTask` 保存 `resources`，不保存完整请求。应用可通过
-`TaskExecutionServiceBuilder::runtime_handle` 指定服务后台任务使用的 runtime，
-并须保证它至少存活到排空完成。第三方 `TaskStore` 必须实现
-`has_unfinished_over_limit(limit)`，以便恢复预检无需解码 payload。最后句柄析构和调度器故障细节见用户指南。
+## 延伸阅读
 
-任务历史和等待接口返回不含 `payload` 的 `TaskSummary`。状态处理应使用
-`get_summary`、`list`、`wait` 和 `retry_blocked`；`get` 返回完整 `TaskRecord`，
-`get_by_idempotency_key` 返回不含 payload 的
-`TaskSummary`。需要 payload 时再调用 `get(summary.id)`。SQLite 存储结构、迁移行为
-和运维步骤见[用户指南](doc/user-guide.zh_CN.md)。
-
-SQLite 历史不会自动清理。可由应用定期先归档 30 天以前的记录，再循环调用
-`prune_terminal_before(cutoff, 100)`，直到单次删除数少于 100。该接口只删除终态。
-应单独检查 `Blocked` 摘要；符合业务策略时，先用
-`abandon_blocked(id, state_version)` 按版本放弃，再在后续清理中删除。记录删除后
-幂等键可重用，因此清理也会结束该键对应的重试窗口。
-
-存储故障发生后，等待者和本地句柄会立即收到错误。共享关闭结果会等待调度器和已跟踪
-的执行尝试退出，再释放 SQLite 所有权。`shutdown_until` 超时后，后台排空仍会继续。
-运维人员可检查超龄 `Blocked` 摘要，并用 `abandon_blocked(id, state_version)`
-按版本放弃；版本已变化时会返回冲突。之后可调用有界
-`prune_terminal_before` 清理终态历史。
+- [用户手册](doc/user-guide.zh_CN.md)
+- [详细设计](doc/task_execution_service_design.md)
+- [API 文档](https://docs.rs/qubit-task)
 
 ## 测试
 
@@ -162,7 +260,7 @@ Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
 ## 贡献
 
 欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试，并在提交
-Pull Request 前运行 `./align-ci.sh` 格式化代码，运行 `./ci-check.sh` 对齐 CI 要求。
+Pull Request 前运行 `./align-ci.sh`格式化代码，运行`./ci-check.sh`对齐CI要求。
 
 ## 作者
 

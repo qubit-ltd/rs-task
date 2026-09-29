@@ -164,6 +164,8 @@ let builder = TaskExecutionServiceBuilder::in_memory().capacity(capacity);
 
 I/O handler 可以请求零 CPU 槽，但仍占用 `max_running_tasks` 名额。显式设置该上限可控制并发网络或磁盘操作。CPU 密集型 handler 应至少请求一个槽，并通过 `spawn_blocking` 或专用执行后端运行阻塞工作。
 
+资源描述最多可包含 32 个 GPU 标签和 32 个自定义资源名称，每项不能为空，且 UTF-8 编码长度不得超过 128 字节。请求 GPU 资源时，`gpu_count` 必须大于零。
+
 ~~~rust,no_run
 use std::num::NonZeroUsize;
 use qubit_task::model::TaskRequest;
