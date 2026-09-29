@@ -16,6 +16,36 @@ use crate::store::TaskFuture;
 /// work must run on a blocking pool or dedicated backend so the async runtime
 /// can continue scheduling other tasks.
 ///
+/// # Thread safety and sharing
+///
+/// The service registers each handler once per exact [`TaskHandlerDescriptor`]
+/// and keeps it as `Arc<dyn TaskHandler>`. Every accepted task with that
+/// `(task_type, version)` resolves to the **same** `Arc` for the lifetime of
+/// the service. When concurrency limits allow, several tasks of the same type
+/// may be `Running` at once; the scheduler clones that shared `Arc` and may
+/// call [`TaskHandler::run`] on different Tokio workers **in parallel**, each
+/// with `&self` pointing at the same handler instance.
+///
+/// The trait therefore requires [`Send`] + [`Sync`]:
+///
+/// - **`Sync`**: shared references (`&self`) must be safe across threads
+///   because concurrent attempts use one handler object.
+/// - **`Send`**: handler state must be safe to move onto worker threads.
+/// - **`run` futures must be `Send`**: [`TaskFuture`] is
+///   `Pin<Box<dyn Future<Output = T> + Send + 'a>>`, so the returned future is
+///   polled on the runtime's workers.
+///
+/// Treat each implementation as a **process-wide singleton** for its
+/// descriptor, not as per-task state:
+///
+/// - Share dependencies through `Arc`, pools, and other already synchronized
+///   handles (for example `Arc<dyn ImportRepository>`).
+/// - Keep per-attempt data in the payload, [`TaskContext`], locals inside the
+///   async block, or internal maps keyed by `task_id` with appropriate
+///   locking.
+/// - Do not store "the task currently running" in unsynchronized mutable
+///   fields on the handler struct; that races when two tasks run together.
+///
 /// # Examples
 ///
 /// ```
@@ -56,6 +86,12 @@ pub trait TaskHandler: Send + Sync {
     fn descriptor(&self) -> TaskHandlerDescriptor;
 
     /// Executes one attempt with a cooperative cancellation context.
+    ///
+    /// The same handler instance may serve this method concurrently for
+    /// different tasks (see [thread safety and
+    /// sharing](#thread-safety-and-sharing)). Each call receives its own
+    /// `payload` and `context`; implementations must not assume exclusive
+    /// access to `self`.
     ///
     /// A cancellation signal is only a request; implementations return
     /// `TaskRunOutcome::Cancelled` when they actually stop work. Successful

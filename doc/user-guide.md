@@ -13,6 +13,7 @@ This guide covers `qubit-task` 0.7.x on Rust 1.94 or later. It is for Rust servi
   - [Submit from the request handler](#submit-from-the-request-handler)
   - [Report status to the client](#report-status-to-the-client)
   - [Assemble the service at startup](#assemble-the-service-at-startup)
+  - [Many task types and the handler registry](#many-task-types-and-the-handler-registry)
   - [Types used on this path](#types-used-on-this-path)
 - [Check the task result](#check-the-task-result)
   - [What success looks like](#what-success-looks-like)
@@ -161,7 +162,7 @@ impl TaskHandler for CsvImportV1 {
 }
 ```
 
-`TaskHandlerDescriptor` names the exact `(task_type, version)` pair this handler accepts. A stored request is only ever given to the handler with the same pair, so changing the payload format means registering `CsvImportV2` alongside `CsvImportV1` rather than editing the old handler. `run` receives the opaque payload and a `TaskContext` with `task_id()`, `attempt()` (starting at 1), `assigned_resources()`, and `is_cancelled()`. The future runs on the Tokio async workers; long parsing and database writes go through `spawn_blocking` so they do not stall other tasks. The handler decides whether an `ImportError` is retryable; the service retries only errors marked `retryable: true`. `TaskOutput.summary` is bounded persisted text, not the result itself.
+`TaskHandlerDescriptor` names the exact `(task_type, version)` pair this handler accepts. A stored request is only ever given to the handler with the same pair, so changing the payload format means registering `CsvImportV2` alongside `CsvImportV1` rather than editing the old handler. `TaskHandler` requires `Send + Sync`: each registered handler is a long-lived `Arc`, and concurrent tasks with the same key may call `run(&self, …)` on different workers at the same time, so a shape like `CsvImportV1 { repository: Arc<dyn ImportRepository> }`—shared, thread-safe dependencies—is typical; do not track “which task is running now” in unsynchronized mutable fields on the handler. `run` receives the opaque payload and a `TaskContext` with `task_id()`, `attempt()` (starting at 1), `assigned_resources()`, and `is_cancelled()`. The future runs on the Tokio async workers; long parsing and database writes go through `spawn_blocking` so they do not stall other tasks. The handler decides whether an `ImportError` is retryable; the service retries only errors marked `retryable: true`. `TaskOutput.summary` is bounded persisted text, not the result itself.
 
 ### Submit from the request handler
 
@@ -263,6 +264,34 @@ tasks.shutdown().await?;
 
 `repository` is the application's `Arc<dyn ImportRepository>`. Build the service before the HTTP listener opens and register every handler version the store may still contain; the registry is fixed once `build()` returns, and a duplicate `(task_type, version)` fails with `HandlerConflict`. `recoverable_sqlite` opens the database, takes an operating-system lock so two processes never execute the same database, and scans unfinished work before returning. `TaskExecutionService` is `Clone`; hand clones to request handlers and keep one for shutdown. For volatile execution, use `TaskExecutionServiceBuilder::in_memory()` (or the shortcut `TaskExecutionService::in_memory().await?`): pending work and history are lost when the process exits.
 
+### Many task types and the handler registry
+
+One `TaskExecutionService` owns one `TaskHandlerRegistry`; the process is not limited to a single `TaskHandler`. CSV import, report export, thumbnail generation, and other jobs should each implement `TaskHandler` and declare a distinct `task_type` in `descriptor()` (and a distinct `version` when the payload format changes, for example keeping `csv-import@1` and `csv-import@2` side by side). On submit, `TaskRequest::new("csv-import", "1", payload)` and `TaskRequest::new("report.export", "1", payload)` resolve to different registered handlers. Scheduling and recovery use only the persisted `task_type` and `handler_version` on the request; nothing inspects the payload to guess a handler.
+
+Example wiring at startup:
+
+```rust
+use qubit_task::TaskExecutionServiceBuilder;
+
+let tasks = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sqlite")?
+    .register_handler(Arc::new(CsvImportV1::new(repository.clone())))?
+    .register_handler(Arc::new(ReportExportV1::new(repository.clone())))?
+    .register_handler(Arc::new(ThumbnailV2::new(media)))?
+    .build()
+    .await?;
+```
+
+You can also fill a `TaskHandlerRegistry` first (for example after discovering providers through `qubit-spi`) and pass it with `.handlers(registry)`. Rules in brief:
+
+| Rule | Meaning |
+| --- | --- |
+| Exact key | Only a `(task_type, version)` that matches a `TaskHandlerDescriptor` exactly; there is no default handler or prefix match. |
+| One instance per key | Each `(task_type, version)` may be registered once; all tasks with that key share the same `Arc<dyn TaskHandler>`, distinguished per run by `TaskContext::task_id()` and related fields. |
+| Shared concurrency | Subject to `max_running_tasks` and resource budgets, several tasks with the same key may be `Running` at once; the scheduler clones the same `Arc` and calls `run` in parallel—it does not construct a fresh handler per task. |
+| Must be thread-safe | The trait requires `Send + Sync`; the `run` future must be `Send` so it can run on any worker. Share dependencies through `Arc`, pools, and other synchronized components; keep per-run data inside the async block or in internal state keyed by `task_id`. |
+| Recovery | Unfinished tasks in a recoverable store keep the keys from submission; after restart you must register the same keys or the task becomes `Blocked` with a reason naming the missing handler. |
+| Versus `submit_local` | Process-local closures use `submit_local`, which creates a temporary `local:{id}@1` handler per task and cannot be used when the store declares restart recovery. |
+
 ### Types used on this path
 
 | Type | Role |
@@ -270,7 +299,7 @@ tasks.shutdown().await?;
 | `TaskExecutionService` | The one facade: submit, query, wait, cancel, maintain, shut down. `clone` it into each module. |
 | `TaskExecutionServiceBuilder` | Chooses the store, handlers, capacity, limits, retry policy, and optional event bus. |
 | `TaskRequest` | Reconstructable description: task type, exact handler version, payload, resource demand, correlation and idempotency keys, metadata. |
-| `TaskHandler` / `TaskHandlerDescriptor` | Versioned code that interprets one payload format. |
+| `TaskHandler` / `TaskHandlerDescriptor` | Versioned code that interprets one payload format; `TaskHandler: Send + Sync`, one registered instance shared by concurrent tasks. |
 | `TaskContext` | Per-attempt task ID, attempt number, assigned resources, and the cooperative cancellation flag. |
 | `TaskRunOutcome` / `TaskRunError` | Handler result: `Succeeded(TaskOutput)`, `Cancelled`, or a classified error with a `retryable` flag. |
 | `TaskRecord` / `TaskSummary` | Queryable lifecycle; the summary omits the payload. |
@@ -767,6 +796,21 @@ These are admission and worker counters, not proof that a subscriber ran. They a
 
 ## Assemble components with `qubit-spi`
 
+Core components can be extended and replaced, including a **custom store** (for example Redis, PostgreSQL, or a file backend): implement the trait and wire it into `TaskExecutionServiceBuilder`. `qubit-task` defines four `qubit-spi` service families in `qubit_task::spi` (table below); the application may also skip SPI and pass `Arc<dyn …>` directly to the builder.
+
+| Extension point | SPI family | Runtime trait | Typical wiring |
+| --- | --- | --- | --- |
+| Task history and acceptance | `TaskStoreSpec` | `TaskStore` | `store` argument to `from_components`, or resolve from a registry |
+| Queue ordering | `SchedulingPolicySpec` | `SchedulingPolicy` | `policy` argument to `from_components` |
+| Resource reservation and execution | `TaskExecutionEngineSpec` | `TaskExecutionEngine` | `engine` argument to `from_components` |
+| Business handlers | `TaskHandlerSpec` | `TaskHandler` | `register_handler` / `handlers(TaskHandlerRegistry)` |
+
+**SPI path (optional `inventory` feature)**: implement `ServiceProvider<…Spec>` in a separate crate with a stable provider ID and register with `submit_sync_provider!`; **link** that crate into the final binary (no runtime `.so` loading). At startup call `discovered_*_registry()` or a built-in registry such as `memory_store_registry()`, select a provider with `ProviderSelection::named(...)`, `create_configured(&config)` to obtain `Arc<dyn …>`, then `from_components` and register handlers. Store extensions often use `TaskStoreConfig::Custom(...)` for provider-specific settings.
+
+**Direct path**: implement `TaskStore` (and the other traits) in the application and call `TaskExecutionServiceBuilder::from_components(Arc::new(yours), engine, policy)` without `inventory`. `in_memory()` and `recoverable_sqlite()` are shortcuts over the built-in providers; linking a third-party provider does not change behavior until you select it explicitly.
+
+Lifecycle notifications use a `qubit-event-bus` `EventBus` supplied by the application through the builder; **`qubit-task` does not define an SPI family for the event bus**.
+
 `TaskExecutionServiceBuilder::in_memory()` and `recoverable_sqlite()` are presets over three components: a `TaskStore` (acceptance, reads, transitions), a `SchedulingPolicy` (which queued task runs next), and a `TaskExecutionEngine` (resource reservation and execution). `from_components(store, engine, policy)` accepts any implementations:
 
 ```rust
@@ -869,6 +913,7 @@ This line uses Event Bus 0.16 and Redis adapter 0.4. The bounded `NotificationPu
 - Store results in the application database and return a bounded `TaskOutput` summary or reference.
 - Generate the idempotency key before the first `submit` and keep it until the task record is no longer needed.
 - Register every handler version the store may still hold before `build()`; a missing version blocks the task rather than losing it.
+- Treat each `TaskHandler` as a process-wide singleton that may be invoked concurrently: inject dependencies with `Arc` and similar thread-safe handles; do not store per-task mutable state in unsynchronized fields.
 - Poll with `get_summary`, not `get`, and page `list` at 256 or fewer. Prune SQLite history on a schedule and review `Blocked` records separately.
 - Treat a publish receipt, an event, and a task transition as different stages. Query the service for authoritative state.
 - Test the full path: accept, run, retry, block, cancel, restart with recovery, and shutdown under a deadline.
