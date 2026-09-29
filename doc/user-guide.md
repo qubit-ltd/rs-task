@@ -54,6 +54,8 @@ The crate schedules work **inside one process**. Recovery is at-least-once: an i
 
 Complete, runnable programs live in [`examples/task_service.rs`](../examples/task_service.rs) (local closures, cooperative cancellation, versioned requests) and [`examples/blocked_maintenance.rs`](../examples/blocked_maintenance.rs) (operator review of blocked tasks).
 
+The idempotency helper below is also compiled and run by [`idempotent_submit.rs`](../tests/fixtures/doc-examples/src/bin/idempotent_submit.rs); it checks both exact replay and conflict under a reused key.
+
 ## Integrate a CSV import service
 
 Add the crate, an async runtime, and a payload codec:
@@ -268,6 +270,8 @@ tasks.shutdown().await?;
 
 One `TaskExecutionService` owns one `TaskHandlerRegistry`; the process is not limited to a single `TaskHandler`. CSV import, report export, thumbnail generation, and other jobs should each implement `TaskHandler` and declare a distinct `task_type` in `descriptor()` (and a distinct `version` when the payload format changes, for example keeping `csv-import@1` and `csv-import@2` side by side). On submit, `TaskRequest::new("csv-import", "1", payload)` and `TaskRequest::new("report.export", "1", payload)` resolve to different registered handlers. Scheduling and recovery use only the persisted `task_type` and `handler_version` on the request; nothing inspects the payload to guess a handler.
 
+Submission does not require a matching handler to be present: the request is accepted and persisted, then becomes `Blocked` if the registry has no exact `(task_type, handler_version)` match. The registry is fixed after `build()`. Register the missing version before rebuilding a recoverable service, then call `retry_blocked` for the retained task.
+
 Example wiring at startup:
 
 ```rust
@@ -370,7 +374,7 @@ The basic integration ends here. The following sections are optional and organis
 
 ## Find a task after the caller stopped waiting
 
-A client may time out on `POST /imports` after the service accepted the request. If it retries with a fresh key, the same file is imported twice. The idempotency key prevents that, and `get_by_idempotency_key` lets the API find the earlier acceptance:
+A client may time out on `POST /imports` after the service accepted the request. Retry with the same key and submit the same request; the store returns the original task ID. Do not return an existing ID from a preliminary key lookup alone: that would silently treat a different request under the same key as an exact replay.
 
 ```rust
 use qubit_task::TaskExecutionService;
@@ -381,10 +385,7 @@ pub async fn start_or_find_import(
     request_key: &str,
     job: &CsvImportJob,
 ) -> Result<Option<TaskId>, Box<dyn std::error::Error>> {
-    // A previous attempt may have been accepted after the client gave up waiting.
-    if let Some(existing) = tasks.get_by_idempotency_key(request_key).await? {
-        return Ok(Some(existing.id));
-    }
+    // submit compares the complete request when the key already exists.
     match start_import(tasks, request_key, job).await? {
         StartImport::Accepted { task_id } => Ok(Some(task_id)),
         StartImport::Busy => Ok(None),
@@ -392,7 +393,7 @@ pub async fn start_or_find_import(
 }
 ```
 
-`get_by_idempotency_key` returns a payload-free `TaskSummary`. `None` is a snapshot: an acceptance may still be in flight, which is why the retry goes through `submit` with the **same** key rather than a new one. `submit` then returns the existing record. The key stays reserved only while its record is retained; after pruning or in-memory eviction it can be reused for a new task. A different request under a reused key is rejected with `StoreError::IdempotencyConflict`, and an exact replay returns the original record even if configured capacity has since decreased. Keys are limited to 256 UTF-8 bytes.
+`get_by_idempotency_key` remains useful for read-only lookup and returns a payload-free `TaskSummary`, but it is not a substitute for submitting a retry. The key stays reserved only while its record is retained; after pruning or in-memory eviction it can be reused for a new task. A different request under a retained key is rejected with `StoreError::IdempotencyConflict`, and an exact replay returns the original record even if configured capacity has since decreased. Keys are limited to 256 UTF-8 bytes.
 
 To list a tenant's imports rather than one task, filter by `correlation_key`:
 
