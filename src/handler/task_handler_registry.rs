@@ -5,15 +5,17 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+// Stores one handler and the identity of its registration source.
+mod internal;
+
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use internal::RegisteredHandler;
 
 use super::RegistryError;
 use super::TaskHandler;
 use super::TaskHandlerDescriptor;
-// Stores one handler and the identity of its registration source.
-mod internal;
-use internal::RegisteredHandler;
 
 /// Resolves task handlers by their exact task type and version.
 ///

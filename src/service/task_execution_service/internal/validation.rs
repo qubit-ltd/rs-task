@@ -37,6 +37,7 @@ pub(in crate::service::task_execution_service) fn now_ms() -> u64 {
 ///
 /// The earliest next attempt timestamp, saturated at `u64::MAX`.
 #[must_use]
+#[inline]
 pub(in crate::service::task_execution_service) fn retry_deadline_ms(
     now_ms: u64,
     policy: RetryPolicy,
@@ -64,13 +65,6 @@ pub(in crate::service::task_execution_service) fn validate_request_format(
     request
         .validate_limits()
         .map_err(|error| TaskServiceError::InvalidRequest(error.to_string()))?;
-    if request.resources.custom.keys().any(String::is_empty)
-        || request.resources.gpu_labels.iter().any(String::is_empty)
-    {
-        return Err(TaskServiceError::InvalidRequest(
-            "resource names and GPU labels must not be empty".into(),
-        ));
-    }
     Ok(())
 }
 

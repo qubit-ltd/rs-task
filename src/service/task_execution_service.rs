@@ -89,6 +89,7 @@ use crate::store::StoreError;
 ///     Ok(())
 /// }
 /// ```
+#[must_use]
 #[derive(Clone)]
 pub struct TaskExecutionService {
     /// Starts asynchronous shutdown when the final public handle is dropped.

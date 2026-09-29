@@ -7,6 +7,8 @@
 // =============================================================================
 use std::sync::Arc;
 
+use crate::model::OwnerEpoch;
+use crate::store::StoreError;
 use crate::store::TaskStore;
 
 /// Owns a recovery lease until it is released or transferred to the service.
@@ -14,7 +16,7 @@ pub(in crate::service::task_execution_service_builder) struct OwnerGuard {
     /// Store whose ownership lease is managed by this guard.
     store: Arc<dyn TaskStore>,
     /// Lease not yet released or transferred to the running service.
-    epoch: Option<crate::model::OwnerEpoch>,
+    epoch: Option<OwnerEpoch>,
 }
 
 impl OwnerGuard {
@@ -30,7 +32,7 @@ impl OwnerGuard {
     /// A guard that releases an untransferred lease.
     pub(in crate::service::task_execution_service_builder) fn new(
         store: Arc<dyn TaskStore>,
-        epoch: Option<crate::model::OwnerEpoch>,
+        epoch: Option<OwnerEpoch>,
     ) -> Self {
         Self { store, epoch }
     }
@@ -41,7 +43,7 @@ impl OwnerGuard {
     ///
     /// The lease epoch, if this guard still owns one.
     #[must_use]
-    pub(in crate::service::task_execution_service_builder) fn transfer(&mut self) -> Option<crate::model::OwnerEpoch> {
+    pub(in crate::service::task_execution_service_builder) fn transfer(&mut self) -> Option<OwnerEpoch> {
         self.epoch.take()
     }
 
@@ -54,9 +56,7 @@ impl OwnerGuard {
     /// # Errors
     ///
     /// Returns the store error if the lease cannot be released.
-    pub(in crate::service::task_execution_service_builder) async fn release(
-        &mut self,
-    ) -> Result<(), crate::store::StoreError> {
+    pub(in crate::service::task_execution_service_builder) async fn release(&mut self) -> Result<(), StoreError> {
         if let Some(epoch) = self.epoch.take() {
             self.store.release_owner(epoch).await
         } else {

@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync;
@@ -13,6 +14,7 @@ use crate::handler::TaskHandlerRegistry;
 use crate::model::TaskId;
 use crate::model::TaskState;
 use crate::model::TaskSummary;
+use crate::model::TransitionCommand;
 use crate::scheduling::QueuedTask;
 use crate::service::task_execution_service_builder::TaskExecutionService;
 use crate::service::task_execution_service_builder::TaskServiceBuildError;
@@ -88,8 +90,8 @@ pub(in crate::service::task_execution_service_builder) async fn restore_tasks_pa
     max_attempts: u32,
     limit: usize,
     sender: &sync::oneshot::Sender<Result<TaskExecutionService, TaskServiceBuildError>>,
-) -> Result<std::collections::VecDeque<QueuedTask>, TaskServiceBuildError> {
-    let mut queue = std::collections::VecDeque::new();
+) -> Result<VecDeque<QueuedTask>, TaskServiceBuildError> {
+    let mut queue = VecDeque::new();
     let mut cursor = None;
     let mut count = 0_usize;
     loop {
@@ -109,7 +111,7 @@ pub(in crate::service::task_execution_service_builder) async fn restore_tasks_pa
         for mut record in page.tasks {
             if matches!(record.state, TaskState::Queued | TaskState::Running) && record.attempt >= max_attempts {
                 store
-                    .transition(crate::model::TransitionCommand {
+                    .transition(TransitionCommand {
                         id: record.id,
                         expected_version: record.state_version,
                         expected_attempt: record.attempt,
@@ -129,7 +131,7 @@ pub(in crate::service::task_execution_service_builder) async fn restore_tasks_pa
             }
             if matches!(record.state, TaskState::Running) {
                 record = store
-                    .transition(crate::model::TransitionCommand {
+                    .transition(TransitionCommand {
                         id: record.id,
                         expected_version: record.state_version,
                         expected_attempt: record.attempt,
@@ -147,7 +149,7 @@ pub(in crate::service::task_execution_service_builder) async fn restore_tasks_pa
                     .is_none()
                 {
                     store
-                        .transition(crate::model::TransitionCommand {
+                        .transition(TransitionCommand {
                             id: record.id,
                             expected_version: record.state_version,
                             expected_attempt: record.attempt,

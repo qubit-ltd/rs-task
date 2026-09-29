@@ -57,6 +57,7 @@ use crate::store::TaskStore;
 /// # Ok(())
 /// # }
 /// ```
+#[must_use = "configure the builder and call build to start the service"]
 pub struct TaskExecutionServiceBuilder {
     /// Selected persistent or volatile task history store.
     store: Option<Arc<dyn TaskStore>>,
@@ -139,7 +140,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// A builder configured with bounded in-memory task history.
-    #[must_use]
+    #[inline]
     pub fn in_memory() -> Self {
         Self::default().store(Arc::new(MemoryTaskStore::new(1024)))
     }
@@ -153,7 +154,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// A builder configured with the supplied payload budget.
-    #[must_use]
+    #[inline]
     pub fn in_memory_with_payload_budget(limit: NonZeroUsize) -> Self {
         Self::default().store(Arc::new(MemoryTaskStore::with_payload_budget(1024, limit)))
     }
@@ -188,7 +189,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// A builder initialized with those components.
-    #[must_use]
+    #[inline]
     pub fn from_components(
         store: Arc<dyn TaskStore>,
         engine: Arc<dyn TaskExecutionEngine>,
@@ -206,7 +207,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the supplied store selected.
-    #[must_use]
+    #[inline]
     pub fn store(mut self, store: Arc<dyn TaskStore>) -> Self {
         self.store = Some(store);
         self
@@ -221,7 +222,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the supplied engine selected.
-    #[must_use]
+    #[inline]
     pub fn engine(mut self, engine: Arc<dyn TaskExecutionEngine>) -> Self {
         self.engine = Some(engine);
         self
@@ -236,7 +237,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the supplied scheduling policy selected.
-    #[must_use]
+    #[inline]
     pub fn policy(mut self, policy: Arc<dyn SchedulingPolicy>) -> Self {
         self.policy = Some(policy);
         self
@@ -273,7 +274,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with its handler registry replaced.
-    #[must_use]
+    #[inline]
     pub fn handlers(mut self, handlers: TaskHandlerRegistry) -> Self {
         self.handlers = handlers;
         self
@@ -288,7 +289,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the local engine capacity replaced.
-    #[must_use]
+    #[inline]
     pub fn capacity(mut self, capacity: ResourceCapacity) -> Self {
         self.capacity = capacity;
         self
@@ -303,7 +304,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the queue limit replaced.
-    #[must_use]
+    #[inline]
     pub fn queue_capacity(mut self, capacity: usize) -> Self {
         self.queue_capacity = capacity;
         self
@@ -318,7 +319,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the admission payload limit replaced.
-    #[must_use]
+    #[inline]
     pub fn max_inflight_payload_bytes(mut self, limit: NonZeroUsize) -> Self {
         self.max_inflight_payload_bytes = limit;
         self
@@ -333,7 +334,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the admission worker limit replaced.
-    #[must_use]
+    #[inline]
     pub fn max_inflight_operations(mut self, limit: NonZeroUsize) -> Self {
         self.max_inflight_operations = limit;
         self
@@ -348,7 +349,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the running task limit replaced.
-    #[must_use]
+    #[inline]
     pub fn max_running_tasks(mut self, limit: NonZeroUsize) -> Self {
         self.max_running_tasks = limit;
         self
@@ -363,7 +364,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the normalized scheduler scan budget.
-    #[must_use]
+    #[inline]
     pub fn scan_budget(mut self, budget: usize) -> Self {
         self.scan_budget = budget.max(1);
         self
@@ -378,7 +379,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the normalized retry attempt limit.
-    #[must_use]
+    #[inline]
     pub fn max_attempts(mut self, attempts: u32) -> Self {
         self.max_attempts = attempts.max(1);
         self
@@ -393,7 +394,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the retry delay policy replaced.
-    #[must_use]
+    #[inline]
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
         self
@@ -408,7 +409,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder with the recovery requirement replaced.
-    #[must_use]
+    #[inline]
     pub fn require_recovery(mut self, required: bool) -> Self {
         self.require_recovery = required;
         self
@@ -427,7 +428,7 @@ impl TaskExecutionServiceBuilder {
     /// # Returns
     ///
     /// This builder configured with the supplied runtime.
-    #[must_use]
+    #[inline]
     pub fn runtime_handle(mut self, handle: runtime::Handle) -> Self {
         self.runtime_handle = Some(handle);
         self
@@ -443,7 +444,7 @@ impl TaskExecutionServiceBuilder {
     ///
     /// This builder configured with the supplied event bus.
     #[cfg(feature = "event-bus")]
-    #[must_use]
+    #[inline]
     pub fn event_bus(mut self, event_bus: EventBus) -> Self {
         self.event_bus = Some(event_bus);
         self
@@ -459,7 +460,7 @@ impl TaskExecutionServiceBuilder {
     ///
     /// This builder with the notification queue capacity replaced.
     #[cfg(feature = "event-bus")]
-    #[must_use]
+    #[inline]
     pub fn event_bus_buffer_capacity(mut self, capacity: NonZeroUsize) -> Self {
         self.event_bus_buffer_capacity = capacity;
         self
@@ -476,7 +477,7 @@ impl TaskExecutionServiceBuilder {
     ///
     /// This builder with the notification close timeout replaced.
     #[cfg(feature = "event-bus")]
-    #[must_use]
+    #[inline]
     pub fn event_bus_close_timeout(mut self, timeout: Duration) -> Self {
         self.event_bus_close_timeout = timeout;
         self
