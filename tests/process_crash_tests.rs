@@ -10,6 +10,7 @@
 //! execution.
 #![cfg(feature = "sqlite")]
 
+use std::fs::Permissions;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::path::Path;
@@ -50,40 +51,96 @@ use tokio::test as tokio_test;
 use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(30);
-static WORKER: OnceLock<PathBuf> = OnceLock::new();
+static WORKER: OnceLock<WorkerFixture> = OnceLock::new();
 
-/// Builds the independent fixture once, outside the repository target
-/// directory. Panics with compiler diagnostics if the required fixture cannot
-/// be built.
-fn build_worker() -> PathBuf {
-    WORKER
-        .get_or_init(|| {
-            let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace = std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .and_then(|path| path.parent().map(Path::to_path_buf))
-                .unwrap_or_else(|| std::env::temp_dir().join(format!("qubit-task-crash-build-{}", TaskId::generate())));
-            let target = workspace.join("fixture-target");
-            let mut command = Command::new(env!("CARGO"));
-            command
-                .current_dir(&repository)
-                .args(["build", "--locked", "--manifest-path"])
-                .arg(repository.join("tests/fixtures/crash-worker/Cargo.toml"))
-                .arg("--target-dir")
-                .arg(&target);
-            // This independent workspace enables only sqlite, so event-bus
-            // siblings and the parent crate's dev-dependencies are unnecessary.
-            let output = command.output().expect("fixture compiler starts");
-            assert!(
-                output.status.success(),
-                "fixture build failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            target
-                .join("debug")
-                .join(format!("rs-task-crash-worker-fixture{}", std::env::consts::EXE_SUFFIX))
-        })
-        .clone()
+/// Caches compiled bytes, rather than a static directory whose destructor
+/// would never run. Every on-disk workspace has a local cleanup owner.
+struct WorkerFixture {
+    bytes: Vec<u8>,
+    permissions: Permissions,
+}
+
+/// Holds one executable's local workspace until its child is killed/reaped.
+struct WorkerInstance {
+    path: PathBuf,
+    _workspace: Database,
+}
+
+/// Selects output inside the owned temporary workspace, ignoring any absolute
+/// or relative Cargo target setting. This pure helper performs no filesystem
+/// IO.
+fn fixture_target_path(_cargo_target_dir: Option<&Path>, workspace: &Path) -> PathBuf {
+    workspace.join("fixture-target")
+}
+
+/// Builds the fixture once into a locally owned temporary target, reads its
+/// bytes, and cleans that target. Materializes a private executable per case,
+/// kept alive by its returned workspace owner. Panics on build/filesystem
+/// errors.
+fn build_worker() -> WorkerInstance {
+    let fixture = WORKER.get_or_init(|| {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+        let workspace = Database::new();
+        let target = fixture_target_path(cargo_target_dir.as_deref(), &workspace.0);
+        let mut command = Command::new(env!("CARGO"));
+        command
+            .current_dir(&repository)
+            .args(["build", "--locked", "--manifest-path"])
+            .arg(repository.join("tests/fixtures/crash-worker/Cargo.toml"))
+            .arg("--target-dir")
+            .arg(&target);
+        // This independent workspace enables only sqlite, so event-bus
+        // siblings and the parent crate's dev-dependencies are unnecessary.
+        let output = command.output().expect("fixture compiler starts");
+        assert!(
+            output.status.success(),
+            "fixture build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let executable = target
+            .join("debug")
+            .join(format!("rs-task-crash-worker-fixture{}", std::env::consts::EXE_SUFFIX));
+        let fixture = WorkerFixture {
+            bytes: std::fs::read(&executable).expect("compiled worker bytes are retained"),
+            permissions: std::fs::metadata(&executable)
+                .expect("worker permissions read")
+                .permissions(),
+        };
+        drop(workspace);
+        assert!(
+            !target.exists(),
+            "temporary compiler output is removed after retaining the executable"
+        );
+        fixture
+    });
+    let workspace = Database::new();
+    let path = workspace.0.join(format!("worker{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&path, &fixture.bytes).expect("private worker executable is materialized");
+    std::fs::set_permissions(&path, fixture.permissions.clone()).expect("worker executable permissions are restored");
+    WorkerInstance {
+        path,
+        _workspace: workspace,
+    }
+}
+
+/// A repository's absolute Cargo output path never selects fixture storage.
+#[test]
+fn test_fixture_target_ignores_absolute_repository_target() {
+    let workspace = Database::new();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let target = fixture_target_path(Some(&repository.join("target")), &workspace.0);
+    assert_eq!(target, workspace.0.join("fixture-target"));
+    assert!(!target.starts_with(repository));
+}
+
+/// Relative Cargo output paths likewise cannot put fixture artifacts in cwd.
+#[test]
+fn test_fixture_target_ignores_relative_cargo_target() {
+    let workspace = Database::new();
+    let target = fixture_target_path(Some(Path::new("target")), &workspace.0);
+    assert_eq!(target, workspace.0.join("fixture-target"));
+    assert!(target.is_absolute());
 }
 
 /// Owns only this test's child, killing and reaping it even during a panic.
@@ -135,7 +192,7 @@ struct Ready {
 /// guard.
 async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize) {
     let worker = spawn_blocking(build_worker).await.expect("fixture build task finishes");
-    let child = Command::new(worker)
+    let child = Command::new(&worker.path)
         .arg(database.path())
         .arg(mode)
         .arg(id.to_string())
@@ -181,6 +238,13 @@ async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize)
             "Child::kill terminates the worker with SIGKILL"
         );
     }
+    drop(child);
+    let executable_workspace = worker._workspace.0.clone();
+    drop(worker);
+    assert!(
+        !executable_workspace.exists(),
+        "private executable is removed after its child exits"
+    );
 }
 
 /// Uses stable payload and idempotency data shared with the worker fixture.
