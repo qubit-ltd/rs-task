@@ -40,6 +40,21 @@ use crate::service::task_execution_service::TaskServiceError;
 use crate::store::StoreError;
 
 impl TaskExecutionService {
+    /// Deletes terminal history while holding an admission permit through the
+    /// store operation.
+    ///
+    /// # Parameters
+    ///
+    /// * `accepted_before_ms` - Exclusive acceptance-time cutoff.
+    /// * `max_rows` - Maximum number of records to prune.
+    ///
+    /// # Returns
+    ///
+    /// The number of deleted records.
+    ///
+    /// # Errors
+    ///
+    /// Returns shutdown, store, or latched store-fault errors.
     pub(in crate::service::task_execution_service) async fn prune_terminal_before_admitted(
         &self,
         accepted_before_ms: u64,
@@ -56,6 +71,21 @@ impl TaskExecutionService {
             .map_err(|error| self.handle_store_error(error))
     }
 
+    /// Applies cancellation to queued work or records a cooperative request
+    /// for a running attempt.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the task to cancel.
+    ///
+    /// # Returns
+    ///
+    /// Whether the task was cancelled before start, cancellation was
+    /// requested, or it was already terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, shutdown, scheduler, or store errors.
     pub(in crate::service::task_execution_service) async fn cancel_admitted(
         &self,
         id: TaskId,
@@ -142,6 +172,20 @@ impl TaskExecutionService {
         }
     }
 
+    /// Cancels a blocked record only if it still has the reviewed revision.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the blocked task.
+    /// * `expected_version` - State revision observed by the caller.
+    ///
+    /// # Returns
+    ///
+    /// The committed cancelled summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, conflict, not-blocked, shutdown, or store errors.
     pub(in crate::service::task_execution_service) async fn abandon_blocked_admitted(
         &self,
         id: TaskId,

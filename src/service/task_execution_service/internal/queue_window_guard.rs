@@ -45,6 +45,8 @@ impl QueueWindowGuard {
     /// # Panics
     ///
     /// Panics if the window has already been restored or consumed.
+    #[must_use]
+    #[inline]
     pub(super) fn tasks_mut(&mut self) -> &mut Vec<QueuedTask> {
         self.tasks.as_mut().expect("scheduler window is active")
     }

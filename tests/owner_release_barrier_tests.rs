@@ -12,6 +12,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
+use qubit_task::model::AcceptOutcome;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskRequest;
 use qubit_task::store::SqliteTaskStore;
@@ -47,7 +48,8 @@ async fn test_release_owner_waits_for_previously_admitted_write() {
     );
 
     store.release_accept();
-    accepting.await.expect("accept worker joins").expect("write completes");
+    let accepted = accepting.await.expect("accept worker joins").expect("write completes");
+    assert!(matches!(accepted, AcceptOutcome::Accepted(_)));
     releasing
         .await
         .expect("release worker joins")

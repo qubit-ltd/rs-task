@@ -24,6 +24,7 @@ use super::RequestValidationRule;
 /// assert_eq!(error.field, RequestValidationField::TaskType);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
 pub struct RequestValidationError {
     /// Field that failed validation.
     pub field: RequestValidationField,
@@ -67,6 +68,7 @@ impl RequestValidationError {
     ///
     /// The static human-readable diagnostic for this validation failure.
     #[must_use]
+    #[inline]
     pub const fn message(self) -> &'static str {
         self.message
     }
