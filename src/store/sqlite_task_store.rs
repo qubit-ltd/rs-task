@@ -841,8 +841,13 @@ fn failure(error: impl std::fmt::Display) -> StoreError {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
+    use futures::poll;
+    use rusqlite::Connection;
     use tokio as tokio_crate;
+    use tokio::pin;
     use tokio::spawn;
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
@@ -854,6 +859,7 @@ mod tests {
     use crate::model::AcceptOutcome;
     use crate::model::TaskQuery;
     use crate::model::TaskRequest;
+    use crate::store::StoreError;
     use crate::store::TaskStore;
 
     /// Creates a unique database path for one worker scheduling test.
@@ -992,6 +998,99 @@ mod tests {
         }
         assert_eq!(peak, 1, "only one worker enters before the connection lock");
 
+        drop(store);
+        remove_database(&path);
+    }
+
+    /// Cancelling an async caller must leave its real blocking transaction
+    /// fenced until commit. Channels mark transaction entry and continuation;
+    /// worker counters and a second connection observe the actual store path.
+    #[tokio_crate::test]
+    async fn test_cancelled_write_caller_keeps_owner_until_transaction_commits() {
+        let path = test_database_path();
+        let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
+        let epoch = store.acquire_owner().await.expect("store acquires owner");
+        store
+            .run_write(|connection| {
+                connection
+                    .execute_batch("CREATE TABLE barrier_probe (value INTEGER NOT NULL)")
+                    .map_err(super::failure)
+            })
+            .await
+            .expect("create probe in this test's database");
+
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let (continue_sender, continue_receiver) = std::sync::mpsc::channel();
+        let (committed_sender, committed_receiver) = oneshot::channel();
+        let writing_store = Arc::clone(&store);
+        let caller = spawn(async move {
+            writing_store
+                .run_write(move |connection| {
+                    let transaction = connection.unchecked_transaction().map_err(super::failure)?;
+                    transaction
+                        .execute("INSERT INTO barrier_probe(value) VALUES(42)", [])
+                        .map_err(super::failure)?;
+                    entered_sender.send(()).expect("test observes transaction entry");
+                    // A dropped test continuation also lets the blocking worker
+                    // exit on assertion failure instead of hanging runtime teardown.
+                    continue_receiver.recv().map_err(super::failure)?;
+                    transaction.commit().map_err(super::failure)?;
+                    committed_sender.send(()).expect("test observes commit");
+                    Ok(())
+                })
+                .await
+        });
+        time::timeout(Duration::from_secs(5), entered_receiver)
+            .await
+            .expect("blocking write enters its transaction")
+            .expect("transaction entry signal");
+        assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 1);
+        assert_eq!(store.operation_slot.available_permits(), 0);
+        let observer = Connection::open(&path).expect("independent SQLite reader opens");
+        let uncommitted: usize = observer
+            .query_row("SELECT COUNT(*) FROM barrier_probe", [], |row| row.get(0))
+            .expect("reader observes committed rows only");
+        assert_eq!(uncommitted, 0, "the entered write has not committed");
+
+        caller.abort();
+        assert!(caller.await.expect_err("caller is cancelled").is_cancelled());
+        assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 1);
+        {
+            let release = store.release_owner(epoch);
+            pin!(release);
+            assert!(
+                poll!(release.as_mut()).is_pending(),
+                "owner release must wait for the cancelled caller's worker"
+            );
+            assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 1);
+            assert!(
+                matches!(SqliteTaskStore::open(&path), Err(StoreError::OwnerConflict)),
+                "OS ownership remains fenced"
+            );
+
+            continue_sender.send(()).expect("allow transaction to commit");
+            time::timeout(Duration::from_secs(5), committed_receiver)
+                .await
+                .expect("transaction commits after continuation")
+                .expect("transaction commit signal");
+            time::timeout(Duration::from_secs(5), release)
+                .await
+                .expect("owner release finishes after the worker")
+                .expect("owner release succeeds");
+        }
+        assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 0);
+        assert_eq!(store.operation_slot.available_permits(), 1);
+        let committed: usize = observer
+            .query_row("SELECT COUNT(*) FROM barrier_probe", [], |row| row.get(0))
+            .expect("reader observes the committed write");
+        assert_eq!(committed, 1);
+        let replacement = SqliteTaskStore::open(&path).expect("ownership can transfer after the completion barrier");
+        assert!(
+            matches!(store.run_write(|_| Ok(())).await, Err(StoreError::Failure(_))),
+            "old owner stays fenced from later writes"
+        );
+        drop(replacement);
+        drop(observer);
         drop(store);
         remove_database(&path);
     }
