@@ -53,6 +53,12 @@ jobs:
         run: ./ci-check.sh --only=verify
       - name: Test all features
         run: cargo test --locked --all-features
+      - name: Run Linux crash and state-model acceptance suites
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/rs-task-linux-acceptance-target
+        run: >-
+          cargo test --locked --features sqlite
+          --test process_crash_tests --test store_state_machine_tests
       - name: Verify publishable package
         run: cargo package --locked
       - name: Run style and coverage Clippy
@@ -74,6 +80,12 @@ jobs:
         run: |
           cargo +1.94.0 check --locked --manifest-path tests/fixtures/provider/Cargo.toml
           cargo +1.94.0 run --locked --manifest-path tests/fixtures/consumer/Cargo.toml
+          cargo +1.94.0 check --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --no-default-features
+          cargo +1.94.0 check --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --no-default-features --features conformance
+          cargo +1.94.0 check --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --no-default-features --features sqlite
+          cargo +1.94.0 check --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --no-default-features --features sqlite,conformance
+          cargo +1.94.0 run --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --no-default-features --features sqlite,conformance
+          cargo +1.94.0 check --locked --manifest-path tests/fixtures/conformance-consumer/Cargo.toml --all-features
           cargo +1.94.0 check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml
           cargo +1.94.0 run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml
       - name: Install documentation toolchain
@@ -120,10 +132,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.94
-      - name: Test SQLite ownership identity on Windows
+      - name: Test SQLite query, recovery, and ownership on Windows
         shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}\rs-task-windows-sqlite-target
         run: >-
           cargo test --locked --features sqlite
+          --test recovery_order_tests
+          --test sqlite_query_tests
+          --test sqlite_tests
+          --test owner_release_barrier_tests
           --test owner_identity_tests
           --test ownership_lifecycle_tests
           --test recovery_bounds_tests
