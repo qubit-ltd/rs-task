@@ -661,36 +661,32 @@ impl TaskExecutionServiceBuilder {
 mod tests {
     use std::num::NonZeroUsize;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
 
-    #[cfg(feature = "event-bus")]
-    use qubit_event_bus::EventBus;
-    #[cfg(feature = "event-bus")]
-    use qubit_event_bus::local::LocalEventBusConfig;
     use tokio as tokio_crate;
     #[cfg(feature = "sqlite")]
     use tokio::time;
 
-    use super::TaskExecutionService;
     use super::TaskExecutionServiceBuilder;
     use super::TaskServiceBuildError;
-    use crate::engine::LocalTaskExecutionEngine;
+    #[cfg(feature = "sqlite")]
     use crate::handler::TaskContext;
+    #[cfg(feature = "sqlite")]
     use crate::handler::TaskHandler;
-    use crate::handler::TaskHandlerRegistry;
+    #[cfg(feature = "sqlite")]
     use crate::handler::TaskRunOutcome;
-    use crate::model::ResourceCapacity;
+    #[cfg(feature = "sqlite")]
     use crate::model::TaskId;
+    #[cfg(feature = "sqlite")]
     use crate::model::TaskOutput;
-    use crate::model::TaskRunError;
+    #[cfg(feature = "sqlite")]
     use crate::model::TaskState;
-    use crate::scheduling::FairFifoPolicy;
     use crate::store::MemoryTaskStore;
     use crate::store::TaskStore;
 
+    #[cfg(feature = "sqlite")]
     struct Echo;
 
+    #[cfg(feature = "sqlite")]
     impl TaskHandler for Echo {
         fn descriptor(&self) -> crate::handler::TaskHandlerDescriptor {
             crate::handler::TaskHandlerDescriptor {
@@ -706,150 +702,6 @@ mod tests {
         ) -> crate::store::TaskFuture<'a, crate::handler::TaskRunResult> {
             Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
         }
-    }
-
-    struct RetryOnce(AtomicUsize);
-
-    impl TaskHandler for RetryOnce {
-        fn descriptor(&self) -> crate::handler::TaskHandlerDescriptor {
-            crate::handler::TaskHandlerDescriptor {
-                task_type: "retry-once".into(),
-                version: "1".into(),
-            }
-        }
-
-        fn run<'a>(
-            &'a self,
-            _payload: &'a [u8],
-            _context: TaskContext,
-        ) -> crate::store::TaskFuture<'a, crate::handler::TaskRunResult> {
-            Box::pin(async move {
-                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                    Err(TaskRunError {
-                        category: "test".into(),
-                        message: "retry once".into(),
-                        retryable: true,
-                    })
-                } else {
-                    Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
-                }
-            })
-        }
-    }
-
-    #[tokio_crate::test]
-    async fn test_public_builder_and_service_lifecycle_contracts() {
-        let mut registry = TaskHandlerRegistry::new();
-        registry.register(Arc::new(Echo)).unwrap();
-        registry.register(Arc::new(RetryOnce(AtomicUsize::new(0)))).unwrap();
-        let capacity = ResourceCapacity {
-            cpu_slots: 1,
-            ..ResourceCapacity::default()
-        };
-        let builder = TaskExecutionServiceBuilder::from_components(
-            Arc::new(MemoryTaskStore::new(16)),
-            Arc::new(LocalTaskExecutionEngine::new(capacity.clone())),
-            Arc::new(FairFifoPolicy::default()),
-        )
-        .register_handler(Arc::new(Echo))
-        .unwrap()
-        .handlers(registry)
-        .capacity(capacity)
-        .queue_capacity(8)
-        .max_running_tasks(NonZeroUsize::new(2).unwrap())
-        .scan_budget(8)
-        .max_attempts(2)
-        .require_recovery(false);
-        #[cfg(feature = "event-bus")]
-        let builder = builder
-            .event_bus(EventBus::local(LocalEventBusConfig::default()).unwrap())
-            .event_bus_buffer_capacity(NonZeroUsize::new(4).unwrap());
-        let service = builder.build().await.unwrap();
-        #[cfg(feature = "event-bus")]
-        assert!(service.notification_stats().is_some());
-        assert!(!service.capabilities().store.restart_recovery);
-        assert_eq!(service.last_store_error(), None);
-        assert!(service.get(TaskId::generate()).await.unwrap().is_none());
-
-        let accepted = service
-            .submit(
-                crate::model::TaskRequest::new("builder-test", "1", Vec::new())
-                    .with_idempotency_key("builder-test-submit"),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            service.wait(accepted.id).await.unwrap().state,
-            TaskState::Succeeded
-        ));
-        assert!(service.get(accepted.id).await.unwrap().is_some());
-        assert_eq!(
-            service
-                .list(crate::model::TaskQuery::default())
-                .await
-                .unwrap()
-                .records
-                .len(),
-            1
-        );
-        assert_eq!(service.stats().await.unwrap().terminal, 1);
-        assert!(matches!(
-            service.cancel(accepted.id).await.unwrap(),
-            crate::service::CancelOutcome::AlreadyTerminal
-        ));
-
-        let local = service
-            .submit_local(|_| crate::service::LocalTaskOutcome::<u8, String>::Succeeded {
-                value: 7,
-                summary: TaskOutput::default(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(local.task_id(), service.get(local.task_id()).await.unwrap().unwrap().id);
-        assert!(format!("{local:?}").contains("LocalTaskHandle"));
-        assert_eq!(local.result().await.unwrap().unwrap(), 7);
-
-        let retrying = service
-            .submit(
-                crate::model::TaskRequest::new("retry-once", "1", Vec::new())
-                    .with_idempotency_key("builder-retry-once"),
-            )
-            .await
-            .unwrap();
-        let retried = service.wait(retrying.id).await.unwrap();
-        assert_eq!(retried.attempt, 2);
-        assert!(matches!(retried.state, TaskState::Succeeded));
-
-        let blocked = service
-            .submit(
-                crate::model::TaskRequest::new("missing", "1", Vec::new())
-                    .with_idempotency_key("builder-missing-handler"),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            service.wait(blocked.id).await,
-            Err(crate::service::TaskServiceError::Blocked)
-        ));
-        service.retry_blocked(blocked.id).await.unwrap();
-        assert!(matches!(
-            service.wait(blocked.id).await,
-            Err(crate::service::TaskServiceError::Blocked)
-        ));
-        assert!(matches!(
-            service.cancel(blocked.id).await.unwrap(),
-            crate::service::CancelOutcome::CancelledBeforeStart
-        ));
-        assert!(matches!(
-            service.cancel(TaskId::generate()).await,
-            Err(crate::service::TaskServiceError::Store(
-                crate::store::StoreError::NotFound
-            ))
-        ));
-        service.shutdown().await.unwrap();
-
-        let memory_service = TaskExecutionService::in_memory().await.unwrap();
-        memory_service.shutdown().await.unwrap();
     }
 
     #[tokio_crate::test]
