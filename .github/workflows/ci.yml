@@ -110,6 +110,24 @@ jobs:
         run: |
           ./ci-check.sh --only=feature-matrix
 
+  windows-sqlite:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        shell: bash
+        run: ./.infra/tools/prepare-local-path-dependencies.sh
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Test SQLite ownership identity on Windows
+        shell: bash
+        run: >-
+          cargo test --locked --features sqlite
+          --test owner_identity_tests
+          --test ownership_lifecycle_tests
+          --test recovery_bounds_tests
+
   coverage:
     needs: [verify]
     permissions:
