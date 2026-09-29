@@ -59,8 +59,11 @@ pub(in crate::store::sqlite_task_store) fn initialize_schema(connection: &mut Co
             ));
         }
         validate_schema_three(&transaction)?;
+        ensure_indexes(&transaction)?;
         transaction
-            .execute_batch("CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);")
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);",
+            )
             .map_err(failure)?;
         transaction.commit().map_err(failure)?;
         return Ok(());
@@ -73,13 +76,32 @@ pub(in crate::store::sqlite_task_store) fn initialize_schema(connection: &mut Co
     } else {
         transaction.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_info_json TEXT NOT NULL, payload BLOB NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 3, lifecycle_json TEXT NOT NULL);").map_err(failure)?;
     }
+    ensure_indexes(&transaction)?;
     transaction
-        .execute_batch("CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);")
+        .execute_batch("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);")
         .map_err(failure)?;
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(failure)?;
     transaction.commit().map_err(failure)
+}
+
+/// Ensures every history/recovery index exists in the schema transaction.
+///
+/// Existing indexes and record bytes are retained; SQLite DDL failures roll
+/// back with the caller's transaction. This applies to fresh, upgraded and
+/// version-3 databases.
+fn ensure_indexes(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    transaction
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS tasks_state_accepted ON tasks(state_kind, accepted_at);
+         CREATE INDEX IF NOT EXISTS tasks_accepted_id ON tasks(accepted_at, id);
+         CREATE INDEX IF NOT EXISTS tasks_correlation_accepted_id ON tasks(correlation_key, accepted_at, id);
+         CREATE INDEX IF NOT EXISTS tasks_state_accepted_id ON tasks(state_kind, accepted_at, id);
+         CREATE INDEX IF NOT EXISTS tasks_unfinished_accepted_id ON tasks(accepted_at, id)
+         WHERE state_kind IN ('Queued','Running');",
+        )
+        .map_err(failure)
 }
 
 /// Verifies that schema 3 has the columns expected by the current store.
