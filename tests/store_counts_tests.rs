@@ -28,9 +28,13 @@ use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
+#[cfg(feature = "sqlite")]
+use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+#[cfg(feature = "sqlite")]
+use rusqlite::Connection;
 use tokio::test as tokio_test;
 
 struct FailListStore {
@@ -284,8 +288,6 @@ async fn test_service_stats_uses_one_aggregate_without_listing_history() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_store_counts_all_state_categories() {
-    use qubit_task::store::SqliteTaskStore;
-
     let path = std::env::temp_dir().join(format!("qubit-task-counts-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     check_all_state_categories(&store).await;
@@ -303,8 +305,6 @@ async fn test_sqlite_store_counts_all_state_categories() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_service_stats_uses_one_sqlite_aggregate_for_large_history() {
-    use qubit_task::store::SqliteTaskStore;
-
     let path = std::env::temp_dir().join(format!("qubit-task-stats-large-{}.sqlite", TaskId::generate()));
     let sqlite = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
     let store = Arc::new(FailListStore {
@@ -344,12 +344,10 @@ async fn test_service_stats_uses_one_sqlite_aggregate_for_large_history() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_store_count_rejects_unknown_state_kind() {
-    use qubit_task::store::SqliteTaskStore;
-
     let path = std::env::temp_dir().join(format!("qubit-task-counts-invalid-{}.sqlite", TaskId::generate()));
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     let record = accept(&store).await;
-    rusqlite::Connection::open(&path)
+    Connection::open(&path)
         .expect("second connection opens")
         .execute(
             "UPDATE tasks SET state_kind='Unknown' WHERE id=?1",

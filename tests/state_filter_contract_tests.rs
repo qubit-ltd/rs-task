@@ -25,6 +25,7 @@ mod sqlite_tests {
     use qubit_task::store::SqliteTaskStore;
     use qubit_task::store::StoreError;
     use qubit_task::store::TaskStore;
+    use serde_json as json;
     use tokio as tokio_crate;
     use tokio::time;
 
@@ -87,7 +88,7 @@ mod sqlite_tests {
 
     /// Parses a fixed UUID so timestamp order can differ from identifier order.
     fn fixed_task_id(value: &str) -> TaskId {
-        serde_json::from_str(&format!("\"{value}\"")).expect("fixed task ID is valid")
+        json::from_str(&format!("\"{value}\"")).expect("fixed task ID is valid")
     }
 
     /// Removes only database files created by the SQLite test.

@@ -8,6 +8,7 @@
 #[cfg(feature = "sqlite")]
 mod common;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "sqlite")]
@@ -29,6 +30,7 @@ use qubit_task::model::TaskStateKind;
 use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::service::LocalTaskOutcome;
+use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
@@ -244,11 +246,6 @@ async fn test_memory_store_abandons_blocked_only_at_expected_version() {
 
 #[tokio_test]
 async fn test_service_abandon_blocked_uses_the_observed_revision() {
-    use std::sync::Arc;
-
-    use qubit_task::TaskExecutionServiceBuilder;
-    use qubit_task::service::TaskServiceError;
-
     let store = Arc::new(MemoryTaskStore::new(16));
     let service = TaskExecutionServiceBuilder::default()
         .store(store)
@@ -436,7 +433,7 @@ async fn test_task_store_default_pruning_reports_unsupported_capability() {
 
 #[tokio_test]
 async fn test_service_pruning_uses_admission_and_removes_terminal_history() {
-    let store = std::sync::Arc::new(MemoryTaskStore::new(8));
+    let store = Arc::new(MemoryTaskStore::new(8));
     let service = TaskExecutionServiceBuilder::in_memory()
         .store(store)
         .build()

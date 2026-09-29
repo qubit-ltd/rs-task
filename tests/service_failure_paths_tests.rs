@@ -15,6 +15,7 @@ use std::time::Duration;
 
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
+use parking_lot::Mutex;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::engine::EngineError;
 use qubit_task::engine::ExecutionHandle;
@@ -59,7 +60,7 @@ use tokio::test as tokio_test;
 use tokio::time;
 
 struct ActivationGateEngine {
-    entered: parking_lot::Mutex<Option<sync::oneshot::Sender<()>>>,
+    entered: Mutex<Option<sync::oneshot::Sender<()>>>,
     release: sync::Semaphore,
 }
 
@@ -363,7 +364,7 @@ async fn test_store_fault_shutdown_waits_for_scheduler_activation_to_return() {
     store.should_fail_get.store(false, Ordering::Release);
     let (entered_tx, entered_rx) = sync::oneshot::channel();
     let engine = Arc::new(ActivationGateEngine {
-        entered: parking_lot::Mutex::new(Some(entered_tx)),
+        entered: Mutex::new(Some(entered_tx)),
         release: sync::Semaphore::new(0),
     });
     let service = TaskExecutionServiceBuilder::default()
@@ -411,7 +412,7 @@ async fn test_store_fault_keeps_sqlite_owner_until_scheduler_activation_stops() 
     let store = Arc::new(FailFirstGetStore::with_inner(sqlite));
     let (entered_tx, entered_rx) = sync::oneshot::channel();
     let engine = Arc::new(ActivationGateEngine {
-        entered: parking_lot::Mutex::new(Some(entered_tx)),
+        entered: Mutex::new(Some(entered_tx)),
         release: sync::Semaphore::new(0),
     });
     let service = TaskExecutionServiceBuilder::default()

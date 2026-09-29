@@ -9,13 +9,19 @@ use qubit_task::TaskId;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::MAX_TASK_QUERY_LIMIT;
 use qubit_task::model::TaskQuery;
+use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRequestInfo;
+use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateKind;
+use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
+use rusqlite::Connection;
+use rusqlite::params;
+use serde_json as json;
 use tokio::test as tokio_test;
 
 fn database_path(label: &str) -> std::path::PathBuf {
@@ -42,7 +48,7 @@ async fn seed_legacy_database(path: &std::path::Path) -> (TaskId, TaskRequest) {
         AcceptOutcome::Accepted(record) => record,
         AcceptOutcome::Existing(_) => panic!("new task ID cannot already exist"),
     };
-    let connection = rusqlite::Connection::open(path).expect("legacy database opens");
+    let connection = Connection::open(path).expect("legacy database opens");
     connection
         .execute_batch(
             "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_json TEXT NOT NULL); CREATE INDEX tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);",
@@ -51,15 +57,15 @@ async fn seed_legacy_database(path: &std::path::Path) -> (TaskId, TaskRequest) {
     connection
         .execute(
             "INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_json) VALUES (?1,'Queued',?2,NULL,?3,?4,?5)",
-            rusqlite::params![
+            params![
                 id.to_string(),
                 i64::try_from(record.accepted_at_ms).expect("timestamp fits SQLite"),
                 request.idempotency_key,
-                serde_json::to_string(&request).expect("request serializes"),
+                json::to_string(&request).expect("request serializes"),
                 {
-                    let mut value = serde_json::to_value(&record).expect("record serializes");
+                    let mut value = json::to_value(&record).expect("record serializes");
                     value.as_object_mut().unwrap().remove("retry_not_before_ms");
-                    serde_json::to_string(&value).expect("legacy record serializes")
+                    json::to_string(&value).expect("legacy record serializes")
                 },
             ],
         )
@@ -72,7 +78,7 @@ async fn test_sqlite_open_creates_version_three_schema() {
     let path = database_path("schema-fresh");
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     drop(store);
-    let connection = rusqlite::Connection::open(&path).expect("database opens for schema inspection");
+    let connection = Connection::open(&path).expect("database opens for schema inspection");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version is readable");
@@ -139,7 +145,7 @@ async fn test_sqlite_open_migrates_legacy_records_without_loss() {
 async fn test_sqlite_open_migrates_schema_one_records_without_loss() {
     let path = database_path("schema-one-migrate");
     let (id, request) = seed_legacy_database(&path).await;
-    let connection = rusqlite::Connection::open(&path).expect("legacy database opens");
+    let connection = Connection::open(&path).expect("legacy database opens");
     connection
         .execute_batch(
             "ALTER TABLE tasks ADD COLUMN record_format_version INTEGER NOT NULL DEFAULT 1; PRAGMA user_version=1;",
@@ -153,7 +159,7 @@ async fn test_sqlite_open_migrates_schema_one_records_without_loss() {
     assert_eq!(record.id, id);
     assert_eq!(record.state_version, 0);
     drop(store);
-    let connection = rusqlite::Connection::open(&path).expect("migrated database opens");
+    let connection = Connection::open(&path).expect("migrated database opens");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
@@ -165,9 +171,6 @@ async fn test_sqlite_open_migrates_schema_one_records_without_loss() {
 /// Preserves queued retry, running, and diagnostic terminal lifecycle fields.
 #[tokio_test]
 async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
-    use qubit_task::model::TaskRecord;
-    use qubit_task::model::TaskState;
-
     let path = database_path("schema-lifecycle");
     let (queued_id, _) = seed_legacy_database(&path).await;
     let records = [
@@ -219,12 +222,12 @@ async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
             cancel_requested: false,
         },
     ];
-    let connection = rusqlite::Connection::open(&path).expect("legacy database opens");
+    let connection = Connection::open(&path).expect("legacy database opens");
     for record in &records {
         connection
             .execute(
                 "INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                rusqlite::params![
+                params![
                     record.id.to_string(),
                     match record.state.kind() {
                         TaskStateKind::Queued => "Queued",
@@ -238,8 +241,8 @@ async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
                     i64::try_from(record.accepted_at_ms).unwrap(),
                     record.request.correlation_key,
                     record.request.idempotency_key,
-                    serde_json::to_string(&record.request).unwrap(),
-                    serde_json::to_string(record).unwrap(),
+                    json::to_string(&record.request).unwrap(),
+                    json::to_string(record).unwrap(),
                 ],
             )
             .expect("legacy lifecycle row is inserted");
@@ -270,14 +273,14 @@ async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
 async fn test_sqlite_schema_migration_rolls_back_when_legacy_record_is_corrupt() {
     let path = database_path("schema-corrupt");
     let (id, _) = seed_legacy_database(&path).await;
-    let connection = rusqlite::Connection::open(&path).expect("legacy database opens");
+    let connection = Connection::open(&path).expect("legacy database opens");
     connection
         .execute("UPDATE tasks SET record_json='not-json' WHERE id=?1", [id.to_string()])
         .expect("corruption is seeded");
     drop(connection);
 
     assert!(SqliteTaskStore::open(&path).is_err());
-    let connection = rusqlite::Connection::open(&path).expect("database remains readable");
+    let connection = Connection::open(&path).expect("database remains readable");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
@@ -295,9 +298,6 @@ async fn test_sqlite_schema_migration_rolls_back_when_legacy_record_is_corrupt()
 /// Leaves immutable request bytes unchanged across lifecycle transitions.
 #[tokio_test]
 async fn test_sqlite_transitions_do_not_rewrite_the_immutable_request() {
-    use qubit_task::model::TaskState;
-    use qubit_task::model::TransitionCommand;
-
     let path = database_path("immutable-request");
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
     let payload = vec![b'x'; 1024 * 1024];
@@ -309,7 +309,7 @@ async fn test_sqlite_transitions_do_not_rewrite_the_immutable_request() {
         AcceptOutcome::Accepted(record) => record,
         AcceptOutcome::Existing(_) => panic!("task is new"),
     };
-    let connection = rusqlite::Connection::open(&path).expect("database opens for inspection");
+    let connection = Connection::open(&path).expect("database opens for inspection");
     let before: Vec<u8> = connection
         .query_row(
             "SELECT payload FROM tasks WHERE id=?1",
@@ -362,7 +362,7 @@ async fn test_sqlite_transitions_do_not_rewrite_the_immutable_request() {
         "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks ORDER BY accepted_at,id",
     ];
     assert!(summary_sql.iter().all(|sql| !sql.contains("payload")));
-    let connection = rusqlite::Connection::open(&path).expect("database opens for inspection");
+    let connection = Connection::open(&path).expect("database opens for inspection");
     let (after, lifecycle): (Vec<u8>, String) = connection
         .query_row(
             "SELECT payload,lifecycle_json FROM tasks WHERE id=?1",
@@ -381,9 +381,6 @@ async fn test_sqlite_transitions_do_not_rewrite_the_immutable_request() {
 
 #[tokio_test]
 async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle() {
-    use qubit_task::model::TaskState;
-    use qubit_task::model::TransitionCommand;
-
     let path = database_path("schema-two-migrate");
     let store = SqliteTaskStore::open(&path).unwrap();
     let request = TaskRequest::new("schema-two", "v1", vec![7; 1024 * 1024]).with_idempotency_key("schema-two-key");
@@ -421,7 +418,7 @@ async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle()
         .unwrap();
     drop(store);
 
-    let connection = rusqlite::Connection::open(&path).unwrap();
+    let connection = Connection::open(&path).unwrap();
     let info_json: String = connection
         .query_row(
             "SELECT request_info_json FROM tasks WHERE id=?1",
@@ -443,7 +440,7 @@ async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle()
             |row| row.get(0),
         )
         .unwrap();
-    let info: TaskRequestInfo = serde_json::from_str(&info_json).unwrap();
+    let info: TaskRequestInfo = json::from_str(&info_json).unwrap();
     let full = TaskRequest {
         payload,
         ..TaskRequest::new(info.task_type, info.handler_version, vec![])
@@ -455,9 +452,9 @@ async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle()
         metadata: info.metadata,
         ..full
     };
-    let request_json = serde_json::to_string(&full).unwrap();
+    let request_json = json::to_string(&full).unwrap();
     connection.execute_batch("DROP TABLE tasks; CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 2, lifecycle_json TEXT NOT NULL); CREATE INDEX tasks_state_accepted ON tasks(state_kind,accepted_at); CREATE INDEX tasks_accepted_id ON tasks(accepted_at,id); PRAGMA user_version=2;").unwrap();
-    connection.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,'Blocked',?2,NULL,?3,?4,2,?5)", rusqlite::params![accepted.id.to_string(), i64::try_from(blocked.accepted_at_ms).unwrap(), "schema-two-key", request_json, lifecycle]).unwrap();
+    connection.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,'Blocked',?2,NULL,?3,?4,2,?5)", params![accepted.id.to_string(), i64::try_from(blocked.accepted_at_ms).unwrap(), "schema-two-key", request_json, lifecycle]).unwrap();
     drop(connection);
 
     let migrated = SqliteTaskStore::open(&path).unwrap();
@@ -475,7 +472,7 @@ async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle()
         accepted.id
     );
     drop(migrated);
-    let connection = rusqlite::Connection::open(&path).unwrap();
+    let connection = Connection::open(&path).unwrap();
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
@@ -496,13 +493,13 @@ async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle()
 async fn test_sqlite_schema_two_corruption_rolls_back_migration() {
     let path = database_path("schema-two-corrupt");
     let id = TaskId::generate();
-    let connection = rusqlite::Connection::open(&path).unwrap();
+    let connection = Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 2, lifecycle_json TEXT NOT NULL); PRAGMA user_version=2;").unwrap();
     connection.execute("INSERT INTO tasks (id,state_kind,accepted_at,request_json,record_format_version,lifecycle_json) VALUES (?1,'Queued',0,'broken',2,'{}')", [id.to_string()]).unwrap();
     drop(connection);
 
     assert!(SqliteTaskStore::open(&path).is_err());
-    let connection = rusqlite::Connection::open(&path).unwrap();
+    let connection = Connection::open(&path).unwrap();
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
@@ -527,9 +524,6 @@ async fn test_sqlite_schema_two_corruption_rolls_back_migration() {
 
 #[tokio_test]
 async fn test_sqlite_schema_two_migration_preserves_each_lifecycle_category() {
-    use qubit_task::model::TaskState;
-    use qubit_task::model::TransitionCommand;
-
     let path = database_path("schema-two-states");
     let store = SqliteTaskStore::open(&path).unwrap();
     let mut cases = Vec::new();
@@ -596,7 +590,7 @@ async fn test_sqlite_schema_two_migration_preserves_each_lifecycle_category() {
     }
     drop(store);
 
-    let connection = rusqlite::Connection::open(&path).unwrap();
+    let connection = Connection::open(&path).unwrap();
     let mut rows = Vec::new();
     for (request, summary, state) in &cases {
         let lifecycle: String = connection
@@ -610,7 +604,7 @@ async fn test_sqlite_schema_two_migration_preserves_each_lifecycle_category() {
     }
     connection.execute_batch("DROP TABLE tasks; CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 2, lifecycle_json TEXT NOT NULL); PRAGMA user_version=2;").unwrap();
     for (request, summary, state, lifecycle) in &rows {
-        connection.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,2,?7)", rusqlite::params![summary.id.to_string(), state, i64::try_from(summary.accepted_at_ms).unwrap(), request.correlation_key, request.idempotency_key, serde_json::to_string(request).unwrap(), lifecycle]).unwrap();
+        connection.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,2,?7)", params![summary.id.to_string(), state, i64::try_from(summary.accepted_at_ms).unwrap(), request.correlation_key, request.idempotency_key, json::to_string(request).unwrap(), lifecycle]).unwrap();
     }
     drop(connection);
 
@@ -665,7 +659,7 @@ async fn test_sqlite_task_query_limit() {
 async fn test_sqlite_open_rejects_future_schema_without_changing_records() {
     let path = database_path("schema-future");
     let (id, _) = seed_legacy_database(&path).await;
-    let connection = rusqlite::Connection::open(&path).expect("legacy database opens");
+    let connection = Connection::open(&path).expect("legacy database opens");
     connection
         .pragma_update(None, "user_version", 4)
         .expect("future version is set");
@@ -679,7 +673,7 @@ async fn test_sqlite_open_rejects_future_schema_without_changing_records() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("4"));
-    let connection = rusqlite::Connection::open(&path).expect("database remains readable");
+    let connection = Connection::open(&path).expect("database remains readable");
     let rows: i64 = connection
         .query_row("SELECT COUNT(*) FROM tasks WHERE id=?1", [id.to_string()], |row| {
             row.get(0)
@@ -710,7 +704,7 @@ async fn test_sqlite_reads_reject_unknown_row_format_everywhere() {
     };
     drop(store);
 
-    let connection = rusqlite::Connection::open(&path).expect("database opens");
+    let connection = Connection::open(&path).expect("database opens");
     connection
         .execute("UPDATE tasks SET record_format_version=4 WHERE id=?1", [id.to_string()])
         .expect("unknown format is seeded");
@@ -727,8 +721,6 @@ async fn test_sqlite_reads_reject_unknown_row_format_everywhere() {
 
 #[tokio_test]
 async fn test_sqlite_store_accepts_retry_deadlines_only_while_queued() {
-    use qubit_task::model::TaskState;
-    use qubit_task::model::TransitionCommand;
     let path = database_path("retry-deadline");
     let store = SqliteTaskStore::open(&path).unwrap();
     let accepted = match store
