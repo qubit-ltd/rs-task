@@ -6,21 +6,21 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 /// Row projection used by reads that deliberately omit the payload column.
-pub(in crate::store::sqlite) struct StoredSummaryRow {
+pub(in crate::store::sqlite_task_store) struct StoredSummaryRow {
     /// UUID text stored in the indexed identity column.
-    pub(in crate::store::sqlite) id: String,
+    pub(in crate::store::sqlite_task_store) id: String,
     /// Indexed lifecycle category.
-    pub(in crate::store::sqlite) state_kind: String,
+    pub(in crate::store::sqlite_task_store) state_kind: String,
     /// Indexed acceptance timestamp.
-    pub(in crate::store::sqlite) accepted_at: i64,
+    pub(in crate::store::sqlite_task_store) accepted_at: i64,
     /// Indexed correlation key.
-    pub(in crate::store::sqlite) correlation_key: Option<String>,
+    pub(in crate::store::sqlite_task_store) correlation_key: Option<String>,
     /// Indexed idempotency key.
-    pub(in crate::store::sqlite) idempotency_key: Option<String>,
+    pub(in crate::store::sqlite_task_store) idempotency_key: Option<String>,
     /// Version of the serialized row representation.
-    pub(in crate::store::sqlite) format_version: i64,
+    pub(in crate::store::sqlite_task_store) format_version: i64,
     /// Immutable request metadata encoded as JSON.
-    pub(in crate::store::sqlite) request_info_json: String,
+    pub(in crate::store::sqlite_task_store) request_info_json: String,
     /// Mutable task lifecycle encoded as JSON.
-    pub(in crate::store::sqlite) lifecycle_json: String,
+    pub(in crate::store::sqlite_task_store) lifecycle_json: String,
 }

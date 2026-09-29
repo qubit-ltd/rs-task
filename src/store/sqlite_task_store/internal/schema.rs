@@ -34,7 +34,7 @@ use crate::store::StoreError;
 ///
 /// Returns a store error for unsupported versions, invalid schemas, migration
 /// failures, or SQLite operation failures.
-pub(in crate::store::sqlite) fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
+pub(in crate::store::sqlite_task_store) fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(failure)?;
