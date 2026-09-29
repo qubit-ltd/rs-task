@@ -198,7 +198,7 @@ pub async fn import_status(
 }
 ```
 
-应用启动时只构建一个 `TaskExecutionService`，在其 `TaskHandlerRegistry` 里注册本进程要执行的全部处理器（每种业务任务类型、每个 payload 版本各一个），再把服务的克隆句柄交给各个请求处理函数。调度器不会全局共用一个处理器：只有 `TaskRequest` 的 `task_type` 与 `handler_version` 匹配已注册处理器的 `TaskHandlerDescriptor` 时，任务才能运行。即使当前没有匹配处理器，提交仍可能成功并持久化；任务会进入 `Blocked`，待恢复时注册相应处理器后再显式重试；不同任务类型可链式多次调用 `register_handler`，也可用 `handlers(...)` 一次性装入整表。同一 `(task_type, handler_version)` 只能注册一次，该键下的多条任务共用同一个 `Arc<dyn TaskHandler>` 实例；在 `max_running_tasks` 允许时，多条同类型任务可能同时在不同 Tokio worker 上调用同一处理器的 `run`，因此 `TaskHandler` 要求 `Send + Sync`，实现须线程安全，单次执行的状态应放在 payload、`TaskContext` 或自有同步结构里，而不是处理器上的可变字段。退出前显式关闭服务，才能观察到已受理任务排空的结果：
+应用启动时只构建一个 `TaskExecutionService`，在其 `TaskHandlerRegistry` 里注册本进程要执行的全部处理器（每种业务任务类型、每个 payload 版本各一个），再把服务的克隆句柄交给各个请求处理函数。调度器不会全局共用一个处理器：只有 `TaskRequest` 的 `task_type` 与 `handler_version` 匹配已注册处理器的 `TaskHandlerDescriptor` 时，任务才能运行。即使当前没有匹配处理器，提交仍可能成功并持久化；任务会进入 `Blocked`。恢复时应在基于同一数据库重建服务前注册相应处理器，启动后再调用 `retry_blocked`；不同任务类型可链式多次调用 `register_handler`，也可用 `handlers(...)` 一次性装入整表。同一 `(task_type, handler_version)` 只能注册一次，该键下的多条任务共用同一个 `Arc<dyn TaskHandler>` 实例；在 `max_running_tasks` 允许时，多条同类型任务可能同时在不同 Tokio worker 上调用同一处理器的 `run`，因此 `TaskHandler` 要求 `Send + Sync`，实现须线程安全，单次执行的状态应放在 payload、`TaskContext` 或自有同步结构里，而不是处理器上的可变字段。退出前显式关闭服务，才能观察到已受理任务排空的结果：
 
 ```rust
 // src/main.rs（启动装配片段）
