@@ -215,7 +215,7 @@ let api_tasks = tasks.clone();
 tasks.shutdown().await?;
 ```
 
-`repository` 是应用持有的 `Arc<dyn ImportRepository>`。`recoverable_sqlite` 会对数据库加操作系统级文件锁，在返回前扫描未完成的任务；加锁或恢复预检失败时直接让启动失败，不会退回内存存储。若只需要易失执行，可改用 `TaskExecutionServiceBuilder::in_memory()`，此时进程退出后未完成任务和历史都会丢失。
+`repository` 是应用持有的 `Arc<dyn ImportRepository>`。`recoverable_sqlite` 打开数据库并加操作系统级文件锁，后续的 `build().await` 在返回服务前扫描未完成的任务。加锁或恢复检查失败时直接让启动失败，不会退回内存存储。若只需要易失执行，可改用 `TaskExecutionServiceBuilder::in_memory()`，此时进程退出后未完成任务和历史都会丢失。
 
 从客户端看到的效果：`start_import` 在请求内即可返回；导入在 `max_running_tasks` 以及每个请求默认一个 CPU 槽的约束下运行；`import_status` 先报告 `Pending`、`Running`，再进入终态。可重试的 `ImportError` 会按指数退避自动重试（初始 1 秒，上限 60 秒），默认最多 3 次尝试，用尽后任务进入 `Blocked` 等待运维处理。恢复出来的任务若找不到对应的 `(task_type, handler_version)` 处理器，同样会进入 `Blocked`；注册处理器、基于同一个数据库重新构建服务，再调用 `retry_blocked` 即可。`tasks.cancel(id)` 会直接取消排队或阻塞中的任务；对运行中的任务，它只请求协作取消，处理器须返回 `TaskRunOutcome::Cancelled` 才能确认取消。恢复执行是至少一次语义，因此 `ImportRepository` 必须让重复处理同一批数据是安全的。资源额度、本地闭包、通知和运维维护见[用户手册](doc/user-guide.zh_CN.md)。
 

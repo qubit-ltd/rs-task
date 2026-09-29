@@ -490,7 +490,7 @@ pub async fn retry_after_fix(
 
 - **正常**：`build()` 成功，恢复的任务为 `Queued`，队列可能暂时超过 `queue_capacity`。新提交在该积压消化前会收到 `QueueFull`。
 - **未完成记录过多**：`build()` 以 `TaskServiceBuildError::RecoveryCapacityExceeded` 失败，记录保持完整。提高 `queue_capacity` 或 `max_running_tasks` 后再启动。
-- **另一进程持有数据库**：`build()` 以存储错误失败。不会回退到内存；不要打开 HTTP 监听器。
+- **另一进程持有数据库**：SQLite 服务构建以存储错误失败，包括 `recoverable_sqlite(path)` 打开存储时。不会回退到内存；不要打开 HTTP 监听器。
 - **恢复的任务没有已注册处理器**：`build()` 成功，该任务 `Blocked`，reason 标明缺失的 `(task_type, handler_version)`。注册处理器、对同一库 rebuild 并调用 `retry_blocked`。启动不会自动重新入队。
 - **恢复的任务已用尽 `max_attempts`**：变为 `Blocked` 且不再启动；`retry_blocked` 报告 `AttemptsExhausted`。
 
@@ -763,7 +763,7 @@ Redis provider、`qubit-spi` 与 `serde_json` 是应用依赖；`use qubit_event
 
 这些是准入与 worker 计数，不是订阅者已执行的证明。单调递增，在 `u64::MAX` 饱和；单次快照的各字段不是同一瞬间。
 
-`shutdown()` 在已接受工作 settle 后关闭通知入队，再排空队列。默认最多等待发布线程 30 秒（`event_bus_close_timeout(Duration)`）；超时、或线程 panic / join 失败时，`shutdown()` 返回 `TaskServiceError::NotificationClose`，线程仍会继续排空已持有内容。并发与后续的 `shutdown` 调用方收到相同存储结果。服务不会 shutdown 应用拥有的总线；应在服务之后由应用关闭。
+`shutdown()` 在已接受工作 settle 后关闭通知入队，再排空队列。默认最多等待发布线程 30 秒（`event_bus_close_timeout(Duration)`）。超时时，`shutdown()` 返回 `TaskServiceError::NotificationClose`，线程仍会继续排空已持有内容。线程 panic 或 join 失败也返回 `NotificationClose`；剩余事件可能丢失。并发与后续的 `shutdown` 调用方收到相同存储结果。服务不会 shutdown 应用拥有的总线；应在服务之后由应用关闭。
 
 ## 用 qubit-spi 组装组件
 
@@ -820,7 +820,7 @@ pub async fn stop(tasks: &TaskExecutionService) -> Result<(), Box<dyn std::error
 }
 ```
 
-`shutdown()` 以 `ShuttingDown` 拒绝新写入，等待进行中的提交完成接受，等待运行尝试与调度结束，释放存储所有权，再排空通知。`Ok(())` 表示以上全部完成；随后下一进程可打开 SQLite 文件。`shutdown_until(deadline)` 启动相同 drain，但只限制**本调用方**的等待；`ShutdownTimedOut` 表示 drain 在后台继续且所有权尚未释放。shutdown 期间取消仍是协作式：忽略标志的处理器会拖住 drain。丢弃最后一个服务句柄也会启动异步 drain，但无人观察结果；若关心完成应调用 `shutdown()`。
+`shutdown()` 以 `ShuttingDown` 拒绝新写入，等待进行中的提交完成接受，等待运行尝试与调度结束，释放存储所有权，再排空通知。`Ok(())` 表示以上全部完成；随后下一进程可打开 SQLite 文件。`shutdown_until(deadline)` 启动相同 drain，但只限制**本调用方**的等待；`ShutdownTimedOut` 表示 drain 在后台继续，超时本身不能证明所有权已释放。shutdown 期间取消仍是协作式：忽略标志的处理器会拖住 drain。丢弃最后一个服务句柄也会启动异步 drain，但无人观察结果；若关心完成应调用 `shutdown()`。
 
 `TaskExecutionServiceBuilder::runtime_handle(Handle)` 为服务拥有的后台任务选择运行时；须保持该运行时存活直到 shutdown 或 drain 结束。取消等待 `build()` 的 future 不会停止后台构建 worker：它会在恢复分页边界停止、释放已取得的 owner，且不会启动调度器。
 
@@ -834,7 +834,6 @@ pub async fn stop(tasks: &TaskExecutionService) -> Result<(), Box<dyn std::error
 | `submit` 返回 `Unsatisfiable` | 请求超过配置的 `ResourceCapacity`，例如 GPU 标签无设备承载。修正请求或容量。 |
 | `submit` 返回 `InvalidRequest` | 空的 task type 或 handler version、超大字段或无效资源描述。消息会指明限制。 |
 | `submit` 返回 `Store(IdempotencyConflict)` | 键被不同请求复用。为新工作生成新键。 |
-| `submit` 返回 `MissingHandler` | `build()` 前未注册该精确 `(task_type, handler_version)` 的处理器。 |
 | `submit_local` 返回 `UnsupportedCapability` | 存储声明重启恢复。改用带已注册处理器的 `TaskRequest`。 |
 | 重启后任务一直 `Blocked` | 读 `get_summary` 中的 reason；常见为缺失处理器或尝试预算用尽。注册处理器并 `retry_blocked`，或 `abandon_blocked`。 |
 | `retry_blocked` 返回 `AttemptsExhausted` | 任务跨重启已用尽 `max_attempts`。提交新任务以获得新预算。 |
