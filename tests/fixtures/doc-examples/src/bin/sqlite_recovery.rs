@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let epoch: OwnerEpoch = store.acquire_owner().await?;
     let request = TaskRequest::new("documented-import", "1", b"rows".to_vec())
         .with_idempotency_key("documented-import-1");
-    store.accept(task_id, request).await?;
+    let _ = store.accept(task_id, request).await?;
     store.release_owner(epoch).await?;
     drop(store);
 
