@@ -25,35 +25,110 @@ trap cleanup EXIT
 printf 'rs-task-package-verification\n' > "$workspace/.rs-task-owned-temp"
 validate_workspace
 
-check_cargo_config() {
-    local config_path=$1
-    [[ -f "$config_path" ]] || return 0
-    python3 - "$config_path" <<'PY'
-import sys
-import tomllib
-
-with open(sys.argv[1], "rb") as cargo_config:
-    config = tomllib.load(cargo_config)
-if config.get("patch"):
-    raise SystemExit(f"Cargo config contains [patch], refusing packaged verification: {sys.argv[1]}")
-PY
-}
-
+cargo_config_files=()
 for cargo_config in config.toml config; do
     if [[ -f "$source_cargo_home/$cargo_config" ]]; then
-        check_cargo_config "$source_cargo_home/$cargo_config"
+        cargo_config_files+=("$source_cargo_home/$cargo_config")
         command cp "$source_cargo_home/$cargo_config" "$workspace/$cargo_config"
     fi
 done
-check_cargo_config "$project_root/.cargo/config.toml"
-check_cargo_config "$project_root/.cargo/config"
+for cargo_config in "$project_root/.cargo/config.toml" "$project_root/.cargo/config"; do
+    [[ ! -f "$cargo_config" ]] || cargo_config_files+=("$cargo_config")
+done
 config_parent=$(dirname "$workspace")
 while :; do
-    check_cargo_config "$config_parent/.cargo/config.toml"
-    check_cargo_config "$config_parent/.cargo/config"
+    for cargo_config in "$config_parent/.cargo/config.toml" "$config_parent/.cargo/config"; do
+        [[ ! -f "$cargo_config" ]] || cargo_config_files+=("$cargo_config")
+    done
     [[ "$config_parent" == / ]] && break
     config_parent=$(dirname "$config_parent")
 done
+python3 - "${cargo_config_files[@]}" <<'PY'
+import os
+import re
+import sys
+import tomllib
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+
+def redact_url(value):
+    sparse_prefix = "sparse+" if value.startswith("sparse+") else ""
+    url = value.removeprefix(sparse_prefix)
+    parts = urlsplit(url)
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    query = urlencode([
+        (key, "REDACTED" if re.search(r"token|password|secret|auth|credential|key", key, re.IGNORECASE) else item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+    ])
+    if netloc == parts.netloc and query == parts.query and not parts.fragment:
+        return value
+    return sparse_prefix + urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+
+sources = {}
+registries = {}
+
+def merge(left, right):
+    merged = dict(left)
+    for key, value in right.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+for filename in sys.argv[1:]:
+    with open(filename, "rb") as cargo_config:
+        config = tomllib.load(cargo_config)
+    if config.get("patch"):
+        raise SystemExit(f"Cargo config contains [patch], refusing packaged verification: {filename}")
+    sources = merge(sources, config.get("source", {}))
+    registries = merge(registries, config.get("registries", {}))
+
+crates_io = sources.get("crates-io", {})
+replacement = os.environ.get("CARGO_SOURCE_CRATES_IO_REPLACE_WITH") or crates_io.get("replace-with")
+direct_registry = crates_io.get("registry")
+if "directory" in crates_io or "local-registry" in crates_io:
+    raise SystemExit("crates-io is configured as a local directory/registry; refusing packaged verification")
+if replacement:
+    chain = []
+    seen = set()
+    source_name = replacement
+    while source_name:
+        if source_name in seen:
+            raise SystemExit(f"Cargo source replacement cycle at {source_name!r}")
+        seen.add(source_name)
+        source = sources.get(source_name)
+        if not isinstance(source, dict):
+            raise SystemExit(f"Cargo source replacement {source_name!r} is undefined; refusing to guess its registry")
+        if "directory" in source or "local-registry" in source:
+            raise SystemExit(f"Cargo source replacement {source_name!r} uses a local directory/registry")
+        registry = source.get("registry")
+        next_source = source.get("replace-with")
+        if registry:
+            normalized = registry.removeprefix("sparse+")
+            if urlparse(normalized).scheme != "https":
+                raise SystemExit(f"Cargo source replacement {source_name!r} is not a remote HTTPS registry")
+            chain.append(f"{source_name}={redact_url(registry)}")
+        elif not next_source:
+            raise SystemExit(f"Cargo source replacement {source_name!r} is not a verifiable remote registry")
+        source_name = next_source
+    if not chain:
+        raise SystemExit("Cargo source replacement chain contains no remote registry")
+    print("Validated Cargo registry replacement chain: " + " -> ".join(chain))
+elif direct_registry:
+    normalized = direct_registry.removeprefix("sparse+")
+    if urlparse(normalized).scheme != "https":
+        raise SystemExit("Configured crates-io registry is not a remote HTTPS registry")
+    print(f"Validated Cargo registry index: {redact_url(direct_registry)}")
+else:
+    configured_index = os.environ.get("CARGO_REGISTRIES_CRATES_IO_INDEX") or registries.get("crates-io", {}).get("index")
+    if configured_index:
+        normalized = configured_index.removeprefix("sparse+")
+        if urlparse(normalized).scheme != "https":
+            raise SystemExit("Configured crates-io index is not a remote HTTPS registry")
+        print(f"Validated Cargo registry index: {redact_url(configured_index)}")
+    else:
+        print("Validated Cargo registry index: crates.io (Cargo default)")
+PY
 for credentials_file in credentials.toml credentials; do
     if [[ -f "$source_cargo_home/$credentials_file" ]]; then
         command cp -p "$source_cargo_home/$credentials_file" "$workspace/$credentials_file"
@@ -71,7 +146,7 @@ for credentials_file in credentials.toml credentials; do
     fi
 done
 
-printf 'Package source: crates.io registry dependencies (no sibling path patches)\n'
+printf 'Package dependencies must resolve from validated remote Cargo registries; sibling path patches are forbidden.\n'
 printf 'Temporary workspace: %s\n' "$workspace"
 cd "$workspace"
 
@@ -116,16 +191,33 @@ cargo check --manifest-path Cargo.toml --locked --no-default-features --features
 cargo check --manifest-path Cargo.toml --locked --no-default-features --features sqlite
 cargo check --manifest-path Cargo.toml --locked --no-default-features --features sqlite,conformance
 cargo run --manifest-path Cargo.toml --locked --no-default-features --features sqlite,conformance
-cargo check --manifest-path Cargo.toml --locked --all-features
 cargo metadata --manifest-path Cargo.toml --locked --format-version 1 > "$workspace/consumer-metadata.json"
 python3 - "$workspace/consumer-metadata.json" <<'PY'
 import json
+import re
 import sys
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+def redact_source(value):
+    prefix = "registry+"
+    url = value.removeprefix(prefix)
+    sparse_prefix = "sparse+" if url.startswith("sparse+") else ""
+    url = url.removeprefix(sparse_prefix)
+    parts = urlsplit(url)
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    query = urlencode([
+        (key, "REDACTED" if re.search(r"token|password|secret|auth|credential|key", key, re.IGNORECASE) else item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+    ])
+    if netloc == parts.netloc and query == parts.query and not parts.fragment:
+        return value
+    clean = urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+    return prefix + sparse_prefix + clean
 
 with open(sys.argv[1], encoding="utf-8") as metadata_file:
     metadata = json.load(metadata_file)
 sources = sorted({
-    dependency["source"]
+    redact_source(dependency["source"])
     for package in metadata["packages"]
     for dependency in package["dependencies"]
     if dependency.get("source", "").startswith("registry+")
@@ -133,6 +225,61 @@ sources = sorted({
 if not sources:
     raise SystemExit("No registry dependencies were resolved for the packaged consumer")
 print("Resolved registry sources:")
+for source in sources:
+    print(f"  {source}")
+PY
+
+all_features_consumer="$workspace/all-features-consumer"
+mkdir "$all_features_consumer"
+command cp -R "$project_root/tests/fixtures/all-features-consumer/." "$all_features_consumer"
+python3 - "$all_features_consumer/Cargo.toml" "$package_dir" <<'PY'
+import pathlib
+import sys
+
+manifest = pathlib.Path(sys.argv[1])
+package = pathlib.Path(sys.argv[2])
+text = manifest.read_text()
+text = text.replace('path = "../../.."', f'path = "{package}"')
+manifest.write_text(text)
+PY
+cd "$all_features_consumer"
+# Resolve this separate all-feature package from the audited registry, never a sibling checkout.
+cargo generate-lockfile --manifest-path Cargo.toml
+cargo check --manifest-path Cargo.toml --locked --all-features
+cargo metadata --manifest-path Cargo.toml --locked --format-version 1 > "$workspace/all-features-metadata.json"
+python3 - "$workspace/all-features-metadata.json" <<'PY'
+import json
+import re
+import sys
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+def redact_source(value):
+    prefix = "registry+"
+    url = value.removeprefix(prefix)
+    sparse_prefix = "sparse+" if url.startswith("sparse+") else ""
+    url = url.removeprefix(sparse_prefix)
+    parts = urlsplit(url)
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    query = urlencode([
+        (key, "REDACTED" if re.search(r"token|password|secret|auth|credential|key", key, re.IGNORECASE) else item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+    ])
+    if netloc == parts.netloc and query == parts.query and not parts.fragment:
+        return value
+    clean = urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+    return prefix + sparse_prefix + clean
+
+with open(sys.argv[1], encoding="utf-8") as metadata_file:
+    metadata = json.load(metadata_file)
+sources = sorted({
+    redact_source(dependency["source"])
+    for package in metadata["packages"]
+    for dependency in package["dependencies"]
+    if dependency.get("source", "").startswith("registry+")
+})
+if not sources:
+    raise SystemExit("No registry dependencies were resolved for the all-features packaged consumer")
+print("All-features consumer registry sources:")
 for source in sources:
     print(f"  {source}")
 PY
