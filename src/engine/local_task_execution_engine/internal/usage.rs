@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 
 /// Mutable aggregate of resources currently reserved by active attempts.
 #[derive(Default)]
-pub(in crate::engine::local) struct Usage {
+pub(in crate::engine::local_task_execution_engine) struct Usage {
     /// Reserved CPU slots.
-    pub(in crate::engine::local) cpu: u32,
+    pub(in crate::engine::local_task_execution_engine) cpu: u32,
     /// Reserved GPU identifiers.
-    pub(in crate::engine::local) gpus: Vec<String>,
+    pub(in crate::engine::local_task_execution_engine) gpus: Vec<String>,
     /// Reserved custom resource amounts.
-    pub(in crate::engine::local) custom: BTreeMap<String, u64>,
+    pub(in crate::engine::local_task_execution_engine) custom: BTreeMap<String, u64>,
 }

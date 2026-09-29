@@ -13,17 +13,17 @@ use crate::model::TaskId;
 use crate::model::TaskRecord;
 
 /// Records and accounting used to enforce bounded volatile-store retention.
-pub(in crate::store::memory) struct MemoryState {
+pub(in crate::store::memory_task_store) struct MemoryState {
     /// Retained task records indexed by stable identifier.
-    pub(in crate::store::memory) records: BTreeMap<TaskId, TaskRecord>,
+    pub(in crate::store::memory_task_store) records: BTreeMap<TaskId, TaskRecord>,
     /// Retained idempotency keys mapped to their task IDs.
-    pub(in crate::store::memory) idempotency: HashMap<String, TaskId>,
+    pub(in crate::store::memory_task_store) idempotency: HashMap<String, TaskId>,
     /// Terminal task IDs in eviction order.
-    pub(in crate::store::memory) terminal_order: VecDeque<TaskId>,
+    pub(in crate::store::memory_task_store) terminal_order: VecDeque<TaskId>,
     /// Payload bytes held by all retained records.
-    pub(in crate::store::memory) retained_payload_bytes: usize,
+    pub(in crate::store::memory_task_store) retained_payload_bytes: usize,
     /// Number of retained queued, running, or blocked records.
-    pub(in crate::store::memory) unfinished_records: usize,
+    pub(in crate::store::memory_task_store) unfinished_records: usize,
 }
 
 impl MemoryState {
@@ -37,7 +37,7 @@ impl MemoryState {
     /// # Returns
     ///
     /// The removed record, or `None` when it was not retained.
-    pub(in crate::store::memory) fn remove_record(&mut self, id: TaskId) -> Option<TaskRecord> {
+    pub(in crate::store::memory_task_store) fn remove_record(&mut self, id: TaskId) -> Option<TaskRecord> {
         let record = self.records.remove(&id)?;
         self.retained_payload_bytes -= record.request.payload.len();
         if !record.state.is_terminal() {

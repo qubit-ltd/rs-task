@@ -34,13 +34,3 @@ reason = "This module groups the store contract, shared errors, and async future
 rule = "multiple-public-types"
 path = "src/spi/mod.rs"
 reason = "SPI specs, provider configs, and registry constructors form one cohesive service-family module."
-
-[[exceptions]]
-rule = "type-file-name"
-path = "src/engine/local.rs"
-reason = "The local module name distinguishes the single-node engine implementation from future engine backends."
-
-[[exceptions]]
-rule = "type-file-name"
-path = "src/store/memory.rs"
-reason = "The memory module name distinguishes the volatile store implementation from persistent backends."

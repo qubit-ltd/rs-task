@@ -10,6 +10,6 @@ mod reservation_guard;
 mod resource_ledger;
 mod usage;
 
-pub(in crate::engine::local) use reservation_guard::ReservationGuard;
-pub(in crate::engine::local) use resource_ledger::ResourceLedger;
-pub(in crate::engine::local) use resource_ledger::release_reservation;
+pub(in crate::engine::local_task_execution_engine) use reservation_guard::ReservationGuard;
+pub(in crate::engine::local_task_execution_engine) use resource_ledger::ResourceLedger;
+pub(in crate::engine::local_task_execution_engine) use resource_ledger::release_reservation;
