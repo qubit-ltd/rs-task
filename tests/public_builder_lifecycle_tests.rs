@@ -22,13 +22,21 @@ use qubit_task::handler::TaskHandler;
 use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskHandlerRegistry;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskQuery;
+use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
 use qubit_task::scheduling::FairFifoPolicy;
+use qubit_task::service::CancelOutcome;
+use qubit_task::service::LocalTaskOutcome;
+use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::StoreError;
+use qubit_task::store::TaskFuture;
 use tokio::test as tokio_test;
 
 struct Echo;
@@ -41,11 +49,7 @@ impl TaskHandler for Echo {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
@@ -53,18 +57,14 @@ impl TaskHandler for Echo {
 struct RetryOnce(AtomicUsize);
 
 impl TaskHandler for RetryOnce {
-    fn descriptor(&self) -> qubit_task::handler::TaskHandlerDescriptor {
-        qubit_task::handler::TaskHandlerDescriptor {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
             task_type: "retry-once".into(),
             version: "1".into(),
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        _payload: &'a [u8],
-        _context: TaskContext,
-    ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 Err(TaskRunError {
@@ -114,10 +114,7 @@ async fn test_public_builder_and_service_lifecycle_contracts() {
     assert!(service.get(TaskId::generate()).await.unwrap().is_none());
 
     let accepted = service
-        .submit(
-            qubit_task::model::TaskRequest::new("builder-test", "1", Vec::new())
-                .with_idempotency_key("builder-test-submit"),
-        )
+        .submit(TaskRequest::new("builder-test", "1", Vec::new()).with_idempotency_key("builder-test-submit"))
         .await
         .unwrap();
     assert!(matches!(
@@ -125,23 +122,15 @@ async fn test_public_builder_and_service_lifecycle_contracts() {
         TaskState::Succeeded
     ));
     assert!(service.get(accepted.id).await.unwrap().is_some());
-    assert_eq!(
-        service
-            .list(qubit_task::model::TaskQuery::default())
-            .await
-            .unwrap()
-            .records
-            .len(),
-        1
-    );
+    assert_eq!(service.list(TaskQuery::default()).await.unwrap().records.len(), 1);
     assert_eq!(service.stats().await.unwrap().terminal, 1);
     assert!(matches!(
         service.cancel(accepted.id).await.unwrap(),
-        qubit_task::service::CancelOutcome::AlreadyTerminal
+        CancelOutcome::AlreadyTerminal
     ));
 
     let local = service
-        .submit_local(|_| qubit_task::service::LocalTaskOutcome::<u8, String>::Succeeded {
+        .submit_local(|_| LocalTaskOutcome::<u8, String>::Succeeded {
             value: 7,
             summary: TaskOutput::default(),
         })
@@ -152,10 +141,7 @@ async fn test_public_builder_and_service_lifecycle_contracts() {
     assert_eq!(local.result().await.unwrap().unwrap(), 7);
 
     let retrying = service
-        .submit(
-            qubit_task::model::TaskRequest::new("retry-once", "1", Vec::new())
-                .with_idempotency_key("builder-retry-once"),
-        )
+        .submit(TaskRequest::new("retry-once", "1", Vec::new()).with_idempotency_key("builder-retry-once"))
         .await
         .unwrap();
     let retried = service.wait(retrying.id).await.unwrap();
@@ -163,30 +149,19 @@ async fn test_public_builder_and_service_lifecycle_contracts() {
     assert!(matches!(retried.state, TaskState::Succeeded));
 
     let blocked = service
-        .submit(
-            qubit_task::model::TaskRequest::new("missing", "1", Vec::new())
-                .with_idempotency_key("builder-missing-handler"),
-        )
+        .submit(TaskRequest::new("missing", "1", Vec::new()).with_idempotency_key("builder-missing-handler"))
         .await
         .unwrap();
-    assert!(matches!(
-        service.wait(blocked.id).await,
-        Err(qubit_task::service::TaskServiceError::Blocked)
-    ));
+    assert!(matches!(service.wait(blocked.id).await, Err(TaskServiceError::Blocked)));
     service.retry_blocked(blocked.id).await.unwrap();
-    assert!(matches!(
-        service.wait(blocked.id).await,
-        Err(qubit_task::service::TaskServiceError::Blocked)
-    ));
+    assert!(matches!(service.wait(blocked.id).await, Err(TaskServiceError::Blocked)));
     assert!(matches!(
         service.cancel(blocked.id).await.unwrap(),
-        qubit_task::service::CancelOutcome::CancelledBeforeStart
+        CancelOutcome::CancelledBeforeStart
     ));
     assert!(matches!(
         service.cancel(TaskId::generate()).await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::NotFound
-        ))
+        Err(TaskServiceError::Store(StoreError::NotFound))
     ));
     service.shutdown().await.unwrap();
 

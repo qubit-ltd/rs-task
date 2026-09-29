@@ -5,10 +5,13 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::AcceptOutcome;
@@ -16,6 +19,7 @@ use qubit_task::model::OwnerEpoch;
 use qubit_task::model::RecoveryPage;
 use qubit_task::model::StoreCapabilities;
 use qubit_task::model::TaskId;
+use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRecord;
@@ -24,16 +28,24 @@ use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateCounts;
 use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
+use qubit_task::service::LocalTaskOutcome;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::spawn;
+use tokio::sync::Semaphore;
+use tokio::task::yield_now;
+use tokio::test as tokio_test;
+use tokio::time::Instant;
+use tokio::time::timeout;
+
 struct DelayedCountsStore {
     inner: Arc<dyn TaskStore>,
     armed: AtomicBool,
     snapshots: AtomicUsize,
-    observed: tokio::sync::Semaphore,
-    resume: tokio::sync::Semaphore,
+    observed: Semaphore,
+    resume: Semaphore,
 }
 impl TaskStore for DelayedCountsStore {
     fn capabilities(&self) -> StoreCapabilities {
@@ -87,7 +99,7 @@ impl TaskStore for DelayedCountsStore {
     fn prune_terminal_before<'a>(
         &'a self,
         _accepted_before_ms: u64,
-        _max_rows: std::num::NonZeroUsize,
+        _max_rows: NonZeroUsize,
     ) -> TaskFuture<'a, Result<usize, StoreError>> {
         self.inner.prune_terminal_before(_accepted_before_ms, _max_rows)
     }
@@ -109,15 +121,15 @@ impl TaskStore for DelayedCountsStore {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio_test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_drains_when_terminal_notification_precedes_count_return() {
-    let (send, recv) = std::sync::mpsc::channel();
+    let (send, recv) = mpsc::channel();
     let store = Arc::new(DelayedCountsStore {
         inner: Arc::new(MemoryTaskStore::new(8)),
         armed: AtomicBool::new(false),
         snapshots: AtomicUsize::new(0),
-        observed: tokio::sync::Semaphore::new(0),
-        resume: tokio::sync::Semaphore::new(0),
+        observed: Semaphore::new(0),
+        resume: Semaphore::new(0),
     });
     let service = TaskExecutionServiceBuilder::in_memory()
         .store(store.clone())
@@ -127,15 +139,15 @@ async fn shutdown_drains_when_terminal_notification_precedes_count_return() {
     let handle = service
         .submit_local(move |_| {
             recv.recv().unwrap();
-            qubit_task::service::LocalTaskOutcome::<u32, String>::Succeeded {
+            LocalTaskOutcome::<u32, String>::Succeeded {
                 value: 42,
-                summary: qubit_task::model::TaskOutput::default(),
+                summary: TaskOutput::default(),
             }
         })
         .await
         .unwrap();
     let id = handle.task_id();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    timeout(Duration::from_secs(5), async {
         loop {
             if matches!(
                 service.get_summary(id).await.unwrap().unwrap().state,
@@ -143,25 +155,21 @@ async fn shutdown_drains_when_terminal_notification_precedes_count_return() {
             ) {
                 break;
             }
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
     .expect("handler did not reach Running");
     store.armed.store(true, Ordering::SeqCst);
     let closing = service.clone();
-    let shutdown = tokio::spawn(async move {
-        closing
-            .shutdown_until(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
-            .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let shutdown = spawn(async move { closing.shutdown_until(Instant::now() + Duration::from_secs(5)).await });
+    timeout(Duration::from_secs(5), async {
         store.observed.acquire_many(2).await.unwrap().forget();
     })
     .await
     .expect("scheduler and shutdown did not both acquire running snapshots");
     send.send(()).unwrap();
-    let value = tokio::time::timeout(std::time::Duration::from_secs(5), handle.result())
+    let value = timeout(Duration::from_secs(5), handle.result())
         .await
         .expect("task did not finalize")
         .unwrap()
@@ -176,7 +184,7 @@ async fn shutdown_drains_when_terminal_notification_precedes_count_return() {
     assert_eq!(counts.running, 0);
     assert_eq!(counts.queued, 0);
     service
-        .shutdown_until(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+        .shutdown_until(Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
 }

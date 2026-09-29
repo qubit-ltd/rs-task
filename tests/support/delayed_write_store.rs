@@ -26,6 +26,7 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::pin;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
@@ -134,7 +135,7 @@ impl TaskStore for DelayedWriteStore {
         Box::pin(async move {
             loop {
                 let notified = self.writes_idle.notified();
-                tokio::pin!(notified);
+                pin!(notified);
                 notified.as_mut().enable();
                 if self.active_writes.load(Ordering::Acquire) == 0 {
                     break;
