@@ -10,12 +10,14 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskRequest;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
 use support::delayed_write_store::DelayedWriteStore;
+use tokio::spawn;
 use tokio::sync::oneshot;
 use tokio::test as tokio_test;
 use tokio::time;
@@ -29,20 +31,18 @@ async fn test_release_owner_waits_for_previously_admitted_write() {
     let epoch = store.acquire_owner().await.expect("owner lease acquired");
 
     let accept_store = Arc::clone(&store);
-    let accepting = tokio::spawn(async move { accept_store.accept(TaskId::generate(), keyed_request()).await });
+    let accepting = spawn(async move { accept_store.accept(TaskId::generate(), keyed_request()).await });
     accept_started.await.expect("write entered provider");
 
     let (release_started_sender, release_started_receiver) = oneshot::channel();
     let release_store = Arc::clone(&store);
-    let mut releasing = tokio::spawn(async move {
+    let mut releasing = spawn(async move {
         let _ = release_started_sender.send(());
         release_store.release_owner(epoch).await
     });
     release_started_receiver.await.expect("release began");
     assert!(
-        time::timeout(std::time::Duration::from_millis(50), &mut releasing)
-            .await
-            .is_err(),
+        time::timeout(Duration::from_millis(50), &mut releasing).await.is_err(),
         "owner release must wait for the earlier write"
     );
 
