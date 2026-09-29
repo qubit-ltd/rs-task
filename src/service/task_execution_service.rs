@@ -5,7 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::future::Future;
 use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -218,12 +220,8 @@ impl TaskExecutionService {
     pub async fn submit(&self, request: TaskRequest) -> Result<TaskRecord, TaskServiceError> {
         let reservation = self.reserve_admission(request.payload.len())?;
         let service = self.clone();
-        await_admission(
-            self.core
-                .runtime_handle
-                .spawn(async move { service.submit_admitted(request, reservation).await }),
-        )
-        .await
+        let worker = spawn_admission(self, async move { service.submit_admitted(request, reservation).await });
+        await_admission(Arc::clone(&self.core), worker).await
     }
 
     /// Submits a process-local closure when the selected store cannot promise
@@ -256,12 +254,11 @@ impl TaskExecutionService {
     {
         let reservation = self.reserve_admission(0)?;
         let service = self.clone();
-        await_admission(
-            self.core
-                .runtime_handle
-                .spawn(async move { service.submit_local_admitted(task, reservation).await }),
-        )
-        .await
+        let worker = spawn_admission(
+            self,
+            async move { service.submit_local_admitted(task, reservation).await },
+        );
+        await_admission(Arc::clone(&self.core), worker).await
     }
 
     /// Loads the complete retained task, including its payload.
@@ -385,13 +382,13 @@ impl TaskExecutionService {
     ) -> Result<usize, TaskServiceError> {
         let reservation = self.reserve_admission(0)?;
         let service = self.clone();
-        await_admission(self.core.runtime_handle.spawn(async move {
+        let worker = spawn_admission(self, async move {
             let _reservation = reservation;
             service
                 .prune_terminal_before_admitted(accepted_before_ms, max_rows)
                 .await
-        }))
-        .await
+        });
+        await_admission(Arc::clone(&self.core), worker).await
     }
 
     /// Counts visible task states and reports current resource use.
@@ -431,11 +428,11 @@ impl TaskExecutionService {
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let reservation = self.reserve_admission(0)?;
         let service = self.clone();
-        await_admission(self.core.runtime_handle.spawn(async move {
+        let worker = spawn_admission(self, async move {
             let _reservation = reservation;
             service.cancel_admitted(id).await
-        }))
-        .await
+        });
+        await_admission(Arc::clone(&self.core), worker).await
     }
 
     /// Requeues a blocked task after external intervention.
@@ -450,16 +447,20 @@ impl TaskExecutionService {
     ///
     /// # Errors
     ///
-    /// Returns `Blocked`, `AttemptsExhausted`, shutdown, capacity, or store
-    /// errors if it cannot be requeued.
+    /// Returns `Store(NotFound)` when the task is no longer retained,
+    /// `NotBlocked` with its current state when it is not blocked,
+    /// `AttemptsExhausted` when its attempt budget is spent, `QueueFull` or
+    /// `OperationLimitExceeded` when admission capacity is unavailable,
+    /// `ShuttingDown` after shutdown starts, or a latched store/scheduler
+    /// error.
     pub async fn retry_blocked(&self, id: TaskId) -> Result<TaskSummary, TaskServiceError> {
         let reservation = self.reserve_admission(0)?;
         let service = self.clone();
-        await_admission(self.core.runtime_handle.spawn(async move {
+        let worker = spawn_admission(self, async move {
             let _reservation = reservation;
             service.retry_blocked_admitted(id).await
-        }))
-        .await
+        });
+        await_admission(Arc::clone(&self.core), worker).await
     }
 
     /// Cancels an operator-selected blocked task if its state revision is
@@ -482,11 +483,11 @@ impl TaskExecutionService {
     pub async fn abandon_blocked(&self, id: TaskId, expected_version: u64) -> Result<TaskSummary, TaskServiceError> {
         let reservation = self.reserve_admission(0)?;
         let service = self.clone();
-        await_admission(self.core.runtime_handle.spawn(async move {
+        let worker = spawn_admission(self, async move {
             let _reservation = reservation;
             service.abandon_blocked_admitted(id, expected_version).await
-        }))
-        .await
+        });
+        await_admission(Arc::clone(&self.core), worker).await
     }
 
     /// Resolves when the task becomes terminal; returns an error if it becomes
@@ -636,7 +637,44 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskSummary, reason: String) 
     Ok(())
 }
 
-/// Awaits an admission worker and maps task-join failures into service errors.
+/// Spawns a detached admission worker with a panic boundary that latches store
+/// uncertainty into the service state.
+///
+/// # Type Parameters
+///
+/// * `T` - Value produced when the admission operation completes.
+///
+/// # Parameters
+///
+/// * `service` - Service whose runtime owns the detached worker.
+/// * `worker` - Admission operation, including its reserved capacity.
+///
+/// # Returns
+///
+/// A handle whose worker remains active if the original caller drops its wait.
+///
+/// # Errors
+///
+/// The worker converts panic into `StoreUnavailable` and latches the fault.
+fn spawn_admission<T, F>(service: &TaskExecutionService, worker: F) -> task::JoinHandle<Result<T, TaskServiceError>>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T, TaskServiceError>> + Send + 'static,
+{
+    let core = Arc::clone(&service.core);
+    service.core.runtime_handle.spawn(async move {
+        match AssertUnwindSafe(worker).catch_unwind().await {
+            Ok(result) => result,
+            Err(payload) => {
+                let diagnostic = format!("task admission worker panicked: {}", panic_message(payload));
+                record_store_fault(&core, diagnostic.clone());
+                Err(TaskServiceError::StoreUnavailable(diagnostic))
+            }
+        }
+    })
+}
+
+/// Awaits a detached admission worker and latches an unexpected join failure.
 ///
 /// # Type Parameters
 ///
@@ -644,6 +682,7 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskSummary, reason: String) 
 ///
 /// # Parameters
 ///
+/// * `core` - Service state to suspend if the worker cannot be joined.
 /// * `handle` - Detached worker handle retained after caller cancellation.
 ///
 /// # Returns
@@ -652,11 +691,20 @@ async fn mark_blocked(core: &ServiceCore, record: &TaskSummary, reason: String) 
 ///
 /// # Errors
 ///
-/// Returns the worker's service error or a diagnostic if the task join fails.
-async fn await_admission<T>(handle: task::JoinHandle<Result<T, TaskServiceError>>) -> Result<T, TaskServiceError> {
-    handle
-        .await
-        .map_err(|error| TaskServiceError::StoreUnavailable(format!("task admission worker stopped: {error}")))?
+/// Returns the worker's service error or `StoreUnavailable` when the task is
+/// cancelled or panics outside the worker's panic boundary.
+async fn await_admission<T>(
+    core: Arc<ServiceCore>,
+    handle: task::JoinHandle<Result<T, TaskServiceError>>,
+) -> Result<T, TaskServiceError> {
+    match handle.await {
+        Ok(result) => result,
+        Err(error) => {
+            let diagnostic = format!("task admission worker stopped: {error}");
+            record_store_fault(&core, diagnostic.clone());
+            Err(TaskServiceError::StoreUnavailable(diagnostic))
+        }
+    }
 }
 
 /// Returns the process-wide runtime used for service-owned background work.

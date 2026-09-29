@@ -548,7 +548,9 @@ impl TaskExecutionService {
             .map_err(|error| self.handle_store_error(error))?
             .ok_or(StoreError::NotFound)?;
         if !matches!(record.state, TaskState::Blocked { .. }) {
-            return Err(TaskServiceError::Blocked);
+            return Err(TaskServiceError::NotBlocked {
+                actual: record.state.kind(),
+            });
         }
         if record.attempt >= self.core.max_attempts {
             return Err(TaskServiceError::AttemptsExhausted {

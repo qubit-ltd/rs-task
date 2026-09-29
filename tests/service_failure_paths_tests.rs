@@ -162,6 +162,9 @@ struct FailFirstGetStore {
     should_fail_get: AtomicBool,
     should_fail_keyed_record_lookup: AtomicBool,
     fail_next_list: AtomicBool,
+    panic_after_accept: AtomicBool,
+    accept_started: Arc<sync::Notify>,
+    override_summary_state: Mutex<Option<TaskState>>,
     release_owner_calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -172,6 +175,9 @@ impl FailFirstGetStore {
             should_fail_get: AtomicBool::new(true),
             should_fail_keyed_record_lookup: AtomicBool::new(false),
             fail_next_list: AtomicBool::new(false),
+            panic_after_accept: AtomicBool::new(false),
+            accept_started: Arc::new(sync::Notify::new()),
+            override_summary_state: Mutex::new(None),
             release_owner_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -183,6 +189,9 @@ impl FailFirstGetStore {
             should_fail_get: AtomicBool::new(false),
             should_fail_keyed_record_lookup: AtomicBool::new(false),
             fail_next_list: AtomicBool::new(false),
+            panic_after_accept: AtomicBool::new(false),
+            accept_started: Arc::new(sync::Notify::new()),
+            override_summary_state: Mutex::new(None),
             release_owner_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -194,7 +203,17 @@ impl TaskStore for FailFirstGetStore {
     }
 
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
-        self.inner.accept(id, request)
+        let inner = Arc::clone(&self.inner);
+        let panic_after_accept = self.panic_after_accept.swap(false, Ordering::AcqRel);
+        let accept_started = Arc::clone(&self.accept_started);
+        Box::pin(async move {
+            accept_started.notify_one();
+            let outcome = inner.accept(id, request).await?;
+            if panic_after_accept {
+                panic!("injected panic after task acceptance was committed");
+            }
+            Ok(outcome)
+        })
     }
 
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
@@ -217,7 +236,15 @@ impl TaskStore for FailFirstGetStore {
     }
 
     fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
-        self.inner.get_summary(id)
+        let state = self.override_summary_state.lock().clone();
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let mut summary = inner.get_summary(id).await?;
+            if let (Some(summary), Some(state)) = (&mut summary, state) {
+                summary.state = state;
+            }
+            Ok(summary)
+        })
     }
 
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
@@ -632,4 +659,128 @@ async fn test_recoverable_sqlite_store_rejects_local_closure_without_accepting_i
         };
         let _ = std::fs::remove_file(file);
     }
+}
+
+#[tokio_test]
+async fn test_admission_worker_panic_after_accept_latches_fault_and_unblocks_shutdown() {
+    let store = Arc::new(FailFirstGetStore::new());
+    store.should_fail_get.store(false, Ordering::Release);
+    store.panic_after_accept.store(true, Ordering::Release);
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+
+    let error = service
+        .submit(TaskRequest::new("panic-after-accept", "1", vec![]).with_idempotency_key("panic-after-accept"))
+        .await
+        .expect_err("a panicked worker cannot report successful acceptance");
+    assert!(matches!(error, TaskServiceError::StoreUnavailable(ref message) if message.contains("panic")));
+    assert!(
+        service.last_store_error().is_some(),
+        "worker panic must suspend the service"
+    );
+    assert!(matches!(
+        time::timeout(Duration::from_secs(1), service.shutdown()).await,
+        Ok(Err(TaskServiceError::StoreUnavailable(_)))
+    ));
+    assert!(
+        store
+            .inner
+            .get_by_idempotency_key("panic-after-accept")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio_test]
+async fn test_admission_worker_panic_is_observed_after_submit_waiter_is_dropped() {
+    let store = Arc::new(FailFirstGetStore::new());
+    store.should_fail_get.store(false, Ordering::Release);
+    store.panic_after_accept.store(true, Ordering::Release);
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let accept_started = store.accept_started.notified();
+    tokio::pin!(accept_started);
+    accept_started.as_mut().enable();
+
+    let submit_service = service.clone();
+    let submit = tokio::spawn(async move {
+        submit_service
+            .submit(TaskRequest::new("cancelled-waiter", "1", vec![]).with_idempotency_key("cancelled-waiter"))
+            .await
+    });
+    time::timeout(Duration::from_secs(1), accept_started)
+        .await
+        .expect("detached worker entered store acceptance");
+    submit.abort();
+    let _ = submit.await;
+
+    time::timeout(Duration::from_secs(1), async {
+        while service.last_store_error().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached worker panic must latch a service fault without its caller");
+    assert!(matches!(
+        time::timeout(Duration::from_secs(1), service.shutdown()).await,
+        Ok(Err(TaskServiceError::StoreUnavailable(_)))
+    ));
+}
+
+#[tokio_test]
+async fn test_retry_blocked_non_blocked_state() {
+    let store = Arc::new(FailFirstGetStore::new());
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service builds");
+    let record = service
+        .submit(TaskRequest::new("unhandled", "1", Vec::new()).with_idempotency_key("retry-state"))
+        .await
+        .expect("request is accepted");
+    time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(
+                service
+                    .get_summary(record.id)
+                    .await
+                    .expect("summary read")
+                    .unwrap()
+                    .state,
+                TaskState::Blocked { .. }
+            ) {
+                break;
+            }
+            time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("missing handler becomes blocked");
+    for (state, expected) in [
+        (TaskState::Queued, qubit_task::model::TaskStateKind::Queued),
+        (TaskState::Running, qubit_task::model::TaskStateKind::Running),
+        (TaskState::Succeeded, qubit_task::model::TaskStateKind::Succeeded),
+        (
+            TaskState::Failed {
+                category: "test".into(),
+                message: "failed".into(),
+            },
+            qubit_task::model::TaskStateKind::Failed,
+        ),
+    ] {
+        *store.override_summary_state.lock() = Some(state);
+        assert!(matches!(
+            service.retry_blocked(record.id).await,
+            Err(TaskServiceError::NotBlocked { actual }) if actual == expected
+        ));
+    }
+    service.shutdown().await.expect("service shuts down");
 }
