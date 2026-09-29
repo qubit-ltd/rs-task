@@ -45,23 +45,18 @@ while :; do
 done
 python3 - "${cargo_config_files[@]}" <<'PY'
 import os
-import re
 import sys
 import tomllib
-from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import urlparse, urlsplit
 
 def redact_url(value):
     sparse_prefix = "sparse+" if value.startswith("sparse+") else ""
-    url = value.removeprefix(sparse_prefix)
-    parts = urlsplit(url)
-    netloc = parts.netloc.rsplit("@", 1)[-1]
-    query = urlencode([
-        (key, "REDACTED" if re.search(r"token|password|secret|auth|credential|key", key, re.IGNORECASE) else item)
-        for key, item in parse_qsl(parts.query, keep_blank_values=True)
-    ])
-    if netloc == parts.netloc and query == parts.query and not parts.fragment:
-        return value
-    return sparse_prefix + urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+    parts = urlsplit(value.removeprefix(sparse_prefix))
+    if not parts.scheme or not parts.hostname:
+        raise SystemExit("Cargo registry URL has no verifiable scheme and hostname")
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    port = f":{parts.port}" if parts.port is not None else ""
+    return f"{sparse_prefix}{parts.scheme}://{host}{port}"
 
 sources = {}
 registries = {}
@@ -74,6 +69,10 @@ def merge(left, right):
         else:
             merged[key] = value
     return merged
+
+inherited_source_overrides = sorted(key for key in os.environ if key.startswith("CARGO_SOURCE_"))
+if inherited_source_overrides:
+    raise SystemExit("Inherited CARGO_SOURCE_* Cargo overrides are forbidden for packaged verification: " + ", ".join(inherited_source_overrides))
 
 for filename in sys.argv[1:]:
     with open(filename, "rb") as cargo_config:
@@ -194,25 +193,19 @@ cargo run --manifest-path Cargo.toml --locked --no-default-features --features s
 cargo metadata --manifest-path Cargo.toml --locked --format-version 1 > "$workspace/consumer-metadata.json"
 python3 - "$workspace/consumer-metadata.json" <<'PY'
 import json
-import re
 import sys
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 def redact_source(value):
     prefix = "registry+"
     url = value.removeprefix(prefix)
     sparse_prefix = "sparse+" if url.startswith("sparse+") else ""
-    url = url.removeprefix(sparse_prefix)
-    parts = urlsplit(url)
-    netloc = parts.netloc.rsplit("@", 1)[-1]
-    query = urlencode([
-        (key, "REDACTED" if re.search(r"token|password|secret|auth|credential|key", key, re.IGNORECASE) else item)
-        for key, item in parse_qsl(parts.query, keep_blank_values=True)
-    ])
-    if netloc == parts.netloc and query == parts.query and not parts.fragment:
-        return value
-    clean = urlunsplit((parts.scheme, netloc, parts.path, query, ""))
-    return prefix + sparse_prefix + clean
+    parts = urlsplit(url.removeprefix(sparse_prefix))
+    if not parts.scheme or not parts.hostname:
+        return prefix + "<unparseable-registry-url>"
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    port = f":{parts.port}" if parts.port is not None else ""
+    return prefix + sparse_prefix + f"{parts.scheme}://{host}{port}"
 
 with open(sys.argv[1], encoding="utf-8") as metadata_file:
     metadata = json.load(metadata_file)
@@ -249,25 +242,19 @@ cargo check --manifest-path Cargo.toml --locked --all-features
 cargo metadata --manifest-path Cargo.toml --locked --format-version 1 > "$workspace/all-features-metadata.json"
 python3 - "$workspace/all-features-metadata.json" <<'PY'
 import json
-import re
 import sys
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 def redact_source(value):
     prefix = "registry+"
     url = value.removeprefix(prefix)
     sparse_prefix = "sparse+" if url.startswith("sparse+") else ""
-    url = url.removeprefix(sparse_prefix)
-    parts = urlsplit(url)
-    netloc = parts.netloc.rsplit("@", 1)[-1]
-    query = urlencode([
-        (key, "REDACTED" if re.search(r"token|password|secret|auth|credential|key", key, re.IGNORECASE) else item)
-        for key, item in parse_qsl(parts.query, keep_blank_values=True)
-    ])
-    if netloc == parts.netloc and query == parts.query and not parts.fragment:
-        return value
-    clean = urlunsplit((parts.scheme, netloc, parts.path, query, ""))
-    return prefix + sparse_prefix + clean
+    parts = urlsplit(url.removeprefix(sparse_prefix))
+    if not parts.scheme or not parts.hostname:
+        return prefix + "<unparseable-registry-url>"
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    port = f":{parts.port}" if parts.port is not None else ""
+    return prefix + sparse_prefix + f"{parts.scheme}://{host}{port}"
 
 with open(sys.argv[1], encoding="utf-8") as metadata_file:
     metadata = json.load(metadata_file)
