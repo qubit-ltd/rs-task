@@ -9,15 +9,16 @@ use std::sync::Mutex;
 
 use tokio::task::spawn_blocking;
 
+mod internal;
+
+use internal::LocalTaskClosure;
+
 use super::TaskContext;
 use super::TaskHandler;
 use super::TaskHandlerDescriptor;
 use super::TaskRunResult;
 use crate::model::TaskRunError;
 use crate::store::TaskFuture;
-
-/// One-shot local task closure with its per-attempt context.
-type LocalTaskClosure = Box<dyn FnOnce(TaskContext) -> TaskRunResult + Send>;
 
 /// Adapter that turns a one-shot local closure into a non-recoverable handler.
 ///

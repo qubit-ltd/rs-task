@@ -5,41 +5,20 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
+// Owns the private reservation and accounting types used by the budget.
+mod internal;
+
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+pub(super) use internal::AdmissionBudgetError;
+pub(super) use internal::AdmissionReservation;
+use internal::BudgetUsage;
 use parking_lot::Mutex;
-
-/// Reason an in-flight admission could not reserve bounded resources.
-///
-/// The caller can reject promptly and report the relevant configured limit.
-#[must_use]
-pub(super) enum AdmissionBudgetError {
-    /// The request payload would exceed the aggregate retained-byte budget.
-    PayloadBytesExceeded {
-        /// Payload bytes requested by the new reservation.
-        requested: usize,
-        /// Payload bytes remaining under the configured budget.
-        available: usize,
-    },
-    /// The number of concurrent admissions has reached its configured limit.
-    OperationLimitExceeded {
-        /// Maximum number of concurrent external write operations.
-        limit: usize,
-    },
-}
-
-/// Current worker count and payload bytes held under the admission lock.
-struct BudgetUsage {
-    /// Number of external write operations holding reservations.
-    operations: usize,
-    /// Payload bytes retained by those workers.
-    payload_bytes: usize,
-}
 
 /// Bounds the request payload and count held by detached external write
 /// operations.
+#[must_use]
 pub(super) struct AdmissionBudget {
     /// Maximum aggregate payload bytes held by in-flight admissions.
     max_payload_bytes: NonZeroUsize,
@@ -47,15 +26,6 @@ pub(super) struct AdmissionBudget {
     max_operations: NonZeroUsize,
     /// Current worker count and payload bytes.
     usage: Mutex<BudgetUsage>,
-}
-
-/// Releases one payload and submission reservation when its admission worker
-/// ends.
-pub(super) struct AdmissionReservation {
-    /// Budget whose usage is decremented when this reservation is dropped.
-    budget: Arc<AdmissionBudget>,
-    /// Payload bytes charged to this reservation.
-    payload_bytes: usize,
 }
 
 impl AdmissionBudget {
@@ -122,16 +92,5 @@ impl AdmissionBudget {
             budget: Arc::clone(self),
             payload_bytes,
         })
-    }
-}
-
-impl Drop for AdmissionReservation {
-    /// Returns this reservation's worker and payload accounting to the budget.
-    fn drop(&mut self) {
-        let mut usage = self.budget.usage.lock();
-        debug_assert!(usage.operations > 0);
-        debug_assert!(usage.payload_bytes >= self.payload_bytes);
-        usage.operations -= 1;
-        usage.payload_bytes -= self.payload_bytes;
     }
 }

@@ -36,21 +36,6 @@ path = "src/spi/mod.rs"
 reason = "SPI specs, provider configs, and registry constructors form one cohesive service-family module."
 
 [[exceptions]]
-rule = "multiple-public-types"
-path = "src/service/task_execution_service.rs"
-reason = "The facade, effective capabilities, and operation errors define the single public service boundary."
-
-[[exceptions]]
-rule = "multiple-public-types"
-path = "src/service/task_execution_service_builder.rs"
-reason = "The builder and its build error form one construction API."
-
-[[exceptions]]
-rule = "multiple-public-types"
-path = "src/model/task_record.rs"
-reason = "Task state, record, query, page, statistics, and transition command are the cohesive persisted lifecycle model."
-
-[[exceptions]]
 rule = "type-file-name"
 path = "src/engine/local.rs"
 reason = "The local module name distinguishes the single-node engine implementation from future engine backends."

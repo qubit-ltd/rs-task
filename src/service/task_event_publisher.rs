@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-// qubit-style: allow multiple-public-types
 //! Bounded serial publication of best-effort task lifecycle notifications.
 
 use std::io;
@@ -23,29 +22,12 @@ use qubit_event_bus::model::AdmissionOutcome;
 use qubit_event_bus::model::Topic;
 use tokio::runtime;
 
+mod internal;
+
+use internal::Counters;
+
 use super::task_event_notification_stats::TaskEventNotificationStats;
 use crate::event::TaskEvent;
-
-/// Atomic counters shared between the service thread and publisher worker.
-#[derive(Default)]
-struct Counters {
-    /// Events accepted into the bounded queue.
-    enqueued: AtomicU64,
-    /// Events rejected because the queue was full.
-    queue_full: AtomicU64,
-    /// Events rejected because the queue was closed.
-    queue_closed: AtomicU64,
-    /// Events accepted by at least one reported destination.
-    accepted: AtomicU64,
-    /// Events accepted by providers without destination details.
-    opaque_accepted: AtomicU64,
-    /// Events without an accepting destination.
-    unaccepted: AtomicU64,
-    /// Events with mixed accepted and rejected destinations.
-    partial_rejection: AtomicU64,
-    /// Failed publish calls.
-    publish_error: AtomicU64,
-}
 
 /// Increments a counter without wrapping its accumulated diagnostic value.
 ///
