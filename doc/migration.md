@@ -1,0 +1,59 @@
+# Migration to task service 0.8
+
+[简体中文](migration.zh_CN.md) · [User guide](user-guide.md)
+
+Task 0.8 adopts the Event Bus 0.17 public type generation. Update application
+`qubit-task`, `qubit-event-bus`, and optional Redis provider dependencies together
+to 0.8, 0.17, and 0.5, including doc/IoC/application fixtures and lockfiles.
+No compatibility alias bridges old and new EventBus types. Applications without
+notifications retain the task store, recovery, and scheduling contracts.
+
+## Migrate the notification codec
+
+The application owns its `EventCodec<TaskEvent>`; the task crate does not
+provide a global schema registry or public task codec. Change decode to accept
+`&EncodedPayload` and read `payload.bytes()`. Default metadata validation now
+requires exact content type and optional schema equality.
+
+The [guide's compiled JSON codec](user-guide.md#publish-through-redis-streams)
+writes `application/json` plus `task-event-v1`; its explicit override accepts
+only that schema or historical `None` with the same content type. Unknown
+schemas and other MIME texts return `MetadataMismatch`, stop facade reception,
+and leave durable work unsettled. Register the migrated codec at startup;
+repair incompatible consumers and create a new durable subscription in the
+same group to recover old work. Redis wire version 1 remains readable. Ordinary
+JSON `CodecError::Decode` still rejects a bad message rather than preserving it
+as a schema mismatch.
+
+Facade encoded publish/receive limits now each default to 1 MiB and require
+positive `PayloadLimits`. Redis adds independent positive 8 MiB wire, 1 MiB
+payload, and 64 KiB headers defaults. Configure both layers when historical
+records need more; do not delete pending records to hide an overflow.
+
+## Observe uncertainty without repeating task transitions
+
+Notification failure still never rolls back task state. `publish_error` counts
+failed publications, and `uncertain_publish` counts those classified as
+`MayHaveBeenAccepted`: a notification may already have reached the provider.
+It is a subset by cumulative classification, but independent atomic loads can
+observe different instants while publishing is active; a live snapshot is not
+an atomic partition and need not show `uncertain_publish <= publish_error`.
+Neither counter proves subscriber completion.
+
+The core public failure is `PublishFailure` with original EventId, aggregate
+effect, and structured cause. Default `DuplicateRiskPolicy::Forbid` stops blind
+uncertain retries even when a custom rule asks to continue. A started cancelled
+publish may be uncertain; RetryPolicy budgets are soft and do not universally
+interrupt in-flight I/O. Redis does not deduplicate by EventId.
+
+Consumers keep the highest `state_version` for each TaskId, ignore same-version
+duplicates and stale events, and query the service after a gap. Parallel state
+changes need not arrive in increasing version order. Best-effort notifications
+can be missing; use a transactional outbox outside this crate when a durable
+handoff is required. Do not repeat a committed task transition because its
+notification failed. Facade DLQ forwarding and source acknowledgement are not
+atomic, so logical dead-letters also need consumer deduplication.
+
+Run the application compile, notification uncertainty, schema compatibility,
+state-version convergence, Redis recovery, and shutdown tests before deploying.
+Earlier task API changes remain documented in the user guide.
