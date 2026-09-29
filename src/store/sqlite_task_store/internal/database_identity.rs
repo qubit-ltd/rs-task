@@ -159,17 +159,23 @@ fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
 /// metadata, or a store error if metadata access fails.
 #[cfg(windows)]
 fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
-    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::AsRawHandle;
 
-    let metadata = file.metadata().map_err(failure)?;
-    let volume = metadata
-        .volume_serial_number()
-        .ok_or(StoreError::UnsupportedDatabaseIdentity)?;
-    let index = metadata.file_index().ok_or(StoreError::UnsupportedDatabaseIdentity)?;
-    let links = metadata
-        .number_of_links()
-        .ok_or(StoreError::UnsupportedDatabaseIdentity)?;
-    Ok(((u64::from(volume), index), u64::from(links)))
+    use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a valid open handle, and `information` is writable
+    // memory with the size and layout required by the Windows API.
+    let succeeded = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if succeeded == 0 {
+        return Err(failure(std::io::Error::last_os_error()));
+    }
+    let file_index = (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok((
+        (u64::from(information.dwVolumeSerialNumber), file_index),
+        u64::from(information.nNumberOfLinks),
+    ))
 }
 
 /// Reports unsupported platforms rather than claiming an unverifiable lock.
