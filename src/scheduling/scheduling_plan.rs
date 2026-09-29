@@ -10,8 +10,10 @@ use crate::model::TaskId;
 /// Candidate order and optional fairness barrier returned by a scheduling
 /// policy.
 ///
-/// A barrier prevents the scheduler from considering tasks after the protected
-/// task while it temporarily cannot start. The scheduler still handles a
+/// `order` contains unique task identifiers from the queue snapshot supplied
+/// to the policy. When `barrier` is set, that identifier must occur in `order`.
+/// The scheduler may start candidates before it, but stops considering later
+/// candidates when the barrier is temporarily unavailable. It still handles a
 /// barrier task that has become terminal, blocked, or permanently
 /// unsatisfiable.
 ///
@@ -26,9 +28,10 @@ use crate::model::TaskId;
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchedulingPlan {
-    /// Candidate task identifiers in preferred order.
+    /// Unique candidate identifiers from the supplied queue snapshot, in
+    /// preferred order.
     pub order: Vec<TaskId>,
-    /// Task that stops the scheduler from scanning later candidates while it
-    /// remains temporarily unable to start.
+    /// Candidate that stops the scheduler from scanning later candidates while
+    /// it remains temporarily unable to start. It must appear in `order`.
     pub barrier: Option<TaskId>,
 }

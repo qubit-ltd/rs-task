@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -33,6 +34,7 @@ use super::super::task_stats;
 use super::super::transition;
 use super::QueueWindowGuard;
 use super::finish_attempt;
+use crate::scheduling::SchedulingPlan;
 
 /// Selects queued work, reserves resources, and starts eligible task attempts.
 ///
@@ -86,16 +88,15 @@ pub(in crate::service::task_execution_service) async fn scheduler_loop(core_ref:
             }
             continue;
         }
-        let scheduling_plan = core.policy.order(
-            &QueueSnapshot {
-                tasks: queue.to_vec(),
-                scan_budget: core.scan_budget,
-            },
-            &core.engine.capacity(),
-        );
-        debug_assert!(scheduling_plan.barrier.is_none_or(|barrier| {
-            scheduling_plan.order.len() == 1 && scheduling_plan.order.first() == Some(&barrier)
-        }));
+        let snapshot = QueueSnapshot {
+            tasks: queue.to_vec(),
+            scan_budget: core.scan_budget,
+        };
+        let scheduling_plan = core.policy.order(&snapshot, &core.engine.capacity());
+        if let Err(error) = validate_scheduling_plan(&snapshot, &scheduling_plan) {
+            record_scheduler_fault(&core, format!("scheduling policy returned an invalid plan: {error}"));
+            return;
+        }
         let barrier = scheduling_plan.barrier;
         let order = scheduling_plan.order;
         let original_positions = queue
@@ -136,6 +137,9 @@ pub(in crate::service::task_execution_service) async fn scheduler_loop(core_ref:
                 let deadline = record.retry_not_before_ms.expect("deadline checked above");
                 task.retry_not_before_ms = Some(deadline);
                 queue.push(task);
+                if barrier == Some(id) {
+                    break;
+                }
                 continue;
             }
             if !matches!(record.state, TaskState::Queued) {
@@ -179,6 +183,9 @@ pub(in crate::service::task_execution_service) async fn scheduler_loop(core_ref:
                 Ok(value) => value,
                 Err(EngineError::TemporarilyUnavailable) => {
                     queue.push(task);
+                    if barrier == Some(id) {
+                        break;
+                    }
                     continue;
                 }
                 Err(EngineError::Unsatisfiable) => {
@@ -387,4 +394,39 @@ pub(in crate::service::task_execution_service) async fn scheduler_loop(core_ref:
             core.changed.notify_waiters();
         }
     }
+}
+
+/// Validates identifiers and the barrier returned by a scheduling extension.
+///
+/// # Parameters
+///
+/// * `snapshot` - Queue view passed to the scheduling policy.
+/// * `plan` - Candidate order and optional protected task returned by it.
+///
+/// # Returns
+///
+/// Success when every candidate is unique and belongs to the snapshot and the
+/// optional barrier appears in the candidate order.
+///
+/// # Errors
+///
+/// Returns a diagnostic naming an unknown or duplicate candidate, or a
+/// barrier that is absent from the candidate order.
+fn validate_scheduling_plan(snapshot: &QueueSnapshot, plan: &SchedulingPlan) -> Result<(), String> {
+    let available = snapshot.tasks.iter().map(|task| task.id).collect::<HashSet<_>>();
+    let mut seen = HashSet::with_capacity(plan.order.len());
+    for id in &plan.order {
+        if !available.contains(id) {
+            return Err(format!("candidate {id} is not present in the queue snapshot"));
+        }
+        if !seen.insert(*id) {
+            return Err(format!("candidate {id} appears more than once"));
+        }
+    }
+    if let Some(barrier) = plan.barrier
+        && !seen.contains(&barrier)
+    {
+        return Err(format!("barrier {barrier} is not present in the candidate order"));
+    }
+    Ok(())
 }

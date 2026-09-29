@@ -8,6 +8,7 @@
 #[cfg(feature = "sqlite")]
 mod common;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
@@ -250,6 +251,69 @@ impl SchedulingPolicy for PausablePolicy {
                 barrier: None,
             }
         }
+    }
+}
+
+struct FixedPlanPolicy {
+    plan: std::sync::Mutex<Option<SchedulingPlan>>,
+}
+
+impl SchedulingPolicy for FixedPlanPolicy {
+    fn order(&self, _queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> SchedulingPlan {
+        self.plan.lock().expect("fixed plan lock").clone().unwrap_or_default()
+    }
+}
+
+struct MultiCandidateBarrierPolicy {
+    plan: std::sync::Mutex<Option<SchedulingPlan>>,
+}
+
+impl SchedulingPolicy for MultiCandidateBarrierPolicy {
+    fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> SchedulingPlan {
+        let Some(mut plan) = self.plan.lock().expect("barrier policy lock").clone() else {
+            return SchedulingPlan::default();
+        };
+        plan.order.retain(|id| queue.tasks.iter().any(|task| task.id == *id));
+        plan
+    }
+}
+
+struct BarrierUnavailableEngine {
+    inner: LocalTaskExecutionEngine,
+    barrier_task: std::sync::Mutex<Option<TaskId>>,
+    later_tasks: std::sync::Mutex<Vec<TaskId>>,
+    barrier_attempts: std::sync::atomic::AtomicUsize,
+    later_attempts: std::sync::atomic::AtomicUsize,
+    barrier_seen: sync::Notify,
+    later_seen: sync::Notify,
+}
+
+impl TaskExecutionEngine for BarrierUnavailableEngine {
+    fn capacity(&self) -> ResourceSnapshot {
+        self.inner.capacity()
+    }
+
+    fn try_prepare(&self, id: TaskId, request: ResourceRequest) -> Result<PreparedExecution, EngineError> {
+        if self.barrier_task.lock().expect("barrier engine lock").as_ref() == Some(&id) {
+            self.barrier_attempts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.barrier_seen.notify_waiters();
+            return Err(EngineError::TemporarilyUnavailable);
+        }
+        if self.later_tasks.lock().expect("later tasks lock").contains(&id) {
+            self.later_attempts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.later_seen.notify_waiters();
+        }
+        self.inner.try_prepare(id, request)
+    }
+
+    fn activate<'a>(
+        &'a self,
+        prepared: PreparedExecution,
+        handler: Arc<dyn TaskHandler>,
+        payload: Vec<u8>,
+        context: TaskContext,
+    ) -> TaskFuture<'a, Result<ExecutionHandle, EngineError>> {
+        self.inner.activate(prepared, handler, payload, context)
     }
 }
 
@@ -660,6 +724,178 @@ async fn test_external_execution_engine_can_implement_public_contract() {
     let finished = service.wait(accepted.id).await.expect("task completes");
     assert_eq!(finished.state, TaskState::Succeeded);
     service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio_test]
+async fn test_scheduling_barrier_stops_later_candidates_when_temporarily_unavailable() {
+    let policy = Arc::new(MultiCandidateBarrierPolicy {
+        plan: std::sync::Mutex::new(None),
+    });
+    let engine = Arc::new(BarrierUnavailableEngine {
+        inner: LocalTaskExecutionEngine::new(ResourceCapacity {
+            cpu_slots: 4,
+            ..ResourceCapacity::default()
+        }),
+        barrier_task: std::sync::Mutex::new(None),
+        later_tasks: std::sync::Mutex::new(Vec::new()),
+        barrier_attempts: std::sync::atomic::AtomicUsize::new(0),
+        later_attempts: std::sync::atomic::AtomicUsize::new(0),
+        barrier_seen: sync::Notify::new(),
+        later_seen: sync::Notify::new(),
+    });
+    let service = TaskExecutionServiceBuilder::from_components(
+        Arc::new(MemoryTaskStore::new(16)),
+        engine.clone(),
+        policy.clone(),
+    )
+    .register_handler(Arc::new(EchoHandler))
+    .expect("handler registration succeeds")
+    .build()
+    .await
+    .expect("service builds");
+    let first = service
+        .submit(test_keyed(TaskRequest::new("echo", "1", b"first".to_vec())))
+        .await
+        .expect("first task is accepted");
+    let barrier = service
+        .submit(test_keyed(TaskRequest::new("echo", "1", b"barrier".to_vec())))
+        .await
+        .expect("barrier task is accepted");
+    let later = service
+        .submit(test_keyed(TaskRequest::new("echo", "1", b"later".to_vec())))
+        .await
+        .expect("later task is accepted");
+    let wake = service
+        .submit(test_keyed(TaskRequest::new("echo", "1", b"wake".to_vec())))
+        .await
+        .expect("wake task is accepted");
+
+    *engine.barrier_task.lock().expect("barrier engine lock") = Some(barrier.id);
+    *engine.later_tasks.lock().expect("later tasks lock") = vec![later.id, wake.id];
+    *policy.plan.lock().expect("barrier policy lock") = Some(SchedulingPlan {
+        order: vec![first.id, barrier.id, later.id, wake.id],
+        barrier: Some(barrier.id),
+    });
+    time::timeout(Duration::from_secs(1), async {
+        loop {
+            if engine.barrier_attempts.load(std::sync::atomic::Ordering::Acquire) > 0
+                || service.last_scheduler_error().is_some()
+            {
+                break;
+            }
+            task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scheduler evaluates configured barrier");
+    assert_eq!(
+        service.last_scheduler_error(),
+        None,
+        "multi-candidate barriers are valid"
+    );
+    assert_eq!(
+        time::timeout(Duration::from_secs(1), service.wait(first.id))
+            .await
+            .expect("the candidate before the barrier starts")
+            .expect("first task completes")
+            .state,
+        TaskState::Succeeded
+    );
+    time::timeout(Duration::from_secs(1), async {
+        while engine.barrier_attempts.load(std::sync::atomic::Ordering::Acquire) < 2 {
+            task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scheduler reaches the barrier again after the earlier task finishes");
+    for id in [later.id, wake.id] {
+        let summary = service.get_summary(id).await.unwrap().unwrap();
+        assert!(
+            matches!(summary.state, TaskState::Queued),
+            "later candidates stay queued"
+        );
+    }
+    assert!(
+        time::timeout(Duration::from_millis(100), engine.later_seen.notified())
+            .await
+            .is_err(),
+        "no candidate after the unavailable barrier starts"
+    );
+    assert_eq!(engine.later_attempts.load(std::sync::atomic::Ordering::Acquire), 0);
+
+    *engine.barrier_task.lock().expect("barrier engine lock") = None;
+    for id in [barrier.id, later.id, wake.id] {
+        time::timeout(Duration::from_secs(1), service.wait(id))
+            .await
+            .expect("released barrier lets queued work drain")
+            .expect("task completes");
+    }
+    service
+        .shutdown()
+        .await
+        .expect("service shuts down after the barrier clears");
+}
+
+#[tokio_test]
+async fn test_scheduling_policy_invalid_plans_latch_scheduler_fault() {
+    for invalid_case in ["missing barrier", "duplicate task", "unknown task"] {
+        let policy = Arc::new(FixedPlanPolicy {
+            plan: std::sync::Mutex::new(None),
+        });
+        let service = TaskExecutionServiceBuilder::from_components(
+            Arc::new(MemoryTaskStore::new(8)),
+            Arc::new(LocalTaskExecutionEngine::new(ResourceCapacity {
+                cpu_slots: 1,
+                ..ResourceCapacity::default()
+            })),
+            policy.clone(),
+        )
+        .build()
+        .await
+        .expect("service builds");
+        let first = service
+            .submit(test_keyed(TaskRequest::new("missing", "1", Vec::new())))
+            .await
+            .expect("first task is accepted");
+        let unknown = TaskId::generate();
+        let plan = match invalid_case {
+            "missing barrier" => SchedulingPlan {
+                order: vec![first.id],
+                barrier: Some(unknown),
+            },
+            "duplicate task" => SchedulingPlan {
+                order: vec![first.id, first.id],
+                barrier: None,
+            },
+            "unknown task" => SchedulingPlan {
+                order: vec![unknown],
+                barrier: None,
+            },
+            _ => unreachable!(),
+        };
+        *policy.plan.lock().expect("fixed plan lock") = Some(plan);
+        let _ = service
+            .submit(test_keyed(TaskRequest::new("missing", "1", Vec::new())))
+            .await;
+
+        time::timeout(Duration::from_secs(1), async {
+            loop {
+                if service.last_scheduler_error().is_some() {
+                    break;
+                }
+                task::yield_now().await;
+            }
+        })
+        .await
+        .expect("invalid plans are detected in all build modes");
+        let diagnostic = service.last_scheduler_error().expect("scheduler fault is latched");
+        assert!(diagnostic.contains("invalid plan"), "{diagnostic}");
+        let shutdown_error = time::timeout(Duration::from_secs(1), service.shutdown())
+            .await
+            .expect("faulted service shutdown is bounded")
+            .expect_err("scheduler fault is returned to the caller");
+        assert!(matches!(shutdown_error, TaskServiceError::SchedulerUnavailable(_)));
+    }
 }
 
 #[tokio_test]
