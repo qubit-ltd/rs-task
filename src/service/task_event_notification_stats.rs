@@ -18,6 +18,7 @@
 /// let stats = TaskEventNotificationStats::default();
 /// assert_eq!(stats.enqueued, 0);
 /// ```
+#[must_use]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TaskEventNotificationStats {
     /// Events placed in the publisher's bounded queue.

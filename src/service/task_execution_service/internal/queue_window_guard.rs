@@ -11,6 +11,7 @@ use super::super::QueuedTask;
 use super::super::ServiceCore;
 
 /// Restores unprocessed tasks when a scheduler round exits early.
+#[must_use]
 pub(in crate::service::task_execution_service) struct QueueWindowGuard {
     /// Shared queue to which unfinished tasks are restored.
     core: Arc<ServiceCore>,

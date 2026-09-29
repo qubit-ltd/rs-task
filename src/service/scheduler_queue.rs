@@ -6,6 +6,8 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use crate::model::TaskId;
@@ -148,37 +150,6 @@ impl SchedulerQueue {
         self.restore_front(tasks);
     }
 
-    /// Removes matching ready tasks without changing their relative order.
-    ///
-    /// # Parameters
-    ///
-    /// * `ids` - Task identifiers to extract from the ready queue.
-    ///
-    /// # Returns
-    ///
-    /// Matching tasks in the order supplied by `ids`; absent IDs are ignored.
-    fn take_ready_ids(&mut self, ids: &[TaskId]) -> Vec<QueuedTask> {
-        use std::collections::HashMap;
-        use std::collections::HashSet;
-
-        let selected = ids.iter().copied().collect::<HashSet<_>>();
-        let mut extracted = HashMap::with_capacity(selected.len());
-        let mut retained = VecDeque::with_capacity(self.ready.len());
-        while let Some(task) = self.ready.pop_front() {
-            if selected.contains(&task.id) {
-                extracted.insert(task.id, task);
-            } else {
-                retained.push_back(task);
-            }
-        }
-        self.ready = retained;
-        self.len -= extracted.len();
-
-        // Output order follows the caller's selection order, independent of
-        // queue order; duplicate and absent IDs are ignored.
-        ids.iter().filter_map(|id| extracted.remove(id)).collect()
-    }
-
     /// Removes one queued task by ID from either scheduling class.
     ///
     /// # Parameters
@@ -247,6 +218,34 @@ impl SchedulerQueue {
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Removes matching ready tasks without changing their relative order.
+    ///
+    /// # Parameters
+    ///
+    /// * `ids` - Task identifiers to extract from the ready queue.
+    ///
+    /// # Returns
+    ///
+    /// Matching tasks in the order supplied by `ids`; absent IDs are ignored.
+    fn take_ready_ids(&mut self, ids: &[TaskId]) -> Vec<QueuedTask> {
+        let selected = ids.iter().copied().collect::<HashSet<_>>();
+        let mut extracted = HashMap::with_capacity(selected.len());
+        let mut retained = VecDeque::with_capacity(self.ready.len());
+        while let Some(task) = self.ready.pop_front() {
+            if selected.contains(&task.id) {
+                extracted.insert(task.id, task);
+            } else {
+                retained.push_back(task);
+            }
+        }
+        self.ready = retained;
+        self.len -= extracted.len();
+
+        // Output order follows the caller's selection order, independent of
+        // queue order; duplicate and absent IDs are ignored.
+        ids.iter().filter_map(|id| extracted.remove(id)).collect()
     }
 }
 
