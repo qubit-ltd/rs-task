@@ -39,6 +39,8 @@ pub struct DelayedWriteStore {
     accept_gate: Arc<Semaphore>,
     /// Signals when the held write has entered the provider.
     accept_started: Mutex<Option<oneshot::Sender<()>>>,
+    /// Signals when ownership release is waiting for an active write.
+    release_waiting: Mutex<Option<oneshot::Sender<()>>>,
     /// Number of writes not yet completed by the inner store.
     active_writes: AtomicUsize,
     /// Wakes ownership release when the final accepted write completes.
@@ -47,17 +49,30 @@ pub struct DelayedWriteStore {
 
 impl DelayedWriteStore {
     /// Creates a wrapper whose next acceptance waits for a test permit.
-    pub fn new(inner: SqliteTaskStore) -> (Self, oneshot::Receiver<()>) {
-        let (sender, receiver) = oneshot::channel();
+    ///
+    /// # Parameters
+    ///
+    /// * `inner` - SQLite store that receives the write after it is released.
+    ///
+    /// # Returns
+    ///
+    /// The wrapper, a receiver signaled when acceptance is held, and a
+    /// receiver signaled when ownership release reaches the active-write wait.
+    #[must_use]
+    pub fn new(inner: SqliteTaskStore) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
+        let (accept_sender, accept_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = oneshot::channel();
         (
             Self {
                 inner,
                 accept_gate: Arc::new(Semaphore::new(0)),
-                accept_started: Mutex::new(Some(sender)),
+                accept_started: Mutex::new(Some(accept_sender)),
+                release_waiting: Mutex::new(Some(release_sender)),
                 active_writes: AtomicUsize::new(0),
                 writes_idle: Notify::new(),
             },
-            receiver,
+            accept_receiver,
+            release_receiver,
         )
     }
 
@@ -75,7 +90,7 @@ impl TaskStore for DelayedWriteStore {
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         Box::pin(async move {
             self.active_writes.fetch_add(1, Ordering::AcqRel);
-            let _active_write = ActiveWrite(self);
+            let _active_write = ActiveWrite { store: self };
             if let Some(sender) = self.accept_started.lock().take() {
                 let _ = sender.send(());
             }
@@ -140,6 +155,9 @@ impl TaskStore for DelayedWriteStore {
                 if self.active_writes.load(Ordering::Acquire) == 0 {
                     break;
                 }
+                if let Some(sender) = self.release_waiting.lock().take() {
+                    let _ = sender.send(());
+                }
                 notified.await;
             }
             self.inner.release_owner(epoch).await
@@ -147,14 +165,18 @@ impl TaskStore for DelayedWriteStore {
     }
 }
 
-/// Decrements the controlled store's in-flight write count when acceptance
-/// exits.
-struct ActiveWrite<'a>(&'a DelayedWriteStore);
+/// Tracks one accepted write until its future exits.
+#[must_use = "the active-write count must be released when acceptance exits"]
+struct ActiveWrite<'a> {
+    /// Store whose active-write count is held.
+    store: &'a DelayedWriteStore,
+}
 
 impl Drop for ActiveWrite<'_> {
+    /// Decrements the active-write count and wakes a waiting owner release.
     fn drop(&mut self) {
-        if self.0.active_writes.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.0.writes_idle.notify_waiters();
+        if self.store.active_writes.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.store.writes_idle.notify_waiters();
         }
     }
 }
