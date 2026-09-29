@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync;
 
 use crate::handler::TaskHandlerRegistry;
-use crate::model::TaskId;
+use crate::model::TaskCursor;
 use crate::model::TaskState;
 use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
@@ -23,7 +23,7 @@ use crate::store::TaskStore;
 /// Maximum number of rows allowed in one recovery scan page.
 const RECOVERY_PAGE_LIMIT: usize = 256;
 
-/// Validates page size and strict recovery cursor progress.
+/// Validates the full recovery page before any lifecycle writes.
 ///
 /// # Parameters
 ///
@@ -33,16 +33,17 @@ const RECOVERY_PAGE_LIMIT: usize = 256;
 ///
 /// # Returns
 ///
-/// Success when the page is bounded and its cursor advances.
+/// Success when recoverable rows strictly follow the exclusive cursor and
+/// any next cursor equals the final row key.
 ///
 /// # Errors
 ///
-/// Returns an invalid-recovery-page error for oversized, empty-with-next, or
-/// non-advancing pages.
+/// Returns an invalid-recovery-page error for oversized pages, invalid states,
+/// duplicate/out-of-order rows, or inconsistent/non-advancing cursors.
 fn validate_recovery_page(
     tasks: &[TaskSummary],
-    previous: Option<TaskId>,
-    next: Option<TaskId>,
+    previous: Option<TaskCursor>,
+    next: Option<TaskCursor>,
 ) -> Result<(), TaskServiceBuildError> {
     if tasks.len() > RECOVERY_PAGE_LIMIT {
         return Err(TaskServiceBuildError::InvalidRecoveryPage(format!(
@@ -55,11 +56,24 @@ fn validate_recovery_page(
             "empty page returned a next cursor".into(),
         ));
     }
-    if let Some(next) = next
-        && previous.is_some_and(|previous| next <= previous)
-    {
+    let mut last = previous;
+    for row in tasks {
+        if !matches!(row.state, TaskState::Queued | TaskState::Running) {
+            return Err(TaskServiceBuildError::InvalidRecoveryPage(
+                "recovery page contains a non-recoverable state".into(),
+            ));
+        }
+        let key = TaskCursor::from(row);
+        if last.is_some_and(|prior| key <= prior) {
+            return Err(TaskServiceBuildError::InvalidRecoveryPage(
+                "recovery rows are not strictly ordered after the cursor".into(),
+            ));
+        }
+        last = Some(key);
+    }
+    if next.is_some() && next != last {
         return Err(TaskServiceBuildError::InvalidRecoveryPage(
-            "cursor did not advance".into(),
+            "recovery next cursor must equal the last row key".into(),
         ));
     }
     Ok(())

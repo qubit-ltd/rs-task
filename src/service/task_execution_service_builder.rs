@@ -485,6 +485,13 @@ impl TaskExecutionServiceBuilder {
 
     /// Builds one unified task service after validating and preparing recovery.
     ///
+    /// Recoverable stores are scanned in strictly increasing acceptance-time/ID
+    /// order. Each bounded page is fully validated before any task in that page
+    /// is changed. Valid earlier pages are not rolled back if a later page
+    /// fails. Recovered queue order remains subject to the selected
+    /// scheduling policy, available resources, and retry deadlines during
+    /// execution.
+    ///
     /// # Returns
     ///
     /// A running service with recovered work queued for execution.

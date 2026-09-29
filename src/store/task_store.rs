@@ -13,6 +13,7 @@ use crate::model::AcceptOutcome;
 use crate::model::OwnerEpoch;
 use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
+use crate::model::TaskCursor;
 use crate::model::TaskId;
 use crate::model::TaskPage;
 use crate::model::TaskQuery;
@@ -265,20 +266,28 @@ pub trait TaskStore: Send + Sync {
     /// Resolves to an error if the store cannot perform the consistency check.
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>>;
 
-    /// Scans one bounded page of unfinished tasks during recovery.
+    /// Scans at most 256 Queued/Running summaries during recovery.
+    ///
+    /// Rows must be strictly ordered by `(accepted_at_ms, id)` and each key
+    /// must exceed `cursor`. Scan without decoding request payloads. Ownership
+    /// must remain exclusive while the service scans and restores these rows.
     ///
     /// # Parameters
     ///
-    /// * `cursor` - Exclusive task ID cursor from the previous page, if any.
+    /// * `cursor` - Exclusive acceptance-time/ID lower bound, or `None` for the
+    ///   first page.
     ///
     /// # Returns
     ///
-    /// A future resolving to one bounded page and its optional next cursor.
+    /// A future resolving to one bounded page. A next cursor, when present,
+    /// equals the last row key and indicates more rows are available. Terminal
+    /// pages have `next = None`, even when exactly 256 rows are returned; an
+    /// empty page must never have a next cursor.
     ///
     /// # Errors
     ///
     /// Resolves to an error if recovery scanning is unsupported or fails.
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>>;
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>>;
 
     /// Releases ownership after the service has stopped accepting work and
     /// drained writes admitted under this ownership epoch.
