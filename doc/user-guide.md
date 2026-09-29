@@ -577,7 +577,7 @@ behavior changes the 0.6.0 retry contract.
 | `TaskQuery.states` built from `TaskState` | `Vec<TaskStateKind>` |
 | Full `TaskRequest` passed to scheduling policies | `QueuedTask.resources` exposes only resource demand |
 | Earlier `TaskStore` contract | Implement aggregate `count_states`, summary reads, bounded recovery precheck, and the `release_owner` completion barrier |
-| Event notification code coupled to a concrete bus | Target `qubit-event-bus` 0.15; use `NotificationPublisher` and map provider `AdmissionOutcome` results into task notification statistics |
+| `qubit-event-bus` 0.14 calls `EventBus::publish(PublishRequest)` and inspects `PublishReceipt::acknowledgement()` | With 0.15, create a bounded `NotificationPublisher`, enqueue with `try_publish(event)`, and map the callback's `NotificationOutcome::Published(receipt).admission_outcome()` (`AdmissionOutcome`) into task notification statistics |
 
 These changes intentionally have no compatibility aliases. Update application
 call sites and provider implementations together, then run the application's
