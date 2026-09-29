@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicUsize;
 
 #[cfg(test)]
 #[derive(Default)]
-pub(in crate::store::sqlite) struct WorkerCounts {
-    pub(in crate::store::sqlite) active: AtomicUsize,
-    pub(in crate::store::sqlite) peak: AtomicUsize,
+pub(in crate::store::sqlite_task_store) struct WorkerCounts {
+    pub(in crate::store::sqlite_task_store) active: AtomicUsize,
+    pub(in crate::store::sqlite_task_store) peak: AtomicUsize,
 }

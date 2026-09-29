@@ -12,11 +12,11 @@ use std::sync::Arc;
 use super::WorkerCounts;
 
 #[cfg(test)]
-pub(in crate::store::sqlite) struct WorkerGuard(pub(in crate::store::sqlite) Arc<WorkerCounts>);
+pub(in crate::store::sqlite_task_store) struct WorkerGuard(pub(in crate::store::sqlite_task_store) Arc<WorkerCounts>);
 
 #[cfg(test)]
 impl WorkerGuard {
-    pub(in crate::store::sqlite) fn enter(counts: Arc<WorkerCounts>) -> Self {
+    pub(in crate::store::sqlite_task_store) fn enter(counts: Arc<WorkerCounts>) -> Self {
         let active = counts.active.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
         counts.peak.fetch_max(active, std::sync::atomic::Ordering::AcqRel);
         Self(counts)

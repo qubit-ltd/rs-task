@@ -10,9 +10,9 @@ use std::fs::File;
 use crate::model::OwnerEpoch;
 
 /// Process-lock ownership and epoch retained by the SQLite store.
-pub(in crate::store::sqlite) struct SqliteOwnerState {
+pub(in crate::store::sqlite_task_store) struct SqliteOwnerState {
     /// Exclusive lock file retained for the active store owner.
-    pub(in crate::store::sqlite) lock_file: Option<File>,
+    pub(in crate::store::sqlite_task_store) lock_file: Option<File>,
     /// Epoch issued to the current service owner.
-    pub(in crate::store::sqlite) epoch: Option<OwnerEpoch>,
+    pub(in crate::store::sqlite_task_store) epoch: Option<OwnerEpoch>,
 }

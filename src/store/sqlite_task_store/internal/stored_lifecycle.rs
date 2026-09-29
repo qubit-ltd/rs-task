@@ -15,29 +15,29 @@ use crate::model::TaskSummary;
 
 /// Immutable task request fields are stored separately from this lifecycle.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub(in crate::store::sqlite) struct StoredLifecycle {
+pub(in crate::store::sqlite_task_store) struct StoredLifecycle {
     /// Stable task identity copied from the indexed row.
-    pub(in crate::store::sqlite) id: TaskId,
+    pub(in crate::store::sqlite_task_store) id: TaskId,
     /// Mutable lifecycle state.
-    pub(in crate::store::sqlite) state: TaskState,
+    pub(in crate::store::sqlite_task_store) state: TaskState,
     /// Monotonic lifecycle revision.
-    pub(in crate::store::sqlite) state_version: u64,
+    pub(in crate::store::sqlite_task_store) state_version: u64,
     /// Number of attempts started.
-    pub(in crate::store::sqlite) attempt: u32,
+    pub(in crate::store::sqlite_task_store) attempt: u32,
     /// Earliest eligible retry timestamp, if delayed.
-    pub(in crate::store::sqlite) retry_not_before_ms: Option<u64>,
+    pub(in crate::store::sqlite_task_store) retry_not_before_ms: Option<u64>,
     /// Acceptance timestamp in Unix epoch milliseconds.
-    pub(in crate::store::sqlite) accepted_at_ms: u64,
+    pub(in crate::store::sqlite_task_store) accepted_at_ms: u64,
     /// Timestamp of the most recent execution start.
-    pub(in crate::store::sqlite) started_at_ms: Option<u64>,
+    pub(in crate::store::sqlite_task_store) started_at_ms: Option<u64>,
     /// Timestamp when the task became terminal.
-    pub(in crate::store::sqlite) finished_at_ms: Option<u64>,
+    pub(in crate::store::sqlite_task_store) finished_at_ms: Option<u64>,
     /// Resources assigned to the current or last attempt.
-    pub(in crate::store::sqlite) assigned_resources: Vec<String>,
+    pub(in crate::store::sqlite_task_store) assigned_resources: Vec<String>,
     /// Bounded output summary from successful work.
-    pub(in crate::store::sqlite) output: Option<TaskOutput>,
+    pub(in crate::store::sqlite_task_store) output: Option<TaskOutput>,
     /// Whether cooperative cancellation has been requested.
-    pub(in crate::store::sqlite) cancel_requested: bool,
+    pub(in crate::store::sqlite_task_store) cancel_requested: bool,
 }
 
 impl StoredLifecycle {
@@ -50,7 +50,7 @@ impl StoredLifecycle {
     /// # Returns
     ///
     /// Lifecycle fields copied without request data.
-    pub(in crate::store::sqlite) fn from_record(record: &TaskRecord) -> Self {
+    pub(in crate::store::sqlite_task_store) fn from_record(record: &TaskRecord) -> Self {
         Self {
             id: record.id,
             state: record.state.clone(),
@@ -75,7 +75,7 @@ impl StoredLifecycle {
     /// # Returns
     ///
     /// Lifecycle fields copied without request data.
-    pub(in crate::store::sqlite) fn from_summary(record: &TaskSummary) -> Self {
+    pub(in crate::store::sqlite_task_store) fn from_summary(record: &TaskSummary) -> Self {
         Self {
             id: record.id,
             state: record.state.clone(),
@@ -100,7 +100,7 @@ impl StoredLifecycle {
     /// # Returns
     ///
     /// A complete record reconstructed from persisted lifecycle values.
-    pub(in crate::store::sqlite) fn into_record(self, request: TaskRequest) -> TaskRecord {
+    pub(in crate::store::sqlite_task_store) fn into_record(self, request: TaskRequest) -> TaskRecord {
         TaskRecord {
             id: self.id,
             request,
@@ -126,7 +126,7 @@ impl StoredLifecycle {
     /// # Returns
     ///
     /// A summary reconstructed without loading the request payload.
-    pub(in crate::store::sqlite) fn into_summary(self, request: TaskRequestInfo) -> TaskSummary {
+    pub(in crate::store::sqlite_task_store) fn into_summary(self, request: TaskRequestInfo) -> TaskSummary {
         TaskSummary {
             id: self.id,
             request,

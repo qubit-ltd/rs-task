@@ -34,7 +34,7 @@ use crate::store::StoreError;
 ///
 /// Returns a SQLite conversion error when a selected column has the wrong
 /// type or cannot be decoded.
-pub(in crate::store::sqlite) fn read_stored_summary_row(row: &Row<'_>) -> SqliteResult<StoredSummaryRow> {
+pub(in crate::store::sqlite_task_store) fn read_stored_summary_row(row: &Row<'_>) -> SqliteResult<StoredSummaryRow> {
     Ok(StoredSummaryRow {
         id: row.get(0)?,
         state_kind: row.get(1)?,
@@ -61,7 +61,7 @@ pub(in crate::store::sqlite) fn read_stored_summary_row(row: &Row<'_>) -> Sqlite
 ///
 /// Returns a SQLite conversion error when a selected column has the wrong
 /// type or cannot be decoded.
-pub(in crate::store::sqlite) fn read_stored_task_row(row: &Row<'_>) -> SqliteResult<StoredTaskRow> {
+pub(in crate::store::sqlite_task_store) fn read_stored_task_row(row: &Row<'_>) -> SqliteResult<StoredTaskRow> {
     Ok(StoredTaskRow {
         id: row.get(0)?,
         state_kind: row.get(1)?,
@@ -89,7 +89,9 @@ pub(in crate::store::sqlite) fn read_stored_task_row(row: &Row<'_>) -> SqliteRes
 ///
 /// Returns a store error for an unsupported format, malformed data, or
 /// inconsistent indexed values.
-pub(in crate::store::sqlite) fn decode_stored_task_row(row: StoredTaskRow) -> Result<TaskRecord, StoreError> {
+pub(in crate::store::sqlite_task_store) fn decode_stored_task_row(
+    row: StoredTaskRow,
+) -> Result<TaskRecord, StoreError> {
     if row.format_version != RECORD_FORMAT_VERSION {
         return Err(StoreError::Failure(format!(
             "unsupported SQLite task record format version {}; supported version is {RECORD_FORMAT_VERSION}",
@@ -136,7 +138,9 @@ pub(in crate::store::sqlite) fn decode_stored_task_row(row: StoredTaskRow) -> Re
 ///
 /// Returns an error for unsupported formats, malformed JSON, or inconsistent
 /// indexed and serialized values.
-pub(in crate::store::sqlite) fn decode_stored_summary_row(row: StoredSummaryRow) -> Result<TaskSummary, StoreError> {
+pub(in crate::store::sqlite_task_store) fn decode_stored_summary_row(
+    row: StoredSummaryRow,
+) -> Result<TaskSummary, StoreError> {
     if row.format_version != RECORD_FORMAT_VERSION {
         return Err(StoreError::Failure(format!(
             "unsupported SQLite task record format version {}; supported version is {RECORD_FORMAT_VERSION}",
@@ -173,7 +177,7 @@ pub(in crate::store::sqlite) fn decode_stored_summary_row(row: StoredSummaryRow)
 /// # Errors
 ///
 /// Returns a store error if serialization fails.
-pub(in crate::store::sqlite) fn encode_lifecycle(record: &TaskRecord) -> Result<String, StoreError> {
+pub(in crate::store::sqlite_task_store) fn encode_lifecycle(record: &TaskRecord) -> Result<String, StoreError> {
     serde_json::to_string(&StoredLifecycle::from_record(record)).map_err(failure)
 }
 
@@ -190,7 +194,9 @@ pub(in crate::store::sqlite) fn encode_lifecycle(record: &TaskRecord) -> Result<
 /// # Errors
 ///
 /// Returns an error if the lifecycle cannot be serialized.
-pub(in crate::store::sqlite) fn encode_summary_lifecycle(record: &TaskSummary) -> Result<String, StoreError> {
+pub(in crate::store::sqlite_task_store) fn encode_summary_lifecycle(
+    record: &TaskSummary,
+) -> Result<String, StoreError> {
     serde_json::to_string(&StoredLifecycle::from_summary(record)).map_err(failure)
 }
 
@@ -208,7 +214,7 @@ pub(in crate::store::sqlite) fn encode_summary_lifecycle(record: &TaskSummary) -
 /// # Errors
 ///
 /// Returns a store error when the format is unsupported or JSON is invalid.
-pub(in crate::store::sqlite) fn decode_legacy_record(
+pub(in crate::store::sqlite_task_store) fn decode_legacy_record(
     format_version: i64,
     json: &str,
 ) -> Result<TaskRecord, StoreError> {
