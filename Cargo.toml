@@ -22,12 +22,18 @@ include = [
     "/resources/**",
     "/src/**",
     "/tests/**",
+    "/benches/**",
 ]
 
 [lib]
 name = "qubit_task"
 doctest = true
 test = true
+
+[[bench]]
+name = "sqlite_history"
+harness = false
+required-features = ["sqlite"]
 
 [dependencies]
 futures = "^0.3"
