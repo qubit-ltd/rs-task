@@ -228,7 +228,7 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保
 ## 发布状态事件
 
 启用 `event-bus` feature 后，可将 `qubit_event_bus::EventBus` 具体门面注入构建器。状态变化后，服务会发布 `TaskEvent`。通知采用尽力而为语义：发布失败不会回滚任务状态。事件可能重复、延迟或丢失，因此消费者应比较 `state_version`，并在需要权威状态时查询服务。
-当前版本面向 `qubit-event-bus` 0.15 API。通用 `NotificationPublisher` 返回 provider receipt；服务再按 `AdmissionOutcome` 映射到现有任务通知统计。
+当前版本面向 `qubit-event-bus` 0.16 API。通用 `NotificationPublisher` 返回 provider receipt；服务再按 `AdmissionOutcome` 映射到现有任务通知统计。
 
 ### Redis Streams provider
 
@@ -412,7 +412,7 @@ let service = TaskExecutionServiceBuilder::in_memory()
 运行应用编译、恢复和关闭测试。
 
 任务通知集成使用有界 `NotificationPublisher` 和 `AdmissionOutcome` API；已发布的
-`qubit-event-bus` 0.14 crate 也包含这些 API。因此，仅将该集成升级到 0.15
+`qubit-event-bus` 0.14 crate 也包含这些 API。因此，将该集成升级到 0.16
 本身不要求应用调用点迁移；升级 provider 时请检查其专属的版本说明。
 
 0.6 将原先仅限制提交的名额替换为 `max_inflight_operations`，统一限制六种生命周期写操作；超限错误为 `TaskServiceError::OperationLimitExceeded`。同时移除了调用方指定任务 ID、用 `submit` 提交闭包、线程池专用构建配置和旧的
