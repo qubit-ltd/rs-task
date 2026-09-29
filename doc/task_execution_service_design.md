@@ -110,9 +110,9 @@ TaskExecutionService
 
 如果调用方取消等待或超时等待 `submit_local`，后台受理仍可能完成，但调用方会失去返回句柄，无法找回原始类型化结果。需要在请求停止等待后继续定位任务时，应使用带稳定幂等键的 `submit`。
 
-调度循环使用 `SchedulingPolicy` 从待执行任务中选择候选项，再向 `TaskExecutionEngine` 请求原子分配和启动。资源账本归执行引擎所有，避免调度器与执行器对剩余资源有不同认识。本期 `LocalTaskExecutionEngine` 在服务所在机器执行；今后替换为分布式实现时，提交与查询模型不必重写。`TaskStore` 是状态依据；不得由协调器或执行引擎另建一套相互竞争的权威状态。
+调度循环使用 `SchedulingPolicy` 从待执行任务中选择候选项，再向 `TaskExecutionEngine` 请求原子分配和启动。计划中的 ID 必须唯一且来自本轮队列快照；barrier 必须出现在有序候选项中。barrier 前的候选项仍可尝试；若 barrier 因暂时缺少资源而无法启动，本轮不会越过它启动后续候选项。非法计划会锁存 `SchedulerUnavailable`，debug 和 release 行为一致。资源账本归执行引擎所有，避免调度器与执行器对剩余资源有不同认识。本期 `LocalTaskExecutionEngine` 在服务所在机器执行；今后替换为分布式实现时，提交与查询模型不必重写。`TaskStore` 是状态依据；不得由协调器或执行引擎另建一套相互竞争的权威状态。
 
-执行引擎必须把处理器的返回错误、panic 和基础设施启动失败区分开。激活失败时释放资源、记录可诊断原因，并将对应任务标记为 `Blocked`；不能让任务永久占有资源。业务返回错误默认是终态 `Failed`，本期不自动重试，避免无意重复副作用。处理器可以主动返回可重试的基础设施错误。自动重试按 1 秒起步、指数翻倍、最高 60 秒执行，可由 `RetryPolicy` 配置；`retry_not_before_ms` 与 `Queued` 状态原子持久化，到期前调度器不启动任务，恢复会保留到期时间。`ExecutionOutcome` 显式区分业务返回、panic 与 worker 停止，panic 不再依赖错误类别字符串。SQLite 使用 `PRAGMA user_version` 管理 schema；schema 3 将不可变请求元数据、payload BLOB 与仅含生命周期字段的 `lifecycle_json` 分列，摘要查询与状态转换不读取 payload。schema 0/1/2 在单个事务内逐行验证并迁移，损坏记录会回滚整个迁移；未知 schema 或记录格式拒绝打开或读取。
+执行引擎必须把处理器的返回错误、panic 和基础设施启动失败区分开。激活失败时释放资源、记录可诊断原因，并将对应任务标记为 `Blocked`；不能让任务永久占有资源。处理器返回不可重试错误时任务进入终态 `Failed`；只有明确标记为可重试的错误才自动重试，从而避免无意重复副作用。自动重试按 1 秒起步、指数翻倍、最高 60 秒执行，可由 `RetryPolicy` 配置；`retry_not_before_ms` 与 `Queued` 状态原子持久化，到期前调度器不启动任务，恢复会保留到期时间。`ExecutionOutcome` 显式区分业务返回、panic 与 worker 停止，panic 不再依赖错误类别字符串。SQLite 使用 `PRAGMA user_version` 管理 schema；schema 3 将不可变请求元数据、payload BLOB 与仅含生命周期字段的 `lifecycle_json` 分列，摘要查询与状态转换不读取 payload。schema 0/1/2 在单个事务内逐行验证并迁移，损坏记录会回滚整个迁移；未知 schema 或记录格式拒绝打开或读取。
 
 ### 4.1 使用 rs-spi 发现和装配扩展模块
 

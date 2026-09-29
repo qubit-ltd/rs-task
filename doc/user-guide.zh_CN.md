@@ -52,7 +52,7 @@
 2. [检查任务结果](#检查任务结果)说明任务完成时长什么样，以及 `Failed`、`Panicked` 与 `Blocked` 的区别。基础接入到此为止。
 3. 按需继续阅读：[调用方停止等待后如何找到任务](#调用方停止等待后如何找到任务)、[取消导入](#取消导入)、[重试策略与尝试次数预算](#重试策略与尝试次数预算)、[重启后恢复已接受的工作](#重启后恢复已接受的工作)、[限制并发与资源](#限制并发与资源)、[发布状态变更](#发布状态变更)或[生命周期与停机](#生命周期与停机)。
 
-完整可运行示例见 [`examples/task_service.rs`](../examples/task_service.rs)（进程内闭包、协作式取消、带版本的请求）与 [`examples/blocked_maintenance.rs`](../examples/blocked_maintenance.rs)（运维人员处理 blocked 任务）。
+完整可运行示例见 [`examples/task_service.rs`](../examples/task_service.rs)（进程内闭包、协作式取消、带版本的请求）与 [`examples/blocked_maintenance.rs`](../examples/blocked_maintenance.rs)（运维人员处理 blocked 任务）。幂等提交段落对应的 [`idempotent_submit.rs`](../tests/fixtures/doc-examples/src/bin/idempotent_submit.rs) 会编译运行，并同时检查相同请求重放和同键冲突。
 
 ## 接入 CSV 导入服务
 
@@ -268,6 +268,8 @@ tasks.shutdown().await?;
 
 一个 `TaskExecutionService` 对应一个 `TaskHandlerRegistry`，而不是「整个进程只能有一个 `TaskHandler`」。CSV 导入、报表导出、缩略图生成等不同业务，应各自实现 `TaskHandler`，在 `descriptor()` 里声明不同的 `task_type`（必要时同一类型下再区分 `version`，例如 `csv-import@1` 与 `csv-import@2` 并存）。提交时 `TaskRequest::new("csv-import", "1", payload)` 与 `TaskRequest::new("report.export", "1", payload)` 会分别匹配已注册的处理器；调度与恢复都只看请求里持久化的 `task_type` 和 `handler_version`，不会根据 payload 内容猜测。
 
+提交时不要求处理器已经注册：请求会先被受理并持久化；若注册表中没有精确匹配的 `(task_type, handler_version)`，任务随后进入 `Blocked`。`build()` 后注册表固定。可恢复服务应在重建前补注册缺少的版本，启动后再对保留任务调用 `retry_blocked`。
+
 启动时装配示例：
 
 ```rust
@@ -370,7 +372,7 @@ pub async fn wait_for_import(
 
 ## 调用方停止等待后如何找到任务
 
-客户端可能在服务已接受请求后对 `POST /imports` 超时。若用新键重试，同一文件会被导入两次。幂等键可避免重复，`get_by_idempotency_key` 让 API 找到先前的接受：
+客户端可能在服务已接受请求后对 `POST /imports` 超时。重试时应复用同一个键并提交相同请求，存储会返回原任务 ID。不要只做预先的键查询后直接返回已有 ID，否则同一键对应不同请求时会被误认为完全相同的重放：
 
 ```rust
 use qubit_task::TaskExecutionService;
@@ -381,10 +383,7 @@ pub async fn start_or_find_import(
     request_key: &str,
     job: &CsvImportJob,
 ) -> Result<Option<TaskId>, Box<dyn std::error::Error>> {
-    // 客户端放弃等待后，先前的尝试可能已被接受。
-    if let Some(existing) = tasks.get_by_idempotency_key(request_key).await? {
-        return Ok(Some(existing.id));
-    }
+    // 已有相同键时，submit 会比较完整请求并拒绝冲突。
     match start_import(tasks, request_key, job).await? {
         StartImport::Accepted { task_id } => Ok(Some(task_id)),
         StartImport::Busy => Ok(None),
@@ -392,7 +391,7 @@ pub async fn start_or_find_import(
 }
 ```
 
-`get_by_idempotency_key` 返回不含 payload 的 `TaskSummary`。`None` 只是快照：接受可能仍在进行，因此重试仍应经 `submit` 并使用**同一**键，`submit` 随后返回已有记录。键仅在记录保留期间占用；prune 或内存驱逐后可复用于新任务。复用键下的不同请求会被 `StoreError::IdempotencyConflict` 拒绝，完全相同的重放则返回原记录，即使配置容量此后已降低。键最长 256 UTF-8 字节。
+`get_by_idempotency_key` 仍适合只读查询，返回不含 payload 的 `TaskSummary`，但不能替代重试时的提交。键仅在记录保留期间占用；prune 或内存驱逐后可复用于新任务。保留中的键若对应不同请求，会被 `StoreError::IdempotencyConflict` 拒绝；完全相同的重放则返回原记录，即使配置容量此后已降低。键最长 256 UTF-8 字节。
 
 若要列出某租户的全部导入而非单个任务，按 `correlation_key` 过滤：
 

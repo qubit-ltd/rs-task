@@ -31,9 +31,9 @@ use crate::store::TaskFuture;
 /// - **`Sync`**: shared references (`&self`) must be safe across threads
 ///   because concurrent attempts use one handler object.
 /// - **`Send`**: handler state must be safe to move onto worker threads.
-/// - **`run` futures must be `Send`**: [`TaskFuture`] is
-///   `Pin<Box<dyn Future<Output = T> + Send + 'a>>`, so the returned future is
-///   polled on the runtime's workers.
+/// - **`run` futures must be `Send`**: [`TaskFuture`] is `Pin<Box<dyn
+///   Future<Output = T> + Send + 'a>>`, so the returned future is polled on the
+///   runtime's workers.
 ///
 /// Treat each implementation as a **process-wide singleton** for its
 /// descriptor, not as per-task state:
@@ -41,10 +41,9 @@ use crate::store::TaskFuture;
 /// - Share dependencies through `Arc`, pools, and other already synchronized
 ///   handles (for example `Arc<dyn ImportRepository>`).
 /// - Keep per-attempt data in the payload, [`TaskContext`], locals inside the
-///   async block, or internal maps keyed by `task_id` with appropriate
-///   locking.
-/// - Do not store "the task currently running" in unsynchronized mutable
-///   fields on the handler struct; that races when two tasks run together.
+///   async block, or internal maps keyed by `task_id` with appropriate locking.
+/// - Do not store "the task currently running" in unsynchronized mutable fields
+///   on the handler struct; that races when two tasks run together.
 ///
 /// # Examples
 ///
