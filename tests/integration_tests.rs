@@ -2045,7 +2045,6 @@ async fn test_memory_store_accepts_retry_deadlines_only_while_queued() {
     assert_eq!(running.retry_not_before_ms, None);
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
