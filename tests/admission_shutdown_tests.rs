@@ -198,17 +198,17 @@ async fn test_scheduler_panic_retains_owner_until_started_attempt_finishes() {
     let store = Arc::new(controlled_store);
     let service = TaskExecutionServiceBuilder::default()
         .store(store.clone())
-        .max_running_tasks(NonZeroUsize::new(1).unwrap())
+        .max_running_tasks(NonZeroUsize::new(1).expect("running limit is positive"))
         .policy(Arc::new(PanicAfterFirstPolicy(AtomicUsize::new(0))))
         .register_handler(handler)
-        .unwrap()
+        .expect("handler registers")
         .build()
         .await
-        .unwrap();
+        .expect("service builds");
     service
         .submit(test_keyed(TaskRequest::new("held-after-panic", "1", Vec::new())))
         .await
-        .unwrap();
+        .expect("first task is accepted");
     time::timeout(Duration::from_secs(2), started_rx)
         .await
         .expect("execution starts")
@@ -216,7 +216,7 @@ async fn test_scheduler_panic_retains_owner_until_started_attempt_finishes() {
     service
         .submit(test_keyed(TaskRequest::new("held-after-panic", "1", Vec::new())))
         .await
-        .unwrap();
+        .expect("second task is accepted");
 
     time::timeout(Duration::from_secs(2), async {
         while service.last_scheduler_error().is_none() {
@@ -1504,8 +1504,8 @@ async fn test_shutdown_until_times_out_without_stopping_drain_coordinator() {
         service
             .get(accepted.id)
             .await
-            .expect("record remains readable")
-            .unwrap()
+            .expect("record lookup succeeds")
+            .expect("running record remains retained")
             .state,
         TaskState::Running
     );
@@ -1634,13 +1634,18 @@ async fn test_shutdown_until_keeps_sqlite_owner_until_drain_finishes() {
             .await,
         Err(TaskServiceError::ShutdownTimedOut)
     ));
-    assert!(TaskExecutionServiceBuilder::recoverable_sqlite(&path).is_err());
+    assert!(matches!(
+        TaskExecutionServiceBuilder::recoverable_sqlite(&path),
+        Err(qubit_task::service::TaskServiceBuildError::Store(
+            StoreError::OwnerConflict
+        ))
+    ));
     assert_eq!(
         service
             .get(accepted.id)
             .await
-            .expect("running record remains readable")
-            .unwrap()
+            .expect("running record lookup succeeds")
+            .expect("record remains retained")
             .state,
         TaskState::Running
     );
@@ -2247,7 +2252,6 @@ async fn test_shutdown_statistics_failure_wakes_waiter_with_store_diagnostic() {
     );
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {
