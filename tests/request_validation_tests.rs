@@ -6,7 +6,6 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::sync::Arc;
-use std::time::Duration;
 
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -33,7 +32,6 @@ use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 use tokio::test as tokio_test;
-use tokio::time;
 
 struct ValidationHandler;
 
@@ -264,18 +262,15 @@ async fn test_submit_rejects_cpu_request_above_capacity() {
 #[tokio_test]
 async fn test_submit_accepts_valid_request() {
     let service = create_service().await;
-    let record = time::timeout(Duration::from_secs(15), service.submit(test_keyed(valid_request())))
+    let record = service
+        .submit(test_keyed(valid_request()))
         .await
-        .expect("valid request submission completes")
         .expect("valid request is accepted");
 
     assert_eq!(record.request.task_type, "validation");
     assert_eq!(record.request.handler_version, "1");
     assert_eq!(record.request.payload, b"payload");
-    time::timeout(Duration::from_secs(15), service.shutdown())
-        .await
-        .expect("service shutdown completes")
-        .expect("service shuts down");
+    service.shutdown().await.expect("service shuts down");
 }
 
 struct OversizedDiagnosticHandler;
@@ -371,7 +366,10 @@ async fn test_exact_request_limits_are_accepted() {
         .await
         .expect("boundary request is accepted");
     assert_eq!(accepted.state, TaskState::Queued);
-    assert!(service.wait(accepted.id).await.is_err());
+    assert!(matches!(
+        service.wait(accepted.id).await,
+        Err(TaskServiceError::Blocked)
+    ));
 
     let mut metadata_boundary = TaskRequest::new("metadata", "1", Vec::new());
     metadata_boundary.metadata.insert("k".repeat(128), "v".repeat(4_096));
@@ -379,7 +377,10 @@ async fn test_exact_request_limits_are_accepted() {
         .submit(test_keyed(metadata_boundary))
         .await
         .expect("metadata entry boundaries are accepted");
-    assert!(service.wait(accepted.id).await.is_err());
+    assert!(matches!(
+        service.wait(accepted.id).await,
+        Err(TaskServiceError::Blocked)
+    ));
     service.shutdown().await.expect("service shuts down");
 }
 
@@ -426,7 +427,6 @@ async fn test_each_request_limit_is_enforced_before_acceptance() {
     service.shutdown().await.expect("service shuts down");
 }
 
-#[allow(dead_code)]
 fn test_keyed(mut request: TaskRequest) -> TaskRequest {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if request.idempotency_key.is_none() {

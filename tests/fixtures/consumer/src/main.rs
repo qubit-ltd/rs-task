@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+//! Exercises a separately compiled task handler through the public service API.
+
 use std::sync::Arc;
 
 use qubit_task::TaskExecutionServiceBuilder;

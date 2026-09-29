@@ -7,6 +7,7 @@
 // =============================================================================
 use qubit_task::model::MAX_TASK_QUERY_LIMIT;
 use qubit_task::model::TaskId;
+use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRecord;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
@@ -19,7 +20,9 @@ fn test_task_query_limit_constant() {
 
 #[test]
 fn test_task_summary_copies_lifecycle_without_payload() {
-    let request = TaskRequest::new("large", "v1", vec![0x5a; 16 * 1024 * 1024]);
+    let mut request = TaskRequest::new("summary", "v1", b"payload".to_vec());
+    request.correlation_key = Some("trace-1".into());
+    request.idempotency_key = Some("request-1".into());
     let record = TaskRecord {
         id: TaskId::generate(),
         request,
@@ -28,21 +31,31 @@ fn test_task_summary_copies_lifecycle_without_payload() {
         },
         state_version: 7,
         attempt: 3,
-        retry_not_before_ms: None,
+        retry_not_before_ms: Some(13),
         accepted_at_ms: 11,
         started_at_ms: Some(12),
-        finished_at_ms: None,
+        finished_at_ms: Some(14),
         assigned_resources: vec!["cpu-0".into()],
-        output: None,
-        cancel_requested: false,
+        output: Some(TaskOutput {
+            summary: b"done".to_vec(),
+        }),
+        cancel_requested: true,
     };
     let summary = record.summary();
     assert_eq!(summary.id, record.id);
     assert_eq!(summary.state, record.state);
     assert_eq!(summary.state_version, record.state_version);
     assert_eq!(summary.attempt, record.attempt);
+    assert_eq!(summary.retry_not_before_ms, record.retry_not_before_ms);
     assert_eq!(summary.accepted_at_ms, record.accepted_at_ms);
+    assert_eq!(summary.started_at_ms, record.started_at_ms);
+    assert_eq!(summary.finished_at_ms, record.finished_at_ms);
+    assert_eq!(summary.assigned_resources, record.assigned_resources);
+    assert_eq!(summary.output, record.output);
+    assert_eq!(summary.cancel_requested, record.cancel_requested);
     assert_eq!(summary.request.task_type, record.request.task_type);
+    assert_eq!(summary.request.handler_version, record.request.handler_version);
     assert_eq!(summary.request.resources, record.request.resources);
     assert_eq!(summary.request.correlation_key, record.request.correlation_key);
+    assert_eq!(summary.request.idempotency_key, record.request.idempotency_key);
 }

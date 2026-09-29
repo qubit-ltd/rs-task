@@ -29,7 +29,12 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
         .expect("identical request replays");
     assert!(matches!(replay, AcceptOutcome::Existing(existing) if existing.id == id));
     assert_eq!(
-        store.get_summary(id).await.expect("summary read succeeds").unwrap().id,
+        store
+            .get_summary(id)
+            .await
+            .expect("summary read succeeds")
+            .expect("accepted task has a summary")
+            .id,
         id
     );
     assert_eq!(
@@ -37,7 +42,7 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
             .get_summary_by_idempotency_key("contract-key")
             .await
             .expect("idempotency summary read succeeds")
-            .unwrap()
+            .expect("accepted idempotency key has a summary")
             .id,
         id
     );
