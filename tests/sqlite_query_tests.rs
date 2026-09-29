@@ -391,3 +391,167 @@ async fn test_schema_index_installation_failure_is_atomic() {
         .expect("failed schema version reads");
     assert_eq!(version, 3);
 }
+
+/// Returns one named index's persisted definition for atomic rebuild
+/// assertions.
+fn unfinished_index_sql(connection: &Connection) -> String {
+    connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='tasks_unfinished_accepted_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("partial index definition reads")
+}
+
+/// Old version-three definitions are rebuilt once while every persisted value
+/// survives.
+#[tokio::test]
+async fn test_schema_rebuilds_old_unfinished_index_once_without_data_changes() {
+    let database = TestDatabase::new();
+    let store = SqliteTaskStore::open(&database.path).expect("index fixture opens");
+    assert!(matches!(
+        store
+            .accept(TaskId::generate(), TaskRequest::new("reindex", "1", vec![0, 255]))
+            .await
+            .expect("fixture accepts"),
+        AcceptOutcome::Accepted(_)
+    ));
+    drop(store);
+    let connection = Connection::open(&database.path).expect("old index fixture opens");
+    connection.execute_batch("DROP INDEX tasks_unfinished_accepted_id; CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at,id) WHERE state_kind IN ('Queued','Running'); INSERT INTO metadata VALUES ('reindex-sentinel',17);").expect("old index definition seeds");
+    let rows_before = task_rows(&connection);
+    let metadata_before = metadata(&connection);
+    drop(connection);
+    let mut first_schema_version = None;
+    let mut first_definition = None;
+    for _ in 0..2 {
+        let store = SqliteTaskStore::open(&database.path).expect("old definition upgrades");
+        drop(store);
+        let connection = Connection::open(&database.path).expect("upgraded index inspects");
+        assert_eq!(task_rows(&connection), rows_before);
+        assert_eq!(metadata(&connection), metadata_before);
+        assert_indexes(&connection);
+        let definition = unfinished_index_sql(&connection);
+        assert!(
+            definition.contains("WHERE +state_kind IN ('Queued','Running')"),
+            "recovery index must match unary query predicate: {definition}"
+        );
+        let schema_version: i64 = connection
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .expect("DDL revision reads");
+        if let Some(first) = first_schema_version {
+            assert_eq!(schema_version, first, "second open must execute no index DDL");
+        } else {
+            first_schema_version = Some(schema_version);
+            first_definition = Some(definition.clone());
+        }
+        assert_eq!(Some(definition), first_definition);
+        let user_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("user version reads");
+        assert_eq!(user_version, 3);
+        let statistics: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name LIKE 'sqlite_stat%')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("statistics absence reads");
+        assert!(!statistics);
+    }
+}
+
+/// Memory history filtering and SQLite recovery agree on every public state
+/// variant.
+#[tokio::test]
+async fn test_recovery_unary_membership_matches_memory_for_all_task_states() {
+    use qubit_task::model::TaskQuery;
+    use qubit_task::model::TaskState;
+    use qubit_task::model::TaskStateKind;
+    use qubit_task::model::TransitionCommand;
+    use qubit_task::store::MemoryTaskStore;
+    let database = TestDatabase::new();
+    let sqlite = SqliteTaskStore::open(&database.path).expect("state membership SQLite opens");
+    let memory = MemoryTaskStore::new(10);
+    let targets = [
+        TaskState::Queued,
+        TaskState::Running,
+        TaskState::Blocked { reason: "test".into() },
+        TaskState::Succeeded,
+        TaskState::Failed {
+            category: "test".into(),
+            message: "test".into(),
+        },
+        TaskState::Panicked { message: "test".into() },
+        TaskState::Cancelled,
+    ];
+    let mut expected = Vec::new();
+    for (index, target) in targets.into_iter().enumerate() {
+        let id = task_id(index + 1);
+        if matches!(target, TaskState::Queued | TaskState::Running) {
+            expected.push(id);
+        }
+        for store in [&memory as &dyn TaskStore, &sqlite as &dyn TaskStore] {
+            let record = match store
+                .accept(id, TaskRequest::new("state-membership", "1", vec![]))
+                .await
+                .expect("membership accepts")
+            {
+                AcceptOutcome::Accepted(record) => record,
+                AcceptOutcome::Existing(_) => panic!("membership IDs are unique"),
+            };
+            let mut current = record.summary();
+            let states = if matches!(
+                target,
+                TaskState::Succeeded | TaskState::Failed { .. } | TaskState::Panicked { .. }
+            ) {
+                vec![TaskState::Running, target.clone()]
+            } else if target == TaskState::Queued {
+                Vec::new()
+            } else {
+                vec![target.clone()]
+            };
+            for state in states {
+                current = store
+                    .transition(TransitionCommand {
+                        id,
+                        expected_version: current.state_version,
+                        expected_attempt: current.attempt,
+                        state,
+                        retry_not_before_ms: None,
+                        output: None,
+                        assigned_resources: Vec::new(),
+                        cancel_requested: false,
+                    })
+                    .await
+                    .expect("membership transitions");
+            }
+        }
+    }
+    let mut memory_ids = memory
+        .list(TaskQuery {
+            states: vec![TaskStateKind::Queued, TaskStateKind::Running],
+            limit: 256,
+            ..TaskQuery::default()
+        })
+        .await
+        .expect("memory unfinished filter reads")
+        .records
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    let mut sqlite_ids = sqlite
+        .scan_unfinished(None)
+        .await
+        .expect("SQLite unfinished recovery reads")
+        .tasks
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    expected.sort();
+    memory_ids.sort();
+    sqlite_ids.sort();
+    assert_eq!(memory_ids, expected);
+    assert_eq!(sqlite_ids, memory_ids);
+}

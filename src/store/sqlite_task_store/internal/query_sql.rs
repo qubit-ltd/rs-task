@@ -85,7 +85,13 @@ pub(in crate::store::sqlite_task_store) fn build_recovery_query(
         params: Vec::new(),
     };
     let mut has_predicate = false;
-    append_predicate(&mut built.sql, &mut has_predicate, "state_kind IN ('Queued','Running')");
+    // Unary plus preserves TEXT membership while excluding unordered probes
+    // of the full state indexes. The partial index uses this exact predicate.
+    append_predicate(
+        &mut built.sql,
+        &mut has_predicate,
+        "+state_kind IN ('Queued','Running')",
+    );
     if let Some(after) = after {
         append_cursor(
             &mut built,
@@ -158,7 +164,6 @@ mod tests {
     use super::build_history_query;
     use super::build_recovery_query;
     use crate::model::TaskCursor;
-    use crate::model::TaskId;
     use crate::model::TaskQuery;
     use crate::model::TaskStateKind;
     use crate::store::StoreError;
@@ -202,7 +207,7 @@ mod tests {
     fn deep_cursor() -> TaskCursor {
         TaskCursor {
             accepted_at_ms: 1800,
-            id: TaskId::generate(),
+            id: serde_json::from_str("\"ffffffff-ffff-ffff-ffff-ffffffffffff\"").expect("fixed cursor ID decodes"),
         }
     }
 
@@ -258,7 +263,7 @@ mod tests {
     /// encodings.
     #[test]
     fn test_query_sql_recovery_uses_partial_index() {
-        let connection = query_database();
+        let connection = recovery_database_without_statistics(2000, 0);
         let built = build_recovery_query(Some(deep_cursor())).expect("recovery query builds");
         assert!(built.sql.contains("state_kind IN ('Queued','Running')"));
         assert_eq!(TaskStateKind::Queued.as_str(), "Queued");
@@ -372,5 +377,157 @@ mod tests {
                 .params[0],
             Value::Integer(i64::MAX)
         );
+    }
+
+    /// Initializes fresh, schema-2 or old schema-3 indexes without statistics.
+    fn recovery_database_without_statistics(size: usize, version: i64) -> Connection {
+        let mut connection = Connection::open_in_memory().expect("unanalysed database opens");
+        if version == 2 {
+            connection.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL,state_kind TEXT NOT NULL,accepted_at INTEGER NOT NULL,correlation_key TEXT,idempotency_key TEXT UNIQUE,request_json TEXT NOT NULL,record_format_version INTEGER NOT NULL DEFAULT 2,lifecycle_json TEXT NOT NULL); CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL,value INTEGER NOT NULL); PRAGMA user_version=2;").expect("legacy schema two creates");
+        } else if version == 3 {
+            connection.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL,state_kind TEXT NOT NULL,accepted_at INTEGER NOT NULL,correlation_key TEXT,idempotency_key TEXT UNIQUE,request_info_json TEXT NOT NULL,payload BLOB NOT NULL,record_format_version INTEGER NOT NULL DEFAULT 3,lifecycle_json TEXT NOT NULL); CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL,value INTEGER NOT NULL); CREATE INDEX tasks_state_accepted ON tasks(state_kind,accepted_at); CREATE INDEX tasks_accepted_id ON tasks(accepted_at,id); CREATE INDEX tasks_correlation_accepted_id ON tasks(correlation_key,accepted_at,id); CREATE INDEX tasks_state_accepted_id ON tasks(state_kind,accepted_at,id); CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at,id) WHERE state_kind IN ('Queued','Running'); PRAGMA user_version=3;").expect("old schema three creates");
+        }
+        if version != 3 {
+            initialize_schema(&mut connection).expect("schema initializes or upgrades");
+        }
+        connection.execute(&format!("WITH RECURSIVE fixture(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM fixture WHERE n<{size}) INSERT INTO tasks (id,state_kind,accepted_at,request_info_json,payload,lifecycle_json) SELECT printf('00000000-0000-0000-0000-%012x',n),CASE WHEN n%10=0 THEN 'Queued' WHEN n%10=1 THEN 'Running' ELSE 'Succeeded' END,n,'{{}}',X'','{{}}' FROM fixture"), []).expect("VM fixture creates");
+        if version == 3 {
+            let started = std::time::Instant::now();
+            initialize_schema(&mut connection).expect("populated old partial index upgrades");
+            eprintln!(
+                "old_v3_rows={size} index_rebuild_elapsed_us={}",
+                started.elapsed().as_micros()
+            );
+        }
+        let statistics: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name LIKE 'sqlite_stat%')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("statistics absence reads");
+        assert!(!statistics, "real initialization must not require ANALYZE");
+        connection
+    }
+
+    /// Executes the builder's complete prepared query and reads actual VM
+    /// counters.
+    fn recovery_vm_steps(connection: &Connection, after: Option<TaskCursor>) -> i32 {
+        let built = build_recovery_query(after).expect("recovery query builds");
+        let mut statement = connection.prepare(&built.sql).expect("VM query prepares");
+        let mut rows = statement.query(params_from_iter(built.params)).expect("VM query runs");
+        let mut count = 0;
+        while rows.next().expect("VM row steps").is_some() {
+            count += 1;
+        }
+        drop(rows);
+        assert_eq!(count, 257, "both sizes return the same full lookahead page");
+        statement.get_status(rusqlite::StatementStatus::VmStep)
+    }
+
+    /// Fresh and both upgrade paths use the ordered partial index without
+    /// ANALYZE.
+    #[test]
+    fn test_query_sql_recovery_fresh_and_upgraded_without_statistics() {
+        for version in [0, 2, 3] {
+            let connection = recovery_database_without_statistics(2000, version);
+            for after in [None, Some(deep_cursor())] {
+                let plan = explain(&connection, build_recovery_query(after).expect("query builds"));
+                eprintln!("version={version} after={after:?} plan={plan:?}");
+                assert!(
+                    plan.iter().any(|line| line.contains("tasks_unfinished_accepted_id")),
+                    "unanalysed recovery must use partial index: {plan:?}"
+                );
+                assert!(
+                    !plan.iter().any(|line| line.contains("TEMP B-TREE")),
+                    "recovery must avoid retained-history sorting: {plan:?}"
+                );
+                if after.is_some() {
+                    assert_search(&plan, "tasks_unfinished_accepted_id");
+                } else {
+                    assert!(
+                        plan.iter()
+                            .any(|line| line.contains("SCAN tasks USING INDEX tasks_unfinished_accepted_id"))
+                    );
+                }
+            }
+        }
+    }
+
+    /// Bounds real recovery VM work as retained history grows fivefold without
+    /// stats.
+    #[test]
+    fn test_query_sql_recovery_vm_work_without_statistics() {
+        for version in [0, 2, 3] {
+            let mut steps = Vec::new();
+            for size in [20_000, 100_000] {
+                let connection = recovery_database_without_statistics(size, version);
+                let first = recovery_vm_steps(&connection, None);
+                let after = Some(TaskCursor {
+                    accepted_at_ms: u64::try_from(size * 9 / 10).expect("fixture cursor fits"),
+                    id: serde_json::from_str("\"ffffffff-ffff-ffff-ffff-ffffffffffff\"")
+                        .expect("fixed cursor ID decodes"),
+                });
+                let deep = recovery_vm_steps(&connection, after);
+                eprintln!("version={version} size={size} first_steps={first} deep_steps={deep}");
+                assert!(
+                    first <= 8000 && deep <= 8000,
+                    "257 rows must have bounded work: first={first}, deep={deep}"
+                );
+                steps.push(deep);
+            }
+            let [small, large] = steps.as_slice() else {
+                panic!("two sizes measured")
+            };
+            assert!(
+                *large <= *small * 3,
+                "fivefold retained history must not cause linear VM growth: {steps:?}"
+            );
+        }
+    }
+
+    /// Unary plus preserves exact TEXT membership, including unknown/boundary
+    /// values.
+    #[test]
+    fn test_query_sql_recovery_unary_text_membership_is_unchanged() {
+        let connection = Connection::open_in_memory().expect("semantic probe opens");
+        connection
+            .execute_batch("CREATE TABLE states (value TEXT);")
+            .expect("TEXT state fixture creates");
+        for value in [
+            "Queued",
+            "Running",
+            "Blocked",
+            "Succeeded",
+            "Failed",
+            "Panicked",
+            "Cancelled",
+            "queued",
+            "Running ",
+            " Queued",
+            "Queued\0",
+            "Running\0",
+            "",
+            "0",
+            "1",
+            "未知",
+        ] {
+            connection
+                .execute("INSERT INTO states VALUES (?1)", [value])
+                .expect("TEXT value inserts");
+        }
+        let mut statement = connection
+            .prepare("SELECT value,value IN ('Queued','Running'),+value IN ('Queued','Running') FROM states")
+            .expect("membership comparison prepares");
+        for row in statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, bool>(2)?))
+            })
+            .expect("membership comparison runs")
+        {
+            let (value, old, new) = row.expect("membership comparison reads");
+            assert_eq!(new, old, "unary plus must preserve TEXT semantics for {value:?}");
+            assert_eq!(new, matches!(value.as_str(), "Queued" | "Running"));
+        }
     }
 }
