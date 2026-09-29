@@ -213,6 +213,8 @@ let service = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sql
 
 SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分列保存，摘要查询和状态转换不读取或解码 payload。schema 0/1/2 数据库在打开时以单个事务迁移到 schema 3，并保留任务与幂等索引；更高的未知 schema 版本或未知记录格式会明确报错。操作系统文件锁确保同一数据库不会同时由多个服务进程执行。构建器取得所有权并扫描未完成任务后才返回。数据库被占用或所选能力不支持恢复时，服务启动失败，不会自动回退到内存。找不到历史任务对应的处理器时，任务保留在存储中并置为 `Blocked`，构建仍可成功。
 
+原地升级时，先停止旧服务并等待 `shutdown()` 完成；`shutdown_until` 超时不表示排空已经结束。备份数据库，再部署新版本，并让新 store 实例打开同一个数据库。检查恢复出的任务摘要后再恢复接收。不要让新旧服务实例同时操作数据库。数据库应位于稳定、可信的目录中：SQLite 所有权锁文件位于数据库旁边，名称是在完整数据库文件名后追加 `.owner.lock`；存在多个硬链接的数据库会被拒绝。schema 0/1/2 迁移在单个事务中完成，并保留数据库内容。
+
 `capabilities()` 会报告实际装配的存储能力 `persistent_history` 和 `restart_recovery`。第三方存储也可以持久化历史，但不支持恢复任务。每个 `TaskStore` 实现都必须提供 `count_states()`，在一次聚合中统计所有保留记录。`stats()` 只调用一次该方法，并向调用者传播统计失败。状态计数和执行引擎资源快照先后读取，因此是时间相邻但非原子的两个快照。统计成本是一次聚合查询，不随历史分页数增长。
 
 `count_states()` 描述存储中的一个一致快照，但 future 返回时状态可能已经变化。需要等待状态变化的 provider 应先登记通知，再读取计数，并在唤醒后重新检查条件。`release_owner(epoch)` 是完成屏障：成功返回后，该 epoch 下先前受理的写操作都已结束，之后不会再提交。provider 必须等所有先前写操作结束后才解除所有权隔离；释放失败不能证明排空已完成。
@@ -305,6 +307,9 @@ provider receipt 表示 Redis 接受了发布命令，不表示订阅者已经�
 任务状态变更与事件发布没有事务绑定。若要求状态与消息原子提交，应使用事务性 outbox。
 文档 codec 与 provider 装配由 `cargo check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`
 编译；可用 `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml` 运行该示例。
+示例使用 `redis://127.0.0.1/`；实际发布时该地址必须能连接到 Redis 服务。只创建
+provider 并在没有发布事件时关闭服务，不能证明 Redis 连通。应在真实 Redis 服务上运行
+Redis 集成测试，以验证网络和 stream 行为。
 
 服务使用 `rs-event-bus` 的 `NotificationPublisher` 管理串行发布线程和有界队列，默认容量为 256。可通过
 `event_bus_buffer_capacity(NonZeroUsize)` 设置其他正数容量。状态转移只调用
@@ -387,6 +392,19 @@ let service = TaskExecutionServiceBuilder::in_memory()
 处理器用 `TaskRunError` 返回错误类别、诊断信息和是否可重试。不可重试错误进入 `Failed`；执行引擎报告的 panic 进入 `Panicked`，不再根据业务错误类别字符串推断。自动重试默认采用 1 秒起步、逐次翻倍、最高 60 秒的退避，可用 `TaskExecutionServiceBuilder::retry_policy(RetryPolicy::new(initial, maximum)?)` 配置。到期时间与排队状态一同持久化，重启后不会提前执行；`retry_blocked` 会清除到期时间并立即使任务可运行。队列满时任务进入 `Blocked`，不会突破队列上限。
 
 ## 从 0.5 及更早 API 迁移
+
+| 旧契约 | 0.6 契约 |
+| --- | --- |
+| 调用方指定任务 ID，或通过闭包形式的 `submit` 提交任务 | 进程内结果使用 `submit_local`；可重建任务使用带稳定幂等键的 `TaskRequest`；`TaskId` 由服务生成 |
+| 仅限制提交操作的在途名额 | 六种生命周期写操作共用 `max_inflight_operations`；超限返回 `OperationLimitExceeded` |
+| `StoredTaskPage<StoredTask>` 恢复分页 | 使用不含 payload 的 `RecoveryPage<TaskSummary>` |
+| `TaskQuery.states` 使用 `TaskState` | 改为 `Vec<TaskStateKind>` |
+| 调度策略接收完整 `TaskRequest` | `QueuedTask.resources` 只暴露资源需求 |
+| 旧版 `TaskStore` 契约 | 实现聚合 `count_states`、摘要读取、有界恢复预检和 `release_owner` 完成屏障 |
+| 事件通知代码耦合具体总线 | 依赖 `qubit-event-bus` 0.15，使用 `NotificationPublisher`，并将 provider `AdmissionOutcome` 结果映射到任务通知统计 |
+
+这些变化有意不保留兼容别名。请同时更新应用调用点和 provider 实现，部署前
+运行应用编译、恢复和关闭测试。
 
 0.6 将原先仅限制提交的名额替换为 `max_inflight_operations`，统一限制六种生命周期写操作；超限错误为 `TaskServiceError::OperationLimitExceeded`。同时移除了调用方指定任务 ID、用 `submit` 提交闭包、线程池专用构建配置和旧的
 `TaskHandle<R, E>`。进程内闭包改用 `submit_local`，并通过
