@@ -36,7 +36,9 @@ pub(super) fn spawn_attempt_finalizer(
     permit: sync::OwnedSemaphorePermit,
 ) -> JoinHandle<()> {
     let runtime_handle = core.runtime_handle.clone();
-    let guard = AttemptInFlightGuard { core_ref: Arc::downgrade(&core) };
+    let guard = AttemptInFlightGuard {
+        core_ref: Arc::downgrade(&core),
+    };
     runtime_handle.spawn(async move {
         let _guard = guard;
         let id = running.id;
@@ -44,11 +46,17 @@ pub(super) fn spawn_attempt_finalizer(
         let weak = Arc::downgrade(&core);
         let result = AssertUnwindSafe(async {
             finish_attempt(weak, running, receiver, permit).await;
-        }).catch_unwind().await;
+        })
+        .catch_unwind()
+        .await;
         if let Err(payload) = result {
-            record_store_fault(&core, format!(
-                "attempt finalizer panicked for {id}, attempt {attempt}: {}", panic_message(payload)
-            ));
+            record_store_fault(
+                &core,
+                format!(
+                    "attempt finalizer panicked for {id}, attempt {attempt}: {}",
+                    panic_message(payload)
+                ),
+            );
         }
     })
 }
@@ -61,8 +69,8 @@ mod tests {
     use tokio::runtime::Builder;
     use tokio::sync;
 
+    use super::super::retry_queue_reservation::RetryQueueReservation;
     use super::spawn_attempt_finalizer;
-    use super::super::RetryQueueReservation;
     use crate::TaskExecutionServiceBuilder;
     use crate::model::TaskId;
     use crate::model::TaskRequest;
@@ -71,17 +79,24 @@ mod tests {
     fn test_attempt_finalizer_supervisor_unpolled_drop_restores_resources() {
         let runtime = Builder::new_current_thread().enable_all().build().expect("runtime");
         let service = runtime.block_on(async {
-            let service = TaskExecutionServiceBuilder::in_memory().runtime_handle(tokio::runtime::Handle::current())
-                .build().await.expect("service");
+            let service = TaskExecutionServiceBuilder::in_memory()
+                .runtime_handle(tokio::runtime::Handle::current())
+                .build()
+                .await
+                .expect("service");
             service.shutdown().await.expect("scheduler stopped");
             service
         });
         let core = Arc::clone(&service.core);
         let id = TaskId::generate();
-        let _accepted = runtime.block_on(core.store.accept(id, TaskRequest::new("unpolled", "1", vec![]))).expect("accepted");
+        let _accepted = runtime
+            .block_on(core.store.accept(id, TaskRequest::new("unpolled", "1", vec![])))
+            .expect("accepted");
         let record = runtime.block_on(core.store.get(id)).expect("read").expect("record");
         let available = core.running_slots.available_permits();
-        let permit = Arc::clone(&core.running_slots).try_acquire_owned().expect("running slot");
+        let permit = Arc::clone(&core.running_slots)
+            .try_acquire_owned()
+            .expect("running slot");
         core.attempts_in_flight.fetch_add(1, Ordering::AcqRel);
         let (_sender, receiver) = sync::oneshot::channel();
         let finalizer = spawn_attempt_finalizer(Arc::clone(&core), record, receiver, permit);
@@ -93,7 +108,9 @@ mod tests {
 
         let reservation = RetryQueueReservation::try_new(&core).expect("retry slot");
         assert_eq!(core.queue_count.load(Ordering::Acquire), 1);
-        let unpolled = async move { let _reservation = reservation; };
+        let unpolled = async move {
+            let _reservation = reservation;
+        };
         drop(unpolled);
         assert_eq!(core.queue_count.load(Ordering::Acquire), 0);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -102,7 +119,9 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_eq!(core.queue_count.load(Ordering::Acquire), 0);
-        RetryQueueReservation::try_new(&core).expect("retry slot").commit_to_queue();
+        RetryQueueReservation::try_new(&core)
+            .expect("retry slot")
+            .commit_to_queue();
         assert_eq!(core.queue_count.load(Ordering::Acquire), 1);
     }
 }

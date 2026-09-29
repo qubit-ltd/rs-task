@@ -41,7 +41,6 @@ use tokio::sync;
 use tokio::test as tokio_test;
 use tokio::time;
 
-
 struct ShutdownStore {
     inner: MemoryTaskStore,
     panic_counts: AtomicBool,
@@ -54,13 +53,23 @@ struct ShutdownStore {
 impl ShutdownStore {
     /// Uses a fresh namespace with observable owner release and write barriers.
     fn new(panic_release: bool) -> Self {
-        Self { inner: MemoryTaskStore::new(16), panic_counts: AtomicBool::new(false), panic_release, count_barrier: sync::Barrier::new(2),
-            events: Mutex::new(vec![]), entered: sync::Notify::new(), write_gate: sync::Semaphore::new(0) }
+        Self {
+            inner: MemoryTaskStore::new(16),
+            panic_counts: AtomicBool::new(false),
+            panic_release,
+            count_barrier: sync::Barrier::new(2),
+            events: Mutex::new(vec![]),
+            entered: sync::Notify::new(),
+            write_gate: sync::Semaphore::new(0),
+        }
     }
 }
 impl TaskStore for ShutdownStore {
     fn capabilities(&self) -> StoreCapabilities {
-        StoreCapabilities { persistent_history: true, restart_recovery: true }
+        StoreCapabilities {
+            persistent_history: true,
+            restart_recovery: true,
+        }
     }
 
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
@@ -87,7 +96,9 @@ impl TaskStore for ShutdownStore {
                 let result = self.inner.transition(command).await;
                 self.events.lock().push("write finished");
                 result
-            } else { self.inner.transition(command).await }
+            } else {
+                self.inner.transition(command).await
+            }
         })
     }
 
@@ -128,11 +139,22 @@ impl TaskStore for ShutdownStore {
     }
 
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
-        { let _ = limit; Box::pin(async { Ok(false) }) }
+        {
+            let _ = limit;
+            Box::pin(async { Ok(false) })
+        }
     }
 
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
-        { let _ = cursor; Box::pin(async { Ok(RecoveryPage { tasks: vec![], next: None }) }) }
+        {
+            let _ = cursor;
+            Box::pin(async {
+                Ok(RecoveryPage {
+                    tasks: vec![],
+                    next: None,
+                })
+            })
+        }
     }
 
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
@@ -145,78 +167,143 @@ impl TaskStore for ShutdownStore {
     }
 }
 
-
-struct TestHandler { retry: bool }
+struct TestHandler {
+    retry: bool,
+}
 impl TaskHandler for TestHandler {
     fn descriptor(&self) -> TaskHandlerDescriptor {
-        TaskHandlerDescriptor { task_type: "finalizer".into(), version: "1".into() }
+        TaskHandlerDescriptor {
+            task_type: "finalizer".into(),
+            version: "1".into(),
+        }
     }
     fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             if self.retry {
-                Err(qubit_task::model::TaskRunError { category: "retry".into(), message: "retry".into(), retryable: true })
-            } else { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) }
+                Err(qubit_task::model::TaskRunError {
+                    category: "retry".into(),
+                    message: "retry".into(),
+                    retryable: true,
+                })
+            } else {
+                Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            }
         })
     }
 }
 
-
 #[tokio_test]
 async fn test_shutdown_count_panic_reaches_shared_result() {
     let store = Arc::new(ShutdownStore::new(false));
-    let service = TaskExecutionServiceBuilder::in_memory().runtime_handle(tokio::runtime::Handle::current()).store(store.clone()).build().await.expect("service");
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(tokio::runtime::Handle::current())
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service");
     store.panic_counts.store(true, Ordering::Release);
     let (first, second) = tokio::join!(
         service.shutdown_until(time::Instant::now() + Duration::from_secs(1)),
-        service.shutdown_until(time::Instant::now() + Duration::from_secs(1)));
-    assert!(matches!(&first, Err(TaskServiceError::StoreUnavailable(message)) if message.contains("count panic")), "{first:?}");
-    assert_eq!(first.expect_err("fault").to_string(), second.expect_err("same fault").to_string());
+        service.shutdown_until(time::Instant::now() + Duration::from_secs(1))
+    );
+    assert!(
+        matches!(&first, Err(TaskServiceError::StoreUnavailable(message)) if message.contains("count panic")),
+        "{first:?}"
+    );
+    assert_eq!(
+        first.expect_err("fault").to_string(),
+        second.expect_err("same fault").to_string()
+    );
     assert_eq!(*store.events.lock(), vec!["release"]);
 }
 
 #[tokio_test]
 async fn test_shutdown_owner_release_panic_is_shared_and_not_retried() {
     let store = Arc::new(ShutdownStore::new(true));
-    let service = TaskExecutionServiceBuilder::in_memory().runtime_handle(tokio::runtime::Handle::current()).store(store.clone()).build().await.expect("service");
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(tokio::runtime::Handle::current())
+        .store(store.clone())
+        .build()
+        .await
+        .expect("service");
     let (first, second) = tokio::join!(
         service.shutdown_until(time::Instant::now() + Duration::from_secs(1)),
-        service.shutdown_until(time::Instant::now() + Duration::from_secs(1)));
-    assert!(matches!(&first, Err(TaskServiceError::StoreUnavailable(message)) if message.contains("owner release panic")), "{first:?}");
-    assert_eq!(first.expect_err("fault").to_string(), second.expect_err("same fault").to_string());
+        service.shutdown_until(time::Instant::now() + Duration::from_secs(1))
+    );
+    assert!(
+        matches!(&first, Err(TaskServiceError::StoreUnavailable(message)) if message.contains("owner release panic")),
+        "{first:?}"
+    );
+    assert_eq!(
+        first.expect_err("fault").to_string(),
+        second.expect_err("same fault").to_string()
+    );
     assert_eq!(*store.events.lock(), vec!["release"]);
 }
 
 #[tokio_test]
 async fn test_shutdown_fault_retains_owner_until_finalizer_write_finishes() {
     let store = Arc::new(ShutdownStore::new(true));
-    let service = TaskExecutionServiceBuilder::in_memory().runtime_handle(tokio::runtime::Handle::current()).store(store.clone())
-        .register_handler(Arc::new(TestHandler { retry: false })).expect("handler")
-        .build().await.expect("service");
-    service.submit(TaskRequest::new("finalizer", "1", vec![]).with_idempotency_key("finalizer")).await.expect("accepted");
-    time::timeout(Duration::from_secs(1), store.entered.notified()).await.expect("finalizer writing");
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(tokio::runtime::Handle::current())
+        .store(store.clone())
+        .register_handler(Arc::new(TestHandler { retry: false }))
+        .expect("handler")
+        .build()
+        .await
+        .expect("service");
+    service
+        .submit(TaskRequest::new("finalizer", "1", vec![]).with_idempotency_key("finalizer"))
+        .await
+        .expect("accepted");
+    time::timeout(Duration::from_secs(1), store.entered.notified())
+        .await
+        .expect("finalizer writing");
     store.panic_counts.store(true, Ordering::Release);
-    assert!(matches!(service.shutdown_until(time::Instant::now() + Duration::from_millis(30)).await,
-        Err(TaskServiceError::ShutdownTimedOut)));
+    assert!(matches!(
+        service
+            .shutdown_until(time::Instant::now() + Duration::from_millis(30))
+            .await,
+        Err(TaskServiceError::ShutdownTimedOut)
+    ));
     assert_eq!(*store.events.lock(), vec!["write entered"]);
     store.write_gate.add_permits(1);
-    let result = service.shutdown_until(time::Instant::now() + Duration::from_secs(1)).await;
-    assert!(matches!(result, Err(TaskServiceError::StoreUnavailable(ref message))
-        if message.contains("count panic") && message.contains("owner release panic")), "{result:?}");
+    let result = service
+        .shutdown_until(time::Instant::now() + Duration::from_secs(1))
+        .await;
+    assert!(
+        matches!(result, Err(TaskServiceError::StoreUnavailable(ref message))
+        if message.contains("count panic") && message.contains("owner release panic")),
+        "{result:?}"
+    );
     assert_eq!(*store.events.lock(), vec!["write entered", "write finished", "release"]);
 }
 
 #[tokio_test]
 async fn test_shutdown_permanently_blocked_store_retains_owner() {
     let store = Arc::new(ShutdownStore::new(false));
-    let service = TaskExecutionServiceBuilder::in_memory().runtime_handle(tokio::runtime::Handle::current())
-        .store(store.clone()).register_handler(Arc::new(TestHandler { retry: false })).expect("handler")
-        .build().await.expect("service");
-    service.submit(TaskRequest::new("finalizer", "1", vec![]).with_idempotency_key("blocked"))
-        .await.expect("accepted");
-    time::timeout(Duration::from_secs(1), store.entered.notified()).await.expect("write entered");
+    let service = TaskExecutionServiceBuilder::in_memory()
+        .runtime_handle(tokio::runtime::Handle::current())
+        .store(store.clone())
+        .register_handler(Arc::new(TestHandler { retry: false }))
+        .expect("handler")
+        .build()
+        .await
+        .expect("service");
+    service
+        .submit(TaskRequest::new("finalizer", "1", vec![]).with_idempotency_key("blocked"))
+        .await
+        .expect("accepted");
+    time::timeout(Duration::from_secs(1), store.entered.notified())
+        .await
+        .expect("write entered");
     store.panic_counts.store(true, Ordering::Release);
-    assert!(matches!(service.shutdown_until(time::Instant::now() + Duration::from_millis(30)).await,
-        Err(TaskServiceError::ShutdownTimedOut)));
+    assert!(matches!(
+        service
+            .shutdown_until(time::Instant::now() + Duration::from_millis(30))
+            .await,
+        Err(TaskServiceError::ShutdownTimedOut)
+    ));
     assert_eq!(*store.events.lock(), vec!["write entered"]);
     assert!(service.last_store_error().is_some());
     // The gate intentionally remains closed. Runtime teardown cancels this
@@ -269,7 +356,6 @@ mod notification_panic {
             )
         }
 
-
         fn publish(&self, _message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
             panic!("injected notification publisher panic");
         }
@@ -290,15 +376,25 @@ mod notification_panic {
 
     #[tokio::test]
     async fn test_shutdown_provider_publish_panic_preserves_shared_result() {
-        let bus = EventBus::from_spi(ProviderId::new("panic-publisher").expect("provider"), Arc::new(PanickingPublisher))
-            .expect("event bus");
-        let service = TaskExecutionServiceBuilder::in_memory().runtime_handle(tokio::runtime::Handle::current())
-            .event_bus(bus).build().await.expect("service");
-        service.submit(TaskRequest::new("unhandled", "1", vec![]).with_idempotency_key("notification"))
-            .await.expect("accepted");
+        let bus = EventBus::from_spi(
+            ProviderId::new("panic-publisher").expect("provider"),
+            Arc::new(PanickingPublisher),
+        )
+        .expect("event bus");
+        let service = TaskExecutionServiceBuilder::in_memory()
+            .runtime_handle(tokio::runtime::Handle::current())
+            .event_bus(bus)
+            .build()
+            .await
+            .expect("service");
+        service
+            .submit(TaskRequest::new("unhandled", "1", vec![]).with_idempotency_key("notification"))
+            .await
+            .expect("accepted");
         let (first, second) = tokio::join!(
             service.shutdown_until(time::Instant::now() + Duration::from_secs(2)),
-            service.shutdown_until(time::Instant::now() + Duration::from_secs(2)));
+            service.shutdown_until(time::Instant::now() + Duration::from_secs(2))
+        );
         first.expect("provider publication panic is isolated by the event bus");
         second.expect("same successful close result");
         assert!(service.last_store_error().is_none());

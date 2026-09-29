@@ -44,7 +44,15 @@ use tokio::test as tokio_test;
 use tokio::time;
 
 #[derive(Clone, Copy)]
-enum Mode { Method, Transition, Retry, NonString, Conflict, Summary, Healthy }
+enum Mode {
+    Method,
+    Transition,
+    Retry,
+    NonString,
+    Conflict,
+    Summary,
+    Healthy,
+}
 
 struct PanicStore {
     inner: MemoryTaskStore,
@@ -55,10 +63,16 @@ struct PanicStore {
 }
 
 impl PanicStore {
-    /// Creates an isolated store whose finalizer failure is selected explicitly.
+    /// Creates an isolated store whose finalizer failure is selected
+    /// explicitly.
     fn new(mode: Mode) -> Self {
-        Self { inner: MemoryTaskStore::new(16), mode, finalizations: AtomicUsize::new(0),
-            summary_panic: AtomicBool::new(false), entered: sync::Notify::new() }
+        Self {
+            inner: MemoryTaskStore::new(16),
+            mode,
+            finalizations: AtomicUsize::new(0),
+            summary_panic: AtomicBool::new(false),
+            entered: sync::Notify::new(),
+        }
     }
 }
 impl TaskStore for PanicStore {
@@ -152,17 +166,27 @@ impl TaskStore for PanicStore {
     }
 }
 
-
-struct TestHandler { retry: bool }
+struct TestHandler {
+    retry: bool,
+}
 impl TaskHandler for TestHandler {
     fn descriptor(&self) -> TaskHandlerDescriptor {
-        TaskHandlerDescriptor { task_type: "finalizer".into(), version: "1".into() }
+        TaskHandlerDescriptor {
+            task_type: "finalizer".into(),
+            version: "1".into(),
+        }
     }
     fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             if self.retry {
-                Err(qubit_task::model::TaskRunError { category: "retry".into(), message: "retry".into(), retryable: true })
-            } else { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) }
+                Err(qubit_task::model::TaskRunError {
+                    category: "retry".into(),
+                    message: "retry".into(),
+                    retryable: true,
+                })
+            } else {
+                Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+            }
         })
     }
 }
@@ -170,56 +194,122 @@ impl TaskHandler for TestHandler {
 /// Observes the public fault after a handshake proves finalization was polled.
 async fn assert_finalizer_fault(mode: Mode) {
     let store = Arc::new(PanicStore::new(mode));
-    let service = TaskExecutionServiceBuilder::default().runtime_handle(tokio::runtime::Handle::current()).store(store.clone())
-        .register_handler(Arc::new(TestHandler { retry: matches!(mode, Mode::Retry) })).expect("handler")
-        .build().await.expect("service");
-    let task = service.submit(TaskRequest::new("finalizer", "1", vec![]).with_idempotency_key("finalizer")).await.expect("accepted");
-    time::timeout(Duration::from_secs(2), store.entered.notified()).await.expect("finalization entered");
+    let service = TaskExecutionServiceBuilder::default()
+        .runtime_handle(tokio::runtime::Handle::current())
+        .store(store.clone())
+        .register_handler(Arc::new(TestHandler {
+            retry: matches!(mode, Mode::Retry),
+        }))
+        .expect("handler")
+        .build()
+        .await
+        .expect("service");
+    let task = service
+        .submit(TaskRequest::new("finalizer", "1", vec![]).with_idempotency_key("finalizer"))
+        .await
+        .expect("accepted");
+    time::timeout(Duration::from_secs(2), store.entered.notified())
+        .await
+        .expect("finalization entered");
     let result = time::timeout(Duration::from_secs(1), service.wait(task.id)).await;
-    assert!(matches!(result, Ok(Err(TaskServiceError::StoreUnavailable(_)))), "wait must observe finalizer fault: {result:?}");
-    let retained = store.inner.get_summary(task.id).await.expect("raw store read").expect("retained task");
-    assert_eq!(retained.state, TaskState::Running, "a store panic must not fabricate a terminal state");
+    assert!(
+        matches!(result, Ok(Err(TaskServiceError::StoreUnavailable(_)))),
+        "wait must observe finalizer fault: {result:?}"
+    );
+    let retained = store
+        .inner
+        .get_summary(task.id)
+        .await
+        .expect("raw store read")
+        .expect("retained task");
+    assert_eq!(
+        retained.state,
+        TaskState::Running,
+        "a store panic must not fabricate a terminal state"
+    );
     let diagnostic = service.last_store_error().expect("fault latched");
     assert!(diagnostic.contains(&task.id.to_string()) && diagnostic.contains("attempt 1"));
-    assert!(matches!(time::timeout(Duration::from_secs(1), service.shutdown()).await,
-        Ok(Err(TaskServiceError::StoreUnavailable(_)))));
+    assert!(matches!(
+        time::timeout(Duration::from_secs(1), service.shutdown()).await,
+        Ok(Err(TaskServiceError::StoreUnavailable(_)))
+    ));
 }
 
 #[tokio_test]
-async fn test_finalizer_transition_panic() { assert_finalizer_fault(Mode::Transition).await; }
+async fn test_finalizer_transition_panic() {
+    assert_finalizer_fault(Mode::Transition).await;
+}
 #[tokio_test]
-async fn test_finalizer_retry_reservation_panic() { assert_finalizer_fault(Mode::Retry).await; }
+async fn test_finalizer_retry_reservation_panic() {
+    assert_finalizer_fault(Mode::Retry).await;
+}
 #[tokio_test]
-async fn test_finalizer_second_cas_panic() { assert_finalizer_fault(Mode::Conflict).await; }
+async fn test_finalizer_second_cas_panic() {
+    assert_finalizer_fault(Mode::Conflict).await;
+}
 #[tokio_test]
-async fn test_finalizer_summary_panic() { assert_finalizer_fault(Mode::Summary).await; }
+async fn test_finalizer_summary_panic() {
+    assert_finalizer_fault(Mode::Summary).await;
+}
 #[tokio_test]
-async fn test_finalizer_non_string_panic() { assert_finalizer_fault(Mode::NonString).await; }
+async fn test_finalizer_non_string_panic() {
+    assert_finalizer_fault(Mode::NonString).await;
+}
 
 #[tokio_test]
 async fn test_finalizer_panic_wakes_local_handle() {
-    let service = TaskExecutionServiceBuilder::default().runtime_handle(tokio::runtime::Handle::current()).store(Arc::new(PanicStore::new(Mode::Transition)))
-        .build().await.expect("service");
-    let handle = service.submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
-        value: (), summary: TaskOutput::default() }).await.expect("accepted");
-    assert!(matches!(time::timeout(Duration::from_secs(1), handle.result()).await,
-        Ok(Err(LocalTaskResultError::StoreUnavailable(_)))));
-    assert!(matches!(service.shutdown().await, Err(TaskServiceError::StoreUnavailable(_))));
+    let service = TaskExecutionServiceBuilder::default()
+        .runtime_handle(tokio::runtime::Handle::current())
+        .store(Arc::new(PanicStore::new(Mode::Transition)))
+        .build()
+        .await
+        .expect("service");
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("accepted");
+    assert!(matches!(
+        time::timeout(Duration::from_secs(1), handle.result()).await,
+        Ok(Err(LocalTaskResultError::StoreUnavailable(_)))
+    ));
+    assert!(matches!(
+        service.shutdown().await,
+        Err(TaskServiceError::StoreUnavailable(_))
+    ));
 }
 
 #[tokio_test]
 async fn test_handler_panic_and_success_keep_service_healthy() {
-    let service = TaskExecutionServiceBuilder::default().runtime_handle(tokio::runtime::Handle::current()).store(Arc::new(PanicStore::new(Mode::Healthy)))
-        .build().await.expect("service");
-    let handle = service.submit_local(|_| -> LocalTaskOutcome<(), std::io::Error> { panic!("handler panic") })
-        .await.expect("accepted");
-    assert!(matches!(service.wait(handle.task_id()).await.expect("terminal").state, TaskState::Panicked { .. }));
-    let handle = service.submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
-        value: (), summary: TaskOutput::default() }).await.expect("accepted");
+    let service = TaskExecutionServiceBuilder::default()
+        .runtime_handle(tokio::runtime::Handle::current())
+        .store(Arc::new(PanicStore::new(Mode::Healthy)))
+        .build()
+        .await
+        .expect("service");
+    let handle = service
+        .submit_local(|_| -> LocalTaskOutcome<(), std::io::Error> { panic!("handler panic") })
+        .await
+        .expect("accepted");
+    assert!(matches!(
+        service.wait(handle.task_id()).await.expect("terminal").state,
+        TaskState::Panicked { .. }
+    ));
+    let handle = service
+        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
+            value: (),
+            summary: TaskOutput::default(),
+        })
+        .await
+        .expect("accepted");
     handle.result().await.expect("finalized").expect("success");
     assert!(service.last_store_error().is_none());
     service.shutdown().await.expect("clean shutdown");
 }
 
 #[tokio_test]
-async fn test_finalizer_store_method_panic() { assert_finalizer_fault(Mode::Method).await; }
+async fn test_finalizer_store_method_panic() {
+    assert_finalizer_fault(Mode::Method).await;
+}

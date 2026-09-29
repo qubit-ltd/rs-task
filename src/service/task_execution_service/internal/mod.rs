@@ -37,8 +37,6 @@ mod transition;
 mod validation;
 
 pub(super) use attempt_finalizer::finish_attempt;
-use attempt_finalizer_supervisor::spawn_attempt_finalizer;
-use retry_queue_reservation::RetryQueueReservation;
 pub(super) use attempt_in_flight_guard::AttemptInFlightGuard;
 pub(super) use fault::finalize_local;
 pub(super) use fault::panic_message;

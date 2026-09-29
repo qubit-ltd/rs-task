@@ -156,9 +156,9 @@ fn bind_text(params: &mut Vec<Value>, value: String) -> String {
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
+    use rusqlite::StatementStatus;
     use rusqlite::params_from_iter;
     use rusqlite::types::Value;
-    use rusqlite::StatementStatus;
 
     use super::super::schema::initialize_schema;
     use super::QuerySql;
@@ -385,17 +385,18 @@ mod tests {
     fn history_vm_database(size: i64) -> (Connection, TaskCursor) {
         let mut connection = Connection::open_in_memory().expect("temporary database opens");
         initialize_schema(&mut connection).expect("schema initializes");
-        connection.execute_batch(&format!(
-            "WITH RECURSIVE fixture(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM fixture WHERE n<{size})
+        connection
+            .execute_batch(&format!(
+                "WITH RECURSIVE fixture(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM fixture WHERE n<{size})
              INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,request_info_json,payload,lifecycle_json)
              SELECT printf('00000000-0000-4000-8000-%012x',n),
                     CASE WHEN n%100=0 THEN 'Queued' WHEN n%100=1 THEN 'Running' ELSE 'Succeeded' END,
                     n,printf('key-%d',n%32),'{{}}',X'','{{}}' FROM fixture;"
-        )).expect("deterministic VM-step fixture inserts");
+            ))
+            .expect("deterministic VM-step fixture inserts");
         let position = size * 70 / 100;
         let id = format!("00000000-0000-4000-8000-{position:012x}");
-        let id = serde_json::from_str(&format!("\"{id}\""))
-            .expect("deterministic fixture ID decodes");
+        let id = serde_json::from_str(&format!("\"{id}\"")).expect("deterministic fixture ID decodes");
         (connection, TaskCursor::new(position as u64, id))
     }
 
@@ -403,9 +404,7 @@ mod tests {
     fn history_vm_steps(connection: &Connection, built: QuerySql) -> (i32, usize) {
         let mut statement = connection.prepare(&built.sql).expect("query prepares");
         statement.reset_status(StatementStatus::VmStep);
-        let mut rows = statement
-            .query(params_from_iter(built.params))
-            .expect("query executes");
+        let mut rows = statement.query(params_from_iter(built.params)).expect("query executes");
         let mut count = 0;
         while rows.next().expect("query advances").is_some() {
             count += 1;
@@ -425,9 +424,14 @@ mod tests {
                 (
                     "unfiltered",
                     build_history_query(
-                        &TaskQuery { after: Some(cursor), limit: 32, ..TaskQuery::default() },
+                        &TaskQuery {
+                            after: Some(cursor),
+                            limit: 32,
+                            ..TaskQuery::default()
+                        },
                         32,
-                    ).expect("unfiltered query builds"),
+                    )
+                    .expect("unfiltered query builds"),
                     "tasks_accepted_id",
                 ),
                 (
@@ -440,15 +444,25 @@ mod tests {
                             ..TaskQuery::default()
                         },
                         32,
-                    ).expect("correlation query builds"),
+                    )
+                    .expect("correlation query builds"),
                     "tasks_correlation_accepted_id",
                 ),
             ];
             let mut case_work = Vec::new();
             for (name, built, index) in cases {
-                let plan = explain(&connection, QuerySql { sql: built.sql.clone(), params: built.params.clone() });
+                let plan = explain(
+                    &connection,
+                    QuerySql {
+                        sql: built.sql.clone(),
+                        params: built.params.clone(),
+                    },
+                );
                 assert_search(&plan, index);
-                assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{name}: {plan:?}");
+                assert!(
+                    !plan.iter().any(|line| line.contains("TEMP B-TREE")),
+                    "{name}: {plan:?}"
+                );
                 let (steps, returned) = history_vm_steps(&connection, built);
                 assert!(steps > 0, "{name} query reports actual SQLite VM work");
                 assert_eq!(returned, 33, "bounded lookahead page");

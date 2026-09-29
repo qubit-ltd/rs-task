@@ -9,7 +9,8 @@ use std::sync::atomic::Ordering;
 
 use super::super::ServiceCore;
 
-/// Decrements the tracked count when finalization exits or its future is dropped.
+/// Decrements the tracked count when finalization exits or its future is
+/// dropped.
 ///
 /// Constructed before spawning, after the scheduler increments the count, so
 /// runtime cancellation before the first poll cannot leak the reservation.
