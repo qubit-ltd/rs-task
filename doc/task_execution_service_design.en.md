@@ -6,10 +6,10 @@
 
 Cloned `TaskExecutionService` handles share one lease. Dropping the final
 handle starts the common drain coordinator, which waits for accepted work,
-closes the notification publisher, and releases recoverable-store ownership.
-Drop cannot wait for or report shutdown errors; callers that need the result
-must await `shutdown()`. An injected Tokio runtime must remain alive until the
-drain finishes.
+releases recoverable-store ownership, then closes the notification publisher
+before publishing the shared shutdown result. Drop cannot wait for or report
+shutdown errors; callers that need the result must await `shutdown()`. An
+injected Tokio runtime must remain alive until the drain finishes.
 
 The scheduler loop is supervised for panics. A panic from the policy or engine
 becomes `TaskServiceError::SchedulerUnavailable`, wakes task waiters, closes
@@ -93,7 +93,7 @@ Locks protecting resource accounting or queue state are not held across user cal
 
 The CI matrix checks all eight combinations of `sqlite`, `inventory`, and `event-bus`; default features remain empty. SQLite has an explicit provider registry so applications do not need `inventory` merely to select the built-in store. The inventory feature adds linked-provider discovery.
 
-The public API intentionally replaces the submission-only limit with `max_inflight_operations` and `OperationLimitExceeded`, and replaces `StoredTaskPage<StoredTask>` with `RecoveryPage<TaskSummary>`. No compatibility aliases are retained. The design documents and user guides describe caller cancellation, shared budgets, resource limits, owner-lock prerequisites, and recovery of missing handlers.
+The public API intentionally replaces the submission-only limit with `max_inflight_operations` and `OperationLimitExceeded`, and replaces `StoredTaskPage<StoredTask>` with `RecoveryPage<TaskSummary>`. For event notifications, the 0.14 integration constructed `PublishRequest`, called `EventBus::publish`, and inspected `PublishReceipt::acknowledgement()`; the 0.15 integration uses bounded `NotificationPublisher::try_publish` and maps the callback's `AdmissionOutcome`. No compatibility aliases are retained. The design documents and user guides describe caller cancellation, shared budgets, resource limits, owner-lock prerequisites, and recovery of missing handlers.
 
 ## 9. Payload-free status and blocked-task operations
 
