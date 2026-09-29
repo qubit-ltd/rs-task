@@ -2,6 +2,35 @@
 
 [中文设计文档](task_execution_service_design.md)
 
+## Runtime reliability details
+
+Cloned `TaskExecutionService` handles share one lease. Dropping the final
+handle starts the common drain coordinator, which waits for accepted work,
+closes the notification publisher, and releases recoverable-store ownership.
+Drop cannot wait for or report shutdown errors; callers that need the result
+must await `shutdown()`. An injected Tokio runtime must remain alive until the
+drain finishes.
+
+The scheduler loop is supervised for panics. A panic from the policy or engine
+becomes `TaskServiceError::SchedulerUnavailable`, wakes task waiters, closes
+admission, and stops future scheduling; the loop is not restarted. Execution
+handles already returned by the engine remain tracked until they finish, before
+store ownership is released. A custom engine must return a trackable handle
+after starting side effects; if it panics after starting work without
+returning one, the service cannot prove that work stopped, so the application
+must terminate the process and recover under external supervision.
+
+`TaskStore::has_unfinished_over_limit(limit)` checks only queued and running
+records, uses strict greater-than semantics, and does not read payloads. SQLite
+uses a state-index existence query; paged recovery recounts and validates
+cursors to handle changes between precheck and scan. Custom stores must
+implement this check and `count_states()`.
+
+`ResourceRequest.cpu_slots = 0` is suitable for asynchronous I/O, but such work
+still consumes a `max_running_tasks` slot. CPU-bound work should request at
+least one CPU slot and run blocking code on `spawn_blocking` or a dedicated
+backend.
+
 ## 1. Purpose and boundaries
 
 `qubit-task` accepts work that cannot finish during the caller's request, schedules it against local CPU, GPU, and named resource budgets, and exposes task state through `TaskExecutionService`. The service is process-local. It does not provide distributed scheduling, workflow dependencies, cron scheduling, forced interruption of arbitrary code, or exactly-once business side effects.
@@ -65,3 +94,20 @@ Locks protecting resource accounting or queue state are not held across user cal
 The CI matrix checks all eight combinations of `sqlite`, `inventory`, and `event-bus`; default features remain empty. SQLite has an explicit provider registry so applications do not need `inventory` merely to select the built-in store. The inventory feature adds linked-provider discovery.
 
 The public API intentionally replaces the submission-only limit with `max_inflight_operations` and `OperationLimitExceeded`, and replaces `StoredTaskPage<StoredTask>` with `RecoveryPage<TaskSummary>`. No compatibility aliases are retained. The design documents and user guides describe caller cancellation, shared budgets, resource limits, owner-lock prerequisites, and recovery of missing handlers.
+
+## 9. Payload-free status and blocked-task operations
+
+History pages, `wait`, `retry_blocked`, and `get_summary` return
+`TaskSummary`, which omits the payload. `get` is the explicit full-record
+query, and `get_by_idempotency_key` also returns a payload-free summary; call
+`get(summary.id)` only when payload access is needed. SQLite schema 3 separates
+request metadata, payload BLOB, and lifecycle JSON, so history, wait checks,
+and transitions avoid selecting or decoding payloads. Schema 0, 1, and 2
+migrations preserve payload, idempotency, lifecycle, ordering, and ownership.
+
+A store failure wakes waiters and local handles immediately. Shared shutdown
+still waits for scheduler termination and tracked execution handles before
+releasing ownership; `shutdown_until` only limits the caller's wait. Operators
+select aged blocked summaries and pass the observed `state_version` to
+`abandon_blocked`. A stale version conflicts, and only terminal records can
+be pruned in bounded batches.

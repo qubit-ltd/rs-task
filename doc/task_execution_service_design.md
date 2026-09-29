@@ -227,21 +227,16 @@ SQLite 使用单个连接，因此同时运行的阻塞数据库操作上限为 
 
 实施分三步：先交付统一门面、内存 `TaskStore`、默认调度策略、本机执行引擎和 SPI 服务族；再完成可恢复 `TaskStore`、SQLite provider 和重启场景；最后直接接入可选的 `rs-event-bus` 事件通知。新版将破坏旧公开 API：使用 `in_memory()` 代替含糊的无参数构造，使用版本化 `TaskRequest` 或只适用于本地闭包的 `LocalTaskHandle<R, E>`，并用服务生成且不复用的 `TaskId`。`submit_local` 不再返回旧的通用 `TaskHandle<R, E>`；第三方 `TaskStore` 还必须实现 `count_states()`，以一次查询返回所有保留状态的计数。迁移调用代码、provider 实现和测试，不要求保留兼容层。检查当前 `rust-common` 工作区与相关 `rs-*` 仓库后，没有发现直接依赖 `rs-task` 的实际下游，因此当前没有需要同步迁移的兄弟 crate。
 
-### Payload-free status reads and blocked-task operations
+## 无 payload 状态查询与 Blocked 任务运维
 
-The public history page contains `TaskSummary`, not full `TaskRecord` values.
-`wait`, `retry_blocked`, and `get_summary` also return payload-free summaries;
-`get` is the explicit full-record query. `get_by_idempotency_key` returns a
-payload-free `TaskSummary`; callers use `get(summary.id)` to load payload.
-SQLite schema 3 separates request
-metadata, payload BLOB, and lifecycle JSON, allowing history reads, wait checks,
-and transitions to avoid selecting or decoding the payload. Opening schema 0,
-1, or 2 databases migrates each row transactionally and preserves payload,
-idempotency, lifecycle, ordering, and owner behavior.
+历史分页、`wait`、`retry_blocked` 和 `get_summary` 都返回不含 payload 的
+`TaskSummary`；`get` 才读取完整记录。`get_by_idempotency_key` 同样返回不含
+payload 的摘要；只有确实需要 payload 时，调用方才通过 `get(summary.id)` 读取。
+SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分开保存，使历史查询、
+等待检查和状态转换无需选择或解码 payload。schema 0、1、2 的迁移会保留 payload、
+幂等键、生命周期、排序和所有权行为。
 
-A store failure wakes waiters and local handles immediately, while the shared
-shutdown completion waits for scheduler termination and all tracked execution
-handles before releasing owner state. A `shutdown_until` timeout only bounds
-the caller's wait. Blocked-task disposition is explicit: operators select aged
-summaries and pass the observed `state_version` to `abandon_blocked`; stale
-versions conflict, and only terminal records are eligible for bounded pruning.
+存储故障会立即唤醒等待者和本地句柄。共享关闭流程仍会等待调度器和已跟踪的执行
+句柄结束后再释放所有权；`shutdown_until` 只限制调用者等待时间。运维人员应先筛选
+超龄的 `Blocked` 摘要，再将观察到的 `state_version` 传给 `abandon_blocked`。版本已变化
+时会冲突；只有终态记录可以按批次有界清理。

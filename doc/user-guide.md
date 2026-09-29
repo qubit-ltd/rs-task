@@ -381,6 +381,12 @@ coupled to task state. Use a transactional outbox when state changes and event
 delivery must commit atomically. The codec and provider assembly are compiled
 by `cargo check --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`;
 run the fixture with `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml`.
+The same fixture compiles and runs the guide's memory, cancellation, and
+versioned-request flow with `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml --bin task_service`.
+It also enables the `sqlite` feature and provides a restart-recovery example
+runnable with `cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml --bin sqlite_recovery`.
+Built-in provider selection and `from_components` assembly are executable with
+`cargo run --locked --manifest-path tests/fixtures/doc-examples/Cargo.toml --bin spi_selection`.
 The example uses `redis://127.0.0.1/`; a Redis server must be reachable there
 for actual publication. Constructing the provider and shutting down without
 publishing does not verify Redis connectivity. Run the Redis integration test

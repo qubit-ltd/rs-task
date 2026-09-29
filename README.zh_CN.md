@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API 与存储契约
 
-自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite schema 0/1/2 数据库会在打开时事务性迁移到 schema 3。SQLite 将请求元数据、payload BLOB 与生命周期 JSON 分列保存；状态查询和历史分页不会读取大型 payload。
+自动重试会持久化下次可运行时间，默认从 1 秒起步按指数退避，最高 60 秒；SQLite 恢复会在重启后保留该截止时间。schema 升级和数据库运维步骤见[用户指南](doc/user-guide.zh_CN.md)。
 
 服务提供独立的 `max_running_tasks(NonZeroUsize)` 运行并发上限，零 CPU 槽请求也占用一个运行名额。重启时未完成记录不得超过 `queue_capacity + max_running_tasks`；恢复的运行中记录会先放入待执行队列，因此队列可暂时超过 `queue_capacity`，队列排空前新受理会返回 `QueueFull`。超限会在保留记录的情况下使启动失败。`max_attempts` 统计同一任务跨进程启动的总次数；耗尽后任务进入 `Blocked`，`retry_blocked` 返回 `AttemptsExhausted`。
 
@@ -121,9 +121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 任务历史和等待接口返回不含 `payload` 的 `TaskSummary`。状态处理应使用
 `get_summary`、`list`、`wait` 和 `retry_blocked`；`get` 返回完整 `TaskRecord`，
 `get_by_idempotency_key` 返回不含 payload 的
-`TaskSummary`。需要 payload 时再调用 `get(summary.id)`。SQLite schema 3
-将请求元数据、payload BLOB 和生命周期 JSON 分列保存，摘要查询与状态转换不读取
-BLOB。schema 0、1、2 数据库会事务性迁移到 schema 3，并保留请求、幂等键和生命周期。
+`TaskSummary`。需要 payload 时再调用 `get(summary.id)`。SQLite 存储结构、迁移行为
+和运维步骤见[用户指南](doc/user-guide.zh_CN.md)。
 
 SQLite 历史不会自动清理。可由应用定期先归档 30 天以前的记录，再循环调用
 `prune_terminal_before(cutoff, 100)`，直到单次删除数少于 100。该接口只删除终态。

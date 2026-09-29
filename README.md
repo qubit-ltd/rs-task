@@ -100,7 +100,7 @@ continue in the background, but the caller loses that handle and cannot recover
 the original typed result. Use keyed `submit` when the caller must find work
 after its request stops waiting.
 
-Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite schema 0, 1, and 2 databases migrate transactionally to schema 3 on open. SQLite keeps the immutable request metadata, payload BLOB, and lifecycle JSON in separate columns so hot reads avoid loading large payloads.
+Automatic retries persist their next eligible time and use exponential backoff (1 second initially, capped at 60 seconds); SQLite recovery preserves that deadline across restarts. See the [user guide](doc/user-guide.md) for schema upgrades and database operations.
 
 The service also has an independent `max_running_tasks(NonZeroUsize)` limit, including for tasks that request zero CPU slots. On restart, unfinished records are limited to `queue_capacity + max_running_tasks`; recovered running records are staged in the waiting queue and can temporarily exceed `queue_capacity`, so new admissions receive `QueueFull` until the queue drains. Startup fails with records preserved if the recovery bound is exceeded. `max_attempts` counts starts for a task across process restarts; exhausted tasks become `Blocked`, and `retry_blocked` returns `AttemptsExhausted`.
 
@@ -149,10 +149,8 @@ Task history and waiting paths return `TaskSummary`, whose request metadata omit
 `payload`. Use `get_summary`, `list`, `wait`, and `retry_blocked` for status
 handling; `get` returns the full `TaskRecord`, while
 `get_by_idempotency_key` returns a payload-free `TaskSummary`. Call `get(summary.id)`
-when payload access is needed. SQLite schema 3 stores request metadata, the payload BLOB, and
-lifecycle JSON separately. Summary queries and lifecycle transitions do not
-select the BLOB. Schema 0, 1, and 2 databases migrate transactionally to schema
-3 while preserving requests, idempotency keys, and lifecycle state.
+when payload access is needed. The user guide documents the SQLite storage
+layout, migration behavior, and operational steps.
 
 SQLite history is retained until the application explicitly prunes it. A typical
 maintenance job can archive records older than 30 days, then call
