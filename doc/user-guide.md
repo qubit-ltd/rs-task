@@ -490,7 +490,7 @@ Observable startup outcomes:
 
 - **Normal**: `build()` returns, the recovered tasks are `Queued`, and the queue may temporarily hold more than `queue_capacity` entries. New submissions receive `QueueFull` until that backlog drains.
 - **Too many unfinished records**: `build()` fails with `TaskServiceBuildError::RecoveryCapacityExceeded` and leaves the records intact. Raise `queue_capacity` or `max_running_tasks` and start again.
-- **Another process owns the database**: `build()` fails with a store error. There is no fallback to memory; do not open the HTTP listener.
+- **Another process owns the database**: SQLite service construction fails with a store error, including when `recoverable_sqlite(path)` opens the store. There is no fallback to memory; do not open the HTTP listener.
 - **A recovered task has no registered handler**: `build()` succeeds and that task is `Blocked` with a reason naming the missing `(task_type, handler_version)`. Register the handler, rebuild against the same database, and call `retry_blocked`. Startup does not requeue it automatically.
 - **A recovered task has already used `max_attempts`**: it becomes `Blocked` without starting again; `retry_blocked` reports `AttemptsExhausted`.
 
@@ -763,7 +763,7 @@ The service publishes through `qubit-event-bus`'s `NotificationPublisher`: one s
 
 These are admission and worker counters, not proof that a subscriber ran. They are monotonic, saturate at `u64::MAX`, and the fields of one snapshot are not from the same instant.
 
-`shutdown()` closes notification enqueue after accepted work has settled, then drains the queue. It waits at most 30 seconds for the publisher thread by default (`event_bus_close_timeout(Duration)`); on timeout, or if the thread panicked or its join failed, `shutdown()` returns `TaskServiceError::NotificationClose` while the thread keeps draining what it already holds. Concurrent and later `shutdown` callers receive the same stored result. The service does not shut down the application-owned bus; do that after the service.
+`shutdown()` closes notification enqueue after accepted work has settled, then drains the queue. It waits at most 30 seconds for the publisher thread by default (`event_bus_close_timeout(Duration)`). On timeout, `shutdown()` returns `TaskServiceError::NotificationClose` while the thread keeps draining what it already holds. A thread panic or join failure also returns `NotificationClose`; remaining events may be lost. Concurrent and later `shutdown` callers receive the same stored result. The service does not shut down the application-owned bus; do that after the service.
 
 ## Assemble components with `qubit-spi`
 
@@ -820,7 +820,7 @@ pub async fn stop(tasks: &TaskExecutionService) -> Result<(), Box<dyn std::error
 }
 ```
 
-`shutdown()` rejects new writes with `ShuttingDown`, waits for in-flight submissions to finish acceptance, waits for running attempts and the scheduler to settle, releases store ownership, and then drains notifications. `Ok(())` means all of that completed; the SQLite file can then be opened by the next process. `shutdown_until(deadline)` starts the same drain but bounds only this caller's wait; `ShutdownTimedOut` means the drain continues in the background and ownership has not been released yet. Cancellation is still cooperative during shutdown: a handler that ignores its flag holds the drain. Dropping the last service handle also starts an asynchronous drain, but nobody observes its result; call `shutdown()` when completion matters.
+`shutdown()` rejects new writes with `ShuttingDown`, waits for in-flight submissions to finish acceptance, waits for running attempts and the scheduler to settle, releases store ownership, and then drains notifications. `Ok(())` means all of that completed; the SQLite file can then be opened by the next process. `shutdown_until(deadline)` starts the same drain but bounds only this caller's wait; `ShutdownTimedOut` means the drain continues in the background; the timeout does not prove that ownership has been released. Cancellation is still cooperative during shutdown: a handler that ignores its flag holds the drain. Dropping the last service handle also starts an asynchronous drain, but nobody observes its result; call `shutdown()` when completion matters.
 
 `TaskExecutionServiceBuilder::runtime_handle(Handle)` selects the runtime for service-owned background tasks; keep that runtime alive until shutdown or the drain has finished. Cancelling the future that awaits `build()` does not stop the background construction worker: it stops at a recovery page boundary, releases any owner it acquired, and does not start the scheduler.
 
@@ -834,7 +834,6 @@ Two failures change the service permanently. A store failure sets the service to
 | `submit` returns `Unsatisfiable` | The request asks for more than the configured `ResourceCapacity`, for example a GPU label no device carries. Fix the request or the capacity. |
 | `submit` returns `InvalidRequest` | An empty task type or handler version, an oversized field, or an invalid resource description. The message names the limit. |
 | `submit` returns `Store(IdempotencyConflict)` | The key was reused with a different request. Generate a new key for new work. |
-| `submit` returns `MissingHandler` | No handler with that exact `(task_type, handler_version)` was registered before `build()`. |
 | `submit_local` returns `UnsupportedCapability` | The store declares restart recovery. Use `TaskRequest` with a registered handler instead. |
 | A task stays `Blocked` after a restart | Read the reason in `get_summary`; usually a missing handler or an exhausted attempt budget. Register the handler and `retry_blocked`, or `abandon_blocked`. |
 | `retry_blocked` returns `AttemptsExhausted` | The task has used `max_attempts` across restarts. Submit a new task for a fresh budget. |

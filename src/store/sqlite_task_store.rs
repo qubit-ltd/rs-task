@@ -55,8 +55,11 @@ use crate::model::checked_page_size;
 
 mod internal;
 
+/// Current SQLite schema version written after successful migration.
 const SCHEMA_VERSION: i64 = 3;
+/// Current serialized record version required by row decoders.
 const RECORD_FORMAT_VERSION: i64 = 3;
+/// Ordered columns used by payload-free task summary queries.
 const SUMMARY_COLUMNS: &str =
     "id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json";
 

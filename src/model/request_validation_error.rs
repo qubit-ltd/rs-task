@@ -32,6 +32,7 @@ pub struct RequestValidationError {
     pub rule: RequestValidationRule,
     /// Maximum value, when the rule is a bounded limit.
     pub limit: Option<usize>,
+    /// Stable human-readable diagnostic used by display and store errors.
     message: &'static str,
 }
 
