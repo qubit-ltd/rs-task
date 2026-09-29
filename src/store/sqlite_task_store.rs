@@ -16,6 +16,8 @@ use internal::WorkerCounts;
 #[cfg(test)]
 use internal::WorkerGuard;
 use internal::acquire_owner_lock;
+use internal::build_history_query;
+use internal::build_recovery_query;
 use internal::decode_stored_summary_row;
 use internal::decode_stored_task_row;
 use internal::encode_lifecycle;
@@ -28,7 +30,6 @@ use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 use rusqlite::params_from_iter;
-use rusqlite::types::Value;
 use tokio::sync;
 use tokio::task;
 
@@ -456,57 +457,20 @@ impl TaskStore for SqliteTaskStore {
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.run(move |connection| {
             let page_size = checked_page_size(query.limit)?;
-            let fetch_limit = page_size
-                .checked_add(1)
-                .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
-            let fetch_limit = i64::try_from(fetch_limit)
-                .map_err(|_| StoreError::InvalidRequest("task history page limit is too large"))?;
-            let after_time = query
-                .after
-                .map(|cursor| i64::try_from(cursor.accepted_at_ms))
-                .transpose()
-                .map_err(|_| StoreError::InvalidRequest("task history cursor timestamp is too large"))?;
-            let state_kinds = query.states.iter().map(|kind| kind.as_str()).collect::<Vec<_>>();
-            let mut sql = String::from(
-                &format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2)) AND (?3 IS NULL OR correlation_key = ?3)"),
-            );
-            if !state_kinds.is_empty() {
-                let placeholders = (4..4 + state_kinds.len())
-                    .map(|i| format!("?{i}"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                sql.push_str(&format!(" AND state_kind IN ({placeholders})"));
-            }
-            sql.push_str(&format!(" ORDER BY accepted_at, id LIMIT ?{}", 4 + state_kinds.len()));
-            let mut values = vec![
-                after_time.map_or(Value::Null, Value::Integer),
-                query.after.map(|cursor| cursor.id.to_string()).map_or(
-                    Value::Null,
-                    Value::Text,
-                ),
-                query
-                    .correlation_key
-                    .map_or(Value::Null, Value::Text),
-            ];
-            values.extend(
-                state_kinds
-                    .into_iter()
-                    .map(|kind| Value::Text(kind.into())),
-            );
-            values.push(Value::Integer(fetch_limit));
-            let mut statement = connection.prepare(&sql).map_err(failure)?;
-            let mut rows = statement.query(params_from_iter(values)).map_err(failure)?;
+            let built = build_history_query(&query, page_size)?;
+            let mut statement = connection.prepare(&built.sql).map_err(failure)?;
+            let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
             let mut records = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
-                records.push(decode_stored_summary_row(read_stored_summary_row(row).map_err(failure)?)?);
+                records.push(decode_stored_summary_row(
+                    read_stored_summary_row(row).map_err(failure)?,
+                )?);
             }
             let has_more = records.len() > page_size;
             if has_more {
                 records.truncate(page_size);
             }
-            let next = has_more
-                .then(|| records.last().map(TaskCursor::from))
-                .flatten();
+            let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
             Ok(TaskPage { records, next })
         })
     }
@@ -760,19 +724,9 @@ impl TaskStore for SqliteTaskStore {
     /// Returns an error if a row is malformed or SQLite access fails.
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.run(move |connection| {
-            let mut sql = format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE state_kind IN ('Queued','Running')");
-            let mut values = Vec::new();
-            if let Some(cursor) = cursor {
-                let accepted_at = i64::try_from(cursor.accepted_at_ms).map_err(|_| {
-                    StoreError::InvalidRequest("recovery cursor timestamp exceeds the SQLite integer range")
-                })?;
-                sql.push_str(" AND (accepted_at, id) > (?1, ?2)");
-                values.push(Value::Integer(accepted_at));
-                values.push(Value::Text(cursor.id.to_string()));
-            }
-            sql.push_str(" ORDER BY accepted_at, id LIMIT 257");
-            let mut statement = connection.prepare(&sql).map_err(failure)?;
-            let mut rows = statement.query(params_from_iter(values)).map_err(failure)?;
+            let built = build_recovery_query(cursor)?;
+            let mut statement = connection.prepare(&built.sql).map_err(failure)?;
+            let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
             let mut tasks = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
                 tasks.push(decode_stored_summary_row(
