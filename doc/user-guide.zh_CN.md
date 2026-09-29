@@ -13,6 +13,7 @@
   - [在请求处理器中提交](#在请求处理器中提交)
   - [向客户端报告状态](#向客户端报告状态)
   - [在启动时组装服务](#在启动时组装服务)
+  - [多个任务类型与处理器注册表](#多个任务类型与处理器注册表)
   - [这条路径上的核心类型](#这条路径上的核心类型)
 - [检查任务结果](#检查任务结果)
   - [成功时是什么样子](#成功时是什么样子)
@@ -161,7 +162,7 @@ impl TaskHandler for CsvImportV1 {
 }
 ```
 
-`TaskHandlerDescriptor` 标明此处理器接受的精确 `(task_type, version)` 对。存储里的请求只会交给相同对的处理器，因此改 payload 格式应注册 `CsvImportV2` 并与 `CsvImportV1` 并存，而不是改旧处理器。`run` 收到不透明 payload 与 `TaskContext`（含 `task_id()`、`attempt()`（从 1 起）、`assigned_resources()`、`is_cancelled()`）。future 在 Tokio 异步 worker 上运行；耗时的解析与数据库写入应经 `spawn_blocking`，避免拖慢其他任务。处理器决定 `ImportError` 是否可重试；服务只对标记为 `retryable: true` 的错误重试。`TaskOutput.summary` 是有界持久文本，不是业务结果本身。
+`TaskHandlerDescriptor` 标明此处理器接受的精确 `(task_type, version)` 对。存储里的请求只会交给相同对的处理器，因此改 payload 格式应注册 `CsvImportV2` 并与 `CsvImportV1` 并存，而不是改旧处理器。`TaskHandler` 继承 `Send + Sync`：注册表里的每个处理器是长期存活的 `Arc`，同一键下并发运行的多条任务会在不同 worker 上同时调用 `run(&self, …)`，因此像 `CsvImportV1 { repository: Arc<dyn ImportRepository> }` 这样把依赖做成可共享、线程安全的句柄是常见写法，不要把「当前正在跑哪条任务」写在无同步的可变字段里。`run` 收到不透明 payload 与 `TaskContext`（含 `task_id()`、`attempt()`（从 1 起）、`assigned_resources()`、`is_cancelled()`）。future 在 Tokio 异步 worker 上运行；耗时的解析与数据库写入应经 `spawn_blocking`，避免拖慢其他任务。处理器决定 `ImportError` 是否可重试；服务只对标记为 `retryable: true` 的错误重试。`TaskOutput.summary` 是有界持久文本，不是业务结果本身。
 
 ### 在请求处理器中提交
 
@@ -263,6 +264,34 @@ tasks.shutdown().await?;
 
 `repository` 是应用的 `Arc<dyn ImportRepository>`。应在 HTTP 监听器打开之前构建服务，并注册存储中仍可能存在的每个处理器版本；`build()` 返回后注册表固定，重复的 `(task_type, version)` 会以 `HandlerConflict` 失败。`recoverable_sqlite` 打开数据库、获取操作系统锁以防两进程执行同一库，并在返回前扫描未完成工作。`TaskExecutionService` 可 `Clone`；把克隆交给请求处理器，并保留一份用于 shutdown。若只需易失执行，使用 `TaskExecutionServiceBuilder::in_memory()`（或快捷方式 `TaskExecutionService::in_memory().await?`）：进程退出后 pending 工作与历史都会丢失。
 
+### 多个任务类型与处理器注册表
+
+一个 `TaskExecutionService` 对应一个 `TaskHandlerRegistry`，而不是「整个进程只能有一个 `TaskHandler`」。CSV 导入、报表导出、缩略图生成等不同业务，应各自实现 `TaskHandler`，在 `descriptor()` 里声明不同的 `task_type`（必要时同一类型下再区分 `version`，例如 `csv-import@1` 与 `csv-import@2` 并存）。提交时 `TaskRequest::new("csv-import", "1", payload)` 与 `TaskRequest::new("report.export", "1", payload)` 会分别匹配已注册的处理器；调度与恢复都只看请求里持久化的 `task_type` 和 `handler_version`，不会根据 payload 内容猜测。
+
+启动时装配示例：
+
+```rust
+use qubit_task::TaskExecutionServiceBuilder;
+
+let tasks = TaskExecutionServiceBuilder::recoverable_sqlite("./state/tasks.sqlite")?
+    .register_handler(Arc::new(CsvImportV1::new(repository.clone())))?
+    .register_handler(Arc::new(ReportExportV1::new(repository.clone())))?
+    .register_handler(Arc::new(ThumbnailV2::new(media)))?
+    .build()
+    .await?;
+```
+
+也可先填充 `TaskHandlerRegistry`（例如从 `qubit-spi` 发现多个 provider 后统一 `register`），再 `.handlers(registry)` 交给 builder。规则要点：
+
+| 规则 | 含义 |
+| --- | --- |
+| 精确键 | 只接受与 `TaskHandlerDescriptor` 完全相同的 `(task_type, version)`；没有「默认处理器」或前缀匹配。 |
+| 一键一实例 | 同一 `(task_type, version)` 只能注册一次；该键下的所有任务共用同一个 `Arc<dyn TaskHandler>`，靠 `TaskContext::task_id()` 等区分单次执行。 |
+| 并发共用 | 受 `max_running_tasks` 与资源额度约束时，多条同键任务可同时处于 `Running`；调度器对同一 `Arc` 克隆并并行调用 `run`，不是「每条任务 new 一个 handler」。 |
+| 须线程安全 | trait 要求 `Send + Sync`；`run` 的 future 须 `Send` 以便跨 worker 执行。共享依赖用 `Arc`、连接池等已同步的组件；单次执行的变量放在 `run` 的 async 块内，或按 `task_id` 分区的内部状态。 |
+| 恢复一致 | SQLite 等可恢复存储里未完成的任务仍携带提交时的键；重启后必须注册相同键，否则任务会 `Blocked` 并写明缺失的处理器。 |
+| 与 `submit_local` 区分 | 进程内闭包走 `submit_local`，会为单次任务生成临时的 `local:{id}@1` 处理器，且不可用于声明了重启恢复的存储。 |
+
 ### 这条路径上的核心类型
 
 | 类型 | 作用 |
@@ -270,7 +299,7 @@ tasks.shutdown().await?;
 | `TaskExecutionService` | 唯一门面：提交、查询、等待、取消、维护、停机。`clone` 到各模块。 |
 | `TaskExecutionServiceBuilder` | 选择存储、处理器、容量、限制、重试策略与可选事件总线。 |
 | `TaskRequest` | 可重建描述：任务类型、精确处理器版本、payload、资源需求、关联键与幂等键、元数据。 |
-| `TaskHandler` / `TaskHandlerDescriptor` | 解释一种 payload 格式的带版本代码。 |
+| `TaskHandler` / `TaskHandlerDescriptor` | 解释一种 payload 格式的带版本代码；`TaskHandler: Send + Sync`，同一注册实例供并发任务共用。 |
 | `TaskContext` | 每次尝试的任务 ID、尝试序号、已分配资源与协作式取消标志。 |
 | `TaskRunOutcome` / `TaskRunError` | 处理器结果：`Succeeded(TaskOutput)`、`Cancelled`，或带 `retryable` 的分类错误。 |
 | `TaskRecord` / `TaskSummary` | 可查询的生命周期；摘要省略 payload。 |
@@ -767,6 +796,21 @@ Redis provider、`qubit-spi` 与 `serde_json` 是应用依赖；`use qubit_event
 
 ## 用 qubit-spi 组装组件
 
+可以扩展并替换核心组件，包括**自定义存储**（例如 Redis、PostgreSQL 或文件后端）：实现对应 trait 并装配进 `TaskExecutionServiceBuilder` 即可。`qubit-task` 在 `qubit_task::spi` 为下表四类能力定义 `qubit-spi` 服务族；应用也可跳过 SPI，直接把 `Arc<dyn …>` 传给 builder。
+
+| 扩展点 | SPI 服务族 | 运行时 trait | 典型装配 |
+| --- | --- | --- | --- |
+| 任务历史与受理 | `TaskStoreSpec` | `TaskStore` | `from_components` 的 `store` 参数；或 registry 解析后传入 |
+| 排队顺序 | `SchedulingPolicySpec` | `SchedulingPolicy` | `from_components` 的 `policy` 参数 |
+| 资源预留与执行 | `TaskExecutionEngineSpec` | `TaskExecutionEngine` | `from_components` 的 `engine` 参数 |
+| 业务处理器 | `TaskHandlerSpec` | `TaskHandler` | `register_handler` / `handlers(TaskHandlerRegistry)` |
+
+**SPI 路径（可选 `inventory` feature）**：在独立 crate 中实现 `ServiceProvider<…Spec>`，声明稳定 provider ID，用 `submit_sync_provider!` 注册；把该 crate **链接**进最终二进制（不是运行时加载 `.so`），启动时调用 `discovered_*_registry()` 或内置 `memory_store_registry()` 等，用 `ProviderSelection::named(...)` 选中 provider，`create_configured(&config)` 得到 `Arc<dyn …>`，再 `from_components` 与注册 handler。存储扩展常用 `TaskStoreConfig::Custom(...)` 传入 provider 私有配置。
+
+**直接路径**：在应用内实现 `TaskStore`（及其它 trait），`TaskExecutionServiceBuilder::from_components(Arc::new(yours), engine, policy)`，无需 `inventory`。`in_memory()` / `recoverable_sqlite()` 只是内置 provider 的快捷预设，不会因为你链接了第三方 provider 而自动切换。
+
+生命周期通知走应用提供的 `qubit-event-bus` `EventBus`，由 builder 直接注入；**不在** `qubit-task` 里定义事件总线的 SPI 族。
+
 `TaskExecutionServiceBuilder::in_memory()` 与 `recoverable_sqlite()` 是三个组件上的预设：`TaskStore`（接受、读、迁移）、`SchedulingPolicy`（下一个排队任务）、`TaskExecutionEngine`（资源预留与执行）。`from_components(store, engine, policy)` 接受任意实现：
 
 ```rust
@@ -869,6 +913,7 @@ pub async fn stop(tasks: &TaskExecutionService) -> Result<(), Box<dyn std::error
 - 结果存在应用数据库，返回有界 `TaskOutput` 摘要或引用。
 - 在首次 `submit` 前生成幂等键并保持到不再需要任务记录。
 - 在 `build()` 前注册存储仍可能持有的每个处理器版本；缺失版本会 blocked 任务而非丢失。
+- 把每个 `TaskHandler` 当作进程内长期存活、可被多线程并发调用的单例：依赖用 `Arc` 等线程安全方式注入，单次任务状态不要放在无同步的可变字段上。
 - 用 `get_summary` 轮询而非 `get`，`list` 分页不超过 256。按计划 prune SQLite 历史并单独审查 `Blocked` 记录。
 - 把发布回执、事件与任务迁移当作不同阶段。权威状态以查询服务为准。
 - 测试完整路径：接受、运行、重试、block、取消、带恢复的 restart、以及有 deadline 的 shutdown。

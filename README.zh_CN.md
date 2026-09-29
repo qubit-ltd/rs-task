@@ -9,6 +9,8 @@
 
 `qubit-task` 解决 Rust 服务里一个常见的难题：请求触发的工作远比请求本身耗时，例如把一个很大的 CSV 文件导入数据库。如果在请求处理函数里直接执行导入，连接会被长时间占用，用户看不到进度，进程一旦重启工作也随之丢失。使用本库时，请求处理函数只需把工作描述成带版本的 `TaskRequest`，交给同一个 `TaskExecutionService`，然后立刻把任务 ID 返回给调用方。服务会在有界队列、并发上限和资源额度约束下调用匹配的 `TaskHandler`，为每个任务保留可查询的记录；搭配可恢复的存储，还能在进程重启后继续执行已受理的任务。本库只在单个进程内调度，也不会把业务副作用变成恰好一次的操作。
 
+设计上，`TaskExecutionService` 由四块可替换组件装配而成：**任务存储**（`TaskStore`）、**调度策略**（`SchedulingPolicy`）、**执行引擎**（`TaskExecutionEngine`）和**业务处理器**（`TaskHandler`）。应用可以注入自己的 trait 实现，也可以通过 [`qubit-spi`](doc/user-guide.zh_CN.md#用-qubit-spi-组装组件) 注册或发现 provider（可选 `inventory` feature）。本库自带的是面向单机与快速集成的默认实现：内存任务存储、公平 FIFO 调度、本进程 local 执行引擎；启用 `sqlite` feature 后另有 SQLite 存储与重启恢复。具体导入、导出等业务逻辑始终由应用实现并注册处理器。`TaskExecutionServiceBuilder::in_memory()` 与 `recoverable_sqlite()` 只是上述内置组件的预设组合，并不妨碍换成自定义存储或其它后端。
+
 ## 数据导入服务实战场景
 
 租户管理员把 CSV 文件上传到对象存储后调用 `POST /imports`。API 把租户 ID 和对象键编码成一个 `csv-import` 任务，附上客户端生成的请求键提交，然后以 HTTP 202 返回任务 ID。`CsvImportV1` 处理器解码 payload，通过应用自己的仓储分批导入数据，并在收到取消请求时于两批之间停下。`GET /imports/{id}` 把任务状态映射为对外的导入状态。若使用 SQLite 存储且进程重启，排队中的导入会继续执行，被中断的运行中导入可能再次运行，因此仓储必须容忍同一批数据被重复处理。导入的数据行存放在应用数据库中，任务记录只保留一段简短摘要。
@@ -196,7 +198,7 @@ pub async fn import_status(
 }
 ```
 
-应用启动时只构建一个服务，注册所有可能需要恢复的处理器版本，再把服务的克隆句柄交给各个请求处理函数。退出前显式关闭服务，才能观察到已受理任务排空的结果：
+应用启动时只构建一个 `TaskExecutionService`，在其 `TaskHandlerRegistry` 里注册本进程要执行的全部处理器（每种业务任务类型、每个 payload 版本各一个），再把服务的克隆句柄交给各个请求处理函数。调度器不会全局共用一个处理器：`submit` 时 `TaskRequest` 的 `task_type` 与 `handler_version` 必须与某个已注册处理器的 `TaskHandlerDescriptor` 完全一致，才会把该任务交给对应实现；不同任务类型可链式多次调用 `register_handler`，也可用 `handlers(...)` 一次性装入整表。同一 `(task_type, handler_version)` 只能注册一次，该键下的多条任务共用同一个 `Arc<dyn TaskHandler>` 实例；在 `max_running_tasks` 允许时，多条同类型任务可能同时在不同 Tokio worker 上调用同一处理器的 `run`，因此 `TaskHandler` 要求 `Send + Sync`，实现须线程安全，单次执行的状态应放在 payload、`TaskContext` 或自有同步结构里，而不是处理器上的可变字段。退出前显式关闭服务，才能观察到已受理任务排空的结果：
 
 ```rust
 // src/main.rs（启动装配片段）
@@ -221,12 +223,12 @@ tasks.shutdown().await?;
 
 ## 能力与边界
 
-- 带版本的 `TaskRequest`（任务类型、精确处理器版本、不透明 payload、资源需求、关联键与幂等键、少量 metadata），以及可查询的 `TaskRecord`/`TaskSummary` 生命周期，状态包括 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked` 和 `Cancelled`。
+- 带版本的 `TaskRequest`（任务类型、精确处理器版本、不透明 payload、资源需求、关联键与幂等键、少量 metadata），以及可查询的 `TaskRecord`/`TaskSummary` 生命周期，状态包括 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked` 和 `Cancelled`；单个服务内按 `(task_type, handler_version)` 注册多个 `TaskHandler`，由请求字段精确路由；同一键下的处理器实例在并发任务间共享，须实现为 `Send + Sync`。
 - 统一的 `TaskExecutionService` 门面：`submit`、`submit_local`、`get`、`get_summary`、`get_by_idempotency_key`、`list`、`wait`、`cancel`、`retry_blocked`、`abandon_blocked`、`prune_terminal_before`、`stats`、`shutdown` 和 `shutdown_until`。
 - 有界等待队列与 `QueueFull` 背压、公平 FIFO 调度策略、CPU 槽 / GPU / 具名资源额度，以及独立的 `max_running_tasks` 运行并发上限。
 - 对可重试处理器错误的自动重试（退避时间持久化）、跨重启计数的尝试次数预算，以及针对处理器缺失、尝试耗尽或重试队列已满的 `Blocked` 记录。
 - 面向易失工作的 `TaskExecutionService::in_memory()`，其中 `submit_local` 闭包通过类型化的 `LocalTaskHandle<R, E>` 返回结果；可选的 `sqlite` 存储提供重启恢复和 schema 迁移。
-- 可插拔的 `TaskStore`、`SchedulingPolicy`、`TaskExecutionEngine` 和 `TaskHandler` provider，既可直接装配，也可通过 `qubit-spi` 发现。
+- 四块组件可替换（见开篇说明）：`from_components` / `register_handler` 直接注入，或经 `qubit-spi` 扩展。
 - 可选的 `event-bus` feature：通过应用提供的 `qubit-event-bus` `EventBus` 以尽力而为的方式发布 `TaskEvent` 通知。
 
 本库不提供多节点或分布式调度、工作流依赖、定时（cron）调度、对任意代码的强制中断，也不保证业务副作用恰好执行一次。存储声明支持重启恢复时，`submit_local` 不可用，因为闭包无法从数据库重建。通知是尽力而为的：队列（默认 256 条）满时会丢弃事件，发布失败也不会回滚任务状态。
