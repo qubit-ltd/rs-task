@@ -9,7 +9,10 @@ use std::sync::atomic::Ordering;
 
 use super::super::ServiceCore;
 
-/// Decrements the tracked execution-attempt count when finalization exits.
+/// Decrements the tracked count when finalization exits or its future is dropped.
+///
+/// Constructed before spawning, after the scheduler increments the count, so
+/// runtime cancellation before the first poll cannot leak the reservation.
 pub(in crate::service::task_execution_service) struct AttemptInFlightGuard {
     /// Service whose active-attempt count this guard owns.
     pub(in crate::service::task_execution_service) core_ref: std::sync::Weak<ServiceCore>,

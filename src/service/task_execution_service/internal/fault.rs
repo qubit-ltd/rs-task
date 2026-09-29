@@ -97,7 +97,7 @@ pub(in crate::service::task_execution_service) fn record_scheduler_fault(core: &
     begin_shutdown_core(Arc::clone(core));
 }
 
-/// Extracts a useful diagnostic from a caught scheduler panic payload.
+/// Extracts a useful diagnostic from a caught background worker panic payload.
 ///
 /// # Parameters
 ///
@@ -112,6 +112,6 @@ pub(in crate::service::task_execution_service) fn panic_message(payload: Box<dyn
     } else if let Some(message) = payload.downcast_ref::<&'static str>() {
         (*message).to_owned()
     } else {
-        "scheduler panicked with a non-string payload".into()
+        "background worker panicked with a non-string payload".into()
     }
 }
