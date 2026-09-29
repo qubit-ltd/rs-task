@@ -31,7 +31,8 @@ use crate::store::TaskStore;
 ///
 /// # Errors
 /// Returns the first violated contract or backend operation failure, including
-/// owner cleanup failure when no earlier violation occurred. Requires the
+/// owner cleanup failure. When both checks and cleanup fail, the original
+/// check is preserved and cleanup diagnostics are appended. Requires the
 /// backend's async runtime and writes disposable fixture data.
 pub async fn verify_core_contract(fixture: &dyn StoreFixture) -> Result<ContractReport, ContractViolation> {
     let store = fixture.open().await.map_err(|error| violation("open", error))?;
@@ -60,11 +61,15 @@ async fn acquire_for_core(store: &dyn TaskStore) -> Result<Option<OwnerEpoch>, C
     match store.acquire_owner().await {
         Err(StoreError::UnsupportedCapability) => {}
         Ok(epoch) => {
-            let _ = store.release_owner(epoch).await;
-            return Err(violation(
-                "capabilities",
-                "volatile ownership must report UnsupportedCapability",
-            ));
+            return finish_owner(
+                store,
+                Some(epoch),
+                Err(violation(
+                    "capabilities",
+                    "volatile ownership must report UnsupportedCapability",
+                )),
+            )
+            .await;
         }
         Err(error) => return Err(violation("capabilities", error)),
     }
@@ -83,18 +88,25 @@ async fn acquire_for_core(store: &dyn TaskStore) -> Result<Option<OwnerEpoch>, C
     Ok(None)
 }
 
-/// Awaits owner release on either result path, preserving the original
-/// violation.
-pub(super) async fn finish_owner(
+/// Awaits owner release for any suite result, preserving the original check
+/// and appending cleanup failures rather than discarding either diagnostic.
+pub(super) async fn finish_owner<T>(
     store: &dyn TaskStore,
     owner: Option<OwnerEpoch>,
-    result: Result<ContractReport, ContractViolation>,
-) -> Result<ContractReport, ContractViolation> {
-    if let Some(epoch) = owner {
-        let cleanup = store.release_owner(epoch).await;
-        if result.is_ok() {
-            cleanup.map_err(|error| violation("owner_release", error))?;
-        }
+    result: Result<T, ContractViolation>,
+) -> Result<T, ContractViolation> {
+    if let Some(epoch) = owner
+        && let Err(error) = store.release_owner(epoch).await
+    {
+        return match result {
+            Ok(_) => Err(violation("owner_release", error)),
+            Err(mut primary) => {
+                primary
+                    .message
+                    .push_str(&format!("; owner_release cleanup failed: {error}"));
+                Err(primary)
+            }
+        };
     }
     result
 }

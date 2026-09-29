@@ -37,7 +37,8 @@ use crate::store::TaskStore;
 ///
 /// # Errors
 /// Unsupported recovery is a `recovery_capability` violation, never a pass or
-/// skip. Other failures identify the first violated contract or operation.
+/// skip. Other failures identify the first violated contract or operation;
+/// any owner cleanup failures are appended to that original diagnostic.
 pub async fn verify_recovery_contract(fixture: &dyn StoreFixture) -> Result<ContractReport, ContractViolation> {
     let store = fixture.open().await.map_err(|error| violation("open", error))?;
     let capabilities = store.capabilities();
@@ -68,11 +69,15 @@ async fn check_first_owner(
         Ok(other) => match other.acquire_owner().await {
             Err(StoreError::OwnerConflict) => {}
             Ok(other_epoch) => {
-                let _ = other.release_owner(other_epoch).await;
-                return Err(violation(
-                    "owner_exclusivity",
-                    "second instance acquired ownership while first owner remained active",
-                ));
+                return finish_owner(
+                    other.as_ref(),
+                    Some(other_epoch),
+                    Err(violation(
+                        "owner_exclusivity",
+                        "second instance acquired ownership while first owner remained active",
+                    )),
+                )
+                .await;
             }
             Err(error) => return Err(violation("owner_exclusivity", error)),
         },
@@ -221,7 +226,8 @@ async fn check_reopened(
         )?;
     }
     verify_pages(store, expected, None).await?;
-    // Also require an exactly full terminal page (256) and two full pages (512).
+    // Also verify datasets with exactly 256 and 512 remaining records. A
+    // conforming backend may split either dataset into shorter pages.
     verify_pages(store, &expected[257..], Some(TaskCursor::from(&expected[256]))).await?;
     verify_pages(store, &expected[1..], Some(TaskCursor::from(&expected[0]))).await?;
     ensure(
@@ -262,9 +268,9 @@ async fn check_reopened(
     })
 }
 
-/// Compares strict 256-row pages to the durable oracle, including exact next
-/// keys. Bounded iteration catches duplicate, unordered, missing, extra, and
-/// excluded rows.
+/// Compares pages of at most 256 rows to consecutive oracle slices, including
+/// exact next keys. Nonempty advancing pages bound iteration by the dataset
+/// size and reject duplicate, unordered, missing, extra, and excluded rows.
 async fn verify_pages(
     store: &dyn TaskStore,
     expected: &[TaskSummary],
@@ -276,9 +282,25 @@ async fn verify_pages(
             .scan_unfinished(after)
             .await
             .map_err(|error| violation("recovery_pagination", error))?;
-        let end = (offset + 256).min(expected.len());
+        let row_count = page.tasks.len();
+        ensure(
+            row_count <= 256,
+            "recovery_pagination",
+            "recovery page exceeds 256 rows",
+        )?;
+        ensure(
+            row_count > 0 || offset == expected.len(),
+            "recovery_pagination",
+            "recovery rows ended before expected snapshots",
+        )?;
+        let end = offset + row_count;
+        ensure(
+            end <= expected.len(),
+            "recovery_pagination",
+            "recovery rows exceed expected snapshots",
+        )?;
         let next = if end < expected.len() {
-            expected.get(end - 1).map(TaskCursor::from)
+            page.tasks.last().map(TaskCursor::from)
         } else {
             None
         };

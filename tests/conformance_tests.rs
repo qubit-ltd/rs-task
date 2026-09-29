@@ -7,6 +7,8 @@
 #[cfg(feature = "sqlite")]
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use qubit_task::conformance::StoreFixture;
 use qubit_task::conformance::verify_core_contract;
@@ -66,12 +68,24 @@ impl Drop for SqliteFixture {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Mutation {
     Idempotency,
     StaleVersion,
     WrongNext,
     DuplicatePage,
+    #[cfg(feature = "sqlite")]
+    WrongNextAndCleanup(Arc<AtomicUsize>, usize),
+    UnexpectedVolatileOwner(Arc<AtomicUsize>),
+    UnexpectedSharedOwner(Arc<AtomicUsize>),
+    #[cfg(feature = "sqlite")]
+    ShortRecoveryPage,
+    #[cfg(feature = "sqlite")]
+    OversizedRecoveryPage,
+    #[cfg(feature = "sqlite")]
+    EmptyRecoveryPage,
+    #[cfg(feature = "sqlite")]
+    PrematureRecoveryEnd,
 }
 struct BrokenFixture<F> {
     fixture: F,
@@ -82,7 +96,7 @@ impl<F: StoreFixture> StoreFixture for BrokenFixture<F> {
         Box::pin(async {
             Ok(Arc::new(BrokenStore {
                 inner: self.fixture.open().await?,
-                mutation: self.mutation,
+                mutation: self.mutation.clone(),
             }) as Arc<dyn TaskStore>)
         })
     }
@@ -93,7 +107,14 @@ struct BrokenStore {
 }
 impl TaskStore for BrokenStore {
     fn capabilities(&self) -> StoreCapabilities {
-        self.inner.capabilities()
+        if matches!(self.mutation, Mutation::UnexpectedSharedOwner(_)) {
+            StoreCapabilities {
+                persistent_history: true,
+                restart_recovery: true,
+            }
+        } else {
+            self.inner.capabilities()
+        }
     }
     fn accept<'a>(&'a self, id: TaskId, mut request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         if matches!(self.mutation, Mutation::Idempotency) {
@@ -115,14 +136,29 @@ impl TaskStore for BrokenStore {
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         Box::pin(async move {
             let mut page = self.inner.list(query).await?;
-            mutate_page(self.mutation, &mut page.records, &mut page.next);
+            mutate_page(&self.mutation, &mut page.records, &mut page.next);
             Ok(page)
         })
     }
     fn scan_unfinished<'a>(&'a self, after: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         Box::pin(async move {
             let mut page = self.inner.scan_unfinished(after).await?;
-            mutate_page(self.mutation, &mut page.tasks, &mut page.next);
+            mutate_page(&self.mutation, &mut page.tasks, &mut page.next);
+            #[cfg(feature = "sqlite")]
+            if matches!(self.mutation, Mutation::ShortRecoveryPage) && page.tasks.len() > 128 {
+                page.tasks.truncate(128);
+                page.next = page.tasks.last().map(TaskCursor::from);
+            }
+            #[cfg(feature = "sqlite")]
+            match self.mutation {
+                Mutation::OversizedRecoveryPage if !page.tasks.is_empty() => page.tasks.push(page.tasks[0].clone()),
+                Mutation::EmptyRecoveryPage => {
+                    page.tasks.clear();
+                    page.next = None;
+                }
+                Mutation::PrematureRecoveryEnd => page.next = None,
+                _ => {}
+            }
             Ok(page)
         })
     }
@@ -145,19 +181,47 @@ impl TaskStore for BrokenStore {
         self.inner.count_states()
     }
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
-        self.inner.acquire_owner()
+        if matches!(
+            self.mutation,
+            Mutation::UnexpectedVolatileOwner(_) | Mutation::UnexpectedSharedOwner(_)
+        ) {
+            Box::pin(async { Ok(OwnerEpoch(1)) })
+        } else {
+            self.inner.acquire_owner()
+        }
     }
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
         self.inner.has_unfinished_over_limit(limit)
     }
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
-        self.inner.release_owner(epoch)
+        Box::pin(async move {
+            match &self.mutation {
+                #[cfg(feature = "sqlite")]
+                Mutation::WrongNextAndCleanup(calls, fail_on_call) => {
+                    let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    self.inner.release_owner(epoch).await?;
+                    if call == *fail_on_call {
+                        return Err(StoreError::Failure("injected cleanup fault".into()));
+                    }
+                    Ok(())
+                }
+                Mutation::UnexpectedVolatileOwner(calls) | Mutation::UnexpectedSharedOwner(calls) => {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(StoreError::Failure("unexpected owner cleanup fault".into()))
+                }
+                _ => self.inner.release_owner(epoch).await,
+            }
+        })
     }
 }
 /// Injects malformed cursors or duplicate rows through the public page API.
-fn mutate_page(mutation: Mutation, rows: &mut [TaskSummary], next: &mut Option<TaskCursor>) {
+fn mutate_page(mutation: &Mutation, rows: &mut [TaskSummary], next: &mut Option<TaskCursor>) {
     match mutation {
         Mutation::WrongNext => {
+            *next = rows.first().map(TaskCursor::from);
+        }
+        #[cfg(feature = "sqlite")]
+        Mutation::WrongNextAndCleanup(_, _) => {
             *next = rows.first().map(TaskCursor::from);
         }
         Mutation::DuplicatePage if rows.len() > 1 => {
@@ -289,4 +353,144 @@ async fn test_harness_core_failure_releases_owner() {
         .await
         .expect("replacement owner after core failure");
     store.release_owner(epoch).await.expect("release probe owner");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_core_failure_preserves_cleanup_diagnostic() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = BrokenFixture {
+        fixture: SqliteFixture::new(),
+        mutation: Mutation::WrongNextAndCleanup(Arc::clone(&calls), 1),
+    };
+    let error = verify_core_contract(&fixture)
+        .await
+        .expect_err("both history and cleanup fail");
+    assert_eq!(error.check, "history_pagination");
+    assert!(error.message.contains("history rows"), "primary diagnostic: {error}");
+    assert!(
+        error.message.contains("owner_release cleanup failed") && error.message.contains("injected cleanup fault"),
+        "cleanup diagnostic: {error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "owner release was awaited once");
+    let store = fixture
+        .fixture
+        .open()
+        .await
+        .expect("real owner release completed before injected error");
+    let epoch = store
+        .acquire_owner()
+        .await
+        .expect("replacement owner after dual failure");
+    store.release_owner(epoch).await.expect("release probe owner");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_recovery_failure_preserves_cleanup_diagnostic() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = BrokenFixture {
+        fixture: SqliteFixture::new(),
+        mutation: Mutation::WrongNextAndCleanup(Arc::clone(&calls), 2),
+    };
+    let error = verify_recovery_contract(&fixture)
+        .await
+        .expect_err("both recovery page and cleanup fail");
+    assert_eq!(error.check, "recovery_pagination");
+    assert!(error.message.contains("recovery rows"), "primary diagnostic: {error}");
+    assert!(
+        error.message.contains("owner_release cleanup failed") && error.message.contains("injected cleanup fault"),
+        "cleanup diagnostic: {error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "both owner generations were released");
+    let store = fixture
+        .fixture
+        .open()
+        .await
+        .expect("real recovery owner release completed");
+    let epoch = store
+        .acquire_owner()
+        .await
+        .expect("replacement owner after recovery dual failure");
+    store.release_owner(epoch).await.expect("release probe owner");
+}
+
+#[tokio::test]
+async fn test_unexpected_volatile_owner_preserves_cleanup_diagnostic() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = BrokenFixture {
+        fixture: MemoryFixture,
+        mutation: Mutation::UnexpectedVolatileOwner(Arc::clone(&calls)),
+    };
+    let error = verify_core_contract(&fixture)
+        .await
+        .expect_err("volatile store must reject ownership");
+    assert_eq!(error.check, "capabilities");
+    assert!(
+        error.message.contains("volatile ownership"),
+        "primary diagnostic: {error}"
+    );
+    assert!(
+        error.message.contains("owner_release cleanup failed")
+            && error.message.contains("unexpected owner cleanup fault"),
+        "cleanup diagnostic: {error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "unexpected owner release was awaited");
+}
+
+#[tokio::test]
+async fn test_unexpected_shared_owner_preserves_both_cleanup_diagnostics() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = BrokenFixture {
+        fixture: MemoryFixture,
+        mutation: Mutation::UnexpectedSharedOwner(Arc::clone(&calls)),
+    };
+    let error = verify_recovery_contract(&fixture)
+        .await
+        .expect_err("second owner must conflict");
+    assert_eq!(error.check, "owner_exclusivity");
+    assert!(error.message.contains("second instance"), "primary diagnostic: {error}");
+    assert_eq!(
+        error.message.matches("owner_release cleanup failed").count(),
+        2,
+        "both owner cleanup failures: {error}"
+    );
+    assert!(
+        error.message.contains("unexpected owner cleanup fault"),
+        "cleanup diagnostic: {error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "both unexpected owners were released");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_recovery_contract_accepts_legal_short_pages() {
+    let fixture = BrokenFixture {
+        fixture: SqliteFixture::new(),
+        mutation: Mutation::ShortRecoveryPage,
+    };
+    let report = verify_recovery_contract(&fixture)
+        .await
+        .expect("128-row recovery pages satisfy the bounded contract");
+    assert!(report.checks.contains(&"recovery_pagination"));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_recovery_contract_rejects_oversized_empty_and_premature_pages() {
+    for (mutation, diagnostic) in [
+        (Mutation::OversizedRecoveryPage, "exceeds 256 rows"),
+        (Mutation::EmptyRecoveryPage, "ended before expected snapshots"),
+        (Mutation::PrematureRecoveryEnd, "recovery rows or next differ"),
+    ] {
+        let fixture = BrokenFixture {
+            fixture: SqliteFixture::new(),
+            mutation,
+        };
+        let error = verify_recovery_contract(&fixture)
+            .await
+            .expect_err("invalid page must not pass the short-page oracle");
+        assert_eq!(error.check, "recovery_pagination");
+        assert!(error.message.contains(diagnostic), "{error}");
+    }
 }
