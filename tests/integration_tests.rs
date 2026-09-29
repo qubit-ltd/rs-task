@@ -234,16 +234,16 @@ impl TaskHandler for RetryQueueHandler {
 struct PausablePolicy {
     paused: std::sync::atomic::AtomicBool,
     called: sync::Notify,
-    saw_nonempty: sync::Notify,
+    saw_paused_nonempty: sync::Notify,
 }
 
 impl SchedulingPolicy for PausablePolicy {
     fn order(&self, queue: &QueueSnapshot, _resources: &ResourceSnapshot) -> SchedulingPlan {
         self.called.notify_one();
-        if !queue.tasks.is_empty() {
-            self.saw_nonempty.notify_one();
-        }
         if self.paused.load(std::sync::atomic::Ordering::Acquire) {
+            if !queue.tasks.is_empty() {
+                self.saw_paused_nonempty.notify_one();
+            }
             SchedulingPlan::default()
         } else {
             SchedulingPlan {
@@ -1063,7 +1063,7 @@ async fn test_retryable_completion_does_not_overfill_waiting_queue() {
     let policy = Arc::new(PausablePolicy {
         paused: std::sync::atomic::AtomicBool::new(false),
         called: sync::Notify::new(),
-        saw_nonempty: sync::Notify::new(),
+        saw_paused_nonempty: sync::Notify::new(),
     });
     let mut handlers = TaskHandlerRegistry::new();
     handlers
@@ -1094,12 +1094,15 @@ async fn test_retryable_completion_does_not_overfill_waiting_queue() {
         .await
         .expect("first attempt starts");
 
+    // Pause before admission so no runnable plan can capture the waiting task.
+    // Only paused observations signal this gate, excluding the first task's
+    // earlier policy notification.
+    policy.paused.store(true, std::sync::atomic::Ordering::Release);
     let waiting = service
         .submit(test_keyed(TaskRequest::new("retry-queue", "1", b"waiting".to_vec())))
         .await
         .expect("one waiting task fills the queue");
-    policy.paused.store(true, std::sync::atomic::Ordering::Release);
-    time::timeout(std::time::Duration::from_secs(2), policy.saw_nonempty.notified())
+    time::timeout(std::time::Duration::from_secs(2), policy.saw_paused_nonempty.notified())
         .await
         .expect("scheduler observes the waiting task while paused");
 

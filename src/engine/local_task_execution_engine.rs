@@ -263,14 +263,18 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
     use super::LocalTaskExecutionEngine;
+    use crate::engine::EngineError;
+    use crate::engine::ExecutionOutcome;
     use crate::engine::TaskExecutionEngine;
     use crate::handler::TaskContext;
     use crate::handler::TaskHandler;
     use crate::handler::TaskHandlerDescriptor;
+    use crate::handler::TaskHandlerRegistry;
     use crate::handler::TaskRunOutcome;
     use crate::handler::TaskRunResult;
     use crate::model::ResourceCapacity;
@@ -292,6 +296,80 @@ mod tests {
         fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
             Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
         }
+    }
+
+    /// Completion is observable only after all reserved resource classes are
+    /// released and can be allocated to another task. The private fixture and
+    /// crate-private completion receiver keep this contract in the unit test.
+    #[tokio::test]
+    async fn test_successful_execution_releases_all_resources_before_completion() {
+        let custom = BTreeMap::from([("license".to_owned(), 2)]);
+        let engine = LocalTaskExecutionEngine::new(ResourceCapacity {
+            cpu_slots: 1,
+            gpus: BTreeMap::from([("gpu-0".to_owned(), vec!["compute".to_owned()])]),
+            custom: custom.clone(),
+        });
+        let request = ResourceRequest {
+            cpu_slots: 1,
+            gpu_count: 1,
+            gpu_labels: vec!["compute".to_owned()],
+            custom: custom.clone(),
+        };
+        let mut handlers = TaskHandlerRegistry::new();
+        handlers
+            .register(Arc::new(NoopHandler))
+            .expect("register noop task handler");
+        let handler = handlers.resolve("noop", "1").expect("resolve registered task handler");
+        let id = TaskId::generate();
+        let prepared = engine
+            .try_prepare(id, request.clone())
+            .expect("reserve all resource classes");
+        assert_eq!(prepared.assigned_resources(), ["gpu-0"]);
+        let handle = engine
+            .activate(
+                prepared,
+                handler,
+                Vec::new(),
+                TaskContext::new(id, 1, vec!["gpu-0".to_owned()], Arc::new(AtomicBool::new(false))),
+            )
+            .await
+            .expect("activate reserved execution");
+        // The current-thread runtime has not polled the spawned handler yet.
+        let held = engine.capacity();
+        assert_eq!(held.used_cpu_slots, 1);
+        assert_eq!(held.used_gpus, ["gpu-0"]);
+        assert_eq!(held.used_custom, custom);
+        assert!(matches!(
+            engine.try_prepare(TaskId::generate(), request.clone()),
+            Err(EngineError::TemporarilyUnavailable)
+        ));
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), handle.receiver)
+            .await
+            .expect("execution completes within test watchdog")
+            .expect("worker sends completion outcome");
+        assert!(matches!(
+            outcome,
+            ExecutionOutcome::Returned(Ok(TaskRunOutcome::Succeeded(_)))
+        ));
+        let released = engine.capacity();
+        assert_eq!(released.used_cpu_slots, 0);
+        assert!(released.used_gpus.is_empty());
+        assert!(released.used_custom.values().all(|used| *used == 0));
+
+        let next = engine
+            .try_prepare(TaskId::generate(), request)
+            .expect("completed resources can be reserved again");
+        assert_eq!(next.assigned_resources(), ["gpu-0"]);
+        let reassigned = engine.capacity();
+        assert_eq!(reassigned.used_cpu_slots, 1);
+        assert_eq!(reassigned.used_gpus, ["gpu-0"]);
+        assert_eq!(reassigned.used_custom, custom);
+        drop(next);
+        let released_again = engine.capacity();
+        assert_eq!(released_again.used_cpu_slots, 0);
+        assert!(released_again.used_gpus.is_empty());
+        assert!(released_again.used_custom.values().all(|used| *used == 0));
     }
 
     #[test]
