@@ -1,0 +1,14 @@
+[package]
+name = "qubit-task-conformance-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+sqlite = ["qubit-task/sqlite"]
+conformance = ["qubit-task/conformance"]
+
+[dependencies]
+qubit-task = { path = "../../..", default-features = false }
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }

@@ -8,7 +8,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::TaskId;
+use super::TaskCursor;
 use super::TaskSummary;
 
 /// Bounded payload-free projection of unfinished work used during recovery.
@@ -24,8 +24,12 @@ use super::TaskSummary;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RecoveryPage {
-    /// Unfinished task summaries in ascending task ID order.
+    /// At most 256 Queued/Running summaries, strictly ordered by
+    /// `(accepted_at_ms, id)` after the requested exclusive lower bound.
     pub tasks: Vec<TaskSummary>,
-    /// Last returned ID when another page is available.
-    pub next: Option<TaskId>,
+    /// Cursor of the last returned summary when another page is available.
+    ///
+    /// Terminal pages use `None`, including full 256-row terminal pages.
+    /// Empty pages never advertise a next cursor.
+    pub next: Option<TaskCursor>,
 }

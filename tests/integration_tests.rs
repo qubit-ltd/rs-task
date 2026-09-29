@@ -1580,7 +1580,7 @@ async fn test_sqlite_store_idempotency_state_filters_and_cursor_queries() {
     let owner = store.acquire_owner().await.unwrap();
     let unfinished = store.scan_unfinished(None).await.unwrap();
     assert_eq!(unfinished.tasks.len(), 2);
-    let cursor = unfinished.tasks.iter().map(|task| task.id).min().unwrap();
+    let cursor = unfinished.tasks.iter().map(TaskCursor::from).min().unwrap();
     assert_eq!(store.scan_unfinished(Some(cursor)).await.unwrap().tasks.len(), 1);
     store.release_owner(owner).await.unwrap();
     assert!(store.acquire_owner().await.is_err());

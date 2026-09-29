@@ -662,7 +662,7 @@ impl TaskStore for MemoryTaskStore {
     ///
     /// Resolves to `UnsupportedCapability` because this store retains no
     /// restart-recovery rows.
-    fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 

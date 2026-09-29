@@ -8,6 +8,9 @@
 //! Resource-aware asynchronous task execution with pluggable storage and
 //! scheduling.
 
+#[cfg(feature = "conformance")]
+pub mod conformance;
+
 pub mod engine;
 pub mod handler;
 pub mod model;

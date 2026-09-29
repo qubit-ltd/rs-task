@@ -113,3 +113,13 @@ releasing ownership; `shutdown_until` only limits the caller's wait. Operators
 select aged blocked summaries and pass the observed `state_version` to
 `abandon_blocked`. A stale version conflicts, and only terminal records can
 be pruned in bounded batches.
+
+## 0.8 execution, recovery, and cursor contracts
+
+Every attempt finalizer is supervised independently from the handler future. A finalizer panic latches `StoreUnavailable` with task and attempt diagnostics; it does not fabricate success or a terminal task state. Shutdown converges admission, scheduler, tracked attempts, and in-flight writes before releasing store ownership. If a store fault is reported, await `shutdown()` before another process opens the durable store. A caller deadline limits only that caller's wait.
+
+History and recovery continuation use `Option<TaskCursor>`, never a bare `TaskId`. The exclusive cursor contains `(accepted_at_ms, id)` and records sort ascending by that pair, including same-millisecond ties. `RecoveryPage.next` is absent on the terminal page even when it contains 256 rows. Recovery pages carry payload-free summaries.
+
+SQLite schema and record format remain version 3. Opening a schema-3 database ensures the required history and unfinished-work indexes; if a known partial index has an old same-name definition, it is rebuilt transactionally without rewriting task rows or metadata. Recovery planning does not depend on `ANALYZE`.
+
+Third-party stores can enable the `conformance` feature and run the public core and durable recovery suites from an independent crate. Recovery requires a fresh namespace containing 513 unfinished tasks. These black-box suites do not prove cancelled-write draining, crash durability, or transaction interruption; backend-specific controlled-gate and process-crash tests remain required. See the [0.8 migration guide](migration-0.8.en.md).

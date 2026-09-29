@@ -16,6 +16,8 @@ use internal::WorkerCounts;
 #[cfg(test)]
 use internal::WorkerGuard;
 use internal::acquire_owner_lock;
+use internal::build_history_query;
+use internal::build_recovery_query;
 use internal::decode_stored_summary_row;
 use internal::decode_stored_task_row;
 use internal::encode_lifecycle;
@@ -28,7 +30,6 @@ use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 use rusqlite::params_from_iter;
-use rusqlite::types::Value;
 use tokio::sync;
 use tokio::task;
 
@@ -456,57 +457,20 @@ impl TaskStore for SqliteTaskStore {
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.run(move |connection| {
             let page_size = checked_page_size(query.limit)?;
-            let fetch_limit = page_size
-                .checked_add(1)
-                .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
-            let fetch_limit = i64::try_from(fetch_limit)
-                .map_err(|_| StoreError::InvalidRequest("task history page limit is too large"))?;
-            let after_time = query
-                .after
-                .map(|cursor| i64::try_from(cursor.accepted_at_ms))
-                .transpose()
-                .map_err(|_| StoreError::InvalidRequest("task history cursor timestamp is too large"))?;
-            let state_kinds = query.states.iter().map(|kind| kind.as_str()).collect::<Vec<_>>();
-            let mut sql = String::from(
-                &format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2)) AND (?3 IS NULL OR correlation_key = ?3)"),
-            );
-            if !state_kinds.is_empty() {
-                let placeholders = (4..4 + state_kinds.len())
-                    .map(|i| format!("?{i}"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                sql.push_str(&format!(" AND state_kind IN ({placeholders})"));
-            }
-            sql.push_str(&format!(" ORDER BY accepted_at, id LIMIT ?{}", 4 + state_kinds.len()));
-            let mut values = vec![
-                after_time.map_or(Value::Null, Value::Integer),
-                query.after.map(|cursor| cursor.id.to_string()).map_or(
-                    Value::Null,
-                    Value::Text,
-                ),
-                query
-                    .correlation_key
-                    .map_or(Value::Null, Value::Text),
-            ];
-            values.extend(
-                state_kinds
-                    .into_iter()
-                    .map(|kind| Value::Text(kind.into())),
-            );
-            values.push(Value::Integer(fetch_limit));
-            let mut statement = connection.prepare(&sql).map_err(failure)?;
-            let mut rows = statement.query(params_from_iter(values)).map_err(failure)?;
+            let built = build_history_query(&query, page_size)?;
+            let mut statement = connection.prepare(&built.sql).map_err(failure)?;
+            let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
             let mut records = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
-                records.push(decode_stored_summary_row(read_stored_summary_row(row).map_err(failure)?)?);
+                records.push(decode_stored_summary_row(
+                    read_stored_summary_row(row).map_err(failure)?,
+                )?);
             }
             let has_more = records.len() > page_size;
             if has_more {
                 records.truncate(page_size);
             }
-            let next = has_more
-                .then(|| records.last().map(TaskCursor::from))
-                .flatten();
+            let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
             Ok(TaskPage { records, next })
         })
     }
@@ -742,30 +706,38 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
-    /// Loads at most 256 unfinished records after an exclusive task ID.
+    /// Loads at most 256 unfinished summaries after an exclusive time/ID key.
     ///
     /// # Parameters
     ///
-    /// * `cursor` - Last task ID returned by the preceding page.
+    /// * `cursor` - Exclusive acceptance-time/ID lower bound, or `None` for the
+    ///   first page.
     ///
     /// # Returns
     ///
-    /// A future resolving to records and an optional next cursor.
+    /// A payload-free page strictly ordered by `(accepted_at_ms, id)`.
+    /// Its next cursor equals the last row key only when more rows exist;
+    /// full terminal pages and empty pages return `None`.
     ///
     /// # Errors
     ///
     /// Returns an error if a row is malformed or SQLite access fails.
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskId>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         self.run(move |connection| {
-            let mut statement = connection.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE state_kind IN ('Queued','Running') AND (?1 IS NULL OR id > ?1) ORDER BY id LIMIT 257")).map_err(failure)?;
-            let mut rows = statement.query([cursor.map(|id| id.to_string())]).map_err(failure)?;
+            let built = build_recovery_query(cursor)?;
+            let mut statement = connection.prepare(&built.sql).map_err(failure)?;
+            let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
             let mut tasks = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
-                tasks.push(decode_stored_summary_row(read_stored_summary_row(row).map_err(failure)?)?);
+                tasks.push(decode_stored_summary_row(
+                    read_stored_summary_row(row).map_err(failure)?,
+                )?);
             }
             let has_more = tasks.len() > 256;
-            if has_more { tasks.truncate(256); }
-            let next = has_more.then(|| tasks.last().map(|task| task.id)).flatten();
+            if has_more {
+                tasks.truncate(256);
+            }
+            let next = has_more.then(|| tasks.last().map(TaskCursor::from)).flatten();
             Ok(RecoveryPage { tasks, next })
         })
     }
@@ -869,8 +841,13 @@ fn failure(error: impl std::fmt::Display) -> StoreError {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
+    use futures::poll;
+    use rusqlite::Connection;
     use tokio as tokio_crate;
+    use tokio::pin;
     use tokio::spawn;
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
@@ -882,6 +859,7 @@ mod tests {
     use crate::model::AcceptOutcome;
     use crate::model::TaskQuery;
     use crate::model::TaskRequest;
+    use crate::store::StoreError;
     use crate::store::TaskStore;
 
     /// Creates a unique database path for one worker scheduling test.
@@ -1020,6 +998,99 @@ mod tests {
         }
         assert_eq!(peak, 1, "only one worker enters before the connection lock");
 
+        drop(store);
+        remove_database(&path);
+    }
+
+    /// Cancelling an async caller must leave its real blocking transaction
+    /// fenced until commit. Channels mark transaction entry and continuation;
+    /// worker counters and a second connection observe the actual store path.
+    #[tokio_crate::test]
+    async fn test_cancelled_write_caller_keeps_owner_until_transaction_commits() {
+        let path = test_database_path();
+        let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
+        let epoch = store.acquire_owner().await.expect("store acquires owner");
+        store
+            .run_write(|connection| {
+                connection
+                    .execute_batch("CREATE TABLE barrier_probe (value INTEGER NOT NULL)")
+                    .map_err(super::failure)
+            })
+            .await
+            .expect("create probe in this test's database");
+
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let (continue_sender, continue_receiver) = std::sync::mpsc::channel();
+        let (committed_sender, committed_receiver) = oneshot::channel();
+        let writing_store = Arc::clone(&store);
+        let caller = spawn(async move {
+            writing_store
+                .run_write(move |connection| {
+                    let transaction = connection.unchecked_transaction().map_err(super::failure)?;
+                    transaction
+                        .execute("INSERT INTO barrier_probe(value) VALUES(42)", [])
+                        .map_err(super::failure)?;
+                    entered_sender.send(()).expect("test observes transaction entry");
+                    // A dropped test continuation also lets the blocking worker
+                    // exit on assertion failure instead of hanging runtime teardown.
+                    continue_receiver.recv().map_err(super::failure)?;
+                    transaction.commit().map_err(super::failure)?;
+                    committed_sender.send(()).expect("test observes commit");
+                    Ok(())
+                })
+                .await
+        });
+        time::timeout(Duration::from_secs(5), entered_receiver)
+            .await
+            .expect("blocking write enters its transaction")
+            .expect("transaction entry signal");
+        assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 1);
+        assert_eq!(store.operation_slot.available_permits(), 0);
+        let observer = Connection::open(&path).expect("independent SQLite reader opens");
+        let uncommitted: usize = observer
+            .query_row("SELECT COUNT(*) FROM barrier_probe", [], |row| row.get(0))
+            .expect("reader observes committed rows only");
+        assert_eq!(uncommitted, 0, "the entered write has not committed");
+
+        caller.abort();
+        assert!(caller.await.expect_err("caller is cancelled").is_cancelled());
+        assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 1);
+        {
+            let release = store.release_owner(epoch);
+            pin!(release);
+            assert!(
+                poll!(release.as_mut()).is_pending(),
+                "owner release must wait for the cancelled caller's worker"
+            );
+            assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 1);
+            assert!(
+                matches!(SqliteTaskStore::open(&path), Err(StoreError::OwnerConflict)),
+                "OS ownership remains fenced"
+            );
+
+            continue_sender.send(()).expect("allow transaction to commit");
+            time::timeout(Duration::from_secs(5), committed_receiver)
+                .await
+                .expect("transaction commits after continuation")
+                .expect("transaction commit signal");
+            time::timeout(Duration::from_secs(5), release)
+                .await
+                .expect("owner release finishes after the worker")
+                .expect("owner release succeeds");
+        }
+        assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 0);
+        assert_eq!(store.operation_slot.available_permits(), 1);
+        let committed: usize = observer
+            .query_row("SELECT COUNT(*) FROM barrier_probe", [], |row| row.get(0))
+            .expect("reader observes the committed write");
+        assert_eq!(committed, 1);
+        let replacement = SqliteTaskStore::open(&path).expect("ownership can transfer after the completion barrier");
+        assert!(
+            matches!(store.run_write(|_| Ok(())).await, Err(StoreError::Failure(_))),
+            "old owner stays fenced from later writes"
+        );
+        drop(replacement);
+        drop(observer);
         drop(store);
         remove_database(&path);
     }

@@ -1,0 +1,12 @@
+[package]
+name = "rs-task-crash-worker-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+qubit-task = { path = "../../..", default-features = false, features = ["sqlite"] }
+serde_json = "1"
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync"] }
