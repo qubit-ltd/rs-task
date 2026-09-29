@@ -2,7 +2,7 @@
 
 ## 运行时可靠性补充
 
-公开 `TaskExecutionService` 句柄共享一个 lease。最后一个 lease 析构时调用统一的关闭入口，后台协调器排空已受理工作、关闭通知发布器并释放可恢复存储的 owner；析构本身不等待，也不能报告关闭错误。需要确认关闭结果的调用方必须显式等待 `shutdown()`。注入的 Tokio runtime 必须存活到异步排空完成。
+公开 `TaskExecutionService` 句柄共享一个 lease。最后一个 lease 析构时调用统一的关闭入口，后台协调器排空已受理工作、释放可恢复存储的 owner，再关闭通知发布器并发布共享关闭结果；析构本身不等待，也不能报告关闭错误。需要确认关闭结果的调用方必须显式等待 `shutdown()`。注入的 Tokio runtime 必须存活到异步排空完成。
 
 调度循环由 panic 监督器包装。策略或引擎 panic 被转换为 `TaskServiceError::SchedulerUnavailable`，该故障唤醒任务等待者、关闭受理并阻止后续重试；调度循环不会自动重启。已经由引擎返回执行句柄的尝试由独立任务跟踪，协调器等待这些尝试完成后再释放存储 owner。自定义引擎必须保证执行副作用开始后返回可追踪句柄；若在开始副作用后 panic 且没有返回句柄，服务不能证明工作已停止，应用必须终止进程并通过外部监督器恢复。
 
@@ -60,7 +60,7 @@
 
 ## 4. 服务接口与职责划分
 
-业务应用是装配入口：通过 `rs-spi` 发现 provider，按部署配置选择并创建组件，再注入统一的 `TaskExecutionService`。`rs-spi` 提供注册、发现、选择和创建能力；组件之间的依赖由应用明确接线，服务构建器负责检查组合是否合法。这与 IoC 的装配思路相近，但不把 `rs-spi` 假定为会自动推断依赖图的完整容器。
+业务应用是装配入口：通过 `rs-spi` 发现 provider，按部署配置选择并创建组件，再注入统一的 `TaskExecutionService`。`rs-spi` 提供注册、发现、选择和创建能力；组件之间的依赖由应用明确接线，服务构建器负责检查组合是否合法。这与 IoC 的装配思路相近，但不把 `rs-spi` 假定为会自动推断依赖图的完整容器。当前实现将门面协调逻辑拆在 `internal/admission.rs`、`internal/transition.rs`、`internal/fault.rs`、`internal/shutdown.rs` 和 `internal/validation.rs`；调度循环位于 `internal/scheduler.rs`，恢复装配位于 builder 的 `internal/recovery.rs`。下图中的协调职责是逻辑边界，不是一个独立的 `TaskCoordinator` 类型。
 
 ```text
 业务应用 / 装配入口
@@ -71,37 +71,39 @@
   └─ rs-event-bus -> 具体 EventBus ───────────────┤
                                                 ↓
                                     TaskExecutionService
-                                    ├─ TaskCoordinator
-                                    └─ TaskScheduler
+                                    ├─ 生命周期内部模块
+                                    └─ scheduler.rs 调度循环
 ```
 
 | 模块 | 职责 | 扩展方式 |
 | --- | --- | --- |
 | `TaskExecutionService` | 对业务暴露提交、查询、取消、等待及能力查询 | 唯一公共门面，不按存储能力拆成多种服务类型 |
-| `TaskCoordinator` | 受理与状态转换、幂等检查、生命周期、关闭和故障协调 | 服务内部固定逻辑，避免第三方绕过状态不变量 |
-| `TaskScheduler` | 管理待执行任务并驱动调度循环 | 内部固定逻辑；候选任务的排序/公平性由 `SchedulingPolicy` 接口决定 |
+| 服务内部生命周期模块 | 在 admission、转换、故障、关闭和校验边界实现协调逻辑 | 内部固定逻辑，避免第三方绕过状态不变量 |
+| 调度循环 | 管理待执行任务并驱动候选执行 | 内部固定逻辑；候选任务的排序/公平性由 `SchedulingPolicy` 接口决定 |
 | `TaskStore` | 权威任务记录、查询和能力声明；需要时提供持久受理与恢复操作 | 接口；库内提供基本内存实现，第三方可通过 SPI 提供数据库或文件等实现 |
 | `TaskExecutionEngine` | 检查本执行域的资源容量，原子预约资源，启动处理器，归还资源并报告执行结果 | 接口；库内提供本机实现，未来可扩展分布式实现 |
 | `TaskHandler` 与注册表 | 按任务类型和版本执行具体业务任务 | 处理器接口通过 SPI 发现多个实现；注册表负责唯一性校验和索引 |
 | `rs-event-bus::EventBus` | 可选任务状态通知 | 直接使用该库提供的抽象，不定义 `TaskEventSink` |
 
-以下签名表达设计边界，不是已存在的可编译 API：
+以下列出当前 `TaskExecutionService` 门面的主要公共操作；完整配置入口和类型化错误见 Rust API 文档：
 
 ```text
 TaskExecutionService
-  capabilities() -> ServiceCapabilities
-  submit(TaskRequest with stable idempotency_key) -> TaskRecord
-  submit_local(local_task) -> LocalTaskHandle<R, E> | UnsupportedCapability
-  get(TaskId) -> TaskRecord | NotFound | Error
-  get_summary(TaskId) -> TaskSummary | NotFound | Error
-  list(TaskQuery) -> Page<TaskSummary>
-  cancel(TaskId) -> CancelOutcome
-  retry_blocked(TaskId) -> TaskSummary | Error
-  abandon_blocked(TaskId, expected_version) -> TaskSummary | Conflict | NotBlocked
-  stats() -> TaskStats
-  wait(TaskId) -> TaskSummary | Blocked | Error
-  shutdown() -> Result
-  shutdown_until(deadline) -> Result
+  capabilities() -> TaskServiceCapabilities
+  submit(TaskRequest) -> Result<TaskRecord, TaskServiceError>
+  submit_local(closure) -> Result<LocalTaskHandle<R, E>, TaskServiceError>
+  get(TaskId) -> Result<Option<TaskRecord>, TaskServiceError>
+  get_summary(TaskId) -> Result<Option<TaskSummary>, TaskServiceError>
+  get_by_idempotency_key(key) -> Result<Option<TaskSummary>, TaskServiceError>
+  list(TaskQuery) -> Result<TaskPage, TaskServiceError>
+  cancel(TaskId) -> Result<CancelOutcome, TaskServiceError>
+  retry_blocked(TaskId) -> Result<TaskSummary, TaskServiceError>
+  abandon_blocked(TaskId, expected_version) -> Result<TaskSummary, TaskServiceError>
+  prune_terminal_before(cutoff, NonZeroUsize) -> Result<usize, TaskServiceError>
+  stats() -> Result<TaskStats, TaskServiceError>
+  wait(TaskId) -> Result<TaskSummary, TaskServiceError>
+  shutdown() -> Result<(), TaskServiceError>
+  shutdown_until(deadline) -> Result<(), TaskServiceError>
 ```
 
 `TaskExecutionService` 是一个门面类型，而不是为不同存储能力实现多套公共 trait。构建时由装配的 `TaskStore` 决定是否启动恢复流程，并可配置 `require_recovery`：要求恢复但所选存储不支持时，构建失败。`capabilities()` 返回存储能力及本地闭包支持情况。`submit_local` 返回 `LocalTaskHandle<R, E>`，可等待类型化业务值/错误或取消、阻塞、存储故障等明确终态结果；稳定 ID 仍可通过 `task_id()` 获取，`TaskRecord.output` 只用于查询持久摘要。若存储声明重启恢复，则返回 `UnsupportedCapability`，防止不可重建闭包被当作可恢复任务。提交返回 `Ok` 只代表受理：不可恢复存储已保存于本机队列；可恢复存储已完成持久化受理。它不代表任务已启动或成功。
@@ -193,6 +195,8 @@ TaskExecutionService
 
 当前 Cargo 配置面向 `qubit-event-bus` 0.15 API。通用 `NotificationPublisher` 返回 provider receipt；本服务按 `AdmissionOutcome` 映射到原有业务统计字段。
 
+事件通知集成也有 source-breaking 迁移：0.14 代码构造 `PublishRequest`，调用 `EventBus::publish`，再检查 `PublishReceipt::acknowledgement()`；0.15 改用有界 `NotificationPublisher::try_publish`，并在回调中读取 receipt 的 `admission_outcome()`，将 `AdmissionOutcome` 映射到任务统计。两种 API 不提供兼容别名。
+
 服务使用 `rs-event-bus` 的 `NotificationPublisher` 维护有界串行队列，默认容量为 256，可用 `TaskExecutionServiceBuilder::event_bus_buffer_capacity(NonZeroUsize)` 配置。任务状态转移只尝试非阻塞入队，不等待同步 provider；队列满时丢弃新通知。队列关闭后的入队尝试也会丢弃。通知失败不会回滚已提交的任务状态，通知可能丢失、重复或延迟。消费者按 `TaskId` 和状态版本去重，再查询服务取得权威状态。不同并发状态转移按实际入队顺序串行发布，不保证跨生产者按 `state_version` 全局排序。
 
 `TaskExecutionService::notification_stats()` 在配置总线时返回统计快照，未配置时返回 `None`。`enqueued` 统计进入本地队列的事件，`queue_full` 与 `queue_closed` 统计对应的丢弃；`accepted` 表示至少一个已报告目的地接受，`partial_rejection` 表示同一事件同时有接受和拒绝目的地，`opaque_accepted` 表示 provider 接受但未暴露目的地，`unaccepted` 表示没有可见目的地接受（含空列表和 interceptor drop），`publish_error` 记录发布错误，`worker_panicked` 记录线程 panic。计数为单调饱和值；它们只描述本地排队、provider 的接纳回执和 worker 状态，不代表 subscriber handler 已完成。
@@ -225,7 +229,11 @@ SQLite 使用单个连接，因此同时运行的阻塞数据库操作上限为 
 
 核心验证包括：资源不足排队、GPU 设备分配、非法资源请求、队列满拒绝、越过次数后的防饥饿、取消与启动竞态、panic 后资源归还、重复提交、历史存储故障、事件故障、持久受理失败、终态写入失败、重启恢复，以及旧实例回调被版本/代际拒绝。还要验证 `in_memory()` 无 SPI 装配可执行本地任务、通用 builder 未选存储时拒绝构建、默认容量可覆盖、SQLite 便捷入口完成恢复后才返回，以及链接第三方 provider 不改变默认行为。SPI 场景要验证跨 crate 自动发现、未链接 provider 不会被发现、重复处理器键报错、运行时配置注入、`StoreCapabilities` 与实际操作一致、`require_recovery` 失败而不降级，以及旧处理器版本恢复。`TaskStore` 提供按能力分组的可复用契约测试套件，让外部后端检验原子受理、条件更新、恢复扫描、独占所有权和单次状态聚合；`stats()` 在服务层由拒绝 `list()` 的测试存储验证只执行一次 `count_states()`。
 
-实施分三步：先交付统一门面、内存 `TaskStore`、默认调度策略、本机执行引擎和 SPI 服务族；再完成可恢复 `TaskStore`、SQLite provider 和重启场景；最后直接接入可选的 `rs-event-bus` 事件通知。新版将破坏旧公开 API：使用 `in_memory()` 代替含糊的无参数构造，使用版本化 `TaskRequest` 或只适用于本地闭包的 `LocalTaskHandle<R, E>`，并用服务生成且不复用的 `TaskId`。`submit_local` 不再返回旧的通用 `TaskHandle<R, E>`；第三方 `TaskStore` 还必须实现 `count_states()`，以一次查询返回所有保留状态的计数。迁移调用代码、provider 实现和测试，不要求保留兼容层。检查当前 `rust-common` 工作区与相关 `rs-*` 仓库后，没有发现直接依赖 `rs-task` 的实际下游，因此当前没有需要同步迁移的兄弟 crate。
+### 历史实施记录（已完成）
+
+重设计按三个阶段交付：统一门面、内存 `TaskStore`、默认调度策略、本机执行引擎和 SPI 服务族；随后完成可恢复 `TaskStore`、SQLite provider 和重启场景；最后接入可选的 `rs-event-bus` 通知。该阶段规划仅记录历史实施顺序，不代表当前仍有待实施步骤。
+
+本次 0.6 API 迁移不保留兼容层：使用 `in_memory()` 代替含糊的无参数构造，使用版本化 `TaskRequest` 或只适用于本地闭包的 `LocalTaskHandle<R, E>`，并使用服务生成且不复用的 `TaskId`。`submit_local` 不再返回旧的通用 `TaskHandle<R, E>`；第三方 `TaskStore` 还须实现 `count_states()`，以一次查询返回所有保留状态的计数。用户指南包含调用方和 provider 的迁移路径。检查当前 `rust-common` 工作区与相关 `rs-*` 仓库后，没有发现直接依赖 `rs-task` 的实际下游，因此当前没有需要同步迁移的兄弟 crate。
 
 ## 无 payload 状态查询与 Blocked 任务运维
 
