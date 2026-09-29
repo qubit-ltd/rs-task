@@ -158,6 +158,7 @@ mod tests {
     use rusqlite::Connection;
     use rusqlite::params_from_iter;
     use rusqlite::types::Value;
+    use rusqlite::StatementStatus;
 
     use super::super::schema::initialize_schema;
     use super::QuerySql;
@@ -377,6 +378,94 @@ mod tests {
                 .params[0],
             Value::Integer(i64::MAX)
         );
+    }
+
+    /// Builds the same deterministic history prefix at each size without
+    /// ANALYZE, matching fresh and migrated databases after index creation.
+    fn history_vm_database(size: i64) -> (Connection, TaskCursor) {
+        let mut connection = Connection::open_in_memory().expect("temporary database opens");
+        initialize_schema(&mut connection).expect("schema initializes");
+        connection.execute_batch(&format!(
+            "WITH RECURSIVE fixture(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM fixture WHERE n<{size})
+             INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,request_info_json,payload,lifecycle_json)
+             SELECT printf('00000000-0000-4000-8000-%012x',n),
+                    CASE WHEN n%100=0 THEN 'Queued' WHEN n%100=1 THEN 'Running' ELSE 'Succeeded' END,
+                    n,printf('key-%d',n%32),'{{}}',X'','{{}}' FROM fixture;"
+        )).expect("deterministic VM-step fixture inserts");
+        let position = size * 70 / 100;
+        let id = format!("00000000-0000-4000-8000-{position:012x}");
+        let id = serde_json::from_str(&format!("\"{id}\""))
+            .expect("deterministic fixture ID decodes");
+        (connection, TaskCursor::new(position as u64, id))
+    }
+
+    /// Counts SQLite's actual prepared-statement VM steps for one built query.
+    fn history_vm_steps(connection: &Connection, built: QuerySql) -> (i32, usize) {
+        let mut statement = connection.prepare(&built.sql).expect("query prepares");
+        statement.reset_status(StatementStatus::VmStep);
+        let mut rows = statement
+            .query(params_from_iter(built.params))
+            .expect("query executes");
+        let mut count = 0;
+        while rows.next().expect("query advances").is_some() {
+            count += 1;
+        }
+        drop(rows);
+        (statement.get_status(StatementStatus::VmStep), count)
+    }
+
+    /// Bounds actual no-filter and single-correlation query work without
+    /// planner statistics as history grows fivefold.
+    #[test]
+    fn test_query_sql_history_vm_steps_scale_without_statistics() {
+        let mut work = Vec::new();
+        for size in [20_000, 100_000] {
+            let (connection, cursor) = history_vm_database(size);
+            let cases = [
+                (
+                    "unfiltered",
+                    build_history_query(
+                        &TaskQuery { after: Some(cursor), limit: 32, ..TaskQuery::default() },
+                        32,
+                    ).expect("unfiltered query builds"),
+                    "tasks_accepted_id",
+                ),
+                (
+                    "single-correlation",
+                    build_history_query(
+                        &TaskQuery {
+                            after: Some(cursor),
+                            correlation_key: Some("key-7".into()),
+                            limit: 32,
+                            ..TaskQuery::default()
+                        },
+                        32,
+                    ).expect("correlation query builds"),
+                    "tasks_correlation_accepted_id",
+                ),
+            ];
+            let mut case_work = Vec::new();
+            for (name, built, index) in cases {
+                let plan = explain(&connection, QuerySql { sql: built.sql.clone(), params: built.params.clone() });
+                assert_search(&plan, index);
+                assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{name}: {plan:?}");
+                let (steps, returned) = history_vm_steps(&connection, built);
+                assert!(steps > 0, "{name} query reports actual SQLite VM work");
+                assert_eq!(returned, 33, "bounded lookahead page");
+                case_work.push((name, steps));
+            }
+            work.push((size, case_work));
+        }
+        for case_index in 0..2 {
+            let small = work[0].1[case_index].1;
+            let large = work[1].1[case_index].1;
+            eprintln!("{} history vm_steps 20k={small} 100k={large}", work[0].1[case_index].0);
+            assert!(
+                large <= small * 3,
+                "{} VM steps must grow by at most 3x from 20k to 100k ({small} -> {large})",
+                work[0].1[case_index].0,
+            );
+        }
     }
 
     /// Initializes fresh, schema-2 or old schema-3 indexes without statistics.
