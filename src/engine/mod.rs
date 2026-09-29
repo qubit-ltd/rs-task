@@ -10,7 +10,7 @@
 mod engine_error;
 mod execution_handle;
 mod execution_outcome;
-mod local;
+mod local_task_execution_engine;
 mod prepared_execution;
 mod task_execution_engine;
 mod task_execution_engine_provider;
@@ -18,7 +18,7 @@ mod task_execution_engine_provider;
 pub use engine_error::EngineError;
 pub use execution_handle::ExecutionHandle;
 pub use execution_outcome::ExecutionOutcome;
-pub use local::LocalTaskExecutionEngine;
+pub use local_task_execution_engine::LocalTaskExecutionEngine;
 pub use prepared_execution::PreparedExecution;
 pub use task_execution_engine::TaskExecutionEngine;
 pub use task_execution_engine_provider::TaskExecutionEngineProvider;

@@ -6,9 +6,10 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 /// Releases a prepared reservation when its execution worker exits or unwinds.
-pub(in crate::engine::local) struct ReservationGuard(
+#[must_use]
+pub(in crate::engine::local_task_execution_engine) struct ReservationGuard(
     /// Callback that releases the attempt's reserved resources.
-    pub(in crate::engine::local) Option<Box<dyn FnOnce() + Send>>,
+    pub(in crate::engine::local_task_execution_engine) Option<Box<dyn FnOnce() + Send>>,
 );
 
 impl Drop for ReservationGuard {

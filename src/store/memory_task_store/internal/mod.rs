@@ -8,4 +8,4 @@
 // Tracks volatile records and the retention accounting updated on eviction.
 mod memory_state;
 
-pub(in crate::store::memory) use memory_state::MemoryState;
+pub(in crate::store::memory_task_store) use memory_state::MemoryState;

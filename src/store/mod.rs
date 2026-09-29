@@ -7,15 +7,15 @@
 // =============================================================================
 //! Pluggable task history and recovery storage.
 
-mod memory;
+mod memory_task_store;
 #[cfg(feature = "sqlite")]
 mod sqlite_task_store;
 mod store_error;
 mod task_future;
 mod task_store;
 
-pub use memory::DEFAULT_MAX_UNFINISHED_RECORDS;
-pub use memory::MemoryTaskStore;
+pub use memory_task_store::DEFAULT_MAX_UNFINISHED_RECORDS;
+pub use memory_task_store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 pub use sqlite_task_store::SqliteTaskStore;
 pub use store_error::StoreError;
