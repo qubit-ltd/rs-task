@@ -19,7 +19,7 @@
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.7", features = ["sqlite"] }
+qubit-task = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -31,6 +31,7 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 | `sqlite` | 持久化历史与重启恢复 |
 | `inventory` | 发现已链接到应用的 provider |
 | `event-bus` | 尽力发布生命周期通知 |
+| `conformance` | 供后端作者复用的黑盒存储契约测试套件 |
 
 ## 快速开始
 

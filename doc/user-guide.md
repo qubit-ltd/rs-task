@@ -2,7 +2,7 @@
 
 [Chinese user guide](user-guide.zh_CN.md) · [README](../README.md) · [API reference](https://docs.rs/qubit-task)
 
-This guide covers `qubit-task` 0.7.x on Rust 1.94 or later. It is for Rust service developers who receive requests whose work outlives the request: imports, exports, report generation, media processing, and similar background jobs. Reading through [Check the task result](#check-the-task-result) is enough to accept such work, run it under bounded concurrency, and report its state back to clients. Later sections cover restart recovery, resource budgets, cancellation, retries, history maintenance, status notifications, component assembly, and shutdown. Developers who implement a store, scheduling policy, or execution engine should read [Assemble components with `qubit-spi`](#assemble-components-with-qubit-spi) and the [detailed design](task_execution_service_design.en.md).
+This guide covers `qubit-task` 0.8.x on Rust 1.94 or later. It is for Rust service developers who receive requests whose work outlives the request: imports, exports, report generation, media processing, and similar background jobs. Reading through [Check the task result](#check-the-task-result) is enough to accept such work, run it under bounded concurrency, and report its state back to clients. Later sections cover restart recovery, resource budgets, cancellation, retries, history maintenance, status notifications, component assembly, and shutdown. Developers who implement a store, scheduling policy, or execution engine should read [Assemble components with `qubit-spi`](#assemble-components-with-qubit-spi) and the [detailed design](task_execution_service_design.en.md).
 
 ## Contents
 
@@ -35,6 +35,7 @@ This guide covers `qubit-task` 0.7.x on Rust 1.94 or later. It is for Rust servi
 - [Lifecycle and shutdown](#lifecycle-and-shutdown)
 - [Errors, diagnostics, and troubleshooting](#errors-diagnostics-and-troubleshooting)
 - [Migration from 0.5 and earlier](#migration-from-05-and-earlier)
+- [Test a custom store and validate the package](#test-a-custom-store-and-validate-the-package)
 - [Boundaries and a practice checklist](#boundaries-and-a-practice-checklist)
 - [Further reading](#further-reading)
 
@@ -62,7 +63,7 @@ Add the crate, an async runtime, and a payload codec:
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.7", features = ["sqlite"] }
+qubit-task = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -923,3 +924,18 @@ This line uses Event Bus 0.16 and Redis adapter 0.4. The bounded `NotificationPu
 
 - [README](../README.md) · [Detailed design](task_execution_service_design.en.md) · [API reference](https://docs.rs/qubit-task)
 - [`examples/task_service.rs`](../examples/task_service.rs) · [`examples/blocked_maintenance.rs`](../examples/blocked_maintenance.rs)
+
+## Test a custom store and validate the package
+
+Backend authors can run the reusable suites from an independent test crate:
+
+```toml
+[dev-dependencies]
+qubit-task = { version = "0.8", default-features = false, features = ["conformance"] }
+```
+
+Implement the public `qubit_task::conformance::StoreFixture`. Use a fresh fixture for `verify_core_contract` and a different durable fixture for `verify_recovery_contract`; recovery writes 513 unfinished records and requires repeatable opens of one isolated namespace. Await each suite to completion so cleanup happens after store handles are dropped. A memory store cannot pass recovery conformance. Keep separate controlled tests for cancelled writes and `release_owner`, transaction failures, and process crashes because the public suites cannot prove those backend internals.
+
+Run `.infra/tools/verify-packaged-consumer.sh` to validate the actual 0.8 archive and an extracted-package consumer. It resolves third-party dependencies through the configured Cargo registry without sibling path patches and runs feature-specific consumer builds. Cargo package verification remains enabled. A registry or network failure blocks this check; do not replace registry dependencies with local path patches or report a pass without a successful run.
+
+Recovery is at-least-once: a crash after an external side effect but before storing the terminal state can cause another attempt. Protect effects with application idempotency or a transaction/outbox; exactly-once business effects are outside this crate's guarantee. See the [0.8 migration guide](migration-0.8.en.md) for cursor signatures and source updates.

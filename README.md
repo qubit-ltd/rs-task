@@ -19,7 +19,7 @@ A tenant administrator uploads a CSV file to object storage and calls `POST /imp
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.7", features = ["sqlite"] }
+qubit-task = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -31,6 +31,7 @@ The `sqlite` feature enables restart recovery through `TaskExecutionServiceBuild
 | `sqlite` | Persistent history and restart recovery |
 | `inventory` | Discover providers linked into the application |
 | `event-bus` | Publish best-effort lifecycle notifications |
+| `conformance` | Reusable black-box store contract suites for backend authors |
 
 ## Quick start
 
