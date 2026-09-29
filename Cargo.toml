@@ -45,6 +45,7 @@ uuid = { version = "^1.26", features = ["v4", "serde"] }
 
 [features]
 default = []
+conformance = []
 inventory = ["qubit-spi/inventory"]
 sqlite = ["dep:rusqlite", "dep:fs2"]
 event-bus = ["dep:qubit-event-bus"]
