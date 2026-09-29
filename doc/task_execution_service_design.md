@@ -248,3 +248,13 @@ SQLite schema 3 将请求元数据、payload BLOB 与生命周期 JSON 分开保
 句柄结束后再释放所有权；`shutdown_until` 只限制调用者等待时间。运维人员应先筛选
 超龄的 `Blocked` 摘要，再将观察到的 `state_version` 传给 `abandon_blocked`。版本已变化
 时会冲突；只有终态记录可以按批次有界清理。
+
+## 0.8 监督、关闭与恢复契约
+
+每次尝试的 finalizer 都与 handler future 分开受监督。finalizer panic 会锁存 `StoreUnavailable`，并带有任务和尝试诊断；不会伪造成功或终态任务。shutdown 在释放存储所有权前会收敛受理、调度器、跟踪中的尝试与在途写入。若报告存储故障，应先等待 `shutdown()`，再让另一个进程打开持久库。调用方 deadline 只限制该调用方等待。
+
+历史和恢复续页使用 `Option<TaskCursor>`，不再使用单独的 `TaskId`。排他游标为 `(accepted_at_ms, id)`，记录按这两个字段升序排列，同一毫秒的记录也有确定顺序。`RecoveryPage.next` 在末页为 `None`，即使该页正好有 256 条。恢复页仅含不带 payload 的摘要。
+
+SQLite schema 与记录格式仍是版本 3。打开 schema 3 数据库时确保历史与未完成任务索引；已知的旧同名局部索引会在事务中重建，且不重写任务行或元数据。恢复查询计划不依赖 `ANALYZE`。
+
+第三方存储可启用 `conformance` 特性，在独立 crate 运行公开的 core 与持久化 recovery 套件。recovery 需要全新命名空间和 513 条未完成任务。这些黑盒套件不能证明取消写入排空、崩溃持久性或事务中断；backend 仍需保留受控屏障和进程崩溃测试。详见 [0.8 迁移说明](migration-0.8.zh_CN.md)。

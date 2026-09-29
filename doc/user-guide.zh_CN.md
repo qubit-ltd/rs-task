@@ -2,7 +2,7 @@
 
 [中文 README](../README.zh_CN.md) · [English user guide](user-guide.md) · [API 文档](https://docs.rs/qubit-task)
 
-本文适用于 `qubit-task` 0.7.x，要求 Rust 1.94 或更高版本。面向那些会收到「工作比请求活得更久」的 Rust 服务开发者：导入、导出、报表生成、媒体处理以及类似的后台作业。读到[检查任务结果](#检查任务结果)，就足以受理这类工作、在有限并发下运行，并把状态回报给客户端。后续章节覆盖重启恢复、资源预算、取消、重试、历史维护、状态通知、组件组装与停机。若要自行实现存储、调度策略或执行引擎，请阅读[用 qubit-spi 组装组件](#用-qubit-spi-组装组件)以及[详细设计](task_execution_service_design.md)。
+本文适用于 `qubit-task` 0.8.x，要求 Rust 1.94 或更高版本。面向那些会收到「工作比请求活得更久」的 Rust 服务开发者：导入、导出、报表生成、媒体处理以及类似的后台作业。读到[检查任务结果](#检查任务结果)，就足以受理这类工作、在有限并发下运行，并把状态回报给客户端。后续章节覆盖重启恢复、资源预算、取消、重试、历史维护、状态通知、组件组装与停机。若要自行实现存储、调度策略或执行引擎，请阅读[用 qubit-spi 组装组件](#用-qubit-spi-组装组件)以及[详细设计](task_execution_service_design.md)。
 
 ## 目录
 
@@ -35,6 +35,7 @@
 - [生命周期与停机](#生命周期与停机)
 - [错误、诊断与排障](#错误诊断与排障)
 - [从 0.5 及更早版本迁移](#从-05-及更早版本迁移)
+- [测试自定义存储与验证 crate 包](#测试自定义存储与验证-crate-包)
 - [边界与实践清单](#边界与实践清单)
 - [延伸阅读](#延伸阅读)
 
@@ -60,7 +61,7 @@
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.7", features = ["sqlite"] }
+qubit-task = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -921,3 +922,18 @@ pub async fn stop(tasks: &TaskExecutionService) -> Result<(), Box<dyn std::error
 
 - [中文 README](../README.zh_CN.md) · [详细设计](task_execution_service_design.md) · [API 文档](https://docs.rs/qubit-task)
 - [`examples/task_service.rs`](../examples/task_service.rs) · [`examples/blocked_maintenance.rs`](../examples/blocked_maintenance.rs)
+
+## 测试自定义存储与验证 crate 包
+
+backend 作者可在独立测试 crate 中运行复用套件：
+
+```toml
+[dev-dependencies]
+qubit-task = { version = "0.8", default-features = false, features = ["conformance"] }
+```
+
+实现公开的 `qubit_task::conformance::StoreFixture`。使用一个全新 fixture 运行 `verify_core_contract`，再用另一个持久化 fixture 运行 `verify_recovery_contract`；recovery 会写入 513 条未完成任务，并要求反复打开同一隔离命名空间。等待套件完整结束，确保 store 句柄释放后再清理。内存存储无法通过 recovery conformance。仍需为取消中的写入与 `release_owner`、事务错误和进程崩溃保留受控测试，因为公开套件无法证明这些 backend 内部性质。
+
+运行 `.infra/tools/verify-packaged-consumer.sh` 验证实际 0.8 archive 和基于解包包的 consumer。脚本通过配置的 Cargo registry 解析第三方依赖，不使用兄弟仓库路径覆盖，并运行不同 feature 的 consumer 构建。Cargo package verification 保持开启。registry 或网络失败表示检查受阻；不要改用路径覆盖或在未成功运行时报告通过。
+
+恢复是至少一次：进程可能在外部副作用后、任务终态落盘前崩溃，造成下一次重试。请用应用幂等机制或事务/outbox 保护副作用；本 crate 不保证业务效果恰好一次。游标签名与代码更新见 [0.8 迁移说明](migration-0.8.zh_CN.md)。
