@@ -155,9 +155,8 @@ fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
 ///
 /// # Errors
 ///
-/// Returns `UnsupportedDatabaseIdentity` when Windows cannot supply identity
-/// metadata, or a store error if metadata access fails.
-#[cfg(windows)]
+/// Returns a store failure if Windows cannot query identity metadata.
+#[cfg(all(windows, not(target_vendor = "uwp")))]
 fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
     use std::os::windows::io::AsRawHandle;
 
@@ -191,7 +190,7 @@ fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
 /// # Errors
 ///
 /// Always returns `UnsupportedDatabaseIdentity`.
-#[cfg(not(any(unix, windows)))]
+#[cfg(any(not(any(unix, windows)), all(windows, target_vendor = "uwp")))]
 fn file_identity(_file: &File) -> Result<((u64, u64), u64), StoreError> {
     Err(StoreError::UnsupportedDatabaseIdentity)
 }
