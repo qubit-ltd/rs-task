@@ -43,7 +43,6 @@ use crate::model::TaskRecord;
 use crate::model::TaskRequest;
 use crate::model::TaskState;
 #[cfg(test)]
-use crate::model::TaskStateCounts;
 #[cfg(test)]
 use crate::model::TaskSummary;
 #[cfg(test)]
@@ -370,6 +369,7 @@ impl LegacyTaskStore for MemoryTaskStore {
                 cancel_error: None,
                 state_version: 0,
                 attempt: 0,
+                retry_not_before_ms: None,
                 accepted_at_ms: now,
                 started_at_ms: None,
                 finished_at_ms: None,
@@ -421,6 +421,7 @@ impl LegacyTaskStore for MemoryTaskStore {
                 .checked_add(1)
                 .ok_or(StoreError::Failure("task attempt counter overflow".to_owned()))?;
             task.summary.state = TaskState::Running;
+            task.summary.retry_not_before_ms = None;
             task.summary.started_at_ms = Some(command.started_at_ms);
             task.summary.finished_at_ms = None;
             task.summary.progress = None;
@@ -457,9 +458,15 @@ impl LegacyTaskStore for MemoryTaskStore {
                         "task output can only be written before the task becomes terminal",
                     ));
                 }
+                if command.retry_not_before_ms.is_some() && command.state != TaskState::Queued {
+                    return Err(StoreError::InvalidRequest(
+                        "retry deadline is only valid for queued tasks",
+                    ));
+                }
                 let was_terminal = task.summary.state.is_terminal();
                 let is_terminal = command.state.is_terminal();
                 task.summary.state = command.state;
+                task.summary.retry_not_before_ms = command.retry_not_before_ms;
                 task.summary.state_version = task
                     .summary
                     .state_version
@@ -684,56 +691,6 @@ impl LegacyTaskStore for MemoryTaskStore {
         Box::pin(async move { Ok(self.state.lock().records.get(&id).map(TaskRecord::summary)) })
     }
 
-    /// Cancels a blocked task only if its revision has not changed.
-    ///
-    /// # Parameters
-    ///
-    /// * `id` - Stable task identifier.
-    /// * `expected_version` - State version observed by the caller.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the cancelled task summary.
-    ///
-    /// # Errors
-    ///
-    /// Resolves to `NotFound`, `Conflict`, or `InvalidTransition` when the
-    /// task is unavailable or no longer blocked at that revision.
-    #[cfg(test)]
-    fn abandon_blocked<'a>(
-        &'a self,
-        id: TaskId,
-        expected_version: u64,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
-        Box::pin(async move {
-            let mut state = self.state.lock();
-            let record = state.records.get_mut(&id).ok_or(StoreError::NotFound)?;
-            if record.state_version != expected_version {
-                return Err(StoreError::Conflict);
-            }
-            if !matches!(record.state, TaskState::Blocked { .. }) {
-                return Err(StoreError::InvalidTransition);
-            }
-            record.state = TaskState::Cancelled;
-            record.state_version += 1;
-            record.retry_not_before_ms = None;
-            record.finished_at_ms = Some(now_ms());
-            record.cancel_requested = false;
-            record.assigned_resources.clear();
-            let summary = record.summary();
-            debug_assert!(state.unfinished_records > 0);
-            state.unfinished_records -= 1;
-            state.terminal_order.push_back(id);
-            state.terminal_order_all.push_back(TerminalTaskId::Legacy(id));
-            while state.terminal_order_all.len() > self.history_capacity {
-                if !state.evict_oldest_terminal() {
-                    break;
-                }
-            }
-            Ok(summary)
-        })
-    }
-
     /// Lists retained summaries in acceptance order using a bounded cursor
     /// page.
     ///
@@ -859,37 +816,6 @@ impl LegacyTaskStore for MemoryTaskStore {
                 .collect::<Vec<_>>();
             let next = has_more.then(|| records.last().map(EncodedTaskCursor::from)).flatten();
             Ok(EncodedTaskPage { records, next })
-        })
-    }
-
-    /// Counts each state among currently retained records.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to counts from one locked snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Resolves to a store error if the count cannot be read.
-    #[cfg(test)]
-    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
-        Box::pin(async move {
-            let state = self.state.lock();
-            let mut counts = TaskStateCounts::default();
-            for record in state.records.values() {
-                match record.state {
-                    TaskState::Queued => counts.queued += 1,
-                    TaskState::Running => counts.running += 1,
-                    TaskState::Blocked { .. } => counts.blocked += 1,
-                    TaskState::Succeeded
-                    | TaskState::Failed { .. }
-                    | TaskState::Panicked { .. }
-                    | TaskState::Cancelled => {
-                        counts.terminal += 1;
-                    }
-                }
-            }
-            Ok(counts)
         })
     }
 

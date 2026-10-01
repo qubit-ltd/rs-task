@@ -194,6 +194,7 @@ pub(in crate::store::sqlite_task_store) fn encode_lifecycle(record: &TaskRecord)
 /// # Errors
 ///
 /// Returns an error if the lifecycle cannot be serialized.
+#[cfg_attr(test, allow(dead_code))]
 pub(in crate::store::sqlite_task_store) fn encode_summary_lifecycle(
     record: &TaskSummary,
 ) -> Result<String, StoreError> {

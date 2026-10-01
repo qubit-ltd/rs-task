@@ -82,7 +82,6 @@ use crate::model::TaskRequestInfo;
 #[cfg(test)]
 use crate::model::TaskState;
 #[cfg(test)]
-use crate::model::TaskStateCounts;
 #[cfg(test)]
 use crate::model::TaskSummary;
 #[cfg(test)]
@@ -700,107 +699,6 @@ impl LegacyTaskStore for SqliteTaskStore {
                 .optional()
                 .map_err(failure)?;
             stored.map(decode_stored_summary_row).transpose()
-        })
-    }
-
-    /// Atomically cancels a blocked task at the caller's observed revision.
-    ///
-    /// # Parameters
-    ///
-    /// * `id` - Stable identity of the blocked task.
-    /// * `expected_version` - State revision observed by the caller.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the committed cancelled summary.
-    ///
-    /// # Errors
-    ///
-    /// Returns not-found, conflict, invalid-state, or SQLite errors.
-    #[cfg(test)]
-    fn abandon_blocked<'a>(
-        &'a self,
-        id: TaskId,
-        expected_version: u64,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        self.run_write(move |connection| {
-            let transaction = connection.unchecked_transaction().map_err(failure)?;
-            let row = transaction
-                .query_row(
-                    &format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE id=?1"),
-                    [id.to_string()],
-                    read_stored_summary_row,
-                )
-                .optional()
-                .map_err(failure)?
-                .ok_or(StoreError::NotFound)?;
-            let mut record = decode_stored_summary_row(row)?;
-            if record.state_version != expected_version {
-                return Err(StoreError::Conflict);
-            }
-            if !matches!(record.state, TaskState::Blocked { .. }) {
-                return Err(StoreError::InvalidTransition);
-            }
-            record.state = TaskState::Cancelled;
-            record.state_version += 1;
-            record.retry_not_before_ms = None;
-            record.finished_at_ms = Some(now_ms());
-            record.cancel_requested = false;
-            record.assigned_resources.clear();
-            transaction
-                .execute(
-                    "UPDATE tasks SET state_kind='Cancelled', lifecycle_json=?2 WHERE id=?1",
-                    params![id.to_string(), encode_summary_lifecycle(&record)?],
-                )
-                .map_err(failure)?;
-            transaction.commit().map_err(failure)?;
-            Ok(record)
-        })
-    }
-
-    /// Aggregates retained lifecycle categories in one SQL query.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to one consistent state-count snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if SQLite reports an unknown state or count failure.
-    #[cfg(test)]
-    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        self.run(|connection| {
-            let mut statement = connection
-                .prepare("SELECT state_kind, COUNT(*) FROM tasks GROUP BY state_kind")
-                .map_err(failure)?;
-            let mut rows = statement.query([]).map_err(failure)?;
-            let mut counts = TaskStateCounts::default();
-            while let Some(row) = rows.next().map_err(failure)? {
-                let kind: String = row.get(0).map_err(failure)?;
-                let count: i64 = row.get(1).map_err(failure)?;
-                let count = usize::try_from(count).map_err(failure)?;
-                match kind.as_str() {
-                    "Queued" => counts.queued = count,
-                    "Running" => counts.running = count,
-                    "Blocked" => counts.blocked = count,
-                    "Succeeded" | "Failed" | "Panicked" | "Cancelled" => {
-                        counts.terminal = counts
-                            .terminal
-                            .checked_add(count)
-                            .ok_or_else(|| StoreError::Failure("terminal state count exceeds usize".into()))?;
-                    }
-                    _ => {
-                        return Err(StoreError::Failure(format!("unknown task state kind: {kind}")));
-                    }
-                }
-            }
-            Ok(counts)
         })
     }
 

@@ -3,7 +3,9 @@ use qubit_task::model::StartCommand;
 use qubit_task::model::StoredPayload;
 use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskId;
+use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskState;
+use qubit_task::model::TaskStateKind;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
@@ -68,6 +70,7 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
                 id,
                 expected_state_version: accepted.summary.state_version,
                 expected_attempt: accepted.summary.attempt,
+                retry_not_before_ms: None,
                 state: TaskState::Succeeded,
                 output: None,
                 cancel_requested: false,
@@ -104,6 +107,7 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
             id,
             expected_state_version: running.state_version,
             expected_attempt: running.attempt,
+            retry_not_before_ms: None,
             state: TaskState::Succeeded,
             output: None,
             cancel_requested: false,
@@ -119,6 +123,7 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
                 id,
                 expected_state_version: running.state_version,
                 expected_attempt: running.attempt.saturating_add(1),
+                retry_not_before_ms: None,
                 state: TaskState::Cancelled,
                 output: None,
                 cancel_requested: false,
@@ -128,4 +133,59 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
             .await,
         Err(StoreError::Conflict)
     ));
+
+    let retry_id = TaskId::from_id(qubit_id::Id::new(103));
+    let accepted = store
+        .accept_encoded(retry_id, request(None, &[4, 5, 6]))
+        .await
+        .expect("retry candidate acceptance succeeds");
+    let running = store
+        .start_encoded(StartCommand {
+            id: retry_id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: accepted.summary.accepted_at_ms,
+        })
+        .await
+        .expect("retry candidate starts");
+    let retry_not_before_ms = running.accepted_at_ms + 60_000;
+    let queued = store
+        .transition_encoded(TransitionCommand {
+            id: retry_id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            retry_not_before_ms: Some(retry_not_before_ms),
+            finished_at_ms: None,
+            output: None,
+        })
+        .await
+        .expect("retry deadline is stored with the queued transition");
+    assert_eq!(queued.retry_not_before_ms, Some(retry_not_before_ms));
+    let page = store
+        .list_encoded(TaskQuery {
+            states: vec![TaskStateKind::Queued],
+            after: None,
+            limit: 256,
+            ..TaskQuery::default()
+        })
+        .await
+        .expect("queued retry candidate can be queried");
+    let persisted = page
+        .records
+        .iter()
+        .find(|summary| summary.id == retry_id)
+        .expect("retry candidate appears in queue query");
+    assert_eq!(persisted.retry_not_before_ms, Some(retry_not_before_ms));
+    let restarted = store
+        .start_encoded(StartCommand {
+            id: retry_id,
+            expected_state_version: queued.state_version,
+            started_at_ms: retry_not_before_ms,
+        })
+        .await
+        .expect("retry attempt starts after its deadline");
+    assert_eq!(restarted.attempt, 2);
+    assert_eq!(restarted.retry_not_before_ms, None);
 }

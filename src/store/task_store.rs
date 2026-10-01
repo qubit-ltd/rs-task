@@ -29,7 +29,6 @@ use crate::model::TaskRecord;
 #[cfg(test)]
 use crate::model::TaskRequest;
 #[cfg(test)]
-use crate::model::TaskStateCounts;
 #[cfg(test)]
 use crate::model::TaskSummary;
 #[cfg(test)]
@@ -68,6 +67,7 @@ use crate::model::next::TransitionCommand as EncodedTransitionCommand;
 /// let store = MemoryTaskStore::new(100);
 /// assert!(!store.capabilities().restart_recovery);
 /// ```
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) trait LegacyTaskStore: Send + Sync {
     /// Reports whether history and unfinished task descriptions survive
     /// restart.
@@ -283,31 +283,6 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
     #[cfg(test)]
     fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>>;
 
-    /// Cancels a blocked record only when its revision still matches.
-    ///
-    /// # Parameters
-    ///
-    /// * `id` - Stable identifier of the blocked task.
-    /// * `expected_version` - State version observed by the caller.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the cancelled task summary.
-    ///
-    /// # Errors
-    ///
-    /// Resolves to `UnsupportedCapability` by default, or another store error
-    /// when an implementation cannot apply the transition.
-    #[cfg(test)]
-    fn abandon_blocked<'a>(
-        &'a self,
-        id: TaskId,
-        expected_version: u64,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
-        let _ = (id, expected_version);
-        Box::pin(async { Err(StoreError::UnsupportedCapability) })
-    }
-
     /// Loads one task record by its stable identifier.
     ///
     /// # Parameters
@@ -350,25 +325,6 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
         let _ = query;
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
-
-    /// Counts every retained lifecycle state in one store snapshot, including
-    /// terminal records.
-    ///
-    /// The returned counts describe one consistent point in the store's
-    /// history. Concurrent transitions may change the counts before this
-    /// future returns; callers that wait for a state change must register their
-    /// notification before querying and recheck the condition after waking.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to counts from one consistent store snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Resolves to an error when aggregation or storage access fails.
-    #[must_use]
-    #[cfg(test)]
-    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>>;
 
     /// Deletes at most `max_rows` terminal records accepted before the supplied
     /// timestamp.

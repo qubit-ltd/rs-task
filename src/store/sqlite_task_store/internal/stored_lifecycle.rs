@@ -75,6 +75,7 @@ impl StoredLifecycle {
     /// # Returns
     ///
     /// Lifecycle fields copied without request data.
+    #[cfg_attr(test, allow(dead_code))]
     pub(in crate::store::sqlite_task_store) fn from_summary(record: &TaskSummary) -> Self {
         Self {
             id: record.id,

@@ -78,6 +78,7 @@ impl TaskRecord {
     /// A borrow of the resource request stored inside this record.
     #[must_use]
     #[inline]
+    #[cfg_attr(test, allow(dead_code))]
     pub fn resource_request(&self) -> &ResourceRequest {
         &self.request.resources
     }

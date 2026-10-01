@@ -62,6 +62,7 @@ async fn finish_with_output(
             id: running.id,
             expected_state_version: running.state_version,
             expected_attempt: running.attempt,
+            retry_not_before_ms: None,
             state: TaskState::Succeeded,
             cancel_requested: false,
             cancel_error: None,

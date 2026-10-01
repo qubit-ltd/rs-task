@@ -30,7 +30,7 @@ use crate::model::TaskRequestInfo;
 use crate::store::StoreError;
 
 /// Schema version for the numeric-ID typed request format.
-pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 4;
+pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 5;
 
 /// Canonical recovery index SQL; equality makes reopen repairs idempotent.
 #[cfg(test)]
@@ -116,7 +116,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(failure)?;
-    if version != 0 && version != NEXT_SCHEMA_VERSION {
+    if version != 0 && version != 4 && version != NEXT_SCHEMA_VERSION {
         return Err(StoreError::Failure(format!(
             "SQLite task schema version {version} uses the legacy UUID format; explicit task ID mapping is required before opening with the typed task API"
         )));
@@ -129,7 +129,20 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
             |row| row.get(0),
         )
         .map_err(failure)?;
-    if version == NEXT_SCHEMA_VERSION {
+    if version == 4 {
+        if !table_exists {
+            return Err(StoreError::Failure(
+                "typed SQLite task schema is missing table `tasks`".into(),
+            ));
+        }
+        transaction
+            .execute_batch("ALTER TABLE tasks ADD COLUMN retry_not_before_ms INTEGER;")
+            .map_err(failure)?;
+        transaction
+            .pragma_update(None, "user_version", NEXT_SCHEMA_VERSION)
+            .map_err(failure)?;
+    }
+    if version == NEXT_SCHEMA_VERSION || version == 4 {
         if !table_exists {
             return Err(StoreError::Failure(
                 "typed SQLite task schema is missing table `tasks`".into(),
@@ -160,6 +173,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
                     lifecycle_json TEXT NOT NULL,
                     state_version INTEGER NOT NULL DEFAULT 0,
                     attempt INTEGER NOT NULL DEFAULT 0,
+                    retry_not_before_ms INTEGER,
                     started_at INTEGER,
                     progress_attempt INTEGER,
                     progress_version INTEGER NOT NULL DEFAULT 0,
@@ -170,7 +184,8 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
                 CREATE INDEX tasks_category_accepted_id ON tasks(category, accepted_at, id);
                 CREATE INDEX tasks_state_accepted_id ON tasks(state_kind, accepted_at, id);
                 CREATE INDEX tasks_correlation_accepted_id ON tasks(correlation_key, accepted_at, id);
-                CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE state_kind IN ('Queued','Running');",
+                CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE state_kind IN ('Queued','Running');
+                CREATE INDEX tasks_queued_accepted_id ON tasks(accepted_at, id) WHERE state_kind='Queued';",
             )
             .map_err(failure)?;
         transaction
@@ -184,7 +199,8 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
              CREATE INDEX IF NOT EXISTS tasks_category_accepted_id ON tasks(category, accepted_at, id);
              CREATE INDEX IF NOT EXISTS tasks_state_accepted_id ON tasks(state_kind, accepted_at, id);
              CREATE INDEX IF NOT EXISTS tasks_correlation_accepted_id ON tasks(correlation_key, accepted_at, id);
-             CREATE INDEX IF NOT EXISTS tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE state_kind IN ('Queued','Running');",
+             CREATE INDEX IF NOT EXISTS tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE state_kind IN ('Queued','Running');
+             CREATE INDEX IF NOT EXISTS tasks_queued_accepted_id ON tasks(accepted_at, id) WHERE state_kind='Queued';",
         )
         .map_err(failure)?;
     transaction.commit().map_err(failure)
@@ -215,6 +231,7 @@ fn validate_next_schema(transaction: &Transaction<'_>) -> Result<(), StoreError>
         "lifecycle_json",
         "state_version",
         "attempt",
+        "retry_not_before_ms",
         "started_at",
         "progress_attempt",
         "progress_version",

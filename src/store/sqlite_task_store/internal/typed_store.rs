@@ -118,6 +118,8 @@ struct StoredTypedLifecycle {
     cancel_error: Option<String>,
     state_version: u64,
     attempt: u32,
+    #[serde(default)]
+    retry_not_before_ms: Option<u64>,
     accepted_at_ms: u64,
     started_at_ms: Option<u64>,
     finished_at_ms: Option<u64>,
@@ -183,6 +185,7 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
         cancel_error: None,
         state_version: 0,
         attempt: 0,
+        retry_not_before_ms: None,
         accepted_at_ms,
         started_at_ms: None,
         finished_at_ms: None,
@@ -192,7 +195,7 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
     let lifecycle_json = serde_json::to_string(&lifecycle).map_err(failure)?;
     transaction
         .execute(
-            "INSERT INTO tasks (id,state_kind,accepted_at,kind_id,category,payload_type_id,payload_schema_version,codec_id,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json,attempt,progress_attempt,progress_version,progress_json) VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,NULL,0,NULL)",
+            "INSERT INTO tasks (id,state_kind,accepted_at,kind_id,category,payload_type_id,payload_schema_version,codec_id,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json,attempt,retry_not_before_ms,progress_attempt,progress_version,progress_json) VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,NULL,NULL,0,NULL)",
             params![
                 id_key,
                 i64::try_from(accepted_at_ms).map_err(failure)?,
@@ -284,11 +287,12 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
         .ok_or_else(|| StoreError::Failure("task attempt counter overflow".into()))?;
     lifecycle.started_at_ms = Some(command.started_at_ms);
     lifecycle.finished_at_ms = None;
+    lifecycle.retry_not_before_ms = None;
     lifecycle.progress = None;
     let lifecycle_json = serde_json::to_string(&lifecycle).map_err(failure)?;
     let changed = transaction
         .execute(
-            "UPDATE tasks SET state_kind='Running',state_version=?2,attempt=?3,started_at=?4,progress_attempt=NULL,progress_version=0,progress_json=NULL,lifecycle_json=?5 WHERE id=?1 AND state_kind='Queued' AND state_version=?6",
+            "UPDATE tasks SET state_kind='Running',state_version=?2,attempt=?3,started_at=?4,retry_not_before_ms=NULL,progress_attempt=NULL,progress_version=0,progress_json=NULL,lifecycle_json=?5 WHERE id=?1 AND state_kind='Queued' AND state_version=?6",
             params![
                 id_key,
                 lifecycle.state_version,
@@ -317,6 +321,11 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
         .validate_diagnostics()
         .map_err(StoreError::InvalidRequest)?;
     validate_encoded_output(&command.state, command.output.as_ref())?;
+    if command.retry_not_before_ms.is_some() && command.state != TaskState::Queued {
+        return Err(StoreError::InvalidRequest(
+            "retry deadline is only valid for queued tasks",
+        ));
+    }
     let id_key = command.id.to_padded_decimal();
     let transaction = connection.unchecked_transaction().map_err(failure)?;
     let row = transaction
@@ -335,6 +344,11 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
         .map_err(failure)?
         .ok_or(StoreError::NotFound)?;
     let (request_json, lifecycle_json, state_version) = row;
+    let retry_deadline = command
+        .retry_not_before_ms
+        .map(i64::try_from)
+        .transpose()
+        .map_err(failure)?;
     let mut lifecycle: StoredTypedLifecycle = serde_json::from_str(&lifecycle_json).map_err(failure)?;
     let terminal_cancel_annotation = lifecycle.state.is_terminal()
         && lifecycle.state == command.state
@@ -358,6 +372,7 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
         .ok_or_else(|| StoreError::Failure("task state version overflow".into()))?;
     lifecycle.cancel_requested = command.cancel_requested;
     lifecycle.cancel_error = command.cancel_error;
+    lifecycle.retry_not_before_ms = command.retry_not_before_ms;
     if lifecycle.state.is_terminal() && command.finished_at_ms.is_some() {
         lifecycle.finished_at_ms = command.finished_at_ms;
     }
@@ -367,13 +382,14 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
     let lifecycle_json = serde_json::to_string(&lifecycle).map_err(failure)?;
     let changed = transaction
         .execute(
-            "UPDATE tasks SET state_kind=?2,state_version=?3,lifecycle_json=?4 WHERE id=?1 AND state_version=?5",
+            "UPDATE tasks SET state_kind=?2,state_version=?3,lifecycle_json=?4,retry_not_before_ms=?6 WHERE id=?1 AND state_version=?5",
             params![
                 id_key,
                 lifecycle.state.kind().as_str(),
                 lifecycle.state_version,
                 lifecycle_json,
-                state_version
+                state_version,
+                retry_deadline
             ],
         )
         .map_err(failure)?;
@@ -471,6 +487,7 @@ fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Resul
         cancel_error: lifecycle.cancel_error,
         state_version: lifecycle.state_version,
         attempt: lifecycle.attempt,
+        retry_not_before_ms: lifecycle.retry_not_before_ms,
         accepted_at_ms: lifecycle.accepted_at_ms,
         started_at_ms: lifecycle.started_at_ms,
         finished_at_ms: lifecycle.finished_at_ms,

@@ -23,6 +23,7 @@ use super::TaskSummary;
 /// assert!(page.next.is_none());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(test, allow(dead_code))]
 pub struct RecoveryPage {
     /// At most 256 Queued/Running summaries, strictly ordered by
     /// `(accepted_at_ms, id)` after the requested exclusive lower bound.

@@ -158,6 +158,32 @@ async fn typed_history_uses_stable_numeric_order_in_memory() {
     assert_eq!(ids_in_order(&memory).await, vec![2, 10, u64::MAX]);
 }
 
+#[tokio::test]
+async fn typed_history_pages_a_queue_larger_than_the_maximum_page() {
+    let memory = MemoryTaskStore::new(300);
+    for value in 1..=257 {
+        memory.accept_encoded(id(value), request("page", "257")).await.unwrap();
+    }
+    let first = memory
+        .list_encoded(TaskQuery {
+            limit: 256,
+            ..TaskQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.records.len(), 256);
+    let second = memory
+        .list_encoded(TaskQuery {
+            limit: 256,
+            after: first.next,
+            ..TaskQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.records.len(), 1);
+    assert!(second.next.is_none());
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn typed_history_has_the_same_order_in_memory_and_sqlite() {
@@ -179,5 +205,36 @@ async fn typed_history_has_the_same_order_in_memory_and_sqlite() {
     assert_eq!(memory_order, vec![2, 10, u64::MAX]);
 
     drop(sqlite);
+    remove_database(&db_path);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn typed_schema_four_migrates_retry_deadline_column_without_losing_rows() {
+    let db_path = std::env::temp_dir().join(format!(
+        "qubit-task-typed-schema-migration-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let sqlite = SqliteTaskStore::open_next(&db_path).expect("schema 5 opens");
+    let stored_id = id(801);
+    sqlite
+        .accept_encoded(stored_id, request("migration", "preserve"))
+        .await
+        .expect("task is accepted");
+    drop(sqlite);
+
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch("ALTER TABLE tasks DROP COLUMN retry_not_before_ms; PRAGMA user_version=4;")
+        .unwrap();
+    drop(connection);
+
+    let migrated = SqliteTaskStore::open_next(&db_path).expect("typed schema 4 migrates to 5");
+    let loaded = migrated.get_encoded_task(stored_id).await.unwrap().unwrap();
+    assert_eq!(loaded.summary.id, stored_id);
+    assert_eq!(loaded.summary.category.as_deref(), Some("migration"));
+    assert_eq!(loaded.request.payload.bytes, [1]);
+    assert_eq!(loaded.summary.retry_not_before_ms, None);
+    drop(migrated);
     remove_database(&db_path);
 }

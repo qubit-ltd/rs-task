@@ -55,14 +55,13 @@ uuid = { version = "^1.26", features = ["v4", "serde"] }
 
 [features]
 default = []
-conformance = []
 inventory = ["qubit-spi/inventory"]
 sqlite = ["dep:rusqlite", "dep:fs2"]
 event-bus = ["dep:qubit-event-bus"]
 
 [dev-dependencies]
 proptest = "1.11"
-qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "0.5" }
+qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "0.6" }
 redis = { version = "0.32.7", default-features = false, features = ["streams"] }
 tokio = { version = "^1.53", features = ["macros", "rt-multi-thread", "time"] }
 
