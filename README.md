@@ -39,6 +39,10 @@ The optional `event-bus` feature provides `TaskEvent` transport integration. The
 - [Migration guide](doc/migration-0.8.en.md)
 - [API reference](https://docs.rs/qubit-task)
 
+## Task notification delivery
+
+Task notifications are best-effort. A successful publisher `close` means the local queue worker drained and stopped; inspect notification statistics to determine provider publication outcomes. Do not treat close success as destination admission or handler completion.
+
 ## Checks
 
 ```bash
