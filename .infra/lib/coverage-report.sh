@@ -2,13 +2,54 @@
 set -euo pipefail
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+source "$project_root/.infra/lib/cleanup-build-artifacts.sh"
 cd "$project_root"
 mkdir -p target/llvm-cov/html
-cargo llvm-cov report --json --output-path coverage.json
-cargo llvm-cov report --lcov --output-path lcov.info
-cargo llvm-cov report --cobertura --output-path target/llvm-cov/cobertura.xml
-cargo llvm-cov report --text --output-path coverage.txt
-cargo llvm-cov report --html --output-dir target/llvm-cov
+
+coverage_config="$project_root/.infra/ci/coverage.json"
+coverage_scope="default-members"
+if [ -f "$coverage_config" ]; then
+    coverage_scope=$(jq -r '.scope // "default-members"' "$coverage_config")
+fi
+report_args=()
+metadata=$(cargo metadata --no-deps --format-version 1 \
+    --manifest-path "$project_root/Cargo.toml")
+excluded_packages=$(jq -c '.exclude_packages // []' "$coverage_config" 2>/dev/null || printf '[]')
+case "$coverage_scope" in
+    workspace)
+        mapfile -t package_names < <(jq -r \
+            --argjson excluded "$excluded_packages" \
+            '. as $metadata
+             | $metadata.packages[]
+             | select(.id as $id | $metadata.workspace_members | index($id))
+             | select(.name as $name | $excluded | index($name) | not)
+             | .name' <<<"$metadata")
+        ;;
+    package)
+        mapfile -t package_names < <(jq -r \
+            --arg manifest "$project_root/Cargo.toml" \
+            '.packages[] | select(.manifest_path == $manifest) | .name')
+        ;;
+    default-members)
+        mapfile -t package_names < <(jq -r \
+            --argjson excluded "$excluded_packages" \
+            '. as $metadata
+             | $metadata.packages[]
+             | select(.id as $id | $metadata.workspace_default_members | index($id))
+             | select(.name as $name | $excluded | index($name) | not)
+             | .name' <<<"$metadata")
+        ;;
+    *) echo "error: unsupported coverage scope '$coverage_scope'" >&2; exit 1 ;;
+esac
+for package_name in "${package_names[@]}"; do
+    report_args+=(--package "$package_name")
+done
+[ "${#package_names[@]}" -gt 0 ] || { echo "error: coverage scope selected no packages" >&2; exit 1; }
+cargo llvm-cov report "${report_args[@]}" --json --output-path coverage.json
+cargo llvm-cov report "${report_args[@]}" --lcov --output-path lcov.info
+cargo llvm-cov report "${report_args[@]}" --cobertura --output-path target/llvm-cov/cobertura.xml
+cargo llvm-cov report "${report_args[@]}" --text --output-path coverage.txt
+cargo llvm-cov report "${report_args[@]}" --html --output-dir target/llvm-cov
 jq -e '.data | type == "array" and length > 0' coverage.json >/dev/null
 jq '
   reduce .data[] as $item (

@@ -2,8 +2,8 @@ format = 1
 
 [[exceptions]]
 rule = "aggregation-files"
-path = "src/handler/mod.rs"
-reason = "This module groups the handler contract and its context and registry implementations as one cohesive API."
+path = "src/engine/mod.rs"
+reason = "This module groups the typed execution engine contract and its implementation."
 
 [[exceptions]]
 rule = "aggregation-files"
@@ -12,10 +12,15 @@ reason = "This module groups the task event payload with the event bus topic con
 
 [[exceptions]]
 rule = "aggregation-files"
-path = "src/engine/mod.rs"
-reason = "This module groups the execution engine contract with its prepared execution and result types."
+path = "src/handler/mod.rs"
+reason = "This module groups the handler contract and its context and registry implementations as one cohesive API."
 
 [[exceptions]]
 rule = "aggregation-files"
 path = "src/store/mod.rs"
 reason = "This module groups the store contract, shared errors, and async future alias used by all backends."
+
+[[exceptions]]
+rule = "public-type-layout"
+path = "src/model/task_record.rs"
+reason = "Legacy lifecycle records and their summaries remain grouped as a test-only persistence contract."
