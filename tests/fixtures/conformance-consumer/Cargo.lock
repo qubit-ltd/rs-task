@@ -464,6 +464,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "qubit-id"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81a4ddf466a87d57a9b9a33f635e9e6395631a8b8e7e1d1139f2f53f6958a4f1"
+dependencies = [
+ "parking_lot",
+ "qubit-clock",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "qubit-json"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -497,7 +509,7 @@ dependencies = [
  "bigdecimal",
  "bitflags",
  "chrono",
- "qubit-id",
+ "qubit-id 0.6.0",
  "qubit-redact 0.9.0",
  "qubit-reflect",
  "serde",
@@ -555,7 +567,7 @@ dependencies = [
  "chrono",
  "inventory",
  "qubit-datatype 0.14.0",
- "qubit-id",
+ "qubit-id 0.6.0",
  "qubit-reflect-derive",
  "thiserror",
  "uuid",
@@ -590,7 +602,7 @@ dependencies = [
  "futures",
  "parking_lot",
  "qubit-codec",
- "qubit-id",
+ "qubit-id 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "qubit-metadata",
  "qubit-model-metadata",
  "qubit-progress",
@@ -608,7 +620,7 @@ dependencies = [
 name = "qubit-task-conformance-consumer"
 version = "0.1.0"
 dependencies = [
- "qubit-id",
+ "qubit-id 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "qubit-metadata",
  "qubit-model-metadata",
  "qubit-task",

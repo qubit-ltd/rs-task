@@ -106,6 +106,7 @@ async fn exercise_store(store: Arc<dyn TaskStore>, id: TaskId) -> Result<(), Box
             state: TaskState::Succeeded,
             cancel_requested: false,
             cancel_error: None,
+            output: None,
             finished_at_ms: Some(now_ms()),
         })
         .await?;
