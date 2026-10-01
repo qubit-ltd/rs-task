@@ -22,33 +22,33 @@ use parking_lot::Mutex;
 use super::LegacyTaskStore;
 use super::StoreError;
 use super::TaskFuture;
-#[cfg(test)]
-use crate::model::AcceptOutcome;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
-#[cfg(test)]
-use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
-#[cfg(test)]
-use crate::model::TaskCursor;
-#[cfg(test)]
-use crate::model::TaskId;
-#[cfg(test)]
-use crate::model::TaskPage;
-#[cfg(test)]
-use crate::model::TaskQuery;
-#[cfg(test)]
-use crate::model::TaskRecord;
-#[cfg(test)]
-use crate::model::TaskRequest;
 use crate::model::TaskState;
 #[cfg(test)]
+use crate::model::legacy::AcceptOutcome;
 #[cfg(test)]
-use crate::model::TaskSummary;
+use crate::model::legacy::RecoveryPage;
 #[cfg(test)]
-use crate::model::TransitionCommand;
+use crate::model::legacy::TaskCursor;
 #[cfg(test)]
-use crate::model::checked_page_size;
+use crate::model::legacy::TaskId;
+#[cfg(test)]
+use crate::model::legacy::TaskPage;
+#[cfg(test)]
+use crate::model::legacy::TaskQuery;
+#[cfg(test)]
+use crate::model::legacy::TaskRecord;
+#[cfg(test)]
+use crate::model::legacy::TaskRequest;
+#[cfg(test)]
+#[cfg(test)]
+use crate::model::legacy::TaskSummary;
+#[cfg(test)]
+use crate::model::legacy::TransitionCommand;
+#[cfg(test)]
+use crate::model::legacy::checked_page_size;
 use crate::model::next::AcceptOutcome as EncodedAcceptOutcome;
 use crate::model::next::ProgressCommand;
 use crate::model::next::StartCommand;
@@ -972,10 +972,10 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::MemoryTaskStore;
-    use crate::model::AcceptOutcome;
-    use crate::model::TaskId;
-    use crate::model::TaskQuery;
-    use crate::model::TaskRequest;
+    use crate::model::legacy::AcceptOutcome;
+    use crate::model::legacy::TaskId;
+    use crate::model::legacy::TaskQuery;
+    use crate::model::legacy::TaskRequest;
     use crate::store::LegacyTaskStore;
 
     #[tokio::test]

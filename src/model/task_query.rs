@@ -5,8 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use super::TaskCursor;
 use super::TaskStateKind;
+use super::legacy::TaskCursor;
 use crate::store::StoreError;
 
 /// Maximum number of records returned by one task history query.

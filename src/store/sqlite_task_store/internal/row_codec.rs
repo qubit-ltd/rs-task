@@ -14,10 +14,10 @@ use super::super::state_kind;
 use super::StoredLifecycle;
 use super::StoredSummaryRow;
 use super::StoredTaskRow;
-use crate::model::TaskRecord;
-use crate::model::TaskRequest;
-use crate::model::TaskRequestInfo;
-use crate::model::TaskSummary;
+use crate::model::legacy::TaskRecord;
+use crate::model::legacy::TaskRequest;
+use crate::model::legacy::TaskRequestInfo;
+use crate::model::legacy::TaskSummary;
 use crate::store::StoreError;
 
 /// Decodes the payload-free SQLite columns selected for a summary query.

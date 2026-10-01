@@ -11,9 +11,9 @@ use std::collections::VecDeque;
 
 use crate::model::OwnerEpoch;
 #[cfg(test)]
-use crate::model::TaskId;
+use crate::model::legacy::TaskId;
 #[cfg(test)]
-use crate::model::TaskRecord;
+use crate::model::legacy::TaskRecord;
 use crate::model::next::StoredTask;
 use crate::model::next::TaskId as EncodedTaskId;
 

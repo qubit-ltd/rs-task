@@ -8,9 +8,9 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::TaskId;
-use super::TaskRecord;
-use super::TaskSummary;
+use super::legacy::TaskId;
+use super::legacy::TaskRecord;
+use super::legacy::TaskSummary;
 
 /// Stable cursor into task history ordered by acceptance time and task ID.
 ///

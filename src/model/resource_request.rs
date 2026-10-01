@@ -11,9 +11,9 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::RequestValidationError;
-use super::RequestValidationField;
-use super::RequestValidationRule;
+use super::legacy::RequestValidationError;
+use super::legacy::RequestValidationField;
+use super::legacy::RequestValidationRule;
 
 /// Maximum number of labels or custom resource names in one request.
 pub const MAX_RESOURCE_NAME_ENTRIES: usize = 32;

@@ -8,13 +8,13 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::ResourceRequest;
-use super::TaskId;
 use super::TaskOutput;
-use super::TaskRequest;
-use super::TaskRequestInfo;
 use super::TaskState;
-use super::TaskSummary;
+use super::legacy::ResourceRequest;
+use super::legacy::TaskId;
+use super::legacy::TaskRequest;
+use super::legacy::TaskRequestInfo;
+use super::legacy::TaskSummary;
 
 /// Queryable task lifecycle snapshot.
 ///

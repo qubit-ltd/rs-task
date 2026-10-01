@@ -10,29 +10,29 @@ use std::num::NonZeroUsize;
 
 use super::StoreError;
 use super::TaskFuture;
-#[cfg(test)]
-use crate::model::AcceptOutcome;
 use crate::model::OwnerEpoch;
-#[cfg(test)]
-use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
 #[cfg(test)]
-use crate::model::TaskCursor;
+use crate::model::legacy::AcceptOutcome;
 #[cfg(test)]
-use crate::model::TaskId;
+use crate::model::legacy::RecoveryPage;
 #[cfg(test)]
-use crate::model::TaskPage;
+use crate::model::legacy::TaskCursor;
 #[cfg(test)]
-use crate::model::TaskQuery;
+use crate::model::legacy::TaskId;
 #[cfg(test)]
-use crate::model::TaskRecord;
+use crate::model::legacy::TaskPage;
 #[cfg(test)]
-use crate::model::TaskRequest;
+use crate::model::legacy::TaskQuery;
+#[cfg(test)]
+use crate::model::legacy::TaskRecord;
+#[cfg(test)]
+use crate::model::legacy::TaskRequest;
 #[cfg(test)]
 #[cfg(test)]
-use crate::model::TaskSummary;
+use crate::model::legacy::TaskSummary;
 #[cfg(test)]
-use crate::model::TransitionCommand;
+use crate::model::legacy::TransitionCommand;
 use crate::model::next::AcceptOutcome as TypedAcceptOutcome;
 use crate::model::next::AcceptOutcome as EncodedAcceptOutcome;
 use crate::model::next::ProgressCommand as TypedProgressCommand;

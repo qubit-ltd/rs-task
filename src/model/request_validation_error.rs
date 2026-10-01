@@ -7,8 +7,8 @@
 // =============================================================================
 use std::fmt;
 
-use super::RequestValidationField;
-use super::RequestValidationRule;
+use super::legacy::RequestValidationField;
+use super::legacy::RequestValidationRule;
 
 /// Structured failure returned by request and resource limit validation.
 ///
