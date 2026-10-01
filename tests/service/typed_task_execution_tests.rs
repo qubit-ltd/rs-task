@@ -108,6 +108,32 @@ impl TaskHandler<u32> for PendingHandler {
     }
 }
 
+struct ContextProgressHandler;
+
+impl TaskHandler<u32> for ContextProgressHandler {
+    fn run<'a>(&'a self, value: u32, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        Box::pin(async move {
+            assert_eq!(value, 42);
+            assert_eq!(context.task_id().to_padded_decimal(), "00000000000000000301");
+            assert_eq!(context.attempt(), 1);
+            assert!(!context.is_cancelled());
+            assert!(!context.cancellation_signal().load(Ordering::Acquire));
+
+            let _progress = context
+                .progress_builder()
+                .stage(qubit_progress::Stage::new("index", "Index records").position(2, 3))
+                .metric(qubit_progress::Metric::new("records", "Records").total(100))
+                .start_async()
+                .await
+                .expect("handler progress starts and persists");
+
+            Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+                summary: b"context-progress".to_vec(),
+            }))
+        })
+    }
+}
+
 fn descriptor(mode: CancellationMode) -> TaskHandlerDescriptor {
     TaskHandlerDescriptor {
         kind_id: "test.typed-service".into(),
@@ -168,6 +194,33 @@ async fn typed_submit_decodes_runs_and_persists_terminal_state() {
     assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
     let completed = service.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(completed.output.unwrap().summary, b"typed-result");
+}
+
+#[tokio::test]
+async fn typed_context_exposes_attempt_cancellation_and_persisted_progress() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(301)))).capacity(
+        ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        },
+    );
+    builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(ContextProgressHandler),
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+
+    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    let summary = service.get(accepted.id).await.unwrap().unwrap();
+    let progress = summary.progress.expect("handler progress remains queryable");
+    assert_eq!(progress.attempt, 1);
+    assert_eq!(progress.stage.as_ref().map(|stage| stage.id.as_str()), Some("index"));
+    assert_eq!(progress.metrics[0].id, "records");
 }
 
 #[tokio::test]

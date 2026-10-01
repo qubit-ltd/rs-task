@@ -85,7 +85,6 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
 
     use qubit_progress::AsyncProgress;
     use qubit_progress::Metric;
@@ -93,7 +92,6 @@ mod tests {
     use qubit_progress::Stage;
 
     use super::TaskProgressReporter;
-    use crate::handler::typed::TypedTaskContext;
     use crate::model::TaskState;
     use crate::model::next::ResourceRequest;
     use crate::model::next::StartCommand;
@@ -150,9 +148,7 @@ mod tests {
         let (store, id) = running_task().await;
         let reporter: Arc<dyn qubit_progress::AsyncReporter> =
             Arc::new(TaskProgressReporter::new(store.clone(), id, 1));
-        let context = TypedTaskContext::new(id, 1, Arc::new(AtomicBool::new(false)), reporter);
-        let mut progress = context
-            .progress_builder()
+        let mut progress = AsyncProgress::builder_arc(reporter)
             .stage(Stage::new("download", "Downloading").position(1, 2))
             .metric(Metric::new("bytes", "Bytes").total(10))
             .start_async()
@@ -273,9 +269,8 @@ mod tests {
         let (store, id) = running_task().await;
         let reporter: Arc<dyn qubit_progress::AsyncReporter> =
             Arc::new(TaskProgressReporter::new(store.clone(), id, 1));
-        let context = TypedTaskContext::new(id, 1, Arc::new(AtomicBool::new(false)), reporter);
-        let first_builder = context.progress_builder().metric(Metric::new("first", "First"));
-        let second_builder = context.progress_builder().metric(Metric::new("second", "Second"));
+        let first_builder = AsyncProgress::builder_arc(Arc::clone(&reporter)).metric(Metric::new("first", "First"));
+        let second_builder = AsyncProgress::builder_arc(reporter).metric(Metric::new("second", "Second"));
 
         let (first, second) = tokio::join!(first_builder.start_async(), second_builder.start_async());
         let mut first = first.expect("first operation starts");

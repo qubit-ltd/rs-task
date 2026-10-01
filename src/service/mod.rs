@@ -32,7 +32,6 @@ mod task_event_publisher;
 mod task_execution_service;
 #[cfg(test)]
 mod task_execution_service_builder;
-#[cfg(not(test))]
 mod task_progress_reporter;
 #[cfg(test)]
 mod task_service_build_error;
