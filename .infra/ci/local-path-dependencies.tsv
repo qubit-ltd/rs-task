@@ -1,3 +1,12 @@
-# relative git root<TAB>repository URL<TAB>branch/tag or full commit SHA
-../rs-event-bus	https://github.com/qubit-ltd/rs-event-bus.git	d1133227ceed40028b37ea9ebec3509bb71309b3
-../rs-event-bus-redis	https://github.com/qubit-ltd/rs-event-bus-redis.git	9cad48ee0329ec6648b0426a61b6c9c7382e93e8
+# relative git root<TAB>repository URL<TAB>default branch
+../rs-codec	https://github.com/qubit-ltd/rs-codec	main
+../rs-datatype	https://github.com/qubit-ltd/rs-datatype	main
+../rs-event-bus	https://github.com/qubit-ltd/rs-event-bus	d1133227ceed40028b37ea9ebec3509bb71309b3
+../rs-event-bus-redis	https://github.com/qubit-ltd/rs-event-bus-redis	9cad48ee0329ec6648b0426a61b6c9c7382e93e8
+../rs-id	https://github.com/qubit-ltd/rs-id	main
+../rs-model-metadata	https://github.com/qubit-ltd/rs-model-metadata	main
+../rs-progress	https://github.com/qubit-ltd/rs-progress	main
+../rs-redact	https://github.com/qubit-ltd/rs-redact	main
+../rs-reflect	https://github.com/qubit-ltd/rs-reflect	main
+../rs-validation-rules	https://github.com/qubit-ltd/rs-validation-rules	main
+../rs-validator	https://github.com/qubit-ltd/rs-validator	dev-starfish

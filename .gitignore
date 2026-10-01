@@ -83,3 +83,33 @@ external/
 
 # Locally installed pinned rs-infra tools
 .infra/tools/bin/
+
+/.infra/*/bin/
+
+/.infra/*/.crates*
+
+/.infra/*/tool.revision*
+
+!/.infra/coverage/
+
+/.infra/coverage/*
+
+!/.infra/coverage/coverage.json
+
+!/.infra/coverage/tool.toml
+
+# Shared Rust project ignore entries (rs-infra)
+**/target/
+/fuzz/artifacts/
+/fuzz/target/
+*.profdata
+*.profraw
+/ci-summary.json
+/coverage-badge.json
+/coverage-summary.md
+/coverage.json
+/coverage.txt
+/lcov.info
+/public/
+/pages-artifact.tar.gz
+__pycache__/
