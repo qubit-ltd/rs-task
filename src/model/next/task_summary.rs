@@ -41,6 +41,8 @@ pub struct TaskSummary {
     pub state_version: u64,
     /// Number of execution attempts started.
     pub attempt: u32,
+    /// Earliest Unix epoch millisecond when a queued retry may start.
+    pub retry_not_before_ms: Option<u64>,
     /// Unix epoch milliseconds when accepted.
     pub accepted_at_ms: u64,
     /// Unix epoch milliseconds when execution last started.

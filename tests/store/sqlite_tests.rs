@@ -176,6 +176,7 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
                 id,
                 expected_state_version: accepted.summary.state_version,
                 expected_attempt: accepted.summary.attempt,
+                retry_not_before_ms: None,
                 state: LegacyTaskState::Succeeded,
                 cancel_requested: false,
                 cancel_error: None,
@@ -193,6 +194,7 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
                 id,
                 expected_state_version: accepted.summary.state_version,
                 expected_attempt: accepted.summary.attempt,
+                retry_not_before_ms: None,
                 state: LegacyTaskState::Failed {
                     category: "x".repeat(crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES + 1),
                     message: "oversized failure category".into(),
@@ -343,7 +345,7 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
     let schema_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version reads");
-    assert_eq!(schema_version, 4);
+    assert_eq!(schema_version, 5);
     let category_index: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='tasks_category_accepted_id')",
@@ -394,6 +396,7 @@ async fn test_sqlite_new_attempt_clears_progress_and_restarts_progress_version()
             id,
             expected_state_version: first_attempt.state_version,
             expected_attempt: first_attempt.attempt,
+            retry_not_before_ms: None,
             state: LegacyTaskState::Queued,
             cancel_requested: false,
             cancel_error: None,
@@ -439,6 +442,7 @@ async fn test_sqlite_new_attempt_clears_progress_and_restarts_progress_version()
             id,
             expected_state_version: second_attempt.state_version,
             expected_attempt: second_attempt.attempt,
+            retry_not_before_ms: None,
             state: LegacyTaskState::Succeeded,
             cancel_requested: false,
             cancel_error: None,
