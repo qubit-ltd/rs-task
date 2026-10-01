@@ -108,6 +108,160 @@ impl TaskHandler<u32> for PendingHandler {
     }
 }
 
+struct RetryOnceHandler(AtomicU64);
+
+impl TaskHandler<u32> for RetryOnceHandler {
+    fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        let attempt = self.0.fetch_add(1, Ordering::AcqRel);
+        Box::pin(async move {
+            if attempt == 0 {
+                Err(TaskRunError {
+                    category: "temporary".into(),
+                    message: "try again".into(),
+                    retryable: true,
+                })
+            } else {
+                Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+                    summary: b"retried".to_vec(),
+                }))
+            }
+        })
+    }
+}
+
+struct ParallelismHandler {
+    active: AtomicU64,
+    maximum: AtomicU64,
+    started: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+struct FailingListStore {
+    inner: Arc<MemoryTaskStore>,
+    fail_next_list: std::sync::atomic::AtomicBool,
+    fail_next_get: std::sync::atomic::AtomicBool,
+    fail_next_start: std::sync::atomic::AtomicBool,
+    fail_next_transition: std::sync::atomic::AtomicBool,
+}
+
+fn failing_store() -> Arc<FailingListStore> {
+    Arc::new(FailingListStore {
+        inner: Arc::new(MemoryTaskStore::new(32)),
+        fail_next_list: std::sync::atomic::AtomicBool::new(false),
+        fail_next_get: std::sync::atomic::AtomicBool::new(false),
+        fail_next_start: std::sync::atomic::AtomicBool::new(false),
+        fail_next_transition: std::sync::atomic::AtomicBool::new(false),
+    })
+}
+
+async fn wait_for_latched_store_fault(service: &qubit_task::service::TaskExecutionService) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                service.submit(request()).await,
+                Err(qubit_task::service::TaskServiceError::StoreUnavailable(_))
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background store failure is latched before further writes");
+}
+
+impl TaskStore for FailingListStore {
+    fn capabilities(&self) -> qubit_task::model::StoreCapabilities {
+        self.inner.capabilities()
+    }
+    fn accept_encoded<'a>(
+        &'a self,
+        id: TaskId,
+        request: qubit_task::model::StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<qubit_task::model::AcceptOutcome, qubit_task::store::StoreError>> {
+        self.inner.accept_encoded(id, request)
+    }
+    fn get_encoded_task<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>> {
+        if self.fail_next_get.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected get failure".into())) })
+        } else {
+            self.inner.get_encoded_task(id)
+        }
+    }
+    fn start_encoded<'a>(
+        &'a self,
+        command: qubit_task::model::StartCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        if self.fail_next_start.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected start failure".into())) })
+        } else {
+            self.inner.start_encoded(command)
+        }
+    }
+    fn transition_encoded<'a>(
+        &'a self,
+        command: qubit_task::model::TransitionCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        if self.fail_next_transition.swap(false, Ordering::AcqRel) {
+            Box::pin(async {
+                Err(qubit_task::store::StoreError::Failure(
+                    "injected transition failure".into(),
+                ))
+            })
+        } else {
+            self.inner.transition_encoded(command)
+        }
+    }
+    fn update_progress<'a>(
+        &'a self,
+        command: qubit_task::model::ProgressCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        self.inner.update_progress(command)
+    }
+    fn list_encoded<'a>(
+        &'a self,
+        query: TaskQuery,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
+        if self.fail_next_list.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected list failure".into())) })
+        } else {
+            self.inner.list_encoded(query)
+        }
+    }
+    fn acquire_owner<'a>(
+        &'a self,
+    ) -> TaskFuture<'a, Result<qubit_task::model::OwnerEpoch, qubit_task::store::StoreError>> {
+        self.inner.acquire_owner()
+    }
+    fn release_owner<'a>(
+        &'a self,
+        epoch: qubit_task::model::OwnerEpoch,
+    ) -> TaskFuture<'a, Result<(), qubit_task::store::StoreError>> {
+        self.inner.release_owner(epoch)
+    }
+}
+
+impl TaskHandler<u32> for ParallelismHandler {
+    fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+        self.maximum.fetch_max(active, Ordering::AcqRel);
+        self.started.add_permits(1);
+        let release = Arc::clone(&self.release);
+        let active = &self.active;
+        Box::pin(async move {
+            let permit = release.acquire().await.unwrap();
+            permit.forget();
+            active.fetch_sub(1, Ordering::AcqRel);
+            Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+                summary: Vec::new(),
+            }))
+        })
+    }
+}
+
 struct ContextProgressHandler;
 
 impl TaskHandler<u32> for ContextProgressHandler {
@@ -194,6 +348,229 @@ async fn typed_submit_decodes_runs_and_persists_terminal_state() {
     assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
     let completed = service.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(completed.output.unwrap().summary, b"typed-result");
+}
+
+#[tokio::test]
+async fn retryable_handler_error_is_persisted_and_retried_after_deadline() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1201))))
+        .retry_policy(
+            qubit_task::service::RetryPolicy::new(
+                std::time::Duration::from_millis(80),
+                std::time::Duration::from_millis(80),
+            )
+            .unwrap(),
+        );
+    builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(RetryOnceHandler(AtomicU64::new(0))),
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    let queued_retry = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(summary) = service.get(accepted.id).await.unwrap()
+                && summary.state == TaskState::Queued
+                && summary.retry_not_before_ms.is_some()
+            {
+                break summary;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry transition is persisted");
+    assert_eq!(queued_retry.attempt, 1);
+    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    assert_eq!(service.get(accepted.id).await.unwrap().unwrap().attempt, 2);
+    service.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_retry_deadline_survives_service_restart() {
+    let path = std::env::temp_dir().join(format!(
+        "qubit-task-retry-restart-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let retry_delay = std::time::Duration::from_millis(400);
+    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let mut first_builder =
+        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1251))))
+            .retry_policy(qubit_task::service::RetryPolicy::new(retry_delay, retry_delay).unwrap());
+    first_builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(RetryOnceHandler(AtomicU64::new(0))),
+        )
+        .unwrap();
+    let first = first_builder.build().await.unwrap();
+    let accepted = first.submit(request()).await.unwrap();
+    let retry = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let summary = first.get(accepted.id).await.unwrap().unwrap();
+            if summary.attempt == 1 && summary.retry_not_before_ms.is_some() {
+                break summary;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first retry deadline is persisted");
+    first.shutdown().await.unwrap();
+    drop(first);
+    drop(store);
+
+    let reopened: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let mut second_builder =
+        TaskExecutionServiceBuilder::new(Arc::clone(&reopened), registry(), Arc::new(Ids(AtomicU64::new(1252))));
+    second_builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let second = second_builder.build().await.unwrap();
+    let remaining = retry.retry_not_before_ms.unwrap().saturating_sub(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    );
+    assert!(remaining > 100, "test must restart before the stored deadline");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let still_waiting = second.get(accepted.id).await.unwrap().unwrap();
+    assert_eq!(still_waiting.attempt, 1);
+    assert!(matches!(still_waiting.state, TaskState::Queued));
+    assert_eq!(still_waiting.retry_not_before_ms, retry.retry_not_before_ms);
+    assert_eq!(wait_for_terminal(&second, accepted.id).await, TaskState::Succeeded);
+    second.shutdown().await.unwrap();
+    drop(second);
+    drop(reopened);
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".owner.lock");
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
+}
+
+#[tokio::test]
+async fn scheduler_never_exceeds_configured_running_limit() {
+    let store = Arc::new(MemoryTaskStore::new(32));
+    let handler = Arc::new(ParallelismHandler {
+        active: AtomicU64::new(0),
+        maximum: AtomicU64::new(0),
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1401))))
+        .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
+    builder
+        .handlers_mut()
+        .register::<u32, _>(descriptor(CancellationMode::Cooperative), handler.clone())
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let mut accepted = Vec::new();
+    for _ in 0..8 {
+        accepted.push(service.submit(request()).await.unwrap().id);
+    }
+    let started = Arc::clone(&handler.started);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+        started.acquire_many(2).await.unwrap().forget();
+    })
+    .await
+    .expect("two handlers start");
+    tokio::task::yield_now().await;
+    assert_eq!(handler.maximum.load(Ordering::Acquire), 2);
+    handler.release.add_permits(8);
+    for id in accepted {
+        assert_eq!(wait_for_terminal(&service, id).await, TaskState::Succeeded);
+    }
+    assert_eq!(handler.maximum.load(Ordering::Acquire), 2);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn scheduler_store_failure_is_latched_and_reported_by_shutdown() {
+    let store = failing_store();
+    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1501))));
+    builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    store.fail_next_list.store(true, Ordering::Release);
+    wait_for_latched_store_fault(&service).await;
+    assert!(
+        matches!(service.shutdown().await, Err(qubit_task::service::TaskServiceError::StoreUnavailable(message)) if message.contains("injected list failure"))
+    );
+}
+
+#[tokio::test]
+async fn typed_service_latches_get_and_start_failures() {
+    for (fail_get, expected) in [(true, "injected get failure"), (false, "injected start failure")] {
+        let store = failing_store();
+        let mut builder =
+            TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1551))));
+        builder
+            .handlers_mut()
+            .register::<u32, _>(
+                descriptor(CancellationMode::Cooperative),
+                Arc::new(Handler {
+                    cooperative_cancel: false,
+                }),
+            )
+            .unwrap();
+        let service = builder.build().await.unwrap();
+        if fail_get {
+            store.fail_next_get.store(true, Ordering::Release);
+        } else {
+            store.fail_next_start.store(true, Ordering::Release);
+        }
+        service.submit(request()).await.unwrap();
+        wait_for_latched_store_fault(&service).await;
+        assert!(matches!(
+            service.shutdown().await,
+            Err(qubit_task::service::TaskServiceError::StoreUnavailable(message)) if message.contains(expected)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn typed_service_latches_finalizer_transition_failure() {
+    let store = failing_store();
+    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1581))));
+    builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    store.fail_next_transition.store(true, Ordering::Release);
+    service.submit(request()).await.unwrap();
+    wait_for_latched_store_fault(&service).await;
+    assert!(matches!(
+        service.shutdown().await,
+        Err(qubit_task::service::TaskServiceError::StoreUnavailable(message)) if message.contains("injected transition failure")
+    ));
 }
 
 #[tokio::test]
@@ -285,6 +662,44 @@ async fn missing_handler_is_retained_as_blocked_and_can_be_cancelled() {
         CancelOutcome::CancelledBeforeStart
     );
     assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
+}
+
+#[tokio::test]
+async fn blocked_task_can_be_resumed_after_restarting_with_its_handler() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let first = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1301))))
+        .build()
+        .await
+        .unwrap();
+    let accepted = first.submit(request()).await.unwrap();
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let summary = first.get(accepted.id).await.unwrap().unwrap();
+            if matches!(summary.state, TaskState::Blocked { .. }) {
+                break summary;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    first.shutdown().await.unwrap();
+
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1302))));
+    builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let second = builder.build().await.unwrap();
+    let queued = second.resume_blocked(accepted.id, blocked.state_version).await.unwrap();
+    assert_eq!(queued.state, TaskState::Queued);
+    assert_eq!(wait_for_terminal(&second, accepted.id).await, TaskState::Succeeded);
+    second.shutdown().await.unwrap();
 }
 
 #[tokio::test]
