@@ -40,18 +40,18 @@ The attempt finalizer is supervised independently of the handler future. If its 
 
 Opening an existing schema-3 database now ensures the required history and unfinished-work indexes. If a known partial index has an older same-name definition, SQLite rebuilds it transactionally during open. The schema and record format remain version 3; this index repair does not rewrite task records or metadata. Back up the database before deployment as for any storage upgrade, and allow the first open to finish before serving traffic.
 
-## Validate a backend outside this repository
+## Validate the typed store API from an external crate
 
-Enable `conformance` in the backend's test dependency and implement the public `StoreFixture` contract. Run `verify_core_contract` against a fresh fixture and `verify_recovery_contract` against a separate durable fixture. The recovery suite needs fresh isolated storage and 513 unfinished records. These black-box checks do not prove cancellation/write-draining, crash durability, or transaction interruption; retain backend-specific controlled-gate and process-crash tests. The `sqlite,conformance` feature combination is checked separately in CI.
+The standalone [typed-store consumer](../tests/fixtures/typed-store-consumer/) exercises `accept_encoded`, `get_encoded_task`, start/transition, and query through the public `TaskStore` trait. It always checks the memory store; enabling `sqlite` also checks a disposable `SqliteTaskStore::open_next` database and removes its temporary directory on exit. Run it with `cargo run --manifest-path tests/fixtures/typed-store-consumer/Cargo.toml --features sqlite,typed-contract`. This is an API smoke test, not a substitute for backend-specific crash, write-draining, and transaction-interruption tests.
 
-The standalone [conformance consumer](../tests/fixtures/conformance-consumer/) demonstrates the public API. `.infra/tools/verify-packaged-consumer.sh` checks the packed crate and registry-resolved consumer with no sibling path override when explicitly run. A script that has not run successfully is not evidence that package validation passed.
+`.infra/tools/verify-packaged-consumer.sh` checks the packed crate and registry-resolved consumer with no sibling path override when explicitly run. A script that has not run successfully is not evidence that package validation passed.
 
 The strict package flow first reviews `cargo package --list`, then runs Cargo verification without `--no-verify`:
 
 ```sh
 cargo package --manifest-path /path/to/rs-task/Cargo.toml \
   --target-dir /tmp/superpowers-rs-task-gc6n4m1u/package-target \
-  --locked --allow-dirty --no-default-features --features sqlite,conformance
+  --locked --allow-dirty --no-default-features --features sqlite
 ```
 
 `--allow-dirty` includes reviewed worktree changes; it does not disable package verification. Extract `package/qubit-task-0.8.0.crate` under a dedicated validated temporary workspace, point a separate consumer manifest at that extracted directory, and keep the consumer manifest free of `[patch]`. Use a fresh `CARGO_HOME`, copy the user's Cargo registry/authentication configuration and credentials without printing them, reject path patches in its config and in Cargo config files along the command's working-directory ancestry, and run the consumer's no-default, single-feature, combined-feature and all-features checks plus the contract suites. Print the resolved registry sources. If registry resolution fails, report it as blocked; never substitute a sibling checkout or claim a package pass.
