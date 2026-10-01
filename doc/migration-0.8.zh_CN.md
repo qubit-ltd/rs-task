@@ -40,18 +40,18 @@ attempt finalizer 与 handler future 分开受监督。若状态迁移或记账�
 
 现在打开已有 schema 3 数据库时会确保所需的历史与未完成任务索引。如果已知的局部索引存在旧的同名定义，打开过程会在事务内重建它。schema 与记录格式仍为版本 3；索引修复不会重写任务记录或元数据。和其他存储升级一样，部署前备份数据库，并等待首次打开完成后再接收流量。
 
-## 在仓库外验证 backend
+## 从独立 crate 验证 typed store API
 
-在 backend 的测试依赖中启用 `conformance`，并实现公开的 `StoreFixture`。使用全新 fixture 运行 `verify_core_contract`，再用另一个独立的持久化 fixture 运行 `verify_recovery_contract`。恢复套件要求新建隔离存储，并写入 513 条未完成任务。这些黑盒检查不能证明取消写入后的排空、崩溃持久性或事务中断；backend 还应保留受控写入屏障和进程崩溃测试。CI 单独检查 `sqlite,conformance` 组合。
+[独立 typed-store consumer](../tests/fixtures/typed-store-consumer/) 通过公开的 `TaskStore` trait 检查 `accept_encoded`、`get_encoded_task`、start/transition 和 query。它始终验证 memory store；启用 `sqlite` 后还会验证临时目录中的 `SqliteTaskStore::open_next`，并在退出时清理该目录。运行命令：`cargo run --manifest-path tests/fixtures/typed-store-consumer/Cargo.toml --features sqlite,typed-contract`。这是 API smoke test，不能代替 backend 自己的崩溃、写入排空和事务中断测试。
 
-[独立 conformance consumer](../tests/fixtures/conformance-consumer/) 展示公开 API。显式运行 `.infra/tools/verify-packaged-consumer.sh` 会验证打包后的 crate 和通过 registry 解析依赖的 consumer，且不使用兄弟仓库路径覆盖。脚本未成功运行时，不得声称包级验证已通过。
+显式运行 `.infra/tools/verify-packaged-consumer.sh` 会验证打包后的 crate 和通过 registry 解析依赖的 consumer，且不使用兄弟仓库路径覆盖。脚本未成功运行时，不得声称包级验证已通过。
 
 严格包检查先审查 `cargo package --list`，再在不使用 `--no-verify` 的情况下执行 Cargo 自带验证：
 
 ```sh
 cargo package --manifest-path /path/to/rs-task/Cargo.toml \
   --target-dir /tmp/superpowers-rs-task-gc6n4m1u/package-target \
-  --locked --allow-dirty --no-default-features --features sqlite,conformance
+  --locked --allow-dirty --no-default-features --features sqlite
 ```
 
 `--allow-dirty` 用于包含已审阅的工作区变更，不会关闭 package verification。将 `package/qubit-task-0.8.0.crate` 解到专用且已校验的临时工作区，再创建另一个 consumer manifest 指向该解包目录，manifest 中不得有 `[patch]`。使用独立 `CARGO_HOME`，复制用户的 Cargo registry/认证配置与 credentials，但不要打印秘密；检查其中和当前命令工作目录祖先上的 Cargo config，拒绝路径 patch。构建并运行 consumer 的无默认特性、单特性、组合特性、全特性及合同套件，同时输出解析出的 registry source。registry 解析失败时应报告阻塞；不得换用兄弟 checkout，也不得声称包检查通过。
