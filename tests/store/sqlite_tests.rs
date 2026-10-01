@@ -133,6 +133,84 @@ fn typed_request(key: Option<&str>) -> StoredTaskRequest {
 }
 
 #[tokio_test]
+async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operations() {
+    let path = database_path("typed-boundary-errors");
+    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let missing_id = typed_task_id(201);
+
+    assert!(
+        TypedTaskStore::get_encoded_task(&store, missing_id)
+            .await
+            .expect("missing lookup succeeds")
+            .is_none()
+    );
+    assert!(matches!(
+        TypedTaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id: missing_id,
+                expected_state_version: 0,
+                started_at_ms: 1,
+            }
+        )
+        .await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        TypedTaskStore::update_progress(&store, ProgressCommand::new(missing_id, 1, 1, None, Vec::new(), 2)).await,
+        Err(StoreError::NotFound)
+    ));
+
+    let id = typed_task_id(202);
+    let accepted = TypedTaskStore::accept_encoded(&store, id, typed_request(None))
+        .await
+        .expect("typed task is accepted");
+    assert!(matches!(
+        TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 0, 1, None, Vec::new(), 3)).await,
+        Err(StoreError::Conflict)
+    ));
+    assert!(matches!(
+        TypedTaskStore::transition_encoded(
+            &store,
+            EncodedTransitionCommand {
+                id,
+                expected_state_version: accepted.summary.state_version,
+                expected_attempt: accepted.summary.attempt,
+                state: LegacyTaskState::Succeeded,
+                cancel_requested: false,
+                cancel_error: None,
+                finished_at_ms: Some(4),
+                output: None,
+            }
+        )
+        .await,
+        Err(StoreError::Conflict)
+    ));
+    assert!(matches!(
+        TypedTaskStore::transition_encoded(
+            &store,
+            EncodedTransitionCommand {
+                id,
+                expected_state_version: accepted.summary.state_version,
+                expected_attempt: accepted.summary.attempt,
+                state: LegacyTaskState::Failed {
+                    category: "x".repeat(crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES + 1),
+                    message: "oversized failure category".into(),
+                },
+                cancel_requested: false,
+                cancel_error: None,
+                finished_at_ms: Some(5),
+                output: None,
+            }
+        )
+        .await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
 async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progress() {
     let path = database_path("typed-schema");
     let id = typed_task_id(u64::MAX);

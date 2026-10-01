@@ -148,3 +148,118 @@ fn test_task_request_rejects_metadata_over_serialized_byte_budget() {
         Err(TaskRequestEncodeError::MetadataTooLarge(_))
     ));
 }
+
+#[test]
+fn test_progress_snapshot_projects_stage_and_metrics_and_round_trips() {
+    use qubit_progress::Metric;
+    use qubit_progress::MetricDelta;
+    use qubit_progress::NoopReporter;
+    use qubit_progress::Progress;
+    use qubit_progress::Stage;
+
+    use crate::model::next::ProgressCommand;
+    use crate::model::next::TaskProgressSnapshot;
+
+    let reporter = NoopReporter;
+    let progress = Progress::builder(&reporter)
+        .metric(Metric::new("items", "Items").total(10))
+        .start()
+        .expect("progress starts");
+    let metric = progress.metric("items").expect("metric exists");
+    metric
+        .apply_delta(MetricDelta::new().started(4).succeeded(3).failed(1))
+        .expect("metric updates");
+    let command = ProgressCommand::new(
+        TaskId::from_id(qubit_id::Id::new(7)),
+        2,
+        9,
+        Some(Stage::new("parse", "Parse input").position(2, 5)),
+        vec![metric.snapshot()],
+        123,
+    );
+
+    let snapshot = TaskProgressSnapshot::from_command(command).expect("snapshot is valid");
+    assert_eq!(snapshot.attempt, 2);
+    assert_eq!(snapshot.progress_version, 9);
+    assert_eq!(snapshot.updated_at_ms, 123);
+    let stage = snapshot.stage.as_ref().expect("stage is retained");
+    assert_eq!((stage.id.as_str(), stage.name.as_str()), ("parse", "Parse input"));
+    assert_eq!((stage.position, stage.total), (Some(2), Some(5)));
+    assert_eq!(snapshot.metrics.len(), 1);
+    assert_eq!(snapshot.metrics[0].completed, 4);
+    assert_eq!(snapshot.metrics[0].succeeded, 3);
+    assert_eq!(snapshot.metrics[0].failed, 1);
+
+    let json = serde_json::to_vec(&snapshot).expect("snapshot serializes");
+    let decoded: TaskProgressSnapshot = serde_json::from_slice(&json).expect("snapshot deserializes");
+    assert_eq!(decoded, snapshot);
+}
+
+#[test]
+fn test_progress_snapshot_rejects_metric_count_stage_size_and_encoded_size() {
+    use qubit_progress::Metric;
+    use qubit_progress::NoopReporter;
+    use qubit_progress::Progress;
+    use qubit_progress::Stage;
+
+    use crate::model::next::ProgressCommand;
+    use crate::model::next::ProgressSnapshotError;
+    use crate::model::next::TaskProgressSnapshot;
+
+    let id = TaskId::from_id(qubit_id::Id::new(1));
+    let reporter = NoopReporter;
+    let metric_names: Vec<_> = (0..=crate::model::next::MAX_TASK_PROGRESS_METRICS)
+        .map(|index| format!("metric-{index}"))
+        .collect();
+    let mut builder = Progress::builder(&reporter);
+    for name in &metric_names {
+        builder = builder.metric(Metric::new(name, "Metric"));
+    }
+    let progress = builder.start().expect("progress starts");
+    let too_many_metrics = metric_names
+        .iter()
+        .map(|name| progress.metric(name).expect("metric exists").snapshot())
+        .collect();
+    assert!(matches!(
+        TaskProgressSnapshot::from_command(ProgressCommand::new(id, 1, 1, None, too_many_metrics, 1)),
+        Err(ProgressSnapshotError::TooManyMetrics(_))
+    ));
+
+    assert!(matches!(
+        TaskProgressSnapshot::from_command(ProgressCommand::new(
+            id,
+            1,
+            1,
+            Some(Stage::new(&"x".repeat(129), "Stage")),
+            Vec::new(),
+            1,
+        )),
+        Err(ProgressSnapshotError::StageIdTooLarge(129))
+    ));
+    assert!(matches!(
+        TaskProgressSnapshot::from_command(ProgressCommand::new(
+            id,
+            1,
+            1,
+            Some(Stage::new("stage", &"x".repeat(257))),
+            Vec::new(),
+            1,
+        )),
+        Err(ProgressSnapshotError::StageNameTooLarge(257))
+    ));
+
+    let names: Vec<_> = (0..9).map(|index| format!("{}-{index}", "x".repeat(2_000))).collect();
+    let mut builder = Progress::builder(&reporter);
+    for name in &names {
+        builder = builder.metric(Metric::new(name, name));
+    }
+    let progress = builder.start().expect("large progress metrics start");
+    let large_metrics = names
+        .iter()
+        .map(|name| progress.metric(name).expect("metric exists").snapshot())
+        .collect();
+    assert!(matches!(
+        TaskProgressSnapshot::from_command(ProgressCommand::new(id, 1, 1, None, large_metrics, 1)),
+        Err(ProgressSnapshotError::TooLarge(_))
+    ));
+}
