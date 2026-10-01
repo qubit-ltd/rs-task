@@ -5,9 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use qubit_task::model::RequestValidationField;
-use qubit_task::model::RequestValidationRule;
-use qubit_task::model::ResourceRequest;
+use crate::model::RequestValidationField;
+use crate::model::RequestValidationRule;
+use crate::model::ResourceRequest;
 
 #[test]
 fn test_resource_request_validates_bounds_and_gpu_consistency() {

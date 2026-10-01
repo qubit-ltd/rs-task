@@ -7,28 +7,29 @@
 // =============================================================================
 use std::time::Duration;
 
-use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::engine::LocalTaskExecutionEngine;
-use qubit_task::handler::TaskContext;
-use qubit_task::handler::TaskHandler;
-use qubit_task::handler::TaskHandlerDescriptor;
-use qubit_task::handler::TaskRunOutcome;
-use qubit_task::handler::TaskRunResult;
-use qubit_task::model::ResourceCapacity;
-use qubit_task::model::TaskOutput;
-use qubit_task::model::TaskRecord;
-use qubit_task::model::TaskRequest;
-use qubit_task::model::TaskRunError;
-use qubit_task::model::TaskState;
-use qubit_task::scheduling::FairFifoPolicy;
-use qubit_task::service::CancelOutcome;
-use qubit_task::service::RetryPolicy;
-use qubit_task::service::RetryPolicyError;
-use qubit_task::store::MemoryTaskStore;
-use qubit_task::store::TaskFuture;
 use tokio::task;
 use tokio::test as tokio_test;
 use tokio::time;
+
+use crate::engine::LocalTaskExecutionEngine;
+use crate::handler::TaskContext;
+use crate::handler::TaskHandler;
+use crate::handler::TaskHandlerDescriptor;
+use crate::handler::TaskRunOutcome;
+use crate::handler::TaskRunResult;
+use crate::model::ResourceCapacity;
+use crate::model::TaskOutput;
+use crate::model::TaskRecord;
+use crate::model::TaskRequest;
+use crate::model::TaskRunError;
+use crate::model::TaskState;
+use crate::scheduling::FairFifoPolicy;
+use crate::service::CancelOutcome;
+use crate::service::RetryPolicy;
+use crate::service::RetryPolicyError;
+use crate::service::task_execution_service_builder::TaskExecutionServiceBuilder;
+use crate::store::MemoryTaskStore;
+use crate::store::TaskFuture;
 
 #[test]
 fn test_retry_policy_defaults_to_one_second_with_sixty_second_cap() {
@@ -87,7 +88,7 @@ impl TaskHandler for RetryOnce {
 async fn test_retry_is_persisted_and_waits_until_deadline() {
     use std::sync::atomic::Ordering;
 
-    use qubit_task::store::TaskStore;
+    use crate::store::LegacyTaskStore as TaskStore;
     let store = std::sync::Arc::new(MemoryTaskStore::new(4));
     let handler = std::sync::Arc::new(RetryOnce(std::sync::atomic::AtomicUsize::new(0)));
     let service = TaskExecutionServiceBuilder::from_components(
@@ -145,11 +146,11 @@ async fn test_retry_is_persisted_and_waits_until_deadline() {
 
 #[tokio_test]
 async fn test_task_record_without_retry_deadline_deserializes_as_ready() {
-    use qubit_task::model::AcceptOutcome;
-    use qubit_task::model::TaskId;
-    use qubit_task::model::TaskRequest;
-    use qubit_task::store::MemoryTaskStore;
-    use qubit_task::store::TaskStore;
+    use crate::model::AcceptOutcome;
+    use crate::model::TaskId;
+    use crate::model::TaskRequest;
+    use crate::store::LegacyTaskStore as TaskStore;
+    use crate::store::MemoryTaskStore;
 
     let store = MemoryTaskStore::new(1);
     let record = match store
@@ -172,7 +173,7 @@ async fn test_task_record_without_retry_deadline_deserializes_as_ready() {
 async fn test_delayed_retry_can_be_cancelled_before_its_next_attempt() {
     use std::sync::atomic::Ordering;
 
-    use qubit_task::store::TaskStore;
+    use crate::store::LegacyTaskStore as TaskStore;
 
     let store = std::sync::Arc::new(MemoryTaskStore::new(4));
     let handler = std::sync::Arc::new(RetryOnce(std::sync::atomic::AtomicUsize::new(0)));

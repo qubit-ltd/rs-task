@@ -7,18 +7,89 @@
 // =============================================================================
 use std::sync::Arc;
 
-use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::handler::TaskContext;
-use qubit_task::handler::TaskHandler;
-use qubit_task::handler::TaskHandlerDescriptor;
-use qubit_task::handler::TaskRunResult;
-use qubit_task::model::TaskRequest;
-use qubit_task::model::TaskRunError;
-use qubit_task::model::TaskState;
-use qubit_task::service::TaskServiceError;
-use qubit_task::store::TaskFuture;
 use tokio::test as tokio_test;
 use tokio::time;
+
+use crate::engine::EngineError;
+use crate::engine::LocalTaskExecutionEngine;
+use crate::engine::TaskExecutionEngine;
+use crate::handler::TaskContext;
+use crate::handler::TaskHandler;
+use crate::handler::TaskHandlerDescriptor;
+use crate::handler::TaskRunResult;
+use crate::model::ResourceCapacity;
+use crate::model::ResourceRequest;
+use crate::model::TaskId;
+use crate::model::TaskRequest;
+use crate::model::TaskRunError;
+use crate::model::TaskState;
+use crate::service::TaskServiceError;
+use crate::service::task_execution_service_builder::TaskExecutionServiceBuilder;
+use crate::store::TaskFuture;
+
+#[test]
+fn test_memory_and_disk_quota_are_reserved_and_released_together() {
+    let engine = LocalTaskExecutionEngine::new(ResourceCapacity {
+        cpu_slots: 2,
+        memory_bytes: Some(100),
+        disk_bytes: Some(80),
+        ..ResourceCapacity::default()
+    });
+    let first = engine
+        .try_prepare(
+            TaskId::generate(),
+            ResourceRequest {
+                memory_bytes: Some(60),
+                disk_bytes: Some(40),
+                ..ResourceRequest::default()
+            },
+        )
+        .expect("quota fits");
+
+    assert_eq!(engine.capacity().used_memory_bytes, 60);
+    assert_eq!(engine.capacity().used_disk_bytes, 40);
+    assert!(matches!(
+        engine.try_prepare(
+            TaskId::generate(),
+            ResourceRequest {
+                memory_bytes: Some(50),
+                disk_bytes: Some(50),
+                ..ResourceRequest::default()
+            }
+        ),
+        Err(EngineError::TemporarilyUnavailable)
+    ));
+
+    drop(first);
+    assert_eq!(engine.capacity().used_memory_bytes, 0);
+    assert_eq!(engine.capacity().used_disk_bytes, 0);
+}
+
+#[test]
+fn test_unconfigured_memory_or_disk_quota_is_unsatisfiable() {
+    let engine = LocalTaskExecutionEngine::new(ResourceCapacity::default());
+
+    assert!(matches!(
+        engine.try_prepare(
+            TaskId::generate(),
+            ResourceRequest {
+                memory_bytes: Some(1),
+                ..ResourceRequest::default()
+            }
+        ),
+        Err(EngineError::Unsatisfiable)
+    ));
+    assert!(matches!(
+        engine.try_prepare(
+            TaskId::generate(),
+            ResourceRequest {
+                disk_bytes: Some(1),
+                ..ResourceRequest::default()
+            }
+        ),
+        Err(EngineError::Unsatisfiable)
+    ));
+}
 
 #[derive(Clone, Copy)]
 enum HandlerBehavior {

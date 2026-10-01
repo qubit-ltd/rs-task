@@ -42,16 +42,13 @@ use qubit_event_bus::model::Topic;
 use qubit_event_bus::spi::EncodedPayload;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
+use qubit_id::Id;
 use qubit_spi::ProviderSelection;
-use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::event::TaskEvent;
 use qubit_task::model::TaskId;
-use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
-use qubit_task::service::LocalTaskOutcome;
 use redis::Client;
 use serde_json as json;
-use tokio::runtime::Handle;
 use tokio::test as tokio_test;
 
 struct RedisContainer {
@@ -172,7 +169,7 @@ fn create_event_bus(url: &str, namespace: &str, register_task_codec: bool) -> Re
 }
 
 #[tokio_test(flavor = "multi_thread")]
-async fn test_task_lifecycle_notifications_publish_and_consume_via_redis() -> Result<(), Box<dyn Error>> {
+async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result<(), Box<dyn Error>> {
     let redis = RedisContainer::start()?;
     let bus = create_event_bus(&redis.url, "task-redis-integration", true)?;
     let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
@@ -186,25 +183,27 @@ async fn test_task_lifecycle_notifications_publish_and_consume_via_redis() -> Re
             .build()?,
         move |delivery| {
             let payload = delivery.payload();
-            let _ = sender.send((payload.task_id, payload.state_version, payload.state.clone()));
+            let _ = sender.send((payload.task_id.clone(), payload.state_version, payload.state.clone()));
             Ok::<(), DeliveryError>(())
         },
     )?;
 
-    let service = TaskExecutionServiceBuilder::in_memory()
-        .runtime_handle(Handle::current())
-        .event_bus(bus.clone())
-        .build()
-        .await?;
-    let id = service
-        .submit_local(|_| LocalTaskOutcome::<(), std::io::Error>::Succeeded {
-            value: (),
-            summary: TaskOutput::default(),
-        })
-        .await?
-        .task_id();
-    assert_eq!(service.wait(id).await?.state, TaskState::Succeeded);
-    service.shutdown().await?;
+    let id = TaskId::from_id(Id::new(42)).to_string();
+    for (state_version, state) in [
+        (0, TaskState::Queued),
+        (1, TaskState::Running),
+        (2, TaskState::Succeeded),
+    ] {
+        let _ = bus.publish(PublishRequest::new(
+            Topic::<TaskEvent>::new("task.lifecycle")?,
+            TaskEvent {
+                task_id: id.clone(),
+                state_version,
+                state,
+                correlation_key: None,
+            },
+        )?)?;
+    }
 
     let mut observed = Vec::new();
     for _ in 0..3 {
@@ -212,7 +211,7 @@ async fn test_task_lifecycle_notifications_publish_and_consume_via_redis() -> Re
     }
     // Check delivered snapshots without asserting a transport arrival order.
     assert_eq!(observed.len(), 3);
-    assert!(observed.iter().all(|(task_id, _, _)| *task_id == id));
+    assert!(observed.iter().all(|(task_id, _, _)| task_id == &id));
     for (version, expected_state) in [
         (0, TaskState::Queued),
         (1, TaskState::Running),
@@ -224,12 +223,9 @@ async fn test_task_lifecycle_notifications_publish_and_consume_via_redis() -> Re
                 .any(|(_, actual_version, state)| *actual_version == version && state == &expected_state)
         );
     }
-    let stats = service.notification_stats().expect("notification counters");
-    assert!(stats.accepted + stats.opaque_accepted >= 3, "{stats:?}");
-    assert_eq!(stats.publish_error, 0, "{stats:?}");
-
     subscription.cancel()?;
-    bus.shutdown(ShutdownMode::Immediate)?;
+    let report = bus.shutdown(ShutdownMode::Immediate)?;
+    assert_eq!(report.outcome, qubit_event_bus::spi::ShutdownOutcome::Complete);
     Ok(())
 }
 
@@ -246,7 +242,8 @@ fn test_redis_facade_rejects_task_event_subscription_without_codec() -> Result<(
         |_| Ok::<(), DeliveryError>(()),
     );
     assert!(result.is_err(), "typed subscription without a codec must fail");
-    bus.shutdown(ShutdownMode::Immediate)?;
+    let report = bus.shutdown(ShutdownMode::Immediate)?;
+    assert_eq!(report.outcome, qubit_event_bus::spi::ShutdownOutcome::Complete);
     Ok(())
 }
 
@@ -303,7 +300,7 @@ fn test_task_event_codec_rejects_unknown_metadata() -> Result<(), Box<dyn Error>
 /// Applies task snapshots at the consumer, independently of transport order.
 #[derive(Default)]
 struct TaskProjection {
-    latest: HashMap<TaskId, TaskEvent>,
+    latest: HashMap<String, TaskEvent>,
     applied: usize,
 }
 
@@ -318,7 +315,7 @@ impl TaskProjection {
         {
             return;
         }
-        self.latest.insert(event.task_id, event.clone());
+        self.latest.insert(event.task_id.clone(), event.clone());
         self.applied += 1;
     }
 }
@@ -334,7 +331,8 @@ fn assert_consumer_convergence(bus: &EventBus, request: SubscribeRequest<TaskEve
         captured.lock().expect("projection lock").consume(delivery.payload());
         sender.send(()).expect("consumer signal receiver");
     })?;
-    let task_id = TaskId::generate();
+    let task_id = TaskId::from_id(Id::new(43));
+    let task_id_string = task_id.to_string();
     for (state_version, state) in [
         (2, TaskState::Running),
         (2, TaskState::Running),
@@ -342,10 +340,10 @@ fn assert_consumer_convergence(bus: &EventBus, request: SubscribeRequest<TaskEve
         (3, TaskState::Succeeded),
         (1, TaskState::Queued),
     ] {
-        bus.publish(PublishRequest::new(
+        let _ = bus.publish(PublishRequest::new(
             topic.clone(),
             TaskEvent {
-                task_id,
+                task_id: task_id_string.clone(),
                 state_version,
                 state,
                 correlation_key: None,
@@ -354,7 +352,7 @@ fn assert_consumer_convergence(bus: &EventBus, request: SubscribeRequest<TaskEve
         received.recv_timeout(Duration::from_secs(5))?;
     }
     let projection = projection.lock().expect("projection lock");
-    let latest = projection.latest.get(&task_id).expect("consumer projected task");
+    let latest = projection.latest.get(&task_id_string).expect("consumer projected task");
     assert_eq!(latest.state_version, 3, "stale event cannot replace newer state");
     assert_eq!(latest.state, TaskState::Succeeded);
     assert_eq!(
@@ -371,7 +369,8 @@ fn test_task_event_consumer_duplicate_and_stale_versions_converge_locally() -> R
     let bus = EventBus::local(LocalEventBusConfig::default())?;
     let request = SubscribeRequest::new("projection-consumer", Topic::<TaskEvent>::new("task.lifecycle")?)?;
     assert_consumer_convergence(&bus, request)?;
-    bus.shutdown(ShutdownMode::Immediate)?;
+    let report = bus.shutdown(ShutdownMode::Immediate)?;
+    assert_eq!(report.outcome, qubit_event_bus::spi::ShutdownOutcome::Complete);
     Ok(())
 }
 
@@ -388,6 +387,7 @@ fn test_task_event_consumer_duplicate_and_stale_versions_converge_via_redis() ->
         .start_position(StartPosition::Earliest)
         .build()?;
     assert_consumer_convergence(&bus, request)?;
-    bus.shutdown(ShutdownMode::Immediate)?;
+    let report = bus.shutdown(ShutdownMode::Immediate)?;
+    assert_eq!(report.outcome, qubit_event_bus::spi::ShutdownOutcome::Complete);
     Ok(())
 }

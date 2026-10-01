@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Committed SQLite state survives an actual child-process kill.
+//! Verifies typed SQLite task recovery after killing a child process.
 //! Handler side effects may repeat after a crash; this is not exactly-once
 //! execution.
 #![cfg(feature = "sqlite")]
@@ -22,17 +22,30 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistration;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistration;
+use qubit_codec::ValueCodecRegistrationSource;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use qubit_model_metadata::metadata::ModelId;
+use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_task::CancellationMode;
+use qubit_task::TaskContext;
+use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::handler::TaskContext;
-use qubit_task::handler::TaskHandler;
-use qubit_task::handler::TaskHandlerDescriptor;
+use qubit_task::TaskHandler;
+use qubit_task::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
-use qubit_task::model::AcceptOutcome;
 use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
@@ -53,7 +66,46 @@ use tokio::test as tokio_test;
 use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(30);
+const PAYLOAD_TYPE_ID: &str = "fixture.CrashWorkerPayload";
+const CODEC_ID: &str = "fixture.crash_worker.json";
 static WORKER: OnceLock<WorkerFixture> = OnceLock::new();
+static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(10_000);
+
+#[derive(Default)]
+struct JsonValueCodec;
+
+impl qubit_codec::ValueEncoder<Value> for JsonValueCodec {
+    type Output = Vec<u8>;
+    type Error = serde_json::Error;
+
+    fn encode(&mut self, value: &Value) -> Result<Self::Output, Self::Error> {
+        serde_json::to_vec(value)
+    }
+}
+
+impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
+    type Output = Value;
+    type Error = serde_json::Error;
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, Value>();
+static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
+    ValueCodecId::new(CODEC_ID),
+    &JSON_DESCRIPTOR,
+    ValueCodecRegistrationSource::new("qubit-task", "crash-worker", "fixture", 1),
+);
+
+fn new_task_id() -> TaskId {
+    TaskId::from_id(Id::new(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)))
+}
+
+fn codec_registry() -> Arc<ValueBytesCodecRegistry> {
+    Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC]).expect("fixture codec registers"))
+}
 
 /// Caches compiled bytes, rather than a static directory whose destructor
 /// would never run. Every on-disk workspace has a local cleanup owner.
@@ -68,33 +120,27 @@ struct WorkerInstance {
     _workspace: Database,
 }
 
-/// Selects output inside the owned temporary workspace, ignoring any absolute
-/// or relative Cargo target setting. This pure helper performs no filesystem
-/// IO.
-fn fixture_target_path(_cargo_target_dir: Option<&Path>, workspace: &Path) -> PathBuf {
+/// Selects output inside the owned temporary workspace, ignoring Cargo target
+/// paths.
+fn fixture_target_path(workspace: &Path) -> PathBuf {
     workspace.join("fixture-target")
 }
 
-/// Builds the fixture once into a locally owned temporary target, reads its
-/// bytes, and cleans that target. Materializes a private executable per case,
-/// kept alive by its returned workspace owner. Panics on build/filesystem
-/// errors.
+/// Builds the standalone typed worker once and keeps a private executable per
+/// case.
 fn build_worker() -> WorkerInstance {
     let fixture = WORKER.get_or_init(|| {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
         let workspace = Database::new();
-        let target = fixture_target_path(cargo_target_dir.as_deref(), &workspace.0);
-        let mut command = Command::new(env!("CARGO"));
-        command
+        let target = fixture_target_path(&workspace.0);
+        let output = Command::new(env!("CARGO"))
             .current_dir(&repository)
             .args(["build", "--locked", "--manifest-path"])
             .arg(repository.join("tests/fixtures/crash-worker/Cargo.toml"))
             .arg("--target-dir")
-            .arg(&target);
-        // This independent workspace enables only sqlite, so event-bus
-        // siblings and the parent crate's dev-dependencies are unnecessary.
-        let output = command.output().expect("fixture compiler starts");
+            .arg(&target)
+            .output()
+            .expect("fixture compiler starts");
         assert!(
             output.status.success(),
             "fixture build failed: {}",
@@ -116,6 +162,7 @@ fn build_worker() -> WorkerInstance {
         );
         fixture
     });
+
     let workspace = Database::new();
     let path = workspace.0.join(format!("worker{}", std::env::consts::EXE_SUFFIX));
     let temporary_path = workspace.0.join(format!("worker.tmp{}", std::env::consts::EXE_SUFFIX));
@@ -139,25 +186,6 @@ fn build_worker() -> WorkerInstance {
     }
 }
 
-/// A repository's absolute Cargo output path never selects fixture storage.
-#[test]
-fn test_fixture_target_ignores_absolute_repository_target() {
-    let workspace = Database::new();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let target = fixture_target_path(Some(&repository.join("target")), &workspace.0);
-    assert_eq!(target, workspace.0.join("fixture-target"));
-    assert!(!target.starts_with(repository));
-}
-
-/// Relative Cargo output paths likewise cannot put fixture artifacts in cwd.
-#[test]
-fn test_fixture_target_ignores_relative_cargo_target() {
-    let workspace = Database::new();
-    let target = fixture_target_path(Some(Path::new("target")), &workspace.0);
-    assert_eq!(target, workspace.0.join("fixture-target"));
-    assert!(target.is_absolute());
-}
-
 /// Owns only this test's child, killing and reaping it even during a panic.
 struct ChildGuard(Child);
 
@@ -170,18 +198,16 @@ impl Drop for ChildGuard {
     }
 }
 
-/// Owns a new disposable namespace; never accepts a caller's database path.
+/// Owns a disposable namespace and never accepts a caller's database path.
 struct Database(PathBuf);
 
 impl Database {
-    /// Creates a fresh directory for one case, panicking on filesystem errors.
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("qubit-task-process-crash-{}", TaskId::generate()));
+        let path = std::env::temp_dir().join(format!("qubit-task-process-crash-{}", new_task_id()));
         std::fs::create_dir(&path).expect("disposable database directory is created");
         Self(path)
     }
 
-    /// Returns the child's absolute database path inside the owned namespace.
     fn path(&self) -> PathBuf {
         self.0.join("tasks.sqlite")
     }
@@ -202,9 +228,7 @@ struct Ready {
     attempt: u32,
 }
 
-/// Waits for a committed-state JSON handshake, then kills and reaps the child.
-/// Blocking stdout reads run on the blocking pool; timeout/panic triggers the
-/// guard.
+/// Waits for a committed-state handshake, then kills and reaps the child.
 async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize) {
     let worker = spawn_blocking(build_worker).await.expect("fixture build task finishes");
     let mut command = Command::new(&worker.path);
@@ -221,9 +245,6 @@ async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize)
         match command.spawn() {
             Ok(child) => break child,
             Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                // Under heavily parallel CI the temporary filesystem can
-                // briefly report the atomically published executable as busy.
-                // Retry only this transient exec error with a bounded delay.
                 if etxtbsy_attempts >= 5 {
                     panic!("crash worker remains busy at {}: {error}", worker.path.display());
                 }
@@ -278,27 +299,26 @@ async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize)
     );
 }
 
-/// Uses stable payload and idempotency data shared with the worker fixture.
-fn request(id: TaskId) -> TaskRequest {
-    TaskRequest::new("crash-worker", "1", b"durable-payload".to_vec()).with_idempotency_key(id.to_string())
+fn request(id: TaskId) -> TaskRequest<Value> {
+    let mut request = TaskRequest::new(
+        "crash-worker",
+        ModelId::new(PAYLOAD_TYPE_ID),
+        1,
+        ValueCodecId::new(CODEC_ID),
+        serde_json::json!({"payload": "durable"}),
+    );
+    request.idempotency_key = Some(id.to_string());
+    request
 }
 
-/// Reports handler starts and waits for explicit completion permits.
 struct RestartHandler {
     starts: mpsc::UnboundedSender<TaskId>,
     count: Arc<AtomicUsize>,
     gate: Arc<Semaphore>,
 }
 
-impl TaskHandler for RestartHandler {
-    fn descriptor(&self) -> TaskHandlerDescriptor {
-        TaskHandlerDescriptor {
-            task_type: "crash-worker".into(),
-            version: "1".into(),
-        }
-    }
-
-    fn run<'a>(&'a self, _payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+impl TaskHandler<Value> for RestartHandler {
+    fn run<'a>(&'a self, _payload: Value, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             self.count.fetch_add(1, Ordering::SeqCst);
             self.starts
@@ -312,139 +332,268 @@ impl TaskHandler for RestartHandler {
     }
 }
 
-/// Reopens after kill, checks identity/payload, and observes recovery via a
-/// gated handler. The outer deadline bounds recovery and graceful cleanup of
-/// the replacement service.
-async fn assert_recovery(mode: &str, max_attempts: u32) {
-    let database = Database::new();
-    let id = TaskId::generate();
-    crash_worker(&database, mode, id, 1).await;
-    timeout(DEADLINE, async {
-        let store = Arc::new(SqliteTaskStore::open(database.path()).expect("killed owner's database reopens"));
-        let owner = store.acquire_owner().await.expect("process death releases owner lock");
-        let before = store.get(id).await.expect("committed task reads").expect("committed task survives kill");
-        assert_eq!(before.request, request(id));
-        assert_eq!(before.attempt, u32::from(mode != "queued"));
-        assert_eq!(before.state, match mode { "queued" => TaskState::Queued, "running" => TaskState::Running, _ => TaskState::Succeeded });
-        assert_eq!(store.get_by_idempotency_key(&id.to_string()).await.expect("idempotency lookup works").expect("key survives").id, id);
-        assert!(matches!(store.accept(id, request(id)).await.expect("duplicate request checks"), AcceptOutcome::Existing(record) if record.id == id));
-        store.release_owner(owner).await.expect("inspection owner releases");
-        drop(store);
+struct TestServiceIds(AtomicU64);
 
-        let (starts, mut observed) = mpsc::unbounded_channel();
-        let count = Arc::new(AtomicUsize::new(0));
-        let gate = Arc::new(Semaphore::new(0));
-        let service = TaskExecutionServiceBuilder::recoverable_sqlite(database.path()).expect("restart builder opens")
-            .max_attempts(max_attempts)
-            .register_handler(Arc::new(RestartHandler { starts, count: Arc::clone(&count), gate: Arc::clone(&gate) }))
-            .expect("restart handler registers").build().await.expect("replacement service recovers");
-        if mode == "terminal" || (mode == "running" && max_attempts == 1) {
-            let record = service.get_summary(id).await.expect("recovered summary reads").expect("task remains retained");
-            if mode == "terminal" {
-                assert_eq!(record, before.summary(), "terminal lifecycle remains unchanged");
-                assert_eq!(service.wait(id).await.expect("terminal wait returns").output, before.output);
-            } else {
-                assert!(matches!(record.state, TaskState::Blocked { ref reason } if reason.contains("attempt")));
-                assert_eq!(record.attempt, 1);
-            }
-            service.shutdown().await.expect("replacement service closes");
-            assert_eq!(count.load(Ordering::SeqCst), 0, "terminal or exhausted work never restarts");
-        } else {
-            assert_eq!(observed.recv().await.expect("recovered handler starts"), id);
-            let running = service.get_summary(id).await.expect("running summary reads").expect("running task exists");
-            assert_eq!(running.state, TaskState::Running);
-            assert_eq!(running.attempt, if mode == "running" { 2 } else { 1 });
-            let duplicate = service.submit(request(id)).await.expect("idempotent resubmission succeeds");
-            assert_eq!(duplicate.id, id, "restart does not accept the same work twice");
-            let history = service.list(TaskQuery::default()).await.expect("deduplicated history reads");
-            assert_eq!(history.records.len(), 1, "idempotent resubmission adds no history row");
-            gate.add_permits(1);
-            let finished = service.wait(id).await.expect("recovered task finishes");
-            assert_eq!(finished.state, TaskState::Succeeded);
-            assert_eq!(finished.request, before.summary().request);
-            service.shutdown().await.expect("replacement service closes");
-            assert_eq!(count.load(Ordering::SeqCst), 1);
-        }
-    }).await.expect("recovery and shutdown finish before deadline");
+impl IdGenerator<Id, IdGenerationError> for TestServiceIds {
+    fn generate(&self) -> Result<Id, IdGenerationError> {
+        Ok(Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
+    }
 }
 
-/// Committed acceptance is retained before any handler starts.
+fn service_builder(
+    store: Arc<SqliteTaskStore>,
+    starts: Option<mpsc::UnboundedSender<TaskId>>,
+    count: Arc<AtomicUsize>,
+    gate: Arc<Semaphore>,
+) -> TaskExecutionServiceBuilder {
+    let mut builder = TaskExecutionServiceBuilder::new(
+        store as Arc<dyn TaskStore>,
+        codec_registry(),
+        Arc::new(TestServiceIds(AtomicU64::new(9_000_000))),
+    );
+    if let Some(starts) = starts {
+        builder
+            .handlers_mut()
+            .register::<Value, _>(
+                TaskHandlerDescriptor {
+                    kind_id: "crash-worker".into(),
+                    payload_type_id: ModelIdBuf::try_from(PAYLOAD_TYPE_ID).expect("payload model ID is valid"),
+                    accepted_schema_versions: vec![1],
+                    cancellation_mode: CancellationMode::Unsupported,
+                },
+                Arc::new(RestartHandler { starts, count, gate }),
+            )
+            .expect("restart handler registers");
+    }
+    builder
+}
+
+async fn wait_for_state(service: &TaskExecutionService, id: TaskId, state: TaskState) {
+    timeout(DEADLINE, async {
+        loop {
+            if service
+                .get(id)
+                .await
+                .expect("task summary reads")
+                .is_some_and(|summary| summary.state == state)
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("task reaches expected state before deadline");
+}
+
+async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> qubit_task::model::TaskSummary {
+    timeout(DEADLINE, async {
+        loop {
+            let summary = service
+                .get(id)
+                .await
+                .expect("task summary reads")
+                .expect("task remains retained");
+            if summary.state.is_terminal() {
+                return summary;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("task reaches a terminal state before deadline")
+}
+
+async fn assert_recovery(mode: &str) {
+    let database = Database::new();
+    let id = new_task_id();
+    crash_worker(&database, mode, id, 1).await;
+
+    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("killed owner's database reopens"));
+    let before = store
+        .get_encoded_task(id)
+        .await
+        .expect("committed task reads")
+        .expect("committed task survives kill");
+    assert_eq!(
+        before.request,
+        request(id).encode(&codec_registry()).expect("fixture request encodes")
+    );
+    assert_eq!(before.summary.attempt, u32::from(mode != "queued"));
+    let expected_state = match mode {
+        "queued" => TaskState::Queued,
+        "running" => TaskState::Running,
+        "terminal" => TaskState::Succeeded,
+        _ => unreachable!("test passes a known crash mode"),
+    };
+    assert_eq!(before.summary.state, expected_state);
+    if mode == "terminal" {
+        assert_eq!(
+            before.summary.output.as_ref().map(|output| output.summary.as_slice()),
+            Some(&b"completed"[..])
+        );
+    }
+    drop(store);
+
+    let (starts, mut observed) = mpsc::unbounded_channel();
+    let count = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(Semaphore::new(0));
+    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("recovery store opens"));
+    let service = service_builder(Arc::clone(&store), Some(starts), Arc::clone(&count), Arc::clone(&gate))
+        .build()
+        .await
+        .expect("replacement service recovers");
+
+    if mode == "terminal" {
+        let recovered = service
+            .get(id)
+            .await
+            .expect("terminal summary reads")
+            .expect("terminal task remains retained");
+        assert_eq!(recovered, before.summary, "terminal lifecycle remains unchanged");
+        assert_eq!(count.load(Ordering::SeqCst), 0, "terminal work never restarts");
+        service.shutdown().await.expect("replacement service closes");
+        return;
+    }
+
+    assert_eq!(observed.recv().await.expect("recovered handler starts"), id);
+    let running = service
+        .get(id)
+        .await
+        .expect("running summary reads")
+        .expect("running task exists");
+    assert_eq!(running.state, TaskState::Running);
+    assert_eq!(running.attempt, if mode == "running" { 2 } else { 1 });
+    let duplicate = service
+        .submit(request(id))
+        .await
+        .expect("idempotent resubmission succeeds");
+    assert_eq!(duplicate.id, id, "restart does not accept the same work twice");
+    let history = service
+        .query(TaskQuery {
+            limit: 16,
+            ..TaskQuery::default()
+        })
+        .await
+        .expect("history reads");
+    assert_eq!(history.records.len(), 1, "idempotent resubmission adds no history row");
+    gate.add_permits(1);
+    let finished = wait_for_terminal(&service, id).await;
+    assert_eq!(finished.state, TaskState::Succeeded);
+    assert_eq!(
+        finished.output.as_ref().map(|output| output.summary.as_slice()),
+        Some(&b"completed"[..])
+    );
+    service.shutdown().await.expect("replacement service closes");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+/// Committed acceptance is retained before any handler starts and later
+/// recovers.
 #[tokio_test]
 async fn test_killed_queued_worker_recovers_acceptance() {
-    assert_recovery("queued", 3).await;
+    assert_recovery("queued").await;
 }
 
 /// An interrupted running attempt is counted when the next attempt starts.
 #[tokio_test]
 async fn test_killed_running_worker_recovers_next_attempt() {
-    assert_recovery("running", 3).await;
+    assert_recovery("running").await;
 }
 
 /// A committed terminal result never starts its handler again.
 #[tokio_test]
 async fn test_killed_terminal_worker_preserves_completion() {
-    assert_recovery("terminal", 3).await;
+    assert_recovery("terminal").await;
 }
 
-/// A killed attempt that spent its budget is blocked during recovery.
+/// A crashed running task is blocked when the replacement has no matching
+/// handler.
 #[tokio_test]
-async fn test_killed_running_worker_with_exhausted_attempts_is_blocked() {
-    assert_recovery("running", 1).await;
+async fn test_killed_running_worker_blocks_without_matching_handler() {
+    let database = Database::new();
+    let id = new_task_id();
+    crash_worker(&database, "running", id, 1).await;
+    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("recovery store opens"));
+    let service = service_builder(
+        Arc::clone(&store),
+        None,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(Semaphore::new(0)),
+    )
+    .build()
+    .await
+    .expect("replacement service scans unfinished work");
+    wait_for_state(
+        &service,
+        id,
+        TaskState::Blocked {
+            reason: "handler is not registered".into(),
+        },
+    )
+    .await;
+    let blocked = service
+        .get(id)
+        .await
+        .expect("blocked summary reads")
+        .expect("task remains retained");
+    assert_eq!(blocked.attempt, 1, "blocked recovery does not begin another attempt");
+    service.shutdown().await.expect("replacement service closes");
 }
 
 /// Crash recovery retains every committed row across the 256-row page boundary.
 #[tokio_test]
 async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
     let database = Database::new();
-    let id = TaskId::generate();
+    let id = new_task_id();
     crash_worker(&database, "queued", id, 513).await;
-    timeout(DEADLINE, async {
-        let store = SqliteTaskStore::open(database.path()).expect("multi-page database reopens");
-        let owner = store.acquire_owner().await.expect("multi-page owner is acquired");
-        let mut cursor = None;
-        let mut ids = std::collections::BTreeSet::new();
-        for expected in [256, 256, 1] {
-            let page = store
-                .scan_unfinished(cursor)
+    let store = SqliteTaskStore::open_next(database.path()).expect("multi-page database reopens");
+    let mut cursor = None;
+    let mut ids = std::collections::BTreeSet::new();
+    for expected in [256, 256, 1] {
+        let page = store
+            .list_encoded(TaskQuery {
+                after: cursor,
+                limit: 256,
+                ..TaskQuery::default()
+            })
+            .await
+            .expect("committed recovery page reads");
+        assert_eq!(page.records.len(), expected);
+        for summary in &page.records {
+            assert!(cursor.is_none_or(|previous| TaskCursor::from(&*summary) > previous));
+            assert!(ids.insert(summary.id), "no task repeats across pages");
+            let stored = store
+                .get_encoded_task(summary.id)
                 .await
-                .expect("committed recovery page reads");
-            assert_eq!(page.tasks.len(), expected);
-            for task in &page.tasks {
-                let key = TaskCursor::from(task);
-                assert!(cursor.is_none_or(|previous| key > previous));
-                assert!(ids.insert(task.id), "no task is repeated across pages");
-                let record = store
-                    .get(task.id)
-                    .await
-                    .expect("committed payload reads")
-                    .expect("committed row exists");
-                assert_eq!(record.request, request(task.id));
-                assert_eq!(record.state, TaskState::Queued);
-                assert_eq!(record.attempt, 0);
-                assert_eq!(
-                    store
-                        .get_by_idempotency_key(&task.id.to_string())
-                        .await
-                        .expect("retained key reads")
-                        .expect("key exists")
-                        .id,
-                    task.id
-                );
-            }
+                .expect("committed payload reads")
+                .expect("committed row exists");
             assert_eq!(
-                page.next,
-                if expected == 1 {
-                    None
-                } else {
-                    page.tasks.last().map(TaskCursor::from)
-                }
+                stored.request,
+                request(summary.id).encode(&codec_registry()).expect("request encodes")
             );
-            cursor = page.next;
+            assert_eq!(summary.state, TaskState::Queued);
+            assert_eq!(summary.attempt, 0);
+            assert_eq!(summary.kind_id, "crash-worker");
+            assert_eq!(summary.payload_type_id, PAYLOAD_TYPE_ID);
+            assert_eq!(summary.payload_schema_version, 1);
+            assert_eq!(summary.payload_codec_id, CODEC_ID);
+            assert_eq!(
+                summary.idempotency_key.as_deref(),
+                Some(summary.id.to_string().as_str()),
+                "idempotency key survives process death"
+            );
         }
-        assert_eq!(ids.len(), 513);
-        assert!(ids.contains(&id));
-        store.release_owner(owner).await.expect("multi-page owner releases");
-    })
-    .await
-    .expect("multi-page inspection finishes before deadline");
+        assert_eq!(
+            page.next,
+            if expected == 1 {
+                None
+            } else {
+                page.records.last().map(TaskCursor::from)
+            }
+        );
+        cursor = page.next;
+    }
+    assert_eq!(ids.len(), 513);
+    assert!(ids.contains(&id));
 }

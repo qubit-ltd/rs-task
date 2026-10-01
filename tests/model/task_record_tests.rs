@@ -5,12 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use qubit_task::model::MAX_TASK_QUERY_LIMIT;
-use qubit_task::model::TaskId;
-use qubit_task::model::TaskOutput;
-use qubit_task::model::TaskRecord;
-use qubit_task::model::TaskRequest;
-use qubit_task::model::TaskState;
+use crate::model::MAX_TASK_QUERY_LIMIT;
+use crate::model::TaskId;
+use crate::model::TaskOutput;
+use crate::model::TaskRecord;
+use crate::model::TaskRequest;
+use crate::model::TaskState;
 
 /// Exposes the common public history query ceiling.
 #[test]

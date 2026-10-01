@@ -13,3 +13,4 @@ conformance = ["qubit-task/conformance"]
 
 [dependencies]
 qubit-task = { path = "../../..", default-features = false }
+qubit-id = { path = "../../../../rs-id", version = "0.6" }

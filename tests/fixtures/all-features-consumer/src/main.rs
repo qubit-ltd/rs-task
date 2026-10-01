@@ -4,8 +4,11 @@
 // =============================================================================
 //! Verifies that an external crate can enable every published feature.
 
-use qubit_task::TaskId;
+use qubit_id::Id;
+use qubit_task::model::TaskId;
 
 fn main() {
-    println!("all-feature consumer task id: {}", TaskId::generate());
+    let id = TaskId::from_id(Id::new(42));
+    assert_eq!(id.to_padded_decimal(), "00000000000000000042");
+    println!("all-feature consumer task id: {id}");
 }

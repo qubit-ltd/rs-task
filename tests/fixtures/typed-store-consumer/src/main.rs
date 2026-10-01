@@ -2,7 +2,7 @@
 //    Copyright (c) 2025 - 2026 Haixing Hu.
 //    SPDX-License-Identifier: Apache-2.0
 // =============================================================================
-//! Exercises the public typed `TaskStore` contract from an independent crate.
+//! Exercises the public typed-store API from a separately compiled crate.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -11,23 +11,23 @@ use std::time::UNIX_EPOCH;
 use qubit_id::Id;
 use qubit_metadata::Metadata;
 use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_task::model::{TaskId, TaskState};
+use qubit_task::model::TaskStateKind;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::StartCommand;
 use qubit_task::model::StoredPayload;
 use qubit_task::model::StoredTaskRequest;
-use qubit_task::model::TaskId;
 use qubit_task::model::TaskQuery;
-use qubit_task::model::TaskState;
-use qubit_task::model::TaskStateKind;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::TaskStore;
 
 #[cfg(feature = "sqlite")]
-use qubit_task::store::SqliteTaskStore;
-#[cfg(feature = "sqlite")]
 use std::path::PathBuf;
+#[cfg(feature = "sqlite")]
+use qubit_task::store::SqliteTaskStore;
 
+/// Owns one temporary database namespace and removes it when the fixture exits.
 #[cfg(feature = "sqlite")]
 struct SqliteFixture {
     directory: PathBuf,
@@ -38,24 +38,20 @@ struct SqliteFixture {
 impl SqliteFixture {
     fn new() -> std::io::Result<Self> {
         let directory = std::env::temp_dir().join(format!(
-            "rs-task-conformance-consumer-{}-{}",
+            "rs-task-typed-store-consumer-{}-{}",
             std::process::id(),
             now_ms()
         ));
         std::fs::create_dir(&directory)?;
         let database = directory.join("tasks.sqlite");
-        Ok(Self {
-            directory,
-            database,
-        })
+        Ok(Self { directory, database })
     }
 }
 
 #[cfg(feature = "sqlite")]
 impl Drop for SqliteFixture {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.directory)
-            .expect("remove this fixture's disposable database directory");
+        std::fs::remove_dir_all(&self.directory).expect("remove this fixture's disposable database directory");
     }
 }
 
@@ -74,23 +70,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn exercise_store(
-    store: Arc<dyn TaskStore>,
-    id: TaskId,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn exercise_store(store: Arc<dyn TaskStore>, id: TaskId) -> Result<(), Box<dyn std::error::Error>> {
     let owner = store.acquire_owner().await?;
     let request = stored_request();
     let accepted = store.accept_encoded(id, request.clone()).await?;
     assert!(accepted.created, "the first acceptance creates a record");
     assert_eq!(accepted.summary.state, TaskState::Queued);
 
-    let replay = store
-        .accept_encoded(task_id(id.into_id().value() + 1), request)
-        .await?;
-    assert!(
-        !replay.created,
-        "an identical idempotency key reuses its record"
-    );
+    let replay = store.accept_encoded(task_id(id.into_id().value() + 1), request).await?;
+    assert!(!replay.created, "an identical idempotency key reuses its record");
     assert_eq!(replay.summary.id, id);
 
     let stored = store
@@ -118,7 +106,6 @@ async fn exercise_store(
             state: TaskState::Succeeded,
             cancel_requested: false,
             cancel_error: None,
-            output: None,
             finished_at_ms: Some(now_ms()),
         })
         .await?;

@@ -11,14 +11,13 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use qubit_task::model::OwnerEpoch;
-use qubit_task::model::TaskId;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 
 /// Creates a unique database path for an owner identity test.
 fn test_database_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("qubit-task-owner-{}.sqlite", TaskId::generate()))
+    std::env::temp_dir().join(format!("qubit-task-owner-{}.sqlite", uuid::Uuid::new_v4()))
 }
 
 /// Appends the owner-lock suffix without replacing the database extension.
@@ -47,11 +46,11 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
     use std::os::unix::fs::symlink;
 
     let path = test_database_path();
-    let alias = path.with_file_name(format!("{}-alias.sqlite", TaskId::generate()));
-    let store = SqliteTaskStore::open(&path).expect("canonical database opens");
+    let alias = path.with_file_name(format!("{}-alias.sqlite", uuid::Uuid::new_v4()));
+    let store = SqliteTaskStore::open_next(&path).expect("canonical database opens");
     symlink(&path, &alias).expect("database alias is created");
 
-    let alias_result = SqliteTaskStore::open(&alias);
+    let alias_result = SqliteTaskStore::open_next(&alias);
     assert!(
         matches!(alias_result, Err(StoreError::OwnerConflict)),
         "the canonical owner lock rejects a second open"
@@ -65,11 +64,11 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
 /// Keeps distinct database files independent even when their stems match.
 #[tokio::test]
 async fn test_different_extensions_use_distinct_owner_locks() {
-    let stem = std::env::temp_dir().join(format!("qubit-task-owner-{}", TaskId::generate()));
+    let stem = std::env::temp_dir().join(format!("qubit-task-owner-{}", uuid::Uuid::new_v4()));
     let sqlite_path = stem.with_extension("sqlite");
     let db_path = stem.with_extension("db");
-    let sqlite_store = SqliteTaskStore::open(&sqlite_path).expect("sqlite file opens");
-    let db_store = SqliteTaskStore::open(&db_path).expect("different database file opens");
+    let sqlite_store = SqliteTaskStore::open_next(&sqlite_path).expect("sqlite file opens");
+    let db_store = SqliteTaskStore::open_next(&db_path).expect("different database file opens");
 
     drop(sqlite_store);
     drop(db_store);
@@ -81,12 +80,12 @@ async fn test_different_extensions_use_distinct_owner_locks() {
 #[tokio::test]
 async fn test_hard_linked_database_is_rejected() {
     let path = test_database_path();
-    let alias = path.with_file_name(format!("{}-hardlink.sqlite", TaskId::generate()));
-    drop(SqliteTaskStore::open(&path).expect("database is initialized"));
+    let alias = path.with_file_name(format!("{}-hardlink.sqlite", uuid::Uuid::new_v4()));
+    drop(SqliteTaskStore::open_next(&path).expect("database is initialized"));
     std::fs::hard_link(&path, &alias).expect("database hard link is created");
 
     assert!(matches!(
-        SqliteTaskStore::open(&path),
+        SqliteTaskStore::open_next(&path),
         Err(StoreError::UnsupportedDatabaseIdentity)
     ));
 
@@ -101,12 +100,12 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
     use std::os::windows::fs::symlink_file;
 
     let path = test_database_path();
-    let alias = path.with_file_name(format!("{}-alias.sqlite", TaskId::generate()));
-    let store = SqliteTaskStore::open(&path).expect("canonical database opens");
+    let alias = path.with_file_name(format!("{}-alias.sqlite", uuid::Uuid::new_v4()));
+    let store = SqliteTaskStore::open_next(&path).expect("canonical database opens");
     symlink_file(&path, &alias).expect("database alias is created");
 
     assert!(
-        matches!(SqliteTaskStore::open(&alias), Err(StoreError::OwnerConflict)),
+        matches!(SqliteTaskStore::open_next(&alias), Err(StoreError::OwnerConflict)),
         "an alias cannot acquire a second lock"
     );
 
@@ -119,7 +118,7 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
 #[tokio::test]
 async fn test_repeated_owner_acquisition_is_rejected() {
     let path = test_database_path();
-    let store = SqliteTaskStore::open(&path).expect("database opens");
+    let store = SqliteTaskStore::open_next(&path).expect("database opens");
     let epoch = store.acquire_owner().await.expect("owner is acquired");
 
     assert!(matches!(store.acquire_owner().await, Err(StoreError::OwnerConflict)));
@@ -133,7 +132,7 @@ async fn test_repeated_owner_acquisition_is_rejected() {
 #[tokio::test]
 async fn test_stale_owner_release_keeps_the_database_locked() {
     let path = test_database_path();
-    let store = SqliteTaskStore::open(&path).expect("database opens");
+    let store = SqliteTaskStore::open_next(&path).expect("database opens");
     let epoch = store.acquire_owner().await.expect("owner is acquired");
 
     assert!(matches!(
@@ -141,7 +140,7 @@ async fn test_stale_owner_release_keeps_the_database_locked() {
         Err(StoreError::OwnerConflict)
     ));
     assert!(
-        matches!(SqliteTaskStore::open(&path), Err(StoreError::OwnerConflict)),
+        matches!(SqliteTaskStore::open_next(&path), Err(StoreError::OwnerConflict)),
         "stale release keeps the lock held"
     );
 
