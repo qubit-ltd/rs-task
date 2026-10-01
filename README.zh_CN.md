@@ -39,6 +39,10 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 - [迁移指南](doc/migration-0.8.zh_CN.md)
 - [API 文档](https://docs.rs/qubit-task)
 
+## 任务通知投递
+
+任务通知采用尽力而为语义。publisher 的 `close` 成功表示本地队列 worker 已排空并停止；应检查通知统计以确认 provider 发布结果。不要把 close 成功视为目标接纳或 handler 完成。
+
 ## 检查
 
 ```bash
