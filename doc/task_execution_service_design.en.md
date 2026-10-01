@@ -22,6 +22,8 @@ A handler registered for a `kind_id` accepts one payload `type_id` and declares 
 
 Memory and SQLite stores implement the same typed store contract. SQLite uses its typed numeric-ID schema; an incompatible legacy UUID schema is rejected with a diagnostic rather than silently reinterpreted. Store ownership fences concurrent service instances, and recovery resumes retained queued work after acquiring ownership.
 
+One scheduler scans queued summaries in bounded pages and starts handlers only while a running slot is available. `max_running_tasks` defaults to available parallelism; `scan_page_size` defaults to 128 and is capped at 256. Retry deadlines are persisted in SQLite schema version 5 and observed across restarts. Only explicitly retryable handler failures are retried, up to the configured attempt limit. Blocked tasks can be resumed with their observed state version after operators repair configuration.
+
 ## Execution and resource admission
 
 The local engine reserves requested CPU slots, GPU devices/labels, memory bytes, disk bytes, and custom integer units before starting a handler. Reservations account for concurrent tasks and are released when execution ends. They do not pin CPU cores, discover or isolate GPUs at the operating-system level, or enforce process memory/disk usage. Requests that exceed configured capacity cannot run; requests that fit wait until enough capacity is free.
@@ -37,5 +39,7 @@ History pages sort ascending by `(accepted_at_ms, numeric task id)`. The exclusi
 ## Reliability boundaries
 
 SQLite persistence supports process restart recovery with at-least-once execution. A crash after an external side effect but before its result is stored can cause the handler to run again, so applications must make effects idempotent or protect them with their own transaction strategy. Scheduling is process-local; the crate does not provide distributed scheduling, forced interruption of arbitrary code, or exactly-once business effects.
+
+Store failures in background scheduling and finalization are latched. New writes stop, and `shutdown()` drains active work before returning the stored failure and releasing ownership. Diagnostic reads continue to use the store.
 
 The optional Event Bus integration exposes `TaskEvent` transport types and codecs, but lifecycle publication is not currently connected to the typed execution service. Task queries remain the authoritative source of state. See the [typed API guide](typed-task-api.md) for the end-to-end example and concrete API contracts.

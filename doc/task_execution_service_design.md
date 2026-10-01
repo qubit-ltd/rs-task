@@ -22,6 +22,8 @@
 
 内存与 SQLite store 实现相同的 typed store 契约。SQLite 使用 typed numeric-ID schema；遇到不兼容的旧 UUID schema 时会返回诊断错误，不会静默重新解释数据。Store ownership 用于隔离并发服务实例；恢复会在取得 ownership 后继续处理保留的 queued 任务。
 
+单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 5 中，重启后仍会遵守；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可携带观察到的 state version 恢复 Blocked 任务。
+
 ## 执行与资源准入
 
 本地执行引擎在启动处理器前预留请求的 CPU 槽位、GPU 设备或标签、内存字节、磁盘字节和自定义整数单位。预留用于核算并发任务，在执行结束后释放。它们不会固定 CPU 核心、在操作系统层面发现或隔离 GPU，也不会强制限制进程实际的内存或磁盘用量。超过配置容量的请求无法运行；容量足够的请求会等待资源空闲。
@@ -37,5 +39,7 @@
 ## 可靠性边界
 
 SQLite 持久化支持进程重启恢复，执行语义为至少一次。若任务在外部副作用完成后、结果保存前崩溃，恢复后 handler 可能再次执行，因此应用必须让副作用幂等，或用自己的事务策略保护它们。调度只在进程内进行；本 crate 不提供分布式调度、强制中断任意代码或业务副作用恰好一次保证。
+
+后台调度或结果写入遇到存储故障时会锁存故障并停止新写入。`shutdown()` 等待活跃工作结束后返回该故障，再释放 owner；诊断读取仍会访问 store。
 
 可选 Event Bus 集成提供 `TaskEvent` 传输类型和 codec，但生命周期发布目前尚未接入 typed execution service。任务查询仍是权威状态来源。完整示例和具体 API 契约见[typed API 指南](typed-task-api.zh_CN.md)。
