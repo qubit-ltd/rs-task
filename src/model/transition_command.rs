@@ -34,6 +34,7 @@ use super::TaskState;
 /// assert!(!command.cancel_requested);
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(test, allow(dead_code))]
 pub struct TransitionCommand {
     /// Target task identity.
     pub id: TaskId,

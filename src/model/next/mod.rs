@@ -43,8 +43,6 @@ pub use task_progress_snapshot::MAX_TASK_PROGRESS_METRICS;
 #[cfg(not(test))]
 pub use task_progress_snapshot::MAX_TASK_PROGRESS_SNAPSHOT_BYTES;
 pub use task_progress_snapshot::TaskProgressSnapshot;
-#[cfg(test)]
-pub(crate) use task_query::MAX_TASK_QUERY_LIMIT;
 pub use task_query::TaskQuery;
 pub use task_request::MAX_TASK_METADATA_BYTES;
 pub use task_request::MAX_TASK_METADATA_ENTRIES;

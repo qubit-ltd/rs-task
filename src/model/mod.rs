@@ -42,8 +42,6 @@ mod task_request;
 mod task_request_info;
 mod task_run_error;
 mod task_state;
-#[cfg(test)]
-mod task_state_counts;
 mod task_state_kind;
 #[cfg(test)]
 mod task_stats;
@@ -52,7 +50,7 @@ mod task_summary;
 #[cfg(test)]
 mod transition_command;
 #[path = "next/mod.rs"]
-pub(crate) mod typed;
+pub mod typed;
 #[cfg(test)]
 pub(crate) use accept_outcome::AcceptOutcome;
 pub use owner_epoch::OwnerEpoch;
@@ -94,8 +92,6 @@ pub(crate) use task_record::TaskRecord;
 #[cfg(test)]
 pub use task_request::MAX_CORRELATION_KEY_BYTES;
 #[cfg(test)]
-pub(crate) use task_request::MAX_IDEMPOTENCY_KEY_BYTES;
-#[cfg(test)]
 pub(crate) use task_request::TaskRequest;
 #[cfg(test)]
 pub(crate) use task_request_info::TaskRequestInfo;
@@ -103,8 +99,6 @@ pub use task_run_error::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES;
 pub use task_run_error::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES;
 pub use task_run_error::TaskRunError;
 pub use task_state::TaskState;
-#[cfg(test)]
-pub use task_state_counts::TaskStateCounts;
 pub use task_state_kind::TaskStateKind;
 #[cfg(test)]
 pub use task_stats::TaskStats;
@@ -125,8 +119,6 @@ pub use typed::MAX_TASK_METADATA_ENTRIES;
 pub use typed::MAX_TASK_PROGRESS_METRICS;
 #[cfg(not(test))]
 pub use typed::MAX_TASK_PROGRESS_SNAPSHOT_BYTES;
-#[cfg(test)]
-pub(crate) use typed::MAX_TASK_QUERY_LIMIT;
 #[cfg(not(test))]
 pub use typed::Payload;
 #[cfg(not(test))]
