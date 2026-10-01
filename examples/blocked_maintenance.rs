@@ -5,69 +5,50 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Reviews old blocked tasks and explicitly abandons only unchanged revisions.
+//! Queries task summaries by category with the typed cursor contract.
 
-use std::num::NonZeroUsize;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
-use qubit_task::TaskExecutionService;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::TaskQuery;
-use qubit_task::model::TaskStateKind;
-use qubit_task::service::TaskServiceError;
-use qubit_task::store::StoreError;
+use qubit_task::store::MemoryTaskStore;
 
-/// Creates the runtime used by the asynchronous maintenance example.
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(run())
-}
+struct SequentialIds(AtomicU64);
 
-/// Reviews aged blocked tasks, abandons unchanged tasks, then prunes history.
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let service = TaskExecutionService::in_memory().await?;
-    let cutoff_ms = now_ms().saturating_sub(Duration::from_secs(24 * 60 * 60).as_millis() as u64);
-    let mut cursor = None;
-    let mut abandoned = 0_usize;
-    let mut conflicts = 0_usize;
-
-    loop {
-        let page = service
-            .list(TaskQuery {
-                states: vec![TaskStateKind::Blocked],
-                limit: 100,
-                after: cursor,
-                ..TaskQuery::default()
-            })
-            .await?;
-        cursor = page.next;
-        for task in page.records {
-            if task.accepted_at_ms > cutoff_ms {
-                continue;
-            }
-            match service.abandon_blocked(task.id, task.state_version).await {
-                Ok(_) => abandoned += 1,
-                Err(TaskServiceError::Store(StoreError::Conflict)) => conflicts += 1,
-                Err(TaskServiceError::NotBlocked { .. }) => conflicts += 1,
-                Err(error) => return Err(error.into()),
-            }
-        }
-        if cursor.is_none() {
-            break;
-        }
+impl qubit_id::IdGenerator for SequentialIds {
+    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
+        Ok(qubit_id::Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
     }
-
-    let pruned = service
-        .prune_terminal_before(cutoff_ms, NonZeroUsize::new(100).expect("100 is nonzero"))
-        .await?;
-    eprintln!("abandoned={abandoned}, changed_during_review={conflicts}, pruned_terminal={pruned}");
-    service.shutdown().await?;
-    Ok(())
 }
 
-/// Returns current Unix epoch milliseconds, defaulting if the clock is earlier.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let service = TaskExecutionServiceBuilder::new(
+            Arc::new(MemoryTaskStore::new(256)),
+            Arc::new(ValueBytesCodecRegistry::empty()),
+            Arc::new(SequentialIds(AtomicU64::new(1))),
+        )
+        .build()
+        .await?;
+
+        let mut query = TaskQuery {
+            category: Some("image-processing".into()),
+            limit: 50,
+            ..TaskQuery::default()
+        };
+        loop {
+            let page = service.query(query.clone()).await?;
+            for task in page.records {
+                println!("{} {:?}", task.id.to_padded_decimal(), task.state);
+            }
+            let Some(next) = page.next else { break };
+            query.after = Some(next);
+        }
+        service.shutdown().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
 }

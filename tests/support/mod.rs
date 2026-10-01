@@ -9,7 +9,3 @@
 // subset.
 #[allow(dead_code)]
 pub mod store_contract;
-
-#[cfg(feature = "sqlite")]
-#[allow(dead_code)] // Shared SQLite test fixture is used by selected integration-test crates.
-pub mod delayed_write_store;

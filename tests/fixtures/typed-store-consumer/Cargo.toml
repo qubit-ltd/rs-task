@@ -1,5 +1,5 @@
 [package]
-name = "qubit-task-conformance-consumer"
+name = "qubit-task-typed-store-consumer"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -7,7 +7,7 @@ publish = false
 [features]
 default = []
 sqlite = ["qubit-task/sqlite"]
-conformance = ["qubit-task/conformance"]
+typed-contract = []
 
 [dependencies]
 qubit-task = { path = "../../..", default-features = false }

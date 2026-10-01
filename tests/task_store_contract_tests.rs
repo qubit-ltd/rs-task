@@ -14,9 +14,21 @@ use common::sqlite_paths;
 use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
+use qubit_task::store::TaskStore;
 use tokio::test as tokio_test;
 #[cfg(feature = "sqlite")]
 use uuid::Uuid;
+
+fn assert_task_store_is_object_safe(_: &dyn TaskStore) {}
+
+#[test]
+fn test_typed_task_store_is_object_safe_and_reports_capabilities() {
+    let store = MemoryTaskStore::new(8);
+    assert_task_store_is_object_safe(&store);
+
+    let store: &dyn TaskStore = &store;
+    assert!(!store.capabilities().restart_recovery);
+}
 
 #[tokio_test]
 async fn test_memory_store_obeys_core_contract() {
@@ -28,7 +40,7 @@ async fn test_memory_store_obeys_core_contract() {
 #[tokio_test]
 async fn test_sqlite_store_obeys_core_contract() {
     let path = std::env::temp_dir().join(format!("rs-task-contract-{}.sqlite", Uuid::new_v4()));
-    let store = SqliteTaskStore::open(&path).expect("sqlite store opens");
+    let store = SqliteTaskStore::open_next(&path).expect("typed sqlite store opens");
     support::store_contract::check_core_contract(&store).await;
     drop(store);
     for file in [

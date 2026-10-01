@@ -8,14 +8,14 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::model::MAX_IDEMPOTENCY_KEY_BYTES;
-use qubit_task::model::MAX_TASK_QUERY_LIMIT;
-use qubit_task::model::TaskQuery;
-use qubit_task::model::TaskRequest;
-use qubit_task::service::TaskServiceError;
-use qubit_task::store::MemoryTaskStore;
-use qubit_task::store::StoreError;
+use crate::model::MAX_IDEMPOTENCY_KEY_BYTES;
+use crate::model::MAX_TASK_QUERY_LIMIT;
+use crate::model::TaskQuery;
+use crate::model::TaskRequest;
+use crate::service::TaskServiceError;
+use crate::service::task_execution_service_builder::TaskExecutionServiceBuilder;
+use crate::store::MemoryTaskStore;
+use crate::store::StoreError;
 
 /// Applies the history page limit at the service boundary.
 #[tokio::test]

@@ -6,4 +6,5 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 mod resource_request_tests;
+mod task_api_model_tests;
 mod task_record_tests;

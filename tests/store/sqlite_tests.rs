@@ -5,25 +5,36 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use qubit_task::TaskId;
-use qubit_task::model::AcceptOutcome;
-use qubit_task::model::MAX_TASK_QUERY_LIMIT;
-use qubit_task::model::TaskCursor;
-use qubit_task::model::TaskQuery;
-use qubit_task::model::TaskRecord;
-use qubit_task::model::TaskRequest;
-use qubit_task::model::TaskRequestInfo;
-use qubit_task::model::TaskState;
-use qubit_task::model::TaskStateKind;
-use qubit_task::model::TransitionCommand;
-use qubit_task::store::MemoryTaskStore;
-use qubit_task::store::SqliteTaskStore;
-use qubit_task::store::StoreError;
-use qubit_task::store::TaskStore;
+use qubit_id::Id;
 use rusqlite::Connection;
 use rusqlite::params;
 use serde_json as json;
 use tokio::test as tokio_test;
+
+use crate::model::AcceptOutcome;
+use crate::model::MAX_TASK_QUERY_LIMIT;
+use crate::model::TaskCursor;
+use crate::model::TaskId;
+use crate::model::TaskQuery;
+use crate::model::TaskRecord;
+use crate::model::TaskRequest;
+use crate::model::TaskRequestInfo;
+use crate::model::TaskState;
+use crate::model::TaskState as LegacyTaskState;
+use crate::model::TaskStateKind;
+use crate::model::TransitionCommand;
+use crate::model::next::ProgressCommand;
+use crate::model::next::ResourceRequest;
+use crate::model::next::StartCommand;
+use crate::model::next::StoredPayload;
+use crate::model::next::StoredTaskRequest;
+use crate::model::next::TaskId as NumericTaskId;
+use crate::model::next::TransitionCommand as EncodedTransitionCommand;
+use crate::store::LegacyTaskStore as TaskStore;
+use crate::store::MemoryTaskStore;
+use crate::store::SqliteTaskStore;
+use crate::store::StoreError;
+use crate::store::TaskStore as TypedTaskStore;
 
 fn database_path(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("qubit-task-{label}-{}.sqlite", TaskId::generate()))
@@ -96,6 +107,303 @@ async fn test_sqlite_open_creates_version_three_schema() {
     assert!(columns.iter().any(|name| name == "request_info_json"));
     assert!(columns.iter().any(|name| name == "payload"));
     assert!(!columns.iter().any(|name| name == "record_json"));
+    drop(connection);
+    remove_database(&path);
+}
+
+fn typed_task_id(value: u64) -> NumericTaskId {
+    NumericTaskId::from_id(Id::new(value))
+}
+
+fn typed_request(key: Option<&str>) -> StoredTaskRequest {
+    StoredTaskRequest {
+        kind_id: "example.worker".into(),
+        category: Some("reports".into()),
+        payload: StoredPayload {
+            type_id: "example.ReportRequest".try_into().expect("valid payload model ID"),
+            schema_version: 3,
+            codec_id: "json-v1".into(),
+            bytes: b"{\"report\":1}".to_vec(),
+        },
+        metadata: qubit_metadata::Metadata::new(),
+        resource_limit: ResourceRequest::default(),
+        correlation_key: Some("corr-typed".into()),
+        idempotency_key: key.map(str::to_owned),
+    }
+}
+
+#[tokio_test]
+async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progress() {
+    let path = database_path("typed-schema");
+    let id = typed_task_id(u64::MAX);
+    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    assert!(matches!(
+        store
+            .accept(TaskId::generate(), TaskRequest::new("legacy", "1", Vec::new()))
+            .await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        store.get(TaskId::generate()).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        store.list(TaskQuery::default()).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        store.scan_unfinished(None).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    let low_id = typed_task_id(1);
+    TypedTaskStore::accept_encoded(&store, low_id, typed_request(None))
+        .await
+        .expect("low typed task is accepted");
+    let accepted = TypedTaskStore::accept_encoded(&store, id, typed_request(Some("typed-idempotency")))
+        .await
+        .expect("typed request is accepted");
+    assert!(accepted.created);
+    assert_eq!(accepted.summary.id, id);
+    assert_eq!(accepted.summary.category.as_deref(), Some("reports"));
+    let existing = TypedTaskStore::accept_encoded(&store, id, typed_request(Some("typed-idempotency")))
+        .await
+        .expect("identical idempotent request is reused");
+    assert!(!existing.created);
+    assert_eq!(existing.summary.id, id);
+    let mut conflicting_request = typed_request(Some("typed-idempotency"));
+    conflicting_request.payload.bytes = b"{\"report\":2}".to_vec();
+    assert!(matches!(
+        TypedTaskStore::accept_encoded(&store, typed_task_id(u64::MAX - 1), conflicting_request).await,
+        Err(StoreError::IdempotencyConflict)
+    ));
+    let loaded = TypedTaskStore::get_encoded_task(&store, id)
+        .await
+        .expect("typed task lookup succeeds")
+        .expect("typed task exists");
+    assert_eq!(loaded.request.payload.bytes, b"{\"report\":1}");
+    assert_eq!(loaded.request.payload.schema_version, 3);
+    let started = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id,
+            expected_state_version: 0,
+            started_at_ms: 10,
+        },
+    )
+    .await
+    .expect("queued typed task starts");
+    assert_eq!(started.state, LegacyTaskState::Running);
+    assert_eq!(started.attempt, 1);
+    assert_eq!(started.state_version, 1);
+    assert!(matches!(
+        TypedTaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id,
+                expected_state_version: 0,
+                started_at_ms: 12,
+            }
+        )
+        .await,
+        Err(StoreError::Conflict)
+    ));
+    let connection = Connection::open(&path).expect("database opens for key inspection");
+    let stored_id: String = connection
+        .query_row("SELECT id FROM tasks ORDER BY id LIMIT 1", [], |row| row.get(0))
+        .expect("fixed width ID reads");
+    assert_eq!(stored_id, "00000000000000000001");
+    drop(connection);
+    drop(store);
+
+    let store = SqliteTaskStore::open_next(&path).expect("typed database reopens");
+    let progress = TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 1, 1, None, Vec::new(), 11))
+        .await
+        .expect("current attempt progress commits");
+    assert_eq!(progress.progress.as_ref().unwrap().progress_version, 1);
+    assert!(matches!(
+        TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 0, 2, None, Vec::new(), 12)).await,
+        Err(StoreError::Conflict)
+    ));
+    assert!(matches!(
+        TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 1, 1, None, Vec::new(), 13)).await,
+        Err(StoreError::Conflict)
+    ));
+    let connection = Connection::open(&path).expect("database opens for terminal setup");
+    let lifecycle_json: String = connection
+        .query_row(
+            "SELECT lifecycle_json FROM tasks WHERE id=?1",
+            [id.to_padded_decimal()],
+            |row| row.get(0),
+        )
+        .expect("lifecycle is stored");
+    let mut lifecycle: serde_json::Value = serde_json::from_str(&lifecycle_json).expect("lifecycle JSON decodes");
+    lifecycle["state"] = serde_json::to_value(LegacyTaskState::Succeeded).expect("success state serializes");
+    connection
+        .execute(
+            "UPDATE tasks SET state_kind='Succeeded',lifecycle_json=?2 WHERE id=?1",
+            params![
+                id.to_padded_decimal(),
+                serde_json::to_string(&lifecycle).expect("lifecycle serializes")
+            ],
+        )
+        .expect("task is marked terminal");
+    drop(connection);
+    assert!(matches!(
+        TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 1, 2, None, Vec::new(), 14)).await,
+        Err(StoreError::Conflict)
+    ));
+    drop(store);
+
+    let reopened = SqliteTaskStore::open_next(&path).expect("typed database remains readable");
+    let recovered = TypedTaskStore::get_encoded_task(&reopened, id)
+        .await
+        .expect("typed task reopens")
+        .expect("typed row remains present");
+    assert_eq!(recovered.summary.progress.unwrap().progress_version, 1);
+    drop(reopened);
+    let connection = Connection::open(&path).expect("database opens for schema inspection");
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("schema version reads");
+    assert_eq!(schema_version, 4);
+    let category_index: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='tasks_category_accepted_id')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("category index lookup succeeds");
+    assert!(category_index);
+    let query_plan: String = connection
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT id FROM tasks WHERE category='reports' ORDER BY accepted_at,id LIMIT 10",
+            [],
+            |row| row.get(3),
+        )
+        .expect("category query plan is available");
+    assert!(query_plan.contains("tasks_category_accepted_id"), "{query_plan}");
+    drop(connection);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_new_attempt_clears_progress_and_restarts_progress_version() {
+    let path = database_path("typed-progress-retry");
+    let id = typed_task_id(120);
+    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let accepted = TypedTaskStore::accept_encoded(&store, id, typed_request(None))
+        .await
+        .expect("typed task is accepted");
+    let first_attempt = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: 1,
+        },
+    )
+    .await
+    .expect("first attempt starts");
+    TypedTaskStore::update_progress(
+        &store,
+        ProgressCommand::new(id, first_attempt.attempt, 1, None, Vec::new(), 2),
+    )
+    .await
+    .expect("first attempt progress persists");
+    let queued = TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id,
+            expected_state_version: first_attempt.state_version,
+            expected_attempt: first_attempt.attempt,
+            state: LegacyTaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: None,
+            output: None,
+        },
+    )
+    .await
+    .expect("retryable task returns to queue");
+    assert!(
+        queued.progress.is_some(),
+        "previous attempt remains visible until restart"
+    );
+
+    let second_attempt = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id,
+            expected_state_version: queued.state_version,
+            started_at_ms: 3,
+        },
+    )
+    .await
+    .expect("second attempt starts");
+    assert_eq!(second_attempt.attempt, 2);
+    assert_eq!(second_attempt.progress, None);
+    let next_progress = TypedTaskStore::update_progress(
+        &store,
+        ProgressCommand::new(id, second_attempt.attempt, 1, None, Vec::new(), 4),
+    )
+    .await
+    .expect("progress version restarts for the new attempt");
+    assert_eq!(
+        next_progress
+            .progress
+            .as_ref()
+            .map(|progress| progress.progress_version),
+        Some(1)
+    );
+    let terminal = TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id,
+            expected_state_version: second_attempt.state_version,
+            expected_attempt: second_attempt.attempt,
+            state: LegacyTaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: Some(5),
+            output: None,
+        },
+    )
+    .await
+    .expect("terminal state persists in lifecycle JSON");
+    assert_eq!(terminal.state, LegacyTaskState::Succeeded);
+    assert_eq!(terminal.finished_at_ms, Some(5));
+    assert_eq!(terminal.progress.as_ref().map(|progress| progress.attempt), Some(2));
+
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_open_next_rejects_legacy_schema_without_rewriting_it() {
+    let path = database_path("typed-legacy-reject");
+    let (id, _) = seed_legacy_database(&path).await;
+    let before = Connection::open(&path)
+        .expect("legacy database opens")
+        .query_row("SELECT record_json FROM tasks WHERE id=?1", [id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })
+        .expect("legacy record is readable before open");
+    let error = match SqliteTaskStore::open_next(&path) {
+        Ok(_) => panic!("typed API must reject a legacy UUID database"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("explicit task ID mapping"));
+    let connection = Connection::open(&path).expect("legacy database remains readable");
+    let after: String = connection
+        .query_row("SELECT record_json FROM tasks WHERE id=?1", [id.to_string()], |row| {
+            row.get(0)
+        })
+        .expect("legacy record remains present");
+    assert_eq!(after, before);
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("legacy schema version remains readable");
+    assert_eq!(version, 0);
     drop(connection);
     remove_database(&path);
 }

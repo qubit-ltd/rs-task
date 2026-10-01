@@ -8,3 +8,6 @@
 mod fixture_handler;
 
 pub use fixture_handler::FixtureHandler;
+pub use fixture_handler::codec_registry;
+pub use fixture_handler::descriptor;
+pub use fixture_handler::request;

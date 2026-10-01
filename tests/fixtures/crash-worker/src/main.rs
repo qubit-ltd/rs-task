@@ -11,21 +11,31 @@ use std::io;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistration;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistration;
+use qubit_codec::ValueCodecRegistrationSource;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use qubit_model_metadata::metadata::ModelId;
+use qubit_model_metadata::metadata::ModelIdBuf;
 use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::handler::TaskContext;
-use qubit_task::handler::TaskHandler;
-use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
-use qubit_task::model::AcceptOutcome;
-use qubit_task::model::TaskId;
-use qubit_task::model::TaskOutput;
-use qubit_task::model::TaskRequest;
-use qubit_task::model::TaskState;
+use qubit_task::model::{TaskId, TaskOutput, TaskRequest, TaskState};
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use qubit_task::TaskHandler;
+use qubit_task::TaskContext;
+use qubit_task::TaskHandlerDescriptor;
+use qubit_task::CancellationMode;
 use serde_json::Value;
 use serde_json::from_value;
 use serde_json::json;
@@ -39,15 +49,8 @@ struct WorkerHandler {
     started: mpsc::UnboundedSender<TaskId>,
 }
 
-impl TaskHandler for WorkerHandler {
-    fn descriptor(&self) -> TaskHandlerDescriptor {
-        TaskHandlerDescriptor {
-            task_type: "crash-worker".into(),
-            version: "1".into(),
-        }
-    }
-
-    fn run<'a>(&'a self, _payload: &'a [u8], context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+impl TaskHandler<serde_json::Value> for WorkerHandler {
+    fn run<'a>(&'a self, _payload: serde_json::Value, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             self.started
                 .send(context.task_id())
@@ -58,6 +61,54 @@ impl TaskHandler for WorkerHandler {
             }))
         })
     }
+}
+
+#[derive(Default)]
+struct JsonValueCodec;
+
+impl qubit_codec::ValueEncoder<serde_json::Value> for JsonValueCodec {
+    type Output = Vec<u8>;
+    type Error = serde_json::Error;
+
+    fn encode(&mut self, value: &serde_json::Value) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(value)
+    }
+}
+
+impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
+    type Output = serde_json::Value;
+    type Error = serde_json::Error;
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, serde_json::Value>();
+static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
+    ValueCodecId::new("fixture.crash_worker.json"),
+    &JSON_DESCRIPTOR,
+    ValueCodecRegistrationSource::new("qubit-task", "crash-worker", "fixture", 1),
+);
+
+struct WorkerIds(AtomicU64);
+
+impl IdGenerator<Id, IdGenerationError> for WorkerIds {
+    fn generate(&self) -> Result<Id, IdGenerationError> {
+        Ok(Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
+    }
+}
+
+fn request(idempotency_key: String) -> TaskRequest<serde_json::Value> {
+    let mut request = TaskRequest::new(
+        "crash-worker",
+        ModelId::new("fixture.CrashWorkerPayload"),
+        1,
+        ValueCodecId::new("fixture.crash_worker.json"),
+        serde_json::json!({"payload": "durable"}),
+    );
+    request.idempotency_key = Some(idempotency_key);
+    request
 }
 
 /// Writes and flushes one machine-readable state acknowledgement.
@@ -99,18 +150,26 @@ fn arguments() -> Result<(PathBuf, String, TaskId, usize), Box<dyn std::error::E
 #[tokio_main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (path, mode, id, count) = arguments()?;
-    let store = Arc::new(SqliteTaskStore::open(&path)?);
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?);
+    let store = Arc::new(SqliteTaskStore::open_next(&path)?);
     let owner = store.acquire_owner().await?;
     for index in 0..count {
-        let task_id = if index == 0 { id } else { TaskId::generate() };
-        let request = TaskRequest::new("crash-worker", "1", b"durable-payload".to_vec())
-            .with_idempotency_key(task_id.to_string());
-        if !matches!(store.accept(task_id, request).await?, AcceptOutcome::Accepted(_)) {
+        let task_id = if index == 0 {
+            id
+        } else {
+            TaskId::from_id(Id::new(1_000_000 + u64::try_from(index)?))
+        };
+        let encoded = request(task_id.to_string()).encode(&codecs)?;
+        if !store.accept_encoded(task_id, encoded).await?.created {
             return Err("fixture task unexpectedly already existed".into());
         }
     }
     if mode == "queued" {
-        let record = store.get_summary(id).await?.ok_or("committed acceptance disappeared")?;
+        let record = store
+            .get_encoded_task(id)
+            .await?
+            .ok_or("committed acceptance disappeared")?
+            .summary;
         if record.state != TaskState::Queued || record.attempt != 0 {
             return Err("queued READY does not match persisted state".into());
         }
@@ -123,22 +182,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // us.
     store.release_owner(owner).await?;
     drop(store);
-    let store = Arc::new(SqliteTaskStore::open(&path)?);
+    let store = Arc::new(SqliteTaskStore::open_next(&path)?);
     let gate = Arc::new(Semaphore::new(usize::from(mode == "terminal")));
     let (started, mut starts) = mpsc::unbounded_channel();
-    let service = TaskExecutionServiceBuilder::in_memory()
-        .store(Arc::clone(&store) as Arc<dyn TaskStore>)
-        .require_recovery(true)
-        .register_handler(Arc::new(WorkerHandler { gate, started }))?
-        .build()
-        .await?;
+    let mut builder = TaskExecutionServiceBuilder::new(
+        Arc::clone(&store) as Arc<dyn TaskStore>,
+        codecs,
+        Arc::new(WorkerIds(AtomicU64::new(1_000_000))),
+    );
+    builder.handlers_mut().register::<serde_json::Value, _>(
+        TaskHandlerDescriptor {
+            kind_id: "crash-worker".into(),
+            payload_type_id: ModelIdBuf::try_from("fixture.CrashWorkerPayload")?,
+            accepted_schema_versions: vec![1],
+            cancellation_mode: CancellationMode::Unsupported,
+        },
+        Arc::new(WorkerHandler { gate, started }),
+    )?;
+    let service = builder.build().await?;
     if starts.recv().await != Some(id) {
         return Err("worker handler did not start the accepted task".into());
     }
     if mode == "terminal" {
-        service.wait(id).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if service.get(id).await?.is_some_and(|summary| summary.state.is_terminal()) {
+                    return Ok::<(), qubit_task::service::TaskServiceError>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await??;
     }
-    let record = store.get_summary(id).await?.ok_or("committed execution disappeared")?;
+    let record = store
+        .get_encoded_task(id)
+        .await?
+        .ok_or("committed execution disappeared")?
+        .summary;
     let expected = if mode == "running" {
         TaskState::Running
     } else {
