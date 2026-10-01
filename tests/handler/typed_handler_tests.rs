@@ -133,6 +133,63 @@ fn descriptor_requires_one_payload_type_and_unique_explicit_versions() {
 }
 
 #[test]
+fn registry_rejects_empty_kind_ids_and_unexpected_external_hooks() {
+    let mut registry = TaskHandlerRegistry::new();
+    let mut empty_kind = descriptor(vec![1]);
+    empty_kind.kind_id = " \t".into();
+    assert!(matches!(
+        registry.register(empty_kind, Arc::new(Handler)),
+        Err(HandlerRegistrationError::EmptyKindId)
+    ));
+
+    let error = registry
+        .register_with_cancellation_hook(
+            descriptor(vec![1]),
+            Arc::new(Handler),
+            "unexpected hook source",
+            Arc::new(|_, _| Box::pin(async { Ok(()) })),
+        )
+        .unwrap_err();
+    assert!(matches!(error, HandlerRegistrationError::UnexpectedExternalHook(_)));
+}
+
+#[test]
+fn registry_reports_missing_handler_and_preserves_registration_source() {
+    let registry = TaskHandlerRegistry::new();
+    assert!(matches!(
+        registry.prepare("example.unknown", payload("example.ResizeRequest", 1, "example.u32"), &ValueBytesCodecRegistry::empty()),
+        Err(HandlerDispatchError::MissingHandler(kind_id)) if kind_id == "example.unknown"
+    ));
+    assert_eq!(registry.descriptor("example.unknown"), None);
+    assert!(!registry.has_external_cancellation_hook("example.unknown"));
+    assert!(
+        registry
+            .cancel_externally(
+                "example.unknown",
+                qubit_task::model::TaskId::from_id(qubit_id::Id::new(42)),
+                1,
+            )
+            .is_none()
+    );
+
+    let mut registry = TaskHandlerRegistry::new();
+    registry
+        .register_with_source(descriptor(vec![1]), Arc::new(Handler), "first provider")
+        .unwrap();
+    let error = registry
+        .register_with_source(descriptor(vec![2]), Arc::new(Handler), "second provider")
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        HandlerRegistrationError::DuplicateKindId {
+            first_source,
+            second_source,
+            ..
+        } if first_source == "first provider" && second_source == "second provider"
+    ));
+}
+
+#[test]
 fn handler_accepts_only_its_declared_payload_model() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(descriptor(vec![1, 2]), Arc::new(Handler)).unwrap();
