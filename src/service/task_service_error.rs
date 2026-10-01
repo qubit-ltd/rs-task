@@ -21,6 +21,12 @@ use crate::store::StoreError;
 #[derive(Debug, thiserror::Error)]
 #[must_use]
 pub enum TaskServiceError {
+    /// ID generation failed before task acceptance.
+    #[error("task ID generation failed: {0}")]
+    IdGeneration(#[from] qubit_id::IdGenerationError),
+    /// Encoding or validating a typed task request failed.
+    #[error("typed task request failed: {0}")]
+    TypedRequest(String),
     /// The selected store failed an operation.
     #[error(transparent)]
     Store(
@@ -109,4 +115,7 @@ pub enum TaskServiceError {
     /// Reconstructable storage cannot accept a local closure.
     #[error("local closure submission is unavailable with a restart-recoverable store")]
     UnsupportedCapability,
+    /// The running typed handler does not support cancellation.
+    #[error("the running task handler does not support cancellation")]
+    CancellationUnsupported,
 }

@@ -27,10 +27,10 @@ use crate::model::TaskStateCounts;
 use crate::model::TaskStateKind;
 use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
+use crate::store::LegacyTaskStore as TaskStore;
 use crate::store::MemoryTaskStore;
 use crate::store::StoreError;
 use crate::store::TaskFuture;
-use crate::store::TaskStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {

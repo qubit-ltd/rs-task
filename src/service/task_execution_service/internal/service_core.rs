@@ -32,12 +32,12 @@ use crate::service::scheduler_queue::SchedulerQueue;
 #[cfg(feature = "event-bus")]
 use crate::service::task_event_publisher::TaskEventPublisher;
 use crate::service::task_wait_registry::TaskWaitRegistry;
-use crate::store::TaskStore;
+use crate::store::LegacyTaskStore;
 
 /// Components and synchronization state shared by service handle clones.
 pub(crate) struct ServiceCore {
     /// Authoritative lifecycle and request store.
-    pub(crate) store: Arc<dyn TaskStore>,
+    pub(crate) store: Arc<dyn LegacyTaskStore>,
     /// Backend that atomically reserves resources and starts handlers.
     pub(crate) engine: Arc<dyn TaskExecutionEngine>,
     /// Strategy used to order scheduler candidates.

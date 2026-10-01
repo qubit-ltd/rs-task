@@ -8,14 +8,14 @@
 use std::sync::Arc;
 
 use crate::model::OwnerEpoch;
+use crate::store::LegacyTaskStore;
 use crate::store::StoreError;
-use crate::store::TaskStore;
 
 /// Owns a recovery lease until it is released or transferred to the service.
 #[must_use = "dropping the guard releases an untransferred ownership lease"]
 pub(in crate::service::task_execution_service_builder) struct OwnerGuard {
     /// Store whose ownership lease is managed by this guard.
-    store: Arc<dyn TaskStore>,
+    store: Arc<dyn LegacyTaskStore>,
     /// Lease not yet released or transferred to the running service.
     epoch: Option<OwnerEpoch>,
 }
@@ -33,7 +33,7 @@ impl OwnerGuard {
     /// A guard that releases an untransferred lease.
     #[inline]
     pub(in crate::service::task_execution_service_builder) fn new(
-        store: Arc<dyn TaskStore>,
+        store: Arc<dyn LegacyTaskStore>,
         epoch: Option<OwnerEpoch>,
     ) -> Self {
         Self { store, epoch }

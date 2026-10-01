@@ -15,27 +15,51 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 
 use internal::MemoryState;
+#[cfg(test)]
+use internal::TerminalTaskId;
 use parking_lot::Mutex;
 
+use super::LegacyTaskStore;
 use super::StoreError;
 use super::TaskFuture;
-use super::TaskStore;
+#[cfg(test)]
 use crate::model::AcceptOutcome;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
+#[cfg(test)]
 use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
+#[cfg(test)]
 use crate::model::TaskCursor;
+#[cfg(test)]
 use crate::model::TaskId;
+#[cfg(test)]
 use crate::model::TaskPage;
+#[cfg(test)]
 use crate::model::TaskQuery;
+#[cfg(test)]
 use crate::model::TaskRecord;
+#[cfg(test)]
 use crate::model::TaskRequest;
 use crate::model::TaskState;
+#[cfg(test)]
 use crate::model::TaskStateCounts;
+#[cfg(test)]
 use crate::model::TaskSummary;
+#[cfg(test)]
 use crate::model::TransitionCommand;
+#[cfg(test)]
 use crate::model::checked_page_size;
+use crate::model::next::AcceptOutcome as EncodedAcceptOutcome;
+use crate::model::next::ProgressCommand;
+use crate::model::next::StartCommand;
+use crate::model::next::StoredTask;
+use crate::model::next::StoredTaskRequest;
+use crate::model::next::TaskCursor as EncodedTaskCursor;
+use crate::model::next::TaskId as EncodedTaskId;
+use crate::model::next::TaskPage as EncodedTaskPage;
+use crate::model::next::TaskProgressSnapshot;
+use crate::model::next::TaskQuery as EncodedTaskQuery;
 
 /// Default number of nonterminal records retained by a memory store.
 pub const DEFAULT_MAX_UNFINISHED_RECORDS: usize = 2_048;
@@ -130,9 +154,19 @@ impl MemoryTaskStore {
             max_payload_bytes: max_payload_bytes.get(),
             max_unfinished_records: max_unfinished_records.get(),
             state: Mutex::new(MemoryState {
+                owner_epoch: None,
+                last_owner_epoch: 0,
+                #[cfg(test)]
                 records: BTreeMap::new(),
+                encoded_tasks: BTreeMap::new(),
+                #[cfg(test)]
                 idempotency: HashMap::new(),
+                encoded_idempotency: HashMap::new(),
+                #[cfg(test)]
                 terminal_order: VecDeque::new(),
+                encoded_terminal_order: VecDeque::new(),
+                #[cfg(test)]
+                terminal_order_all: VecDeque::new(),
                 retained_payload_bytes: 0,
                 unfinished_records: 0,
             }),
@@ -140,7 +174,7 @@ impl MemoryTaskStore {
     }
 }
 
-impl TaskStore for MemoryTaskStore {
+impl LegacyTaskStore for MemoryTaskStore {
     /// Reports that this store does not persist records across process
     /// restarts.
     ///
@@ -169,6 +203,7 @@ impl TaskStore for MemoryTaskStore {
     ///
     /// Resolves to validation, duplicate, idempotency, capacity, or retention
     /// limit errors.
+    #[cfg(test)]
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         Box::pin(async move {
             request
@@ -183,6 +218,13 @@ impl TaskStore for MemoryTaskStore {
                     return Err(StoreError::IdempotencyConflict);
                 }
                 return Ok(AcceptOutcome::Existing(existing.clone()));
+            }
+            if request
+                .idempotency_key
+                .as_ref()
+                .is_some_and(|key| state.encoded_idempotency.contains_key(key))
+            {
+                return Err(StoreError::IdempotencyConflict);
             }
             if state.records.contains_key(&id) {
                 return Err(StoreError::DuplicateTask);
@@ -202,7 +244,13 @@ impl TaskStore for MemoryTaskStore {
                         .get(terminal_id)
                         .map(|record| record.request.payload.len())
                 })
-                .sum::<usize>();
+                .sum::<usize>()
+                + state
+                    .encoded_terminal_order
+                    .iter()
+                    .filter_map(|terminal_id| state.encoded_tasks.get(terminal_id))
+                    .map(|task| task.request.payload.bytes.len())
+                    .sum::<usize>();
             let minimum_retained = state.retained_payload_bytes.saturating_sub(reclaimable_bytes);
             if minimum_retained
                 .checked_add(requested_bytes)
@@ -215,15 +263,12 @@ impl TaskStore for MemoryTaskStore {
                 });
             }
             while state.retained_payload_bytes > self.max_payload_bytes - requested_bytes {
-                let oldest = state
-                    .terminal_order
-                    .front()
-                    .copied()
-                    .ok_or(StoreError::CapacityExceeded {
+                if !state.evict_oldest_terminal() {
+                    return Err(StoreError::CapacityExceeded {
                         requested_bytes,
                         available_bytes: self.max_payload_bytes.saturating_sub(state.retained_payload_bytes),
-                    })?;
-                state.remove_record(oldest);
+                    });
+                }
             }
             let now = now_ms();
             let record = TaskRecord {
@@ -250,6 +295,226 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Atomically retains a typed request after its payload has been encoded.
+    fn accept_encoded<'a>(
+        &'a self,
+        id: EncodedTaskId,
+        request: StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<EncodedAcceptOutcome, StoreError>> {
+        Box::pin(async move {
+            if request.kind_id.is_empty() || request.payload.codec_id.is_empty() {
+                return Err(StoreError::InvalidRequest(
+                    "task kind and payload codec must not be empty",
+                ));
+            }
+            let mut state = self.state.lock();
+            if let Some(key) = &request.idempotency_key
+                && let Some(existing_id) = state.encoded_idempotency.get(key)
+            {
+                let existing = state.encoded_tasks.get(existing_id).ok_or(StoreError::NotFound)?;
+                if existing.request != request {
+                    return Err(StoreError::IdempotencyConflict);
+                }
+                return Ok(EncodedAcceptOutcome {
+                    summary: existing.summary.clone(),
+                    created: false,
+                });
+            }
+            if state.encoded_tasks.contains_key(&id) {
+                return Err(StoreError::DuplicateTask);
+            }
+            if state.unfinished_records >= self.max_unfinished_records {
+                return Err(StoreError::UnfinishedRecordLimitExceeded {
+                    limit: self.max_unfinished_records,
+                });
+            }
+            let requested_bytes = request.payload.bytes.len();
+            let reclaimable_bytes = state
+                .encoded_terminal_order
+                .iter()
+                .filter_map(|terminal_id| state.encoded_tasks.get(terminal_id))
+                .map(|task| task.request.payload.bytes.len())
+                .sum::<usize>();
+            let minimum_retained = state.retained_payload_bytes.saturating_sub(reclaimable_bytes);
+            if minimum_retained
+                .checked_add(requested_bytes)
+                .is_none_or(|total| total > self.max_payload_bytes)
+            {
+                return Err(StoreError::CapacityExceeded {
+                    requested_bytes,
+                    available_bytes: self.max_payload_bytes.saturating_sub(minimum_retained),
+                });
+            }
+            while state.retained_payload_bytes > self.max_payload_bytes - requested_bytes {
+                if !state.evict_oldest_encoded_terminal() {
+                    return Err(StoreError::CapacityExceeded {
+                        requested_bytes,
+                        available_bytes: self.max_payload_bytes.saturating_sub(state.retained_payload_bytes),
+                    });
+                }
+            }
+            let now = now_ms();
+            let summary = crate::model::next::TaskSummary {
+                id,
+                kind_id: request.kind_id.clone(),
+                category: request.category.clone(),
+                payload_type_id: request.payload.type_id.to_string(),
+                payload_schema_version: request.payload.schema_version,
+                payload_codec_id: request.payload.codec_id.clone(),
+                metadata: request.metadata.clone(),
+                resource_limit: request.resource_limit.clone(),
+                correlation_key: request.correlation_key.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                state: TaskState::Queued,
+                cancel_requested: false,
+                cancel_error: None,
+                state_version: 0,
+                attempt: 0,
+                accepted_at_ms: now,
+                started_at_ms: None,
+                finished_at_ms: None,
+                progress: None,
+                output: None,
+            };
+            if let Some(key) = &request.idempotency_key {
+                state.encoded_idempotency.insert(key.clone(), id);
+            }
+            state.retained_payload_bytes += requested_bytes;
+            state.encoded_tasks.insert(
+                id,
+                StoredTask {
+                    request,
+                    summary: summary.clone(),
+                },
+            );
+            state.unfinished_records += 1;
+            Ok(EncodedAcceptOutcome { summary, created: true })
+        })
+    }
+
+    /// Loads one encoded request together with its current summary.
+    fn get_encoded_task<'a>(&'a self, id: EncodedTaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+        Box::pin(async move { Ok(self.state.lock().encoded_tasks.get(&id).cloned()) })
+    }
+
+    /// Starts a queued encoded task attempt using a lifecycle revision CAS.
+    fn start_encoded<'a>(
+        &'a self,
+        command: StartCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock();
+            let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
+            if task.summary.state_version != command.expected_state_version
+                || !matches!(task.summary.state, TaskState::Queued)
+            {
+                return Err(StoreError::Conflict);
+            }
+            task.summary.state_version = task
+                .summary
+                .state_version
+                .checked_add(1)
+                .ok_or(StoreError::Failure("task state version overflow".to_owned()))?;
+            task.summary.attempt = task
+                .summary
+                .attempt
+                .checked_add(1)
+                .ok_or(StoreError::Failure("task attempt counter overflow".to_owned()))?;
+            task.summary.state = TaskState::Running;
+            task.summary.started_at_ms = Some(command.started_at_ms);
+            task.summary.finished_at_ms = None;
+            task.summary.progress = None;
+            Ok(task.summary.clone())
+        })
+    }
+
+    /// Applies a typed lifecycle transition with revision and attempt checks.
+    fn transition_encoded<'a>(
+        &'a self,
+        command: crate::model::next::TransitionCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        Box::pin(async move {
+            command
+                .state
+                .validate_diagnostics()
+                .map_err(StoreError::InvalidRequest)?;
+            validate_encoded_output(&command.state, command.output.as_ref())?;
+            let mut state = self.state.lock();
+            let (was_terminal, is_terminal, summary) = {
+                let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
+                let terminal_cancel_annotation = task.summary.state.is_terminal()
+                    && task.summary.state == command.state
+                    && command.cancel_requested
+                    && command.cancel_error.is_some();
+                if task.summary.state_version != command.expected_state_version
+                    || task.summary.attempt != command.expected_attempt
+                    || (!task.summary.state.allows_transition_to(&command.state) && !terminal_cancel_annotation)
+                {
+                    return Err(StoreError::Conflict);
+                }
+                if command.output.is_some() && task.summary.state.is_terminal() {
+                    return Err(StoreError::InvalidRequest(
+                        "task output can only be written before the task becomes terminal",
+                    ));
+                }
+                let was_terminal = task.summary.state.is_terminal();
+                let is_terminal = command.state.is_terminal();
+                task.summary.state = command.state;
+                task.summary.state_version = task
+                    .summary
+                    .state_version
+                    .checked_add(1)
+                    .ok_or(StoreError::Failure("task state version overflow".to_owned()))?;
+                task.summary.cancel_requested = command.cancel_requested;
+                task.summary.cancel_error = command.cancel_error;
+                if let Some(output) = command.output {
+                    task.summary.output = Some(output);
+                }
+                if is_terminal && command.finished_at_ms.is_some() {
+                    task.summary.finished_at_ms = command.finished_at_ms;
+                }
+                (was_terminal, is_terminal, task.summary.clone())
+            };
+            if !was_terminal && is_terminal {
+                state.unfinished_records = state.unfinished_records.saturating_sub(1);
+                state.encoded_terminal_order.push_back(command.id);
+                #[cfg(test)]
+                state.terminal_order_all.push_back(TerminalTaskId::Encoded(command.id));
+                while state.encoded_terminal_order.len() > self.history_capacity {
+                    if !state.evict_oldest_encoded_terminal() {
+                        break;
+                    }
+                }
+            }
+            Ok(summary)
+        })
+    }
+
+    /// Persists a bounded progress snapshot using an attempt/version CAS.
+    fn update_progress<'a>(
+        &'a self,
+        command: ProgressCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        Box::pin(async move {
+            let snapshot = TaskProgressSnapshot::from_command(command.clone())
+                .map_err(|_| StoreError::InvalidRequest("task progress snapshot exceeds its limits"))?;
+            let mut state = self.state.lock();
+            let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
+            if !matches!(task.summary.state, TaskState::Running)
+                || task.summary.attempt != command.expected_attempt
+                || task
+                    .summary
+                    .progress
+                    .as_ref()
+                    .is_some_and(|current| current.progress_version >= command.progress_version)
+            {
+                return Err(StoreError::Conflict);
+            }
+            task.summary.progress = Some(snapshot);
+            Ok(task.summary.clone())
+        })
+    }
+
     /// Applies a version-checked lifecycle transition and evicts old terminal
     /// records when required by retention limits.
     ///
@@ -265,6 +530,7 @@ impl TaskStore for MemoryTaskStore {
     ///
     /// Resolves to an error when the record is missing, the revision conflicts,
     /// the transition is invalid, or diagnostics are invalid.
+    #[cfg(test)]
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             command
@@ -314,9 +580,10 @@ impl TaskStore for MemoryTaskStore {
                     state.unfinished_records -= 1;
                 }
                 state.terminal_order.push_back(command.id);
-                while state.terminal_order.len() > self.history_capacity {
-                    if let Some(oldest) = state.terminal_order.front().copied() {
-                        state.remove_record(oldest);
+                state.terminal_order_all.push_back(TerminalTaskId::Legacy(command.id));
+                while state.terminal_order_all.len() > self.history_capacity {
+                    if !state.evict_oldest_terminal() {
+                        break;
                     }
                 }
                 return Ok(updated);
@@ -342,6 +609,7 @@ impl TaskStore for MemoryTaskStore {
     /// # Errors
     ///
     /// Resolves to a store error if the lookup cannot complete.
+    #[cfg(test)]
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move {
             let state = self.state.lock();
@@ -365,6 +633,7 @@ impl TaskStore for MemoryTaskStore {
     /// # Errors
     ///
     /// Resolves to a store error if the lookup cannot complete.
+    #[cfg(test)]
     fn get_summary_by_idempotency_key<'a>(
         &'a self,
         key: &'a str,
@@ -392,6 +661,7 @@ impl TaskStore for MemoryTaskStore {
     /// # Errors
     ///
     /// Resolves to a store error if the lookup cannot complete.
+    #[cfg(test)]
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().records.get(&id).cloned()) })
     }
@@ -409,6 +679,7 @@ impl TaskStore for MemoryTaskStore {
     /// # Errors
     ///
     /// Resolves to a store error if the lookup cannot complete.
+    #[cfg(test)]
     fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().records.get(&id).map(TaskRecord::summary)) })
     }
@@ -428,6 +699,7 @@ impl TaskStore for MemoryTaskStore {
     ///
     /// Resolves to `NotFound`, `Conflict`, or `InvalidTransition` when the
     /// task is unavailable or no longer blocked at that revision.
+    #[cfg(test)]
     fn abandon_blocked<'a>(
         &'a self,
         id: TaskId,
@@ -452,9 +724,10 @@ impl TaskStore for MemoryTaskStore {
             debug_assert!(state.unfinished_records > 0);
             state.unfinished_records -= 1;
             state.terminal_order.push_back(id);
-            while state.terminal_order.len() > self.history_capacity {
-                if let Some(oldest) = state.terminal_order.front().copied() {
-                    state.remove_record(oldest);
+            state.terminal_order_all.push_back(TerminalTaskId::Legacy(id));
+            while state.terminal_order_all.len() > self.history_capacity {
+                if !state.evict_oldest_terminal() {
+                    break;
                 }
             }
             Ok(summary)
@@ -475,6 +748,7 @@ impl TaskStore for MemoryTaskStore {
     /// # Errors
     ///
     /// Resolves to `InvalidRequest` when the page limit is invalid.
+    #[cfg(test)]
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         Box::pin(async move {
             let page_size = checked_page_size(query.limit)?;
@@ -535,6 +809,59 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Lists typed summaries using `(accepted_at_ms, numeric task ID)` order.
+    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        Box::pin(async move {
+            let page_size = query.checked_page_size()?;
+            let fetch_limit = page_size
+                .checked_add(1)
+                .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
+            let state = self.state.lock();
+            let mut candidates = BinaryHeap::with_capacity(fetch_limit);
+            for task in state.encoded_tasks.values().filter(|task| {
+                (query.states.is_empty() || query.states.contains(&task.summary.state.kind()))
+                    && query
+                        .category
+                        .as_ref()
+                        .is_none_or(|category| task.summary.category.as_ref() == Some(category))
+                    && query
+                        .correlation_key
+                        .as_ref()
+                        .is_none_or(|key| task.summary.correlation_key.as_ref() == Some(key))
+                    && query.after.is_none_or(|after| {
+                        (task.summary.accepted_at_ms, task.summary.id) > (after.accepted_at_ms, after.id)
+                    })
+            }) {
+                let key = (task.summary.accepted_at_ms, task.summary.id);
+                if candidates.len() < fetch_limit {
+                    candidates.push(key);
+                } else if candidates.peek().is_some_and(|largest| key < *largest) {
+                    candidates.pop();
+                    candidates.push(key);
+                }
+            }
+            let mut candidates = candidates.into_vec();
+            candidates.sort_unstable();
+            let has_more = candidates.len() > page_size;
+            if has_more {
+                candidates.truncate(page_size);
+            }
+            let records = candidates
+                .iter()
+                .map(|(_, id)| {
+                    state
+                        .encoded_tasks
+                        .get(id)
+                        .expect("page candidate remains retained")
+                        .summary
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+            let next = has_more.then(|| records.last().map(EncodedTaskCursor::from)).flatten();
+            Ok(EncodedTaskPage { records, next })
+        })
+    }
+
     /// Counts each state among currently retained records.
     ///
     /// # Returns
@@ -544,6 +871,7 @@ impl TaskStore for MemoryTaskStore {
     /// # Errors
     ///
     /// Resolves to a store error if the count cannot be read.
+    #[cfg(test)]
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
         Box::pin(async move {
             let state = self.state.lock();
@@ -579,6 +907,7 @@ impl TaskStore for MemoryTaskStore {
     /// # Errors
     ///
     /// Resolves to a store error if pruning cannot complete.
+    #[cfg(test)]
     fn prune_terminal_before<'a>(
         &'a self,
         accepted_before_ms: u64,
@@ -604,19 +933,25 @@ impl TaskStore for MemoryTaskStore {
         })
     }
 
-    /// Reports that this volatile store cannot provide exclusive recovery
-    /// ownership.
+    /// Acquires exclusive ownership within this in-process store instance.
     ///
-    /// # Returns
-    ///
-    /// A future resolving to `UnsupportedCapability`.
-    ///
-    /// # Errors
-    ///
-    /// Resolves to `UnsupportedCapability` because this volatile store has no
-    /// persistent ownership lock.
+    /// The epoch is local to this `MemoryTaskStore`; it does not imply restart
+    /// recovery or coordination with another process.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
-        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+        Box::pin(async move {
+            let mut state = self.state.lock();
+            if state.owner_epoch.is_some() {
+                return Err(StoreError::OwnerConflict);
+            }
+            let next_epoch = state
+                .last_owner_epoch
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Failure("memory owner epoch exhausted".into()))?;
+            let epoch = OwnerEpoch(next_epoch);
+            state.last_owner_epoch = next_epoch;
+            state.owner_epoch = Some(epoch);
+            Ok(epoch)
+        })
     }
 
     /// Checks whether queued and running records strictly exceed a limit.
@@ -632,6 +967,7 @@ impl TaskStore for MemoryTaskStore {
     /// # Errors
     ///
     /// Resolves to a store error if the count cannot be read.
+    #[cfg(test)]
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
         Box::pin(async move {
             let state = self.state.lock();
@@ -662,25 +998,21 @@ impl TaskStore for MemoryTaskStore {
     ///
     /// Resolves to `UnsupportedCapability` because this store retains no
     /// restart-recovery rows.
+    #[cfg(test)]
     fn scan_unfinished<'a>(&'a self, _cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
-    /// Reports that no ownership lock is held by this volatile store.
-    ///
-    /// # Parameters
-    ///
-    /// * `_epoch` - Ignored because ownership acquisition is unsupported.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to `UnsupportedCapability`.
-    ///
-    /// # Errors
-    ///
-    /// Resolves to `UnsupportedCapability` because ownership is unsupported.
-    fn release_owner<'a>(&'a self, _epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
-        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    /// Releases the current in-process owner when its epoch matches.
+    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock();
+            if state.owner_epoch != Some(epoch) {
+                return Err(StoreError::OwnerConflict);
+            }
+            state.owner_epoch = None;
+            Ok(())
+        })
     }
 }
 
@@ -690,6 +1022,20 @@ impl TaskStore for MemoryTaskStore {
 /// # Returns
 ///
 /// Current epoch milliseconds, or zero if the system clock predates the epoch.
+fn validate_encoded_output(state: &TaskState, output: Option<&crate::model::TaskOutput>) -> Result<(), StoreError> {
+    if output.is_some() && state != &TaskState::Succeeded {
+        return Err(StoreError::InvalidRequest(
+            "task output can only be stored with the succeeded state",
+        ));
+    }
+    if output.is_some_and(|value| value.summary.len() > MAX_TASK_OUTPUT_SUMMARY_BYTES) {
+        return Err(StoreError::InvalidRequest(
+            "task output summary exceeds the 64 KiB limit",
+        ));
+    }
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -704,7 +1050,7 @@ mod tests {
     use crate::model::TaskId;
     use crate::model::TaskQuery;
     use crate::model::TaskRequest;
-    use crate::store::TaskStore;
+    use crate::store::LegacyTaskStore;
 
     #[tokio::test]
     async fn test_same_millisecond_pages_use_task_id_as_tie_breaker() {

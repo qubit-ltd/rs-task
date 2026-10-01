@@ -6,10 +6,15 @@
 
 use rusqlite::types::Value;
 
+#[cfg(test)]
 use super::super::SUMMARY_COLUMNS;
+#[cfg(test)]
 use crate::model::TaskCursor;
+#[cfg(test)]
 use crate::model::TaskId;
+#[cfg(test)]
 use crate::model::TaskQuery;
+use crate::model::next::TaskQuery as EncodedTaskQuery;
 use crate::store::StoreError;
 
 /// SQL text and bound values for one SQLite query.
@@ -25,6 +30,7 @@ pub(in crate::store::sqlite_task_store) struct QuerySql {
 /// Binds all cursor/filter values and the lookahead limit. Returns
 /// `InvalidRequest` when the timestamp or limit exceeds SQLite's integer
 /// domain.
+#[cfg(test)]
 pub(in crate::store::sqlite_task_store) fn build_history_query(
     query: &TaskQuery,
     page_size: usize,
@@ -73,10 +79,64 @@ pub(in crate::store::sqlite_task_store) fn build_history_query(
     Ok(built)
 }
 
+/// Builds a parameterized history query over typed task rows.
+pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
+    query: &EncodedTaskQuery,
+    page_size: usize,
+) -> Result<QuerySql, StoreError> {
+    let fetch_limit = page_size
+        .checked_add(1)
+        .and_then(|limit| i64::try_from(limit).ok())
+        .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
+    let mut built = QuerySql {
+        sql: "SELECT id,request_info_json,lifecycle_json FROM tasks".to_owned(),
+        params: Vec::new(),
+    };
+    let mut has_predicate = false;
+    if let Some(after) = query.after {
+        let time = bind_timestamp(
+            &mut built.params,
+            after.accepted_at_ms,
+            "task history cursor timestamp is too large",
+        )?;
+        let id = bind_text(&mut built.params, after.id.to_padded_decimal());
+        append_predicate(&mut built.sql, &mut has_predicate, "(accepted_at, id) > (");
+        built.sql.push_str(&format!("{time}, {id})"));
+    }
+    if let Some(category) = &query.category {
+        append_predicate(&mut built.sql, &mut has_predicate, "category = ");
+        built.sql.push_str(&bind_text(&mut built.params, category.clone()));
+    }
+    if let Some(key) = &query.correlation_key {
+        append_predicate(&mut built.sql, &mut has_predicate, "correlation_key = ");
+        built.sql.push_str(&bind_text(&mut built.params, key.clone()));
+    }
+    let mut states = Vec::new();
+    for state in &query.states {
+        if !states.contains(state) {
+            states.push(*state);
+        }
+    }
+    if !states.is_empty() {
+        append_predicate(&mut built.sql, &mut has_predicate, "state_kind IN (");
+        for (index, state) in states.iter().enumerate() {
+            if index != 0 {
+                built.sql.push(',');
+            }
+            built.sql.push_str(&bind_text(&mut built.params, state.as_str().into()));
+        }
+        built.sql.push(')');
+    }
+    let limit = bind_value(&mut built.params, Value::Integer(fetch_limit));
+    built.sql.push_str(&format!(" ORDER BY accepted_at, id LIMIT {limit}"));
+    Ok(built)
+}
+
 /// Builds the unfinished-task page using the partial index's literal predicate.
 ///
 /// `after` is an exclusive cursor; `None` omits the lower bound. Returns
 /// `InvalidRequest` when the timestamp exceeds SQLite's integer domain.
+#[cfg(test)]
 pub(in crate::store::sqlite_task_store) fn build_recovery_query(
     after: Option<TaskCursor>,
 ) -> Result<QuerySql, StoreError> {
@@ -113,6 +173,7 @@ fn append_predicate(sql: &mut String, has_predicate: &mut bool, fragment: &'stat
 }
 
 /// Appends a bound tuple cursor, returning the supplied overflow diagnostic.
+#[cfg(test)]
 fn append_cursor(
     built: &mut QuerySql,
     has_predicate: &mut bool,
@@ -144,6 +205,7 @@ fn bind_timestamp(
 }
 
 /// Binds the task ID's existing UUID text representation.
+#[cfg(test)]
 fn bind_task_id(params: &mut Vec<Value>, id: TaskId) -> String {
     bind_text(params, id.to_string())
 }
@@ -162,11 +224,15 @@ mod tests {
 
     use super::super::schema::initialize_schema;
     use super::QuerySql;
+    use super::build_encoded_history_query;
     use super::build_history_query;
     use super::build_recovery_query;
     use crate::model::TaskCursor;
     use crate::model::TaskQuery;
     use crate::model::TaskStateKind;
+    use crate::model::next::TaskCursor as EncodedTaskCursor;
+    use crate::model::next::TaskId as EncodedTaskId;
+    use crate::model::next::TaskQuery as EncodedTaskQuery;
     use crate::store::StoreError;
 
     /// Creates indexed, representative terminal history with sparse unfinished
@@ -550,7 +616,7 @@ mod tests {
                 } else {
                     assert!(
                         plan.iter()
-                            .any(|line| line.contains("SCAN tasks USING INDEX tasks_unfinished_accepted_id"))
+                            .any(|line| { line.contains("SCAN tasks USING INDEX tasks_unfinished_accepted_id") })
                     );
                 }
             }
@@ -632,5 +698,25 @@ mod tests {
             assert_eq!(new, old, "unary plus must preserve TEXT semantics for {value:?}");
             assert_eq!(new, matches!(value.as_str(), "Queued" | "Running"));
         }
+    }
+
+    #[test]
+    fn test_typed_history_query_binds_category_and_numeric_cursor_key() {
+        let query = EncodedTaskQuery {
+            category: Some("image' OR 1=1 --".to_owned()),
+            after: Some(EncodedTaskCursor::new(
+                123,
+                EncodedTaskId::from_id(qubit_id::Id::new(2)),
+            )),
+            ..EncodedTaskQuery::default()
+        };
+        let built = build_encoded_history_query(&query, 5).expect("typed query builds");
+        assert!(built.sql.contains("(accepted_at, id) > (?1, ?2)"));
+        assert!(built.sql.contains("category = ?3"));
+        assert!(built.sql.contains("ORDER BY accepted_at, id LIMIT ?4"));
+        assert_eq!(built.params[0], Value::Integer(123));
+        assert_eq!(built.params[1], Value::Text("00000000000000000002".to_owned()));
+        assert_eq!(built.params[2], Value::Text("image' OR 1=1 --".to_owned()));
+        assert_eq!(built.params[3], Value::Integer(6));
     }
 }

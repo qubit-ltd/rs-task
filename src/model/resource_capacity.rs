@@ -27,6 +27,10 @@ use serde::Serialize;
 pub struct ResourceCapacity {
     /// CPU concurrency slots available to tasks.
     pub cpu_slots: u32,
+    /// Optional memory quota capacity in bytes.
+    pub memory_bytes: Option<u64>,
+    /// Optional disk quota capacity in bytes.
+    pub disk_bytes: Option<u64>,
     /// GPU device identifiers and their labels.
     pub gpus: BTreeMap<String, Vec<String>>,
     /// Named integer resource limits.

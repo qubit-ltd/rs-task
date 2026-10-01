@@ -8,43 +8,47 @@
 // Owns private resource-accounting and reservation-guard types.
 mod internal;
 
+#[cfg(test)]
 use std::any::Any;
 use std::sync::Arc;
 
+#[cfg(test)]
 use futures::FutureExt;
+#[cfg(test)]
 use internal::ReservationGuard;
 use internal::ResourceLedger;
 use internal::release_reservation;
 use parking_lot::Mutex;
+#[cfg(test)]
 use tokio::spawn;
+#[cfg(test)]
 use tokio::sync::oneshot;
 
 use crate::engine::EngineError;
+#[cfg(test)]
 use crate::engine::ExecutionHandle;
+#[cfg(test)]
 use crate::engine::ExecutionOutcome;
+#[cfg(test)]
 use crate::engine::PreparedExecution;
+#[cfg(test)]
 use crate::engine::TaskExecutionEngine;
+#[cfg(test)]
 use crate::handler::TaskContext;
+#[cfg(test)]
 use crate::handler::TaskHandler;
 use crate::model::ResourceCapacity;
+#[cfg(test)]
 use crate::model::ResourceRequest;
+#[cfg(test)]
 use crate::model::ResourceSnapshot;
+#[cfg(test)]
 use crate::model::TaskId;
+#[cfg(test)]
 use crate::store::TaskFuture;
 
 /// Single-process executor that atomically accounts for CPU, GPU, and custom
 /// resources.
-///
-/// # Examples
-///
-/// ```
-/// use qubit_task::engine::LocalTaskExecutionEngine;
-/// use qubit_task::engine::TaskExecutionEngine;
-/// use qubit_task::model::ResourceCapacity;
-///
-/// let engine = LocalTaskExecutionEngine::new(ResourceCapacity::default());
-/// assert_eq!(engine.capacity().used_cpu_slots, 0);
-/// ```
 pub struct LocalTaskExecutionEngine {
     /// Total available resources.
     capacity: ResourceCapacity,
@@ -72,8 +76,104 @@ impl LocalTaskExecutionEngine {
             })),
         }
     }
+
+    /// Reserves a typed task's resources in the same ledger as legacy tasks.
+    #[cfg(not(test))]
+    pub fn try_prepare_typed(
+        &self,
+        _id: crate::model::next::TaskId,
+        request: crate::model::next::ResourceRequest,
+    ) -> Result<crate::engine::TypedResourceReservation, EngineError> {
+        let matching_gpu_capacity = self
+            .capacity
+            .gpus
+            .values()
+            .filter(|labels| request.gpu_labels.iter().all(|label| labels.contains(label)))
+            .count();
+        if request.cpu_slots > self.capacity.cpu_slots
+            || request.gpu_count as usize > matching_gpu_capacity
+            || request
+                .memory_bytes
+                .is_some_and(|value| value > self.capacity.memory_bytes.unwrap_or(0))
+            || request
+                .disk_bytes
+                .is_some_and(|value| value > self.capacity.disk_bytes.unwrap_or(0))
+            || request
+                .custom
+                .iter()
+                .any(|(name, value)| self.capacity.custom.get(name).is_none_or(|limit| value > limit))
+        {
+            return Err(EngineError::Unsatisfiable);
+        }
+        let mut ledger = self.ledger.lock();
+        let available_gpus = self
+            .capacity
+            .gpus
+            .iter()
+            .filter(|(id, labels)| {
+                !ledger.usage.gpus.contains(id) && request.gpu_labels.iter().all(|label| labels.contains(label))
+            })
+            .map(|(id, _)| id.clone())
+            .take(request.gpu_count as usize)
+            .collect::<Vec<_>>();
+        let available_custom = request.custom.iter().all(|(name, value)| {
+            ledger
+                .usage
+                .custom
+                .get(name)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(*value)
+                .is_some_and(|total| total <= self.capacity.custom.get(name).copied().unwrap_or(0))
+        });
+        let memory = request.memory_bytes.unwrap_or(0);
+        let disk = request.disk_bytes.unwrap_or(0);
+        let available = ledger
+            .usage
+            .cpu
+            .checked_add(request.cpu_slots)
+            .is_some_and(|total| total <= self.capacity.cpu_slots)
+            && ledger
+                .usage
+                .memory
+                .checked_add(memory)
+                .is_some_and(|total| total <= self.capacity.memory_bytes.unwrap_or(0))
+            && ledger
+                .usage
+                .disk
+                .checked_add(disk)
+                .is_some_and(|total| total <= self.capacity.disk_bytes.unwrap_or(0))
+            && available_gpus.len() == request.gpu_count as usize
+            && available_custom;
+        if !available {
+            return Err(EngineError::TemporarilyUnavailable);
+        }
+        let Some(token) = ledger.next_token else {
+            return Err(EngineError::ReservationTokenExhausted);
+        };
+        let Some(next_token) = token.checked_add(1) else {
+            return Err(EngineError::ReservationTokenExhausted);
+        };
+        ledger.next_token = Some(next_token);
+        ledger.usage.cpu += request.cpu_slots;
+        ledger.usage.memory += memory;
+        ledger.usage.disk += disk;
+        ledger.usage.gpus.extend(available_gpus.clone());
+        for (name, value) in &request.custom {
+            *ledger.usage.custom.entry(name.clone()).or_default() += value;
+        }
+        ledger
+            .allocations
+            .insert(token, (request.cpu_slots, memory, disk, available_gpus, request.custom));
+        drop(ledger);
+        let ledger = Arc::clone(&self.ledger);
+        Ok(crate::engine::TypedResourceReservation::new(Box::new(move || {
+            release_reservation(token, &ledger)
+        })))
+    }
 }
 
+#[cfg(test)]
 impl TaskExecutionEngine for LocalTaskExecutionEngine {
     /// Returns the immutable engine limits and current reservation totals.
     ///
@@ -85,6 +185,8 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
         ResourceSnapshot {
             capacity: self.capacity.clone(),
             used_cpu_slots: ledger.usage.cpu,
+            used_memory_bytes: ledger.usage.memory,
+            used_disk_bytes: ledger.usage.disk,
             used_gpus: ledger.usage.gpus.clone(),
             used_custom: ledger.usage.custom.clone(),
         }
@@ -119,6 +221,12 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
         if request.cpu_slots > self.capacity.cpu_slots
             || request.gpu_count as usize > matching_gpu_capacity
             || request
+                .memory_bytes
+                .is_some_and(|value| value > self.capacity.memory_bytes.unwrap_or(0))
+            || request
+                .disk_bytes
+                .is_some_and(|value| value > self.capacity.disk_bytes.unwrap_or(0))
+            || request
                 .custom
                 .iter()
                 .any(|(name, value)| self.capacity.custom.get(name).is_none_or(|limit| value > limit))
@@ -151,7 +259,24 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
             .cpu
             .checked_add(request.cpu_slots)
             .is_some_and(|total| total <= self.capacity.cpu_slots);
-        if !cpu_available || available_gpus.len() != request.gpu_count as usize || !available_custom {
+        let memory = request.memory_bytes.unwrap_or(0);
+        let disk = request.disk_bytes.unwrap_or(0);
+        let memory_available = ledger
+            .usage
+            .memory
+            .checked_add(memory)
+            .is_some_and(|total| total <= self.capacity.memory_bytes.unwrap_or(0));
+        let disk_available = ledger
+            .usage
+            .disk
+            .checked_add(disk)
+            .is_some_and(|total| total <= self.capacity.disk_bytes.unwrap_or(0));
+        if !cpu_available
+            || !memory_available
+            || !disk_available
+            || available_gpus.len() != request.gpu_count as usize
+            || !available_custom
+        {
             return Err(EngineError::TemporarilyUnavailable);
         }
         let Some(token) = ledger.next_token else {
@@ -162,13 +287,16 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
         };
         ledger.next_token = Some(next_token);
         ledger.usage.cpu += request.cpu_slots;
+        ledger.usage.memory += memory;
+        ledger.usage.disk += disk;
         ledger.usage.gpus.extend(available_gpus.clone());
         for (name, value) in &request.custom {
             *ledger.usage.custom.entry(name.clone()).or_default() += value;
         }
-        ledger
-            .allocations
-            .insert(token, (request.cpu_slots, available_gpus.clone(), request.custom));
+        ledger.allocations.insert(
+            token,
+            (request.cpu_slots, memory, disk, available_gpus.clone(), request.custom),
+        );
         drop(ledger);
         let ledger = Arc::clone(&self.ledger);
         Ok(PreparedExecution {
@@ -251,6 +379,7 @@ impl TaskExecutionEngine for LocalTaskExecutionEngine {
 /// # Returns
 ///
 /// The panic message or a stable fallback for non-string payloads.
+#[cfg(test)]
 fn panic_message(payload: Box<dyn Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<String>() {
         message.clone()
@@ -308,12 +437,14 @@ mod tests {
             cpu_slots: 1,
             gpus: BTreeMap::from([("gpu-0".to_owned(), vec!["compute".to_owned()])]),
             custom: custom.clone(),
+            ..ResourceCapacity::default()
         });
         let request = ResourceRequest {
             cpu_slots: 1,
             gpu_count: 1,
             gpu_labels: vec!["compute".to_owned()],
             custom: custom.clone(),
+            ..ResourceRequest::default()
         };
         let mut handlers = TaskHandlerRegistry::new();
         handlers

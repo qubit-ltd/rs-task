@@ -3,12 +3,14 @@ mod history_dataset;
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskQuery;
+use qubit_task::model::TaskStateKind;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
 use rusqlite::Connection;
@@ -152,7 +154,7 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
          WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2))
            AND (?3 IS NULL OR correlation_key = ?3)
          ORDER BY accepted_at,id LIMIT ?4",
-        params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_string(), Option::<String>::None, 33i64],
+        params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_padded_decimal(), Option::<String>::None, 33i64],
     )?;
     drop(no_index_connection);
 
@@ -178,12 +180,12 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
          WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2))
            AND (?3 IS NULL OR correlation_key = ?3)
          ORDER BY accepted_at,id LIMIT ?4",
-        params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_string(), Option::<String>::None, 33i64],
+        params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_padded_decimal(), Option::<String>::None, 33i64],
     )?;
     drop(legacy_connection);
 
     let open_start = Instant::now();
-    let store = SqliteTaskStore::open(&dataset.database_path)?;
+    let store = SqliteTaskStore::open_next(&dataset.database_path)?;
     let first_store_open_and_compound_index_build_ms = elapsed_ms(open_start.elapsed());
     let sqlite = Connection::open(&dataset.database_path)?;
     sqlite.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -210,18 +212,18 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
         "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks
          WHERE +state_kind IN ('Queued','Running') AND (accepted_at,id) > (?1,?2)
          ORDER BY accepted_at,id LIMIT 257",
-        params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_string()],
+        params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_padded_decimal()],
     )?;
 
     let runtime_store = &store;
     let first_id = dataset.cursor.id;
-    let verified = runtime.block_on(runtime_store.get_summary(first_id))?;
+    let verified = runtime.block_on(runtime_store.get_encoded_task(first_id))?;
     if verified.is_none() {
         return Err("store read failed to decode deterministic benchmark row".into());
     }
     let no_filter_page = measure(runtime, || async {
         let page = runtime_store
-            .list(TaskQuery {
+            .list_encoded(TaskQuery {
                 limit: PAGE_SIZE,
                 ..TaskQuery::default()
             })
@@ -230,7 +232,7 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     })?;
     let deep_no_filter_page = measure(runtime, || async {
         let page = runtime_store
-            .list(TaskQuery {
+            .list_encoded(TaskQuery {
                 after: Some(dataset.cursor),
                 limit: PAGE_SIZE,
                 ..TaskQuery::default()
@@ -240,7 +242,7 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     })?;
     let deep_single_correlation_page = measure(runtime, || async {
         let page = runtime_store
-            .list(TaskQuery {
+            .list_encoded(TaskQuery {
                 after: Some(dataset.cursor),
                 correlation_key: Some(dataset.correlation_key.clone()),
                 limit: PAGE_SIZE,
@@ -250,10 +252,21 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
         Ok(page.records.len())
     })?;
     let unfinished_recovery_page = measure(runtime, || async {
-        let page = runtime_store.scan_unfinished(Some(dataset.cursor)).await?;
-        Ok(page.tasks.len())
+        let page = runtime_store
+            .list_encoded(TaskQuery {
+                states: vec![TaskStateKind::Queued, TaskStateKind::Running],
+                after: Some(dataset.cursor),
+                limit: 256,
+                ..TaskQuery::default()
+            })
+            .await?;
+        Ok(page.records.len())
     })?;
-    let count_states = measure(runtime, || async { Ok(runtime_store.count_states().await?.queued) })?;
+    let count_states = measure_sync(|| {
+        sqlite.query_row("SELECT COUNT(*) FROM tasks WHERE state_kind='Queued'", [], |row| {
+            row.get::<_, i64>(0)
+        })
+    })?;
     drop(sqlite);
     drop(store);
     let checkpoint = Connection::open(&dataset.database_path)?;
@@ -271,7 +284,7 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     };
     Ok(DatasetReport {
         rows: size,
-        seed: "xorshift64 seed 0x6a09e667f3bcc909; deterministic UUID-shaped IDs; identical prefix across sizes",
+        seed: "xorshift64 seed 0x6a09e667f3bcc909; deterministic padded numeric IDs; identical prefix across sizes",
         indexless_database_bytes,
         legacy_index_build_ms,
         legacy_indexed_database_bytes,
@@ -311,6 +324,23 @@ where
     Ok(summarize(samples))
 }
 
+fn measure_sync<F, T, E>(mut operation: F) -> Result<Timing, Box<dyn std::error::Error>>
+where
+    F: FnMut() -> Result<T, E>,
+    E: std::error::Error + 'static,
+{
+    for _ in 0..QUERY_WARMUPS {
+        let _ = operation()?;
+    }
+    let mut samples = Vec::with_capacity(QUERY_SAMPLES);
+    for _ in 0..QUERY_SAMPLES {
+        let start = Instant::now();
+        let _ = operation()?;
+        samples.push(start.elapsed());
+    }
+    Ok(summarize(samples))
+}
+
 fn measure_shutdown(
     runtime: &tokio::runtime::Runtime,
     database_path: &Path,
@@ -320,11 +350,10 @@ fn measure_shutdown(
     for sample in 0..SHUTDOWN_SAMPLES {
         let sample_path = directory.path.join(format!("shutdown-{sample}.sqlite"));
         std::fs::copy(database_path, &sample_path)?;
-        let service = runtime.block_on(async {
-            TaskExecutionServiceBuilder::recoverable_sqlite(&sample_path)?
-                .build()
-                .await
-        })?;
+        let store = Arc::new(SqliteTaskStore::open_next(&sample_path)?);
+        let codecs = Arc::new(qubit_codec::ValueBytesCodecRegistry::empty());
+        let id_generator = Arc::new(qubit_id::SnowflakeGenerator::new(0)?);
+        let service = runtime.block_on(TaskExecutionServiceBuilder::new(store, codecs, id_generator).build())?;
         let start = Instant::now();
         runtime.block_on(service.shutdown())?;
         samples.push(start.elapsed());
@@ -345,7 +374,7 @@ fn legacy_history_measurement(
         let rows = statement.query_map(
             params![
                 cursor.accepted_at_ms as i64,
-                cursor.id.to_string(),
+                cursor.id.to_padded_decimal(),
                 Option::<String>::None,
                 33i64
             ],
@@ -373,7 +402,7 @@ fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<Stri
             "WHERE (accepted_at,id) > (?1,?2) AND correlation_key = ?3 ORDER BY accepted_at,id LIMIT ?4",
             vec![
                 rusqlite::types::Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
-                rusqlite::types::Value::Text(query.after.expect("cursor was set").id.to_string()),
+                rusqlite::types::Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
                 rusqlite::types::Value::Text(key),
                 rusqlite::types::Value::Integer((query.limit + 1) as i64),
             ],
@@ -383,7 +412,7 @@ fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<Stri
             "WHERE (accepted_at,id) > (?1,?2) ORDER BY accepted_at,id LIMIT ?3",
             vec![
                 rusqlite::types::Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
-                rusqlite::types::Value::Text(query.after.expect("cursor was set").id.to_string()),
+                rusqlite::types::Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
                 rusqlite::types::Value::Integer((query.limit + 1) as i64),
             ],
         )

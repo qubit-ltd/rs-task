@@ -9,3 +9,5 @@
 mod memory_state;
 
 pub(in crate::store::memory_task_store) use memory_state::MemoryState;
+#[cfg(test)]
+pub(in crate::store::memory_task_store) use memory_state::TerminalTaskId;

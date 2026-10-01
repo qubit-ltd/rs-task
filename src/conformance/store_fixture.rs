@@ -4,14 +4,14 @@
 // =============================================================================
 use std::sync::Arc;
 
+use crate::store::LegacyTaskStore;
 use crate::store::StoreError;
 use crate::store::TaskFuture;
-use crate::store::TaskStore;
 /// Opens stores in one fresh, isolated namespace; repeated opens address the
 /// same namespace. The fixture owns disposable namespace cleanup after all
 /// returned stores are dropped.
 pub trait StoreFixture: Send + Sync {
     /// Opens a store, returning backend errors including `OwnerConflict` for an
     /// active owner.
-    fn open<'a>(&'a self) -> TaskFuture<'a, Result<Arc<dyn TaskStore>, StoreError>>;
+    fn open<'a>(&'a self) -> TaskFuture<'a, Result<Arc<dyn LegacyTaskStore>, StoreError>>;
 }

@@ -1,0 +1,1071 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+#![cfg(feature = "sqlite")]
+
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
+#[cfg(feature = "sqlite")]
+use common::sqlite_paths;
+use tokio::spawn;
+use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::test as tokio_test;
+use tokio::time;
+
+#[cfg(feature = "sqlite")]
+use super::common;
+use crate::handler::TaskContext;
+use crate::handler::TaskHandler;
+use crate::handler::TaskHandlerDescriptor;
+use crate::handler::TaskRunOutcome;
+use crate::handler::TaskRunResult;
+use crate::model::AcceptOutcome;
+use crate::model::OwnerEpoch;
+use crate::model::RecoveryPage;
+use crate::model::StoreCapabilities;
+use crate::model::TaskCursor;
+use crate::model::TaskId;
+use crate::model::TaskOutput;
+use crate::model::TaskPage;
+use crate::model::TaskQuery;
+use crate::model::TaskRecord;
+use crate::model::TaskRequest;
+use crate::model::TaskState;
+use crate::model::TaskStateCounts;
+use crate::model::TaskSummary;
+use crate::model::TransitionCommand;
+use crate::service::TaskExecutionServiceBuilder;
+use crate::service::TaskServiceBuildError;
+use crate::service::TaskServiceError;
+use crate::store::LegacyTaskStore as TaskStore;
+use crate::store::SqliteTaskStore;
+use crate::store::StoreError;
+use crate::store::TaskFuture;
+
+struct Echo;
+
+impl TaskHandler for Echo {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
+            task_type: "echo".into(),
+            version: "1".into(),
+        }
+    }
+
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
+    }
+}
+
+struct GatedEcho {
+    started: mpsc::UnboundedSender<()>,
+    permits: Arc<Semaphore>,
+}
+
+impl TaskHandler for GatedEcho {
+    fn descriptor(&self) -> TaskHandlerDescriptor {
+        TaskHandlerDescriptor {
+            task_type: "echo".into(),
+            version: "1".into(),
+        }
+    }
+
+    fn run<'a>(&'a self, _payload: &'a [u8], _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        let started = self.started.clone();
+        let permits = Arc::clone(&self.permits);
+        Box::pin(async move {
+            let _ = started.send(());
+            permits.acquire().await.expect("test gate remains open").forget();
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+    }
+}
+
+fn temp_db() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("qubit-task-recovery-{}.sqlite", TaskId::generate()))
+}
+
+fn cleanup(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(sqlite_paths::owner_lock_path(path));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+async fn accept(store: &SqliteTaskStore) -> TaskRecord {
+    match store
+        .accept(TaskId::generate(), TaskRequest::new("echo", "1", Vec::new()))
+        .await
+        .unwrap()
+    {
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => unreachable!(),
+    }
+}
+
+#[tokio_test]
+async fn test_recovery_blocks_exhausted_attempts_and_manual_retry_preserves_record() {
+    let path = temp_db();
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let running = accept(&store).await;
+    let running = store
+        .transition(TransitionCommand {
+            id: running.id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Running,
+            output: None,
+            assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let queued = accept(&store).await;
+    let queued_attempt = store
+        .transition(TransitionCommand {
+            id: queued.id,
+            expected_version: queued.state_version,
+            expected_attempt: queued.attempt,
+            state: TaskState::Running,
+            output: None,
+            assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let queued_attempt = store
+        .transition(TransitionCommand {
+            id: queued_attempt.id,
+            expected_version: queued_attempt.state_version,
+            expected_attempt: queued_attempt.attempt,
+            state: TaskState::Queued,
+            output: None,
+            assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    drop(store);
+
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .max_attempts(1)
+        .register_handler(Arc::new(Echo))
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let recovered_running = service.get(running.id).await.unwrap().unwrap();
+    let recovered_queued = service.get(queued.id).await.unwrap().unwrap();
+    assert_eq!(recovered_running.attempt, 1);
+    assert_eq!(recovered_queued.attempt, 1);
+    assert!(matches!(recovered_running.state, TaskState::Blocked { .. }));
+    assert!(matches!(recovered_queued.state, TaskState::Blocked { .. }));
+    assert_eq!(queued_attempt.attempt, 1);
+    assert!(matches!(service.wait(queued.id).await, Err(TaskServiceError::Blocked)));
+    service.shutdown().await.unwrap();
+    drop(service);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_recovery_capacity_failure_preserves_records_and_releases_owner() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        ids.push(accept(&inner).await.id);
+    }
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::Normal,
+        stored: Mutex::new(None),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+        acquire_gate: None,
+        scan_gate: None,
+        fail_release: false,
+        release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
+        release_finished: Mutex::new(None),
+    });
+
+    let result = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .queue_capacity(2)
+        .max_running_tasks(std::num::NonZeroUsize::new(1).unwrap())
+        .require_recovery(true)
+        .build()
+        .await;
+    let error = match result {
+        Ok(_) => panic!("recovery exceeding the configured bound must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        TaskServiceBuildError::RecoveryCapacityExceeded { limit: 3 }
+    ));
+    assert_eq!(store.precheck_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.scan_calls.load(Ordering::Relaxed), 0);
+    drop(store);
+
+    let check = SqliteTaskStore::open(&path).unwrap();
+    for id in &ids {
+        let record = check.get(*id).await.unwrap().unwrap();
+        assert!(matches!(record.state, TaskState::Queued));
+        assert_eq!(record.attempt, 0);
+    }
+    drop(check);
+
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .queue_capacity(4)
+        .max_running_tasks(std::num::NonZeroUsize::new(1).unwrap())
+        .register_handler(Arc::new(Echo))
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    for id in ids {
+        assert!(matches!(service.wait(id).await.unwrap().state, TaskState::Succeeded));
+    }
+    service.shutdown().await.unwrap();
+    drop(service);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_recovery_running_overflow_uses_recovery_capacity_and_backpressures_new_work() {
+    let path = temp_db();
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let queued = accept(&store).await;
+    let running = accept(&store).await;
+    let running = store
+        .transition(TransitionCommand {
+            id: running.id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .expect("seed running state commits");
+    drop(store);
+
+    let (started, mut started_rx) = mpsc::unbounded_channel();
+    let permits = Arc::new(Semaphore::new(0));
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .queue_capacity(1)
+        .max_running_tasks(std::num::NonZeroUsize::new(1).unwrap())
+        .register_handler(Arc::new(GatedEcho {
+            started,
+            permits: Arc::clone(&permits),
+        }))
+        .unwrap()
+        .build()
+        .await
+        .expect("one queued plus one interrupted running task fit recovery capacity");
+
+    time::timeout(std::time::Duration::from_secs(3), started_rx.recv())
+        .await
+        .expect("one recovered task starts")
+        .expect("start notification is sent");
+    let stats = service
+        .stats()
+        .await
+        .expect("stats succeed after a recovered task starts");
+    assert_eq!(stats.queued, 1);
+    assert_eq!(stats.running, 1);
+
+    let rejected = service
+        .submit(TaskRequest::new("echo", "1", Vec::new()).with_idempotency_key("recovery-capacity-new"))
+        .await;
+    assert!(matches!(rejected, Err(TaskServiceError::QueueFull)));
+
+    permits.add_permits(2);
+    for id in [queued.id, running.id] {
+        time::timeout(std::time::Duration::from_secs(3), service.wait(id))
+            .await
+            .expect("recovered task finishes")
+            .expect("terminal task is returned");
+    }
+    service.shutdown().await.expect("service shuts down");
+    drop(service);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_recovery_scans_across_page_boundary() {
+    let path = temp_db();
+    let store = SqliteTaskStore::open(&path).unwrap();
+    for _ in 0..257 {
+        accept(&store).await;
+    }
+    drop(store);
+
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .queue_capacity(255)
+        .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(service.stats().await.unwrap().blocked, 257);
+    service.shutdown().await.unwrap();
+    drop(service);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_retry_blocked_rejects_exhausted_budget_without_mutation() {
+    let path = temp_db();
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let record = accept(&store).await;
+    let running = store
+        .transition(TransitionCommand {
+            id: record.id,
+            expected_version: record.state_version,
+            expected_attempt: record.attempt,
+            state: TaskState::Running,
+            output: None,
+            assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let blocked = store
+        .transition(TransitionCommand {
+            id: running.id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Blocked { reason: "test".into() },
+            output: None,
+            assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .max_attempts(1)
+        .build()
+        .await
+        .unwrap();
+    let before = service.get(record.id).await.unwrap().unwrap();
+    assert!(matches!(
+        service.retry_blocked(record.id).await,
+        Err(TaskServiceError::AttemptsExhausted { attempts: 1, limit: 1 })
+    ));
+    let after = service.get(record.id).await.unwrap().unwrap();
+    assert_eq!(before.state_version, after.state_version);
+    assert_eq!(before.attempt, after.attempt);
+    assert_eq!(before.state, after.state);
+    assert_eq!(blocked.attempt, after.attempt);
+    service.shutdown().await.unwrap();
+    drop(service);
+    cleanup(&path);
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BadPage {
+    Normal,
+    EmptyWithNext,
+    StuckCursor,
+    TooManyRecords,
+    Duplicate,
+    Reversed,
+    AtOrBeforeCursor,
+    BeforeCursor,
+    NextNotLast,
+    Blocked,
+    Terminal,
+}
+
+struct BadScanStore {
+    inner: Arc<SqliteTaskStore>,
+    mode: BadPage,
+    stored: Mutex<Option<TaskSummary>>,
+    cursor: TaskCursor,
+    precheck_calls: AtomicUsize,
+    scan_calls: AtomicUsize,
+    acquire_gate: Option<Arc<AsyncGate>>,
+    scan_gate: Option<Arc<AsyncGate>>,
+    fail_release: bool,
+    release_calls: AtomicUsize,
+    transition_calls: AtomicUsize,
+    get_calls: AtomicUsize,
+    events: Mutex<Vec<&'static str>>,
+    release_finished: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+struct AsyncGate {
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+    release: Semaphore,
+}
+
+impl AsyncGate {
+    fn new() -> (Self, oneshot::Receiver<()>) {
+        let (entered, receiver) = oneshot::channel();
+        (
+            Self {
+                entered: Mutex::new(Some(entered)),
+                release: Semaphore::new(0),
+            },
+            receiver,
+        )
+    }
+
+    async fn wait(&self) {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        self.release.acquire().await.expect("test gate remains open").forget();
+    }
+}
+
+impl TaskStore for BadScanStore {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
+        self.inner.accept(id, request)
+    }
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        self.inner.get_by_idempotency_key(key)
+    }
+
+    fn get_summary_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        self.inner.get_summary_by_idempotency_key(key)
+    }
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+        self.transition_calls.fetch_add(1, Ordering::AcqRel);
+        self.inner.transition(command)
+    }
+
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        self.inner.get_summary(id)
+    }
+    fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        self.get_calls.fetch_add(1, Ordering::AcqRel);
+        self.inner.get(id)
+    }
+    fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        self.inner.list(query)
+    }
+    fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
+        self.inner.count_states()
+    }
+    fn prune_terminal_before<'a>(
+        &'a self,
+        _accepted_before_ms: u64,
+        _max_rows: std::num::NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
+        let inner = Arc::clone(&self.inner);
+        let gate = self.acquire_gate.clone();
+        Box::pin(async move {
+            let owner = inner.acquire_owner().await?;
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+            Ok(owner)
+        })
+    }
+    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.release_calls.fetch_add(1, Ordering::AcqRel);
+        if self.fail_release {
+            return Box::pin(async { Err(StoreError::Failure("injected owner release failure".into())) });
+        }
+        let result = self.inner.release_owner(epoch);
+        let finished = self.release_finished.lock().unwrap().take();
+        Box::pin(async move {
+            let result = result.await;
+            self.events.lock().unwrap().push("released");
+            if let Some(finished) = finished {
+                let _ = finished.send(());
+            }
+            result
+        })
+    }
+
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        self.precheck_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.has_unfinished_over_limit(limit)
+    }
+
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+        self.scan_calls.fetch_add(1, Ordering::Relaxed);
+        let gate = self.scan_gate.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+            let result = match self.mode {
+                BadPage::Normal => self.inner.scan_unfinished(cursor).await,
+                BadPage::EmptyWithNext => Ok(RecoveryPage {
+                    tasks: Vec::new(),
+                    next: Some(self.cursor),
+                }),
+                BadPage::StuckCursor => {
+                    if cursor.is_none() {
+                        let page = self.inner.scan_unfinished(None).await?;
+                        if let Some(task) = page.tasks.first() {
+                            *self.stored.lock().unwrap() = Some(task.clone());
+                        }
+                    }
+                    let task = self.stored.lock().unwrap().clone().ok_or(StoreError::NotFound)?;
+                    Ok(RecoveryPage {
+                        next: Some(TaskCursor::from(&task)),
+                        tasks: vec![task],
+                    })
+                }
+                BadPage::TooManyRecords => {
+                    let page = self.inner.scan_unfinished(None).await?;
+                    let task = page.tasks.first().cloned().ok_or(StoreError::NotFound)?;
+                    Ok(RecoveryPage {
+                        tasks: vec![task; 257],
+                        next: None,
+                    })
+                }
+                BadPage::Duplicate
+                | BadPage::Reversed
+                | BadPage::NextNotLast
+                | BadPage::Blocked
+                | BadPage::Terminal => {
+                    let mut page = self.inner.scan_unfinished(None).await?;
+                    match self.mode {
+                        BadPage::Duplicate => page.tasks.push(page.tasks[0].clone()),
+                        BadPage::Reversed => {
+                            page.tasks.sort_by_key(|task| TaskCursor::from(task));
+                            page.tasks.reverse();
+                        }
+                        BadPage::NextNotLast => page.next = Some(self.cursor),
+                        BadPage::Blocked => {
+                            page.tasks.last_mut().unwrap().state = TaskState::Blocked {
+                                reason: "injected".into(),
+                            }
+                        }
+                        BadPage::Terminal => page.tasks.last_mut().unwrap().state = TaskState::Succeeded,
+                        _ => unreachable!(),
+                    }
+                    Ok(page)
+                }
+                BadPage::AtOrBeforeCursor | BadPage::BeforeCursor => {
+                    if cursor.is_none() {
+                        let page = self.inner.scan_unfinished(None).await?;
+                        let task = page.tasks.first().cloned().ok_or(StoreError::NotFound)?;
+                        *self.stored.lock().unwrap() = Some(task.clone());
+                        Ok(RecoveryPage {
+                            next: Some(TaskCursor::from(&task)),
+                            tasks: vec![task],
+                        })
+                    } else {
+                        let mut task = self.stored.lock().unwrap().clone().ok_or(StoreError::NotFound)?;
+                        if matches!(self.mode, BadPage::BeforeCursor) {
+                            task.accepted_at_ms -= 1;
+                        }
+                        Ok(RecoveryPage {
+                            next: None,
+                            tasks: vec![task],
+                        })
+                    }
+                }
+            };
+            self.events.lock().unwrap().push("scan completed");
+            result
+        })
+    }
+}
+
+#[tokio_test]
+async fn test_invalid_recovery_pages_fail_without_looping() {
+    for mode in [BadPage::EmptyWithNext, BadPage::StuckCursor, BadPage::TooManyRecords] {
+        let path = temp_db();
+        let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+        let before = accept(&inner).await;
+        let store = Arc::new(BadScanStore {
+            inner,
+            mode,
+            stored: Mutex::new(None),
+            cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
+            precheck_calls: AtomicUsize::new(0),
+            scan_calls: AtomicUsize::new(0),
+            acquire_gate: None,
+            scan_gate: None,
+            fail_release: false,
+            release_calls: AtomicUsize::new(0),
+            transition_calls: AtomicUsize::new(0),
+            get_calls: AtomicUsize::new(0),
+            events: Mutex::new(Vec::new()),
+            release_finished: Mutex::new(None),
+        });
+        let result = TaskExecutionServiceBuilder::default()
+            .store(store.clone())
+            .require_recovery(true)
+            .register_handler(Arc::new(Echo))
+            .expect("handler registers")
+            .build()
+            .await;
+        assert!(matches!(result, Err(TaskServiceBuildError::InvalidRecoveryPage(_))));
+        assert_eq!(store.transition_calls.load(Ordering::Acquire), 0);
+        assert_eq!(
+            store.get_calls.load(Ordering::Acquire),
+            0,
+            "recovery never reads payloads"
+        );
+        assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events.last(), Some(&"released"));
+        let after = store
+            .inner
+            .get_summary(before.id)
+            .await
+            .expect("summary reads")
+            .expect("task remains");
+        assert_eq!(after.state_version, before.state_version);
+        drop(store);
+        let reopened = SqliteTaskStore::open(&path).unwrap();
+        let epoch = reopened.acquire_owner().await.unwrap();
+        reopened.release_owner(epoch).await.unwrap();
+        drop(reopened);
+        cleanup(&path);
+    }
+}
+
+#[tokio_test]
+async fn test_recovery_error_retains_owner_release_failure() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    accept(&inner).await;
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::EmptyWithNext,
+        stored: Mutex::new(None),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+        acquire_gate: None,
+        scan_gate: None,
+        fail_release: true,
+        release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
+        release_finished: Mutex::new(None),
+    });
+    let result = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .require_recovery(true)
+        .build()
+        .await;
+    let error = match result {
+        Ok(_) => panic!("recovery and cleanup both fail"),
+        Err(error) => error,
+    };
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("empty page returned a next cursor"));
+    assert!(diagnostic.contains("injected owner release failure"));
+    assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+    drop(store);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_cancelled_build_releases_owner_after_acquisition_finishes() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    let (gate, entered) = AsyncGate::new();
+    let gate = Arc::new(gate);
+    let (release_finished, released) = oneshot::channel();
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::Normal,
+        stored: Mutex::new(None),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+        acquire_gate: Some(Arc::clone(&gate)),
+        scan_gate: None,
+        fail_release: false,
+        release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
+        release_finished: Mutex::new(Some(release_finished)),
+    });
+    let builder_store = Arc::clone(&store);
+    let building = spawn(async move {
+        TaskExecutionServiceBuilder::default()
+            .store(builder_store)
+            .require_recovery(true)
+            .build()
+            .await
+    });
+    time::timeout(std::time::Duration::from_secs(2), entered)
+        .await
+        .expect("owner acquisition reaches its post-side-effect gate")
+        .expect("owner gate signals entry");
+    building.abort();
+    assert!(matches!(building.await, Err(error) if error.is_cancelled()));
+    gate.release.add_permits(1);
+
+    time::timeout(std::time::Duration::from_secs(2), released)
+        .await
+        .expect("detached builder releases the acquired owner")
+        .expect("owner release notification arrives");
+    assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+    drop(store);
+    let reopened = SqliteTaskStore::open(&path).expect("cancelled build released SQLite ownership");
+    drop(reopened);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_cancelled_build_releases_owner_after_recovery_scan_finishes() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    accept(&inner).await;
+    let (gate, entered) = AsyncGate::new();
+    let gate = Arc::new(gate);
+    let (release_finished, released) = oneshot::channel();
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::Normal,
+        stored: Mutex::new(None),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+        acquire_gate: None,
+        scan_gate: Some(Arc::clone(&gate)),
+        fail_release: false,
+        release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
+        release_finished: Mutex::new(Some(release_finished)),
+    });
+    let builder_store = Arc::clone(&store);
+    let building = spawn(async move {
+        TaskExecutionServiceBuilder::default()
+            .store(builder_store)
+            .register_handler(Arc::new(Echo))
+            .unwrap()
+            .require_recovery(true)
+            .build()
+            .await
+    });
+    time::timeout(std::time::Duration::from_secs(2), entered)
+        .await
+        .expect("recovery scan reaches its gate")
+        .expect("scan gate signals entry");
+    building.abort();
+    assert!(matches!(building.await, Err(error) if error.is_cancelled()));
+    gate.release.add_permits(1);
+
+    time::timeout(std::time::Duration::from_secs(2), released)
+        .await
+        .expect("detached builder releases owner after the page completes")
+        .expect("owner release notification arrives");
+    assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+    drop(store);
+    let reopened = SqliteTaskStore::open(&path).expect("cancelled recovery released SQLite ownership");
+    drop(reopened);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_recovery_prechecks_once_then_scans_each_page_once() {
+    let path = temp_db();
+    let inner = Arc::new(SqliteTaskStore::open(&path).unwrap());
+    for _ in 0..257 {
+        accept(&inner).await;
+    }
+    let store = Arc::new(BadScanStore {
+        inner,
+        mode: BadPage::Normal,
+        stored: Mutex::new(None),
+        cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
+        precheck_calls: AtomicUsize::new(0),
+        scan_calls: AtomicUsize::new(0),
+        acquire_gate: None,
+        scan_gate: None,
+        fail_release: false,
+        release_calls: AtomicUsize::new(0),
+        transition_calls: AtomicUsize::new(0),
+        get_calls: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
+        release_finished: Mutex::new(None),
+    });
+    let service = TaskExecutionServiceBuilder::default()
+        .store(store.clone())
+        .queue_capacity(255)
+        .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap())
+        .require_recovery(true)
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(store.precheck_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.scan_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(service.stats().await.unwrap().blocked, 257);
+    assert_eq!(
+        store.get_calls.load(Ordering::Acquire),
+        0,
+        "recovery blocks tasks without payload reads"
+    );
+    service.shutdown().await.unwrap();
+    drop(service);
+    drop(store);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_recovery_retries_running_attempt_below_limit() {
+    let path = temp_db();
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let record = accept(&store).await;
+    let running = store
+        .transition(TransitionCommand {
+            id: record.id,
+            expected_version: record.state_version,
+            expected_attempt: record.attempt,
+            state: TaskState::Running,
+            output: None,
+            assigned_resources: Vec::new(),
+            retry_not_before_ms: None,
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .max_attempts(2)
+        .register_handler(Arc::new(Echo))
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let finished = service.wait(record.id).await.unwrap();
+    assert_eq!(running.attempt, 1);
+    assert_eq!(finished.attempt, 2);
+    assert!(matches!(finished.state, TaskState::Succeeded));
+    service.shutdown().await.unwrap();
+    drop(service);
+    cleanup(&path);
+}
+
+#[tokio_test]
+async fn test_recovery_preserves_retry_deadline_for_queued_record() {
+    let path = temp_db();
+    let store = SqliteTaskStore::open(&path).unwrap();
+    let accepted = accept(&store).await;
+    let running = store
+        .transition(TransitionCommand {
+            id: accepted.id,
+            expected_version: accepted.state_version,
+            expected_attempt: accepted.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 10_000;
+    let queued = store
+        .transition(TransitionCommand {
+            id: running.id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Queued,
+            retry_not_before_ms: Some(deadline),
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let later = accept(&store).await;
+    let later_running = store
+        .transition(TransitionCommand {
+            id: later.id,
+            expected_version: later.state_version,
+            expected_attempt: later.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    let later_queued = store
+        .transition(TransitionCommand {
+            id: later_running.id,
+            expected_version: later_running.state_version,
+            expected_attempt: later_running.attempt,
+            state: TaskState::Queued,
+            retry_not_before_ms: Some(0),
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .unwrap();
+    drop(store);
+
+    let service = TaskExecutionServiceBuilder::recoverable_sqlite(&path)
+        .unwrap()
+        .register_handler(Arc::new(Echo))
+        .unwrap()
+        .max_attempts(2)
+        .build()
+        .await
+        .unwrap();
+    let expired_finished = time::timeout(std::time::Duration::from_secs(5), service.wait(later_queued.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(expired_finished.attempt, 2);
+    assert!(matches!(expired_finished.state, TaskState::Succeeded));
+    let waiting = service.get(queued.id).await.unwrap().unwrap();
+    assert_eq!(waiting.retry_not_before_ms, Some(deadline));
+    assert_eq!(waiting.attempt, 1);
+    service.shutdown().await.unwrap();
+    drop(service);
+    cleanup(&path);
+}
+
+/// Invalid rows are rejected before transitions, then ownership is released.
+#[tokio_test]
+async fn test_invalid_recovery_rows_have_no_page_side_effects_and_cleanup_follows_scan() {
+    for mode in [
+        BadPage::Duplicate,
+        BadPage::Reversed,
+        BadPage::NextNotLast,
+        BadPage::Blocked,
+        BadPage::Terminal,
+        BadPage::AtOrBeforeCursor,
+        BadPage::BeforeCursor,
+    ] {
+        let path = temp_db();
+        let inner = Arc::new(SqliteTaskStore::open(&path).expect("store opens"));
+        let first = accept(&inner).await;
+        let first = if matches!(mode, BadPage::AtOrBeforeCursor | BadPage::BeforeCursor) {
+            first.summary()
+        } else {
+            inner
+                .transition(TransitionCommand {
+                    id: first.id,
+                    expected_version: first.state_version,
+                    expected_attempt: first.attempt,
+                    state: TaskState::Running,
+                    retry_not_before_ms: None,
+                    output: None,
+                    assigned_resources: Vec::new(),
+                    cancel_requested: false,
+                })
+                .await
+                .expect("interrupted attempt persists")
+        };
+        let second = accept(&inner).await.summary();
+        let store = Arc::new(BadScanStore {
+            inner,
+            mode,
+            stored: Mutex::new(None),
+            cursor: TaskCursor::new(u64::MAX, TaskId::generate()),
+            precheck_calls: AtomicUsize::new(0),
+            scan_calls: AtomicUsize::new(0),
+            acquire_gate: None,
+            scan_gate: None,
+            fail_release: false,
+            release_calls: AtomicUsize::new(0),
+            transition_calls: AtomicUsize::new(0),
+            get_calls: AtomicUsize::new(0),
+            events: Mutex::new(Vec::new()),
+            release_finished: Mutex::new(None),
+        });
+        let result = TaskExecutionServiceBuilder::default()
+            .store(store.clone())
+            .require_recovery(true)
+            .register_handler(Arc::new(Echo))
+            .expect("handler registers")
+            .build()
+            .await;
+        match result {
+            Err(TaskServiceBuildError::InvalidRecoveryPage(_)) => {}
+            Err(error) => {
+                panic!("invalid {mode:?} rows returned {error:?}; expected InvalidRecoveryPage")
+            }
+            Ok(service) => {
+                let _ = service.shutdown().await;
+                panic!("invalid {mode:?} rows must produce InvalidRecoveryPage; build returned Ok");
+            }
+        }
+        assert_eq!(
+            store.transition_calls.load(Ordering::Acquire),
+            0,
+            "no row is changed before full-page validation"
+        );
+        assert_eq!(store.release_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            store.get_calls.load(Ordering::Acquire),
+            0,
+            "invalid-page recovery never reads payloads"
+        );
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events.last(), Some(&"released"));
+        assert!(
+            events[..events.len() - 1]
+                .iter()
+                .all(|event| *event == "scan completed")
+        );
+        for record in [first, second] {
+            let after = store
+                .inner
+                .get_summary(record.id)
+                .await
+                .expect("summary reads")
+                .expect("task remains");
+            assert_eq!(after.state, record.state);
+            assert_eq!(after.state_version, record.state_version);
+        }
+        drop(store);
+        let reopened = SqliteTaskStore::open(&path).expect("invalid-page cleanup releases owner");
+        drop(reopened);
+        cleanup(&path);
+    }
+}

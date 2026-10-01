@@ -22,6 +22,8 @@ pub enum CancelOutcome {
     CancelledBeforeStart,
     /// Cooperative cancellation was signalled to a running handler.
     CancellationRequested,
+    /// The running handler has no cooperative or external cancellation path.
+    CancellationUnsupported,
     /// The task had already reached a terminal state.
     AlreadyTerminal,
 }

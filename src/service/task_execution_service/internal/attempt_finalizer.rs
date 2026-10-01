@@ -39,9 +39,7 @@ pub(in crate::service::task_execution_service) async fn finish_attempt(
     receiver: sync::oneshot::Receiver<ExecutionOutcome>,
     _running_permit: sync::OwnedSemaphorePermit,
 ) {
-    let outcome = receiver
-        .await
-        .unwrap_or_else(|_| ExecutionOutcome::WorkerStopped("execution worker stopped".into()));
+    let outcome = receiver.await.unwrap_or(ExecutionOutcome::WorkerStopped);
     let Some(core) = core_ref.upgrade() else {
         return;
     };
@@ -58,8 +56,8 @@ pub(in crate::service::task_execution_service) async fn finish_attempt(
         ExecutionOutcome::Panicked(message) => TaskState::Panicked {
             message: truncate_utf8(message, MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES),
         },
-        ExecutionOutcome::WorkerStopped(_) if running.attempt < core.max_attempts => TaskState::Queued,
-        ExecutionOutcome::WorkerStopped(_) => TaskState::Blocked {
+        ExecutionOutcome::WorkerStopped if running.attempt < core.max_attempts => TaskState::Queued,
+        ExecutionOutcome::WorkerStopped => TaskState::Blocked {
             reason: "execution worker stopped after retry limit".into(),
         },
         ExecutionOutcome::Returned(Ok(TaskRunOutcome::Succeeded(_))) => TaskState::Succeeded,

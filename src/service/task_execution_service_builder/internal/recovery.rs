@@ -18,7 +18,7 @@ use crate::model::TransitionCommand;
 use crate::scheduling::QueuedTask;
 use crate::service::task_execution_service_builder::TaskExecutionService;
 use crate::service::task_execution_service_builder::TaskServiceBuildError;
-use crate::store::TaskStore;
+use crate::store::LegacyTaskStore;
 
 /// Maximum number of rows allowed in one recovery scan page.
 const RECOVERY_PAGE_LIMIT: usize = 256;
@@ -99,7 +99,7 @@ fn validate_recovery_page(
 /// Returns a build error for failed scans, invalid pages, capacity overflow,
 /// missing-handler transitions, or interrupted construction.
 pub(in crate::service::task_execution_service_builder) async fn restore_tasks_paged(
-    store: &Arc<dyn TaskStore>,
+    store: &Arc<dyn LegacyTaskStore>,
     handlers: &TaskHandlerRegistry,
     max_attempts: u32,
     limit: usize,

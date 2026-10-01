@@ -25,6 +25,10 @@ pub struct ResourceSnapshot {
     pub capacity: ResourceCapacity,
     /// Currently reserved CPU slots.
     pub used_cpu_slots: u32,
+    /// Memory quota currently held by active attempts.
+    pub used_memory_bytes: u64,
+    /// Disk quota currently held by active attempts.
+    pub used_disk_bytes: u64,
     /// Currently reserved GPU device identifiers.
     pub used_gpus: Vec<String>,
     /// Currently reserved custom resources.

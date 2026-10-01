@@ -33,8 +33,5 @@ pub enum ExecutionOutcome {
         String,
     ),
     /// The execution worker stopped before it could report a handler result.
-    WorkerStopped(
-        /// Diagnostic describing why the worker stopped without an outcome.
-        String,
-    ),
+    WorkerStopped,
 }

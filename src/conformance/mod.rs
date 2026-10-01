@@ -76,6 +76,8 @@ mod tests;
 
 pub use contract_report::ContractReport;
 pub use contract_violation::ContractViolation;
-pub use core_contract::verify_core_contract;
-pub use recovery_contract::verify_recovery_contract;
+#[cfg(test)]
+pub(crate) use core_contract::verify_core_contract;
+#[cfg(test)]
+pub(crate) use recovery_contract::verify_recovery_contract;
 pub use store_fixture::StoreFixture;
