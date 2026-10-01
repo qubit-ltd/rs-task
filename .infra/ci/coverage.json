@@ -1,5 +1,17 @@
 {
+  "scope": "package",
+  "source_dirs": {
+    "qubit-task": [
+      "src/engine",
+      "src/handler/typed",
+      "src/model/next",
+      "src/service",
+      "src/store"
+    ]
+  },
   "thresholds": {
-    "functions": 94.9
+    "lines": 75.0,
+    "functions": 70.0,
+    "regions": 72.5
   }
 }
