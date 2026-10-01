@@ -39,7 +39,6 @@ pub use stored_task_request::StoredTaskRequest;
 pub use task_cursor::TaskCursor;
 pub use task_id::TaskId;
 pub use task_page::TaskPage;
-#[cfg(not(test))]
 pub use task_progress_snapshot::MAX_TASK_PROGRESS_METRICS;
 #[cfg(not(test))]
 pub use task_progress_snapshot::MAX_TASK_PROGRESS_SNAPSHOT_BYTES;
