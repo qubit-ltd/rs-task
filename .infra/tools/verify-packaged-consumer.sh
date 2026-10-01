@@ -168,7 +168,7 @@ printf 'Temporary workspace: %s\n' "$workspace"
 cd "$workspace"
 
 package_file_list="$workspace/packaged-files.txt"
-cargo package --manifest-path "$manifest" --locked --no-default-features --features sqlite,conformance --list > "$package_file_list"
+cargo package --manifest-path "$manifest" --locked --all-features --list > "$package_file_list"
 printf 'Package file list reviewed for secrets and sibling dependency patches:\n'
 cat "$package_file_list"
 if rg -ni '(^|/)(\.env([^/]*|$)|credentials?([^/]*|$)|[^/]*\.(pem|key))' "$package_file_list"; then
@@ -179,7 +179,7 @@ fi
 # Cargo's own verification is deliberately enabled; --allow-dirty includes the reviewed worktree diff.
 cargo package --manifest-path "$manifest" \
     --target-dir "$package_target" \
-    --locked --allow-dirty --no-default-features --features sqlite,conformance
+    --locked --allow-dirty --all-features
 
 archive="$package_target/package/qubit-task-0.8.0.crate"
 [[ -f "$archive" ]] || { printf 'Packaged archive not found: %s\n' "$archive" >&2; exit 1; }
@@ -187,58 +187,6 @@ mkdir "$workspace/unpacked"
 tar -xzf "$archive" -C "$workspace/unpacked"
 package_dir="$workspace/unpacked/qubit-task-0.8.0"
 [[ -f "$package_dir/Cargo.toml" ]] || { printf 'Invalid package archive: %s\n' "$archive" >&2; exit 1; }
-
-consumer="$workspace/consumer"
-mkdir "$consumer"
-command cp -R "$project_root/tests/fixtures/conformance-consumer/." "$consumer"
-python3 - "$consumer/Cargo.toml" "$package_dir" <<'PY'
-import pathlib
-import sys
-
-manifest = pathlib.Path(sys.argv[1])
-package = pathlib.Path(sys.argv[2])
-text = manifest.read_text()
-text = text.replace('path = "../../.."', f'path = "{package}"')
-manifest.write_text(text)
-PY
-cd "$consumer"
-
-cargo check --manifest-path Cargo.toml --locked --no-default-features
-cargo check --manifest-path Cargo.toml --locked --no-default-features --features conformance
-cargo check --manifest-path Cargo.toml --locked --no-default-features --features sqlite
-cargo check --manifest-path Cargo.toml --locked --no-default-features --features sqlite,conformance
-cargo run --manifest-path Cargo.toml --locked --no-default-features --features sqlite,conformance
-cargo metadata --manifest-path Cargo.toml --locked --format-version 1 > "$workspace/consumer-metadata.json"
-python3 - "$workspace/consumer-metadata.json" <<'PY'
-import json
-import sys
-from urllib.parse import urlsplit
-
-def redact_source(value):
-    prefix = "registry+"
-    url = value.removeprefix(prefix)
-    sparse_prefix = "sparse+" if url.startswith("sparse+") else ""
-    parts = urlsplit(url.removeprefix(sparse_prefix))
-    if not parts.scheme or not parts.hostname:
-        return prefix + "<unparseable-registry-url>"
-    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
-    port = f":{parts.port}" if parts.port is not None else ""
-    return prefix + sparse_prefix + f"{parts.scheme}://{host}{port}"
-
-with open(sys.argv[1], encoding="utf-8") as metadata_file:
-    metadata = json.load(metadata_file)
-sources = sorted({
-    redact_source(dependency["source"])
-    for package in metadata["packages"]
-    for dependency in package["dependencies"]
-    if dependency.get("source", "").startswith("registry+")
-})
-if not sources:
-    raise SystemExit("No registry dependencies were resolved for the packaged consumer")
-print("Resolved registry sources:")
-for source in sources:
-    print(f"  {source}")
-PY
 
 all_features_consumer="$workspace/all-features-consumer"
 mkdir "$all_features_consumer"

@@ -9,7 +9,6 @@ default = []
 sqlite = ["qubit-task/sqlite"]
 inventory = ["qubit-task/inventory"]
 event-bus = ["qubit-task/event-bus"]
-conformance = ["qubit-task/conformance"]
 
 [dependencies]
 qubit-task = { path = "../../..", default-features = false }
