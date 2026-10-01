@@ -9,11 +9,11 @@ use rusqlite::types::Value;
 #[cfg(test)]
 use super::super::SUMMARY_COLUMNS;
 #[cfg(test)]
-use crate::model::TaskCursor;
+use crate::model::legacy::TaskCursor;
 #[cfg(test)]
-use crate::model::TaskId;
+use crate::model::legacy::TaskId;
 #[cfg(test)]
-use crate::model::TaskQuery;
+use crate::model::legacy::TaskQuery;
 use crate::model::next::TaskQuery as EncodedTaskQuery;
 use crate::store::StoreError;
 
@@ -227,9 +227,9 @@ mod tests {
     use super::build_encoded_history_query;
     use super::build_history_query;
     use super::build_recovery_query;
-    use crate::model::TaskCursor;
-    use crate::model::TaskQuery;
     use crate::model::TaskStateKind;
+    use crate::model::legacy::TaskCursor;
+    use crate::model::legacy::TaskQuery;
     use crate::model::next::TaskCursor as EncodedTaskCursor;
     use crate::model::next::TaskId as EncodedTaskId;
     use crate::model::next::TaskQuery as EncodedTaskQuery;

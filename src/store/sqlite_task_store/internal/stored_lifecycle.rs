@@ -5,13 +5,13 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use crate::model::TaskId;
 use crate::model::TaskOutput;
-use crate::model::TaskRecord;
-use crate::model::TaskRequest;
-use crate::model::TaskRequestInfo;
 use crate::model::TaskState;
-use crate::model::TaskSummary;
+use crate::model::legacy::TaskId;
+use crate::model::legacy::TaskRecord;
+use crate::model::legacy::TaskRequest;
+use crate::model::legacy::TaskRequestInfo;
+use crate::model::legacy::TaskSummary;
 
 /// Immutable task request fields are stored separately from this lifecycle.
 #[derive(serde::Serialize, serde::Deserialize)]

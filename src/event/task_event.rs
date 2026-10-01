@@ -39,7 +39,6 @@ pub struct TaskEvent {
     pub correlation_key: Option<String>,
 }
 
-#[cfg(test)]
 impl From<&crate::model::TaskSummary> for TaskEvent {
     /// Copies the task identity, revision, state, and correlation key.
     ///
@@ -50,19 +49,6 @@ impl From<&crate::model::TaskSummary> for TaskEvent {
     /// # Returns
     ///
     /// An immutable event snapshot without request payload data.
-    fn from(record: &crate::model::TaskSummary) -> Self {
-        Self {
-            task_id: record.id.to_string(),
-            state_version: record.state_version,
-            state: record.state.clone(),
-            correlation_key: record.request.correlation_key.clone(),
-        }
-    }
-}
-
-#[cfg(not(test))]
-impl From<&crate::model::TaskSummary> for TaskEvent {
-    /// Copies the typed task identity, revision, state, and correlation key.
     fn from(record: &crate::model::TaskSummary) -> Self {
         Self {
             task_id: record.id.to_string(),

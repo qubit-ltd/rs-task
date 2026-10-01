@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use super::TaskRecord;
+use super::legacy::TaskRecord;
 
 /// Result of atomically accepting a task request.
 ///

@@ -5,9 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use super::TaskId;
 use super::TaskOutput;
 use super::TaskState;
+use super::legacy::TaskId;
 
 /// Conditional task state update guarded by state version and attempt.
 ///

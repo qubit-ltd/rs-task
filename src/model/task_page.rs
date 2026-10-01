@@ -5,8 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use super::TaskCursor;
-use super::TaskSummary;
+use super::legacy::TaskCursor;
+use super::legacy::TaskSummary;
 
 /// One bounded page of task history.
 ///

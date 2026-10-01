@@ -8,10 +8,10 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::TaskId;
 use super::TaskOutput;
-use super::TaskRequestInfo;
 use super::TaskState;
+use super::legacy::TaskId;
+use super::legacy::TaskRequestInfo;
 
 /// Payload-free lifecycle snapshot for listing and waiting on tasks.
 ///

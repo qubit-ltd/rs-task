@@ -11,10 +11,10 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::MAX_TASK_PAYLOAD_BYTES;
-use super::RequestValidationError;
-use super::RequestValidationField;
-use super::RequestValidationRule;
-use super::ResourceRequest;
+use super::legacy::RequestValidationError;
+use super::legacy::RequestValidationField;
+use super::legacy::RequestValidationRule;
+use super::legacy::ResourceRequest;
 
 /// Maximum byte lengths for stable task request identifiers.
 pub const MAX_TASK_TYPE_BYTES: usize = 128;
@@ -92,26 +92,6 @@ impl TaskRequest {
             idempotency_key: None,
             metadata: BTreeMap::new(),
         }
-    }
-
-    /// Sets the caller-generated key used to recover the same accepted task.
-    ///
-    /// Create and durably retain this key before calling
-    /// [`TaskExecutionService::submit`](crate::service::TaskExecutionService::submit).
-    /// Reuse it only with the identical request.
-    ///
-    /// # Parameters
-    ///
-    /// * `key` - Stable caller-generated idempotency key.
-    ///
-    /// # Returns
-    ///
-    /// The request with the supplied key attached.
-    #[must_use]
-    #[inline]
-    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
-        self.idempotency_key = Some(key.into());
-        self
     }
 
     /// Checks the size limits used by both the service and task stores.

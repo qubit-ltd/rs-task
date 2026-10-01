@@ -8,8 +8,8 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::TaskCursor;
-use super::TaskSummary;
+use super::legacy::TaskCursor;
+use super::legacy::TaskSummary;
 
 /// Bounded payload-free projection of unfinished work used during recovery.
 ///

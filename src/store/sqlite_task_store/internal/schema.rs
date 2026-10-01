@@ -24,9 +24,9 @@ use super::row_codec::decode_legacy_record;
 #[cfg(test)]
 use super::row_codec::encode_lifecycle;
 #[cfg(test)]
-use crate::model::TaskRequest;
+use crate::model::legacy::TaskRequest;
 #[cfg(test)]
-use crate::model::TaskRequestInfo;
+use crate::model::legacy::TaskRequestInfo;
 use crate::store::StoreError;
 
 /// Schema version for the numeric-ID typed request format.

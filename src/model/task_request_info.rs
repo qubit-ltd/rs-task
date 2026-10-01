@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::ResourceRequest;
-use super::TaskRequest;
+use super::legacy::ResourceRequest;
+use super::legacy::TaskRequest;
 
 /// Payload-free immutable fields used in task history and lifecycle reads.
 ///
