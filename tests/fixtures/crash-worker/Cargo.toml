@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 qubit-task = { path = "../../..", default-features = false, features = ["sqlite"] }
 qubit-codec = { path = "../../../../rs-codec", version = "0.16" }
-qubit-id = { path = "../../../../rs-id", version = "0.6" }
+qubit-id = { version = "0.6" }
 qubit-model-metadata = { path = "../../../../rs-model-metadata", version = "0.1.0" }
 serde_json = "1"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time"] }
