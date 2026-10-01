@@ -10,7 +10,8 @@
 use std::sync::Arc;
 
 use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::model::{ResourceCapacity, TaskState};
+use qubit_task::model::ResourceCapacity;
+use qubit_task::model::TaskState;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
 

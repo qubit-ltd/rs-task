@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -14,7 +21,9 @@ use qubit_task::handler::TaskRunResult;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
 use qubit_task::TaskHandlerDescriptor;
-use qubit_task::model::{ResourceRequest, TaskOutput, TaskRequest};
+use qubit_task::model::ResourceRequest;
+use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskRequest;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::TaskHandler;
