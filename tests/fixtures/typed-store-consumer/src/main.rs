@@ -1,9 +1,14 @@
 // =============================================================================
 //    Copyright (c) 2025 - 2026 Haixing Hu.
+//
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Exercises the public typed-store API from a separately compiled crate.
 
+#[cfg(feature = "sqlite")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -11,7 +16,8 @@ use std::time::UNIX_EPOCH;
 use qubit_id::Id;
 use qubit_metadata::Metadata;
 use qubit_model_metadata::metadata::ModelIdBuf;
-use qubit_task::model::{TaskId, TaskState};
+use qubit_task::model::TaskId;
+use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateKind;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::StartCommand;
@@ -22,8 +28,6 @@ use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::TaskStore;
 
-#[cfg(feature = "sqlite")]
-use std::path::PathBuf;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
 
