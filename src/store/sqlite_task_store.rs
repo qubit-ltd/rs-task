@@ -5,8 +5,10 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(test)]
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use internal::DatabaseIdentity;
@@ -15,52 +17,91 @@ use internal::SqliteOwnerState;
 use internal::WorkerCounts;
 #[cfg(test)]
 use internal::WorkerGuard;
+use internal::accept_encoded;
 use internal::acquire_owner_lock;
+#[cfg(test)]
 use internal::build_history_query;
+#[cfg(test)]
 use internal::build_recovery_query;
+#[cfg(test)]
 use internal::decode_stored_summary_row;
+#[cfg(test)]
 use internal::decode_stored_task_row;
+#[cfg(test)]
 use internal::encode_lifecycle;
+#[cfg(test)]
 use internal::encode_summary_lifecycle;
+use internal::get_encoded_task;
+use internal::initialize_next_schema;
+#[cfg(test)]
 use internal::initialize_schema;
+use internal::list_encoded;
+#[cfg(test)]
 use internal::read_stored_summary_row;
+#[cfg(test)]
 use internal::read_stored_task_row;
+use internal::start_encoded;
+use internal::transition_encoded;
+use internal::update_progress;
 use parking_lot::Mutex;
 use rusqlite::Connection;
+#[cfg(test)]
 use rusqlite::OptionalExtension;
+#[cfg(test)]
 use rusqlite::params;
+#[cfg(test)]
 use rusqlite::params_from_iter;
 use tokio::sync;
 use tokio::task;
 
+use super::LegacyTaskStore;
 use super::StoreError;
 use super::TaskFuture;
-use super::TaskStore;
+#[cfg(test)]
 use crate::model::AcceptOutcome;
+#[cfg(test)]
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
+#[cfg(test)]
 use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
+#[cfg(test)]
 use crate::model::TaskCursor;
+#[cfg(test)]
 use crate::model::TaskId;
+#[cfg(test)]
 use crate::model::TaskPage;
+#[cfg(test)]
 use crate::model::TaskQuery;
+#[cfg(test)]
 use crate::model::TaskRecord;
+#[cfg(test)]
 use crate::model::TaskRequest;
+#[cfg(test)]
 use crate::model::TaskRequestInfo;
+#[cfg(test)]
 use crate::model::TaskState;
+#[cfg(test)]
 use crate::model::TaskStateCounts;
+#[cfg(test)]
 use crate::model::TaskSummary;
+#[cfg(test)]
 use crate::model::TransitionCommand;
+#[cfg(test)]
 use crate::model::checked_page_size;
+use crate::model::next::TaskPage as EncodedTaskPage;
+use crate::model::next::TaskQuery as EncodedTaskQuery;
 
 mod internal;
 
 /// Current SQLite schema version written after successful migration.
+#[cfg(test)]
 const SCHEMA_VERSION: i64 = 3;
 /// Current serialized record version required by row decoders.
+#[cfg(test)]
 const RECORD_FORMAT_VERSION: i64 = 3;
 /// Ordered columns used by payload-free task summary queries.
+#[cfg(test)]
 const SUMMARY_COLUMNS: &str =
     "id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json";
 
@@ -72,29 +113,44 @@ const SUMMARY_COLUMNS: &str =
 /// ```
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use std::fs;
+/// use std::io::ErrorKind;
+/// use std::time::SystemTime;
 ///
-/// use qubit_task::model::TaskId;
-/// use qubit_task::store::SqliteTaskStore;
 /// use qubit_task::store::TaskStore;
+/// use qubit_task::store::SqliteTaskStore;
 ///
-/// let path = std::env::temp_dir().join(format!("qubit-task-{}.sqlite", TaskId::generate()));
-/// let store = SqliteTaskStore::open(&path)?;
+/// let timestamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
+/// let directory = std::env::temp_dir().join(format!("qubit-task-doc-{}-{timestamp}", std::process::id()));
+/// match fs::create_dir(&directory) {
+///     Ok(()) => {},
+///     Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+///         return Err(error.into());
+///     }
+///     Err(error) => return Err(error.into()),
+/// }
+/// let path = directory.join("tasks.sqlite");
+/// let store = SqliteTaskStore::open_next(&path)?;
 /// assert!(store.capabilities().restart_recovery);
 /// drop(store);
 /// fs::remove_file(&path)?;
 /// let mut lock_path = path.as_os_str().to_owned();
 /// lock_path.push(".owner.lock");
 /// fs::remove_file(std::path::PathBuf::from(lock_path))?;
+/// fs::remove_dir(directory)?;
 /// # Ok(())
 /// # }
 /// ```
 pub struct SqliteTaskStore {
     /// SQLite connection serialized behind a synchronous mutex.
     connection: Arc<Mutex<Connection>>,
+    /// Canonical path used to reacquire the process lock after owner release.
+    database_path: PathBuf,
     /// Process-lock file and currently held recovery epoch.
     owner_state: Arc<Mutex<SqliteOwnerState>>,
     /// Bounds connection operations to one blocking worker at a time.
     operation_slot: Arc<sync::Semaphore>,
+    /// Selects the in-progress typed numeric-ID schema path.
+    typed_schema: bool,
     /// Tracks blocking worker overlap in unit tests.
     #[cfg(test)]
     worker_counts: Arc<WorkerCounts>,
@@ -110,12 +166,14 @@ impl SqliteTaskStore {
     /// # Returns
     ///
     /// An initialized store holding the database file lock. The service owner
-    /// epoch is acquired separately through [`TaskStore::acquire_owner`].
+    /// epoch is acquired separately through
+    /// [`crate::store::TaskStore::acquire_owner`].
     ///
     /// # Errors
     ///
     /// Returns a store error when opening, locking, initializing, or migrating
     /// the database fails.
+    #[cfg(test)]
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let (identity, _database_file) = DatabaseIdentity::open(path.as_ref())?;
         let lock = acquire_owner_lock(identity.path())?;
@@ -131,11 +189,46 @@ impl SqliteTaskStore {
         initialize_schema(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            database_path: identity.path().to_path_buf(),
             owner_state: Arc::new(Mutex::new(SqliteOwnerState {
                 lock_file: Some(lock),
                 epoch: None,
             })),
             operation_slot: Arc::new(sync::Semaphore::new(1)),
+            typed_schema: false,
+            #[cfg(test)]
+            worker_counts: Arc::new(WorkerCounts::default()),
+        })
+    }
+
+    /// Opens a database using the typed numeric-ID task schema.
+    ///
+    /// This cutover entry point creates a fresh schema or reopens the same
+    /// typed schema. Legacy UUID databases are rejected with a migration
+    /// diagnostic and left unchanged; converting their IDs requires an
+    /// explicit mapping migration.
+    pub fn open_next(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let (identity, _database_file) = DatabaseIdentity::open(path.as_ref())?;
+        let lock = acquire_owner_lock(identity.path())?;
+        identity.verify()?;
+        let mut connection = Connection::open(identity.path()).map_err(failure)?;
+        identity.verify()?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(failure)?;
+        initialize_next_schema(&mut connection)?;
+        connection
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .map_err(failure)?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            database_path: identity.path().to_path_buf(),
+            owner_state: Arc::new(Mutex::new(SqliteOwnerState {
+                lock_file: Some(lock),
+                epoch: None,
+            })),
+            operation_slot: Arc::new(sync::Semaphore::new(1)),
+            typed_schema: true,
             #[cfg(test)]
             worker_counts: Arc::new(WorkerCounts::default()),
         })
@@ -220,7 +313,7 @@ impl SqliteTaskStore {
     }
 }
 
-impl TaskStore for SqliteTaskStore {
+impl LegacyTaskStore for SqliteTaskStore {
     /// Reports that history is persistent and unfinished records can recover.
     ///
     /// # Returns
@@ -231,6 +324,79 @@ impl TaskStore for SqliteTaskStore {
             persistent_history: true,
             restart_recovery: true,
         }
+    }
+
+    /// Atomically accepts an encoded typed request on a store opened with
+    /// [`SqliteTaskStore::open_next`].
+    fn accept_encoded<'a>(
+        &'a self,
+        id: crate::model::next::TaskId,
+        request: crate::model::next::StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<crate::model::next::AcceptOutcome, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async {
+                Err(StoreError::Failure(
+                    "typed task operations require SqliteTaskStore::open_next".into(),
+                ))
+            });
+        }
+        self.run_write(move |connection| accept_encoded(connection, id, request))
+    }
+
+    /// Loads an encoded typed task without decoding its application payload.
+    fn get_encoded_task<'a>(
+        &'a self,
+        id: crate::model::next::TaskId,
+    ) -> TaskFuture<'a, Result<Option<crate::model::next::StoredTask>, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async {
+                Err(StoreError::Failure(
+                    "typed task operations require SqliteTaskStore::open_next".into(),
+                ))
+            });
+        }
+        self.run(move |connection| get_encoded_task(connection, id))
+    }
+
+    /// Persists a progress snapshot for the matching running attempt.
+    fn update_progress<'a>(
+        &'a self,
+        command: crate::model::next::ProgressCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async {
+                Err(StoreError::Failure(
+                    "typed task operations require SqliteTaskStore::open_next".into(),
+                ))
+            });
+        }
+        self.run_write(move |connection| update_progress(connection, command))
+    }
+
+    /// Starts one queued typed task attempt with a revision compare-and-set.
+    fn start_encoded<'a>(
+        &'a self,
+        command: crate::model::next::StartCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async {
+                Err(StoreError::Failure(
+                    "typed task operations require SqliteTaskStore::open_next".into(),
+                ))
+            });
+        }
+        self.run_write(move |connection| start_encoded(connection, command))
+    }
+
+    /// Applies a typed lifecycle transition atomically.
+    fn transition_encoded<'a>(
+        &'a self,
+        command: crate::model::next::TransitionCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
+        self.run_write(move |connection| transition_encoded(connection, command))
     }
 
     /// Acceptance and idempotency lookup share one SQLite transaction.
@@ -247,7 +413,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns validation, idempotency, or SQLite persistence errors.
+    #[cfg(test)]
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         if let Err(error) = request.validate_limits() {
             return Box::pin(async move { Err(StoreError::InvalidRequest(error.message())) });
         }
@@ -284,7 +454,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns missing, stale, invalid, oversized, or persistence errors.
+    #[cfg(test)]
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         if let Err(error) = command.state.validate_diagnostics() {
             return Box::pin(async move { Err(StoreError::InvalidRequest(error)) });
         }
@@ -364,7 +538,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns an error if the query or persisted row decoding fails.
+    #[cfg(test)]
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         let key = key.to_owned();
         self.run(move |connection| {
             let stored = connection
@@ -392,10 +570,14 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns an error if the query or persisted summary decoding fails.
+    #[cfg(test)]
     fn get_summary_by_idempotency_key<'a>(
         &'a self,
         key: &'a str,
     ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         let key = key.to_owned();
         self.run(move |connection| {
             let stored = connection
@@ -423,7 +605,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns an error if the query or persisted row decoding fails.
+    #[cfg(test)]
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         Box::pin(async move {
             let stored = self
                 .run(move |connection| {
@@ -454,7 +640,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns invalid query or SQLite decoding errors.
+    #[cfg(test)]
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         self.run(move |connection| {
             let page_size = checked_page_size(query.limit)?;
             let built = build_history_query(&query, page_size)?;
@@ -475,6 +665,13 @@ impl TaskStore for SqliteTaskStore {
         })
     }
 
+    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
+        self.run(move |connection| list_encoded(connection, query))
+    }
+
     /// Loads task lifecycle and immutable metadata without the payload.
     ///
     /// # Parameters
@@ -488,7 +685,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns an error if the query or persisted summary decoding fails.
+    #[cfg(test)]
     fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         self.run(move |connection| {
             let stored = connection
                 .query_row(
@@ -516,11 +717,15 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns not-found, conflict, invalid-state, or SQLite errors.
+    #[cfg(test)]
     fn abandon_blocked<'a>(
         &'a self,
         id: TaskId,
         expected_version: u64,
     ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         self.run_write(move |connection| {
             let transaction = connection.unchecked_transaction().map_err(failure)?;
             let row = transaction
@@ -565,7 +770,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns an error if SQLite reports an unknown state or count failure.
+    #[cfg(test)]
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         self.run(|connection| {
             let mut statement = connection
                 .prepare("SELECT state_kind, COUNT(*) FROM tasks GROUP BY state_kind")
@@ -609,11 +818,15 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns range, transaction, or SQLite errors.
+    #[cfg(test)]
     fn prune_terminal_before<'a>(
         &'a self,
         accepted_before_ms: u64,
         max_rows: NonZeroUsize,
     ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         let accepted_before_ms = match i64::try_from(accepted_before_ms) {
             Ok(value) => value,
             Err(_) => {
@@ -665,13 +878,14 @@ impl TaskStore for SqliteTaskStore {
     /// Returns an error when the owner lock is absent or metadata access fails.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         let owner_state = Arc::clone(&self.owner_state);
+        let database_path = self.database_path.clone();
         self.run(move |connection| {
             let mut owner_state = owner_state.lock();
             if owner_state.epoch.is_some() {
                 return Err(StoreError::OwnerConflict);
             }
             if owner_state.lock_file.is_none() {
-                return Err(StoreError::OwnerConflict);
+                owner_state.lock_file = Some(acquire_owner_lock(&database_path)?);
             }
             connection.execute("INSERT INTO metadata(key,value) VALUES('owner_epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1", []).map_err(failure)?;
             let epoch = connection.query_row("SELECT value FROM metadata WHERE key='owner_epoch'", [], |row| row.get::<_, u64>(0)).map(OwnerEpoch).map_err(failure)?;
@@ -693,7 +907,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns an error when SQLite cannot perform the probe.
+    #[cfg(test)]
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         if limit > i64::MAX as usize {
             return Box::pin(async { Ok(false) });
         }
@@ -722,7 +940,11 @@ impl TaskStore for SqliteTaskStore {
     /// # Errors
     ///
     /// Returns an error if a row is malformed or SQLite access fails.
+    #[cfg(test)]
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+        if self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
         self.run(move |connection| {
             let built = build_recovery_query(cursor)?;
             let mut statement = connection.prepare(&built.sql).map_err(failure)?;
@@ -779,6 +1001,7 @@ impl TaskStore for SqliteTaskStore {
 /// # Returns
 ///
 /// A queued record with initial lifecycle timestamps and revision.
+#[cfg(test)]
 fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
     TaskRecord {
         id,
@@ -805,6 +1028,7 @@ fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
 /// # Returns
 ///
 /// The case-sensitive variant name used in the indexed state column.
+#[cfg(test)]
 fn state_kind(state: &TaskState) -> &'static str {
     state.kind().as_str()
 }
@@ -815,6 +1039,7 @@ fn state_kind(state: &TaskState) -> &'static str {
 /// # Returns
 ///
 /// Current epoch milliseconds, or zero if the system clock predates the epoch.
+#[cfg(test)]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -859,8 +1084,8 @@ mod tests {
     use crate::model::AcceptOutcome;
     use crate::model::TaskQuery;
     use crate::model::TaskRequest;
+    use crate::store::LegacyTaskStore;
     use crate::store::StoreError;
-    use crate::store::TaskStore;
 
     /// Creates a unique database path for one worker scheduling test.
     fn test_database_path() -> std::path::PathBuf {

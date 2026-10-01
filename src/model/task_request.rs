@@ -10,16 +10,11 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::MAX_TASK_PAYLOAD_BYTES;
 use super::RequestValidationError;
 use super::RequestValidationField;
 use super::RequestValidationRule;
 use super::ResourceRequest;
-
-/// Maximum number of bytes accepted in a reconstructable task payload.
-///
-/// The service rejects requests whose payload exceeds this limit before
-/// storing them.
-pub const MAX_TASK_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Maximum byte lengths for stable task request identifiers.
 pub const MAX_TASK_TYPE_BYTES: usize = 128;

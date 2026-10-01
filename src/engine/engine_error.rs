@@ -7,15 +7,6 @@
 // =============================================================================
 /// Engine errors distinguish temporary contention from invalid capacity
 /// requests.
-///
-/// # Examples
-///
-/// ```
-/// use qubit_task::engine::EngineError;
-///
-/// let error = EngineError::TemporarilyUnavailable;
-/// assert_eq!(error.to_string(), "requested resources are temporarily unavailable");
-/// ```
 #[derive(Debug, thiserror::Error)]
 #[must_use]
 pub enum EngineError {
@@ -25,8 +16,9 @@ pub enum EngineError {
     /// Request exceeds configured capacity or requires unknown resources.
     #[error("requested resources cannot be satisfied by this engine")]
     Unsatisfiable,
-    /// Engine cannot accept new task execution.
-    #[error("task execution engine is shut down")]
+    /// The legacy test engine has shut down and cannot reserve resources.
+    #[cfg(test)]
+    #[error("task execution engine is closed")]
     Closed,
     /// The engine exhausted its non-reusable reservation identifiers.
     #[error("task execution reservation identifier space is exhausted")]

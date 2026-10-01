@@ -5,23 +5,53 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(test)]
 use std::num::NonZeroUsize;
 
 use super::StoreError;
 use super::TaskFuture;
+#[cfg(test)]
 use crate::model::AcceptOutcome;
 use crate::model::OwnerEpoch;
+#[cfg(test)]
 use crate::model::RecoveryPage;
 use crate::model::StoreCapabilities;
+#[cfg(test)]
 use crate::model::TaskCursor;
+#[cfg(test)]
 use crate::model::TaskId;
+#[cfg(test)]
 use crate::model::TaskPage;
+#[cfg(test)]
 use crate::model::TaskQuery;
+#[cfg(test)]
 use crate::model::TaskRecord;
+#[cfg(test)]
 use crate::model::TaskRequest;
+#[cfg(test)]
 use crate::model::TaskStateCounts;
+#[cfg(test)]
 use crate::model::TaskSummary;
+#[cfg(test)]
 use crate::model::TransitionCommand;
+use crate::model::next::AcceptOutcome as TypedAcceptOutcome;
+use crate::model::next::AcceptOutcome as EncodedAcceptOutcome;
+use crate::model::next::ProgressCommand as TypedProgressCommand;
+use crate::model::next::ProgressCommand;
+use crate::model::next::StartCommand as TypedStartCommand;
+use crate::model::next::StartCommand;
+use crate::model::next::StoredTask as TypedStoredTask;
+use crate::model::next::StoredTask;
+use crate::model::next::StoredTaskRequest as TypedStoredTaskRequest;
+use crate::model::next::StoredTaskRequest;
+use crate::model::next::TaskId as TypedTaskId;
+use crate::model::next::TaskPage as TypedTaskPage;
+use crate::model::next::TaskPage as EncodedTaskPage;
+use crate::model::next::TaskQuery as TypedTaskQuery;
+use crate::model::next::TaskQuery as EncodedTaskQuery;
+use crate::model::next::TaskSummary as TypedTaskSummary;
+use crate::model::next::TransitionCommand as TypedTransitionCommand;
+use crate::model::next::TransitionCommand as EncodedTransitionCommand;
 
 /// Persistent task history implementation contract.
 ///
@@ -38,7 +68,7 @@ use crate::model::TransitionCommand;
 /// let store = MemoryTaskStore::new(100);
 /// assert!(!store.capabilities().restart_recovery);
 /// ```
-pub trait TaskStore: Send + Sync {
+pub(crate) trait LegacyTaskStore: Send + Sync {
     /// Reports whether history and unfinished task descriptions survive
     /// restart.
     ///
@@ -65,7 +95,90 @@ pub trait TaskStore: Send + Sync {
     ///
     /// Resolves to an error for invalid requests, duplicate IDs, idempotency
     /// conflicts, capacity limits, or persistence failures.
+    #[cfg(test)]
     fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>>;
+
+    /// Accepts a request whose payload has already been encoded for storage.
+    ///
+    /// Existing stores may keep supporting only the legacy
+    /// [`LegacyTaskStore::accept`] path. Such stores return
+    /// `UnsupportedCapability` from this default.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identifier to assign if the request is new.
+    /// * `request` - Request containing its type-erased stored payload.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the newly accepted task or an identical existing
+    /// idempotent task.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to `UnsupportedCapability` by default, or a store error when
+    /// an implementation supports but cannot complete encoded acceptance.
+    fn accept_encoded<'a>(
+        &'a self,
+        id: crate::model::next::TaskId,
+        request: StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<EncodedAcceptOutcome, StoreError>> {
+        let _ = (id, request);
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
+    /// Loads a typed request and summary for recovery or status queries.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable typed task identifier to load.
+    ///
+    /// # Returns
+    ///
+    /// `Some` when an encoded task is retained, or `None` when it is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnsupportedCapability` when the store has not implemented
+    /// encoded task persistence, or a store error when loading fails.
+    fn get_encoded_task<'a>(
+        &'a self,
+        id: crate::model::next::TaskId,
+    ) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+        let _ = id;
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
+    /// Starts a queued encoded task attempt with a lifecycle version check.
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Task identity, expected state revision, and start time.
+    ///
+    /// # Returns
+    ///
+    /// The updated typed task summary with its attempt count advanced.
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnsupportedCapability` by default, `NotFound` when absent, or
+    /// `Conflict` when the task is not queued or its state revision changed.
+    fn start_encoded<'a>(
+        &'a self,
+        command: StartCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        let _ = command;
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
+    /// Applies an atomic state transition to a typed task.
+    fn transition_encoded<'a>(
+        &'a self,
+        command: EncodedTransitionCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        let _ = command;
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
 
     /// Finds a retained task by its caller-supplied idempotency key without
     /// consuming queue capacity.
@@ -81,6 +194,7 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error if the store cannot complete the lookup.
+    #[cfg(test)]
     fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
 
     /// Finds lifecycle metadata by idempotency key without loading payload
@@ -101,6 +215,7 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error if the store cannot complete the lookup.
+    #[cfg(test)]
     fn get_summary_by_idempotency_key<'a>(
         &'a self,
         key: &'a str,
@@ -120,7 +235,37 @@ pub trait TaskStore: Send + Sync {
     ///
     /// Resolves to an error when the task is missing, the revision conflicts,
     /// the transition is invalid, or persistence fails.
+    #[cfg(test)]
     fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>>;
+
+    /// Writes a progress snapshot using an attempt and progress-version
+    /// compare-and-set.
+    ///
+    /// Implementations must accept a command only while the matching attempt
+    /// is running and only when its progress version is newer than the stored
+    /// version. Lifecycle `state_version` remains independent of the progress
+    /// version. The default reports `UnsupportedCapability`.
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Progress snapshot and its expected attempt/version.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the lifecycle summary after the progress write.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to `UnsupportedCapability` by default, `NotFound` when the
+    /// task is not retained, `Conflict` for a stale attempt/version, or a store
+    /// error when persistence fails.
+    fn update_progress<'a>(
+        &'a self,
+        command: ProgressCommand,
+    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
+        let _ = command;
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
 
     /// Loads lifecycle metadata without reading or copying the payload.
     ///
@@ -135,6 +280,7 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error if the store cannot complete the read.
+    #[cfg(test)]
     fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>>;
 
     /// Cancels a blocked record only when its revision still matches.
@@ -152,6 +298,7 @@ pub trait TaskStore: Send + Sync {
     ///
     /// Resolves to `UnsupportedCapability` by default, or another store error
     /// when an implementation cannot apply the transition.
+    #[cfg(test)]
     fn abandon_blocked<'a>(
         &'a self,
         id: TaskId,
@@ -174,6 +321,7 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error if the store cannot complete the read.
+    #[cfg(test)]
     fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
 
     /// Lists a bounded page of task history.
@@ -190,7 +338,18 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error for an invalid page size or a storage failure.
+    #[cfg(test)]
     fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>>;
+
+    /// Lists typed task summaries in deterministic acceptance order.
+    ///
+    /// The exclusive cursor is ordered by `(accepted_at_ms, numeric task ID)`.
+    /// Implementations that do not support typed task storage return
+    /// `UnsupportedCapability` by default.
+    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        let _ = query;
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
 
     /// Counts every retained lifecycle state in one store snapshot, including
     /// terminal records.
@@ -208,6 +367,7 @@ pub trait TaskStore: Send + Sync {
     ///
     /// Resolves to an error when aggregation or storage access fails.
     #[must_use]
+    #[cfg(test)]
     fn count_states<'a>(&'a self) -> TaskFuture<'a, Result<TaskStateCounts, StoreError>>;
 
     /// Deletes at most `max_rows` terminal records accepted before the supplied
@@ -227,6 +387,7 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to `UnsupportedCapability` by default or a store error.
+    #[cfg(test)]
     fn prune_terminal_before<'a>(
         &'a self,
         accepted_before_ms: u64,
@@ -264,6 +425,7 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error if the store cannot perform the consistency check.
+    #[cfg(test)]
     fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>>;
 
     /// Scans at most 256 Queued/Running summaries during recovery.
@@ -287,6 +449,7 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error if recovery scanning is unsupported or fails.
+    #[cfg(test)]
     fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>>;
 
     /// Releases ownership after the service has stopped accepting work and
@@ -299,7 +462,8 @@ pub trait TaskStore: Send + Sync {
     ///
     /// # Parameters
     ///
-    /// * `epoch` - Ownership epoch returned by [`TaskStore::acquire_owner`].
+    /// * `epoch` - Ownership epoch returned by
+    ///   [`LegacyTaskStore::acquire_owner`].
     ///
     /// # Returns
     ///
@@ -309,5 +473,51 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Resolves to an error if the epoch is stale or release fails.
+    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>>;
+}
+
+/// Persists encoded requests and lifecycle summaries for typed tasks.
+///
+/// IDs use `qubit_id::Id`; payload type and schema identity remain in the
+/// stored payload. Implementations must make acceptance and version-checked
+/// updates atomic. Recovery ownership methods fence concurrent services.
+pub trait TaskStore: Send + Sync {
+    /// Reports persistence and recovery support.
+    fn capabilities(&self) -> StoreCapabilities;
+
+    /// Atomically accepts a type-erased request that was encoded by the codec
+    /// registry.
+    fn accept_encoded<'a>(
+        &'a self,
+        id: TypedTaskId,
+        request: TypedStoredTaskRequest,
+    ) -> TaskFuture<'a, Result<TypedAcceptOutcome, StoreError>>;
+
+    /// Loads a retained task and its stored request.
+    fn get_encoded_task<'a>(&'a self, id: TypedTaskId) -> TaskFuture<'a, Result<Option<TypedStoredTask>, StoreError>>;
+
+    /// Starts one attempt if the task is queued at the supplied state version.
+    fn start_encoded<'a>(&'a self, command: TypedStartCommand) -> TaskFuture<'a, Result<TypedTaskSummary, StoreError>>;
+
+    /// Applies a typed task lifecycle transition using optimistic concurrency.
+    fn transition_encoded<'a>(
+        &'a self,
+        command: TypedTransitionCommand,
+    ) -> TaskFuture<'a, Result<TypedTaskSummary, StoreError>>;
+
+    /// Persists progress for the matching running attempt and newer progress
+    /// version.
+    fn update_progress<'a>(
+        &'a self,
+        command: TypedProgressCommand,
+    ) -> TaskFuture<'a, Result<TypedTaskSummary, StoreError>>;
+
+    /// Queries summaries in deterministic typed-task order.
+    fn list_encoded<'a>(&'a self, query: TypedTaskQuery) -> TaskFuture<'a, Result<TypedTaskPage, StoreError>>;
+
+    /// Acquires exclusive ownership before recovering unfinished tasks.
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>>;
+
+    /// Releases ownership after all writes admitted under it have completed.
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>>;
 }

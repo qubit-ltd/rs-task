@@ -20,8 +20,8 @@ use crate::model::TaskCursor;
 use crate::model::TaskId;
 use crate::model::TaskState;
 use crate::model::TaskSummary;
+use crate::store::LegacyTaskStore as TaskStore;
 use crate::store::StoreError;
-use crate::store::TaskStore;
 
 /// Verifies durable recovery, ownership fencing, and strict recovery pages.
 ///

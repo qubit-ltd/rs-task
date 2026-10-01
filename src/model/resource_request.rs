@@ -41,6 +41,10 @@ pub struct ResourceRequest {
     pub cpu_slots: u32,
     /// Number of distinct GPU devices requested.
     pub gpu_count: u32,
+    /// Optional memory quota in bytes.
+    pub memory_bytes: Option<u64>,
+    /// Optional disk quota in bytes.
+    pub disk_bytes: Option<u64>,
     /// Minimum labels required from every assigned GPU.
     pub gpu_labels: Vec<String>,
     /// Named exclusive integer resources such as memory or licenses.

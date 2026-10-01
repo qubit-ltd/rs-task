@@ -12,6 +12,10 @@ use std::collections::BTreeMap;
 pub(in crate::engine::local_task_execution_engine) struct Usage {
     /// Reserved CPU slots.
     pub(in crate::engine::local_task_execution_engine) cpu: u32,
+    /// Reserved memory quota in bytes.
+    pub(in crate::engine::local_task_execution_engine) memory: u64,
+    /// Reserved disk quota in bytes.
+    pub(in crate::engine::local_task_execution_engine) disk: u64,
     /// Reserved GPU identifiers.
     pub(in crate::engine::local_task_execution_engine) gpus: Vec<String>,
     /// Reserved custom resource amounts.

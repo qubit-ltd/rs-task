@@ -6,21 +6,34 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use rusqlite::Connection;
+#[cfg(test)]
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
+#[cfg(test)]
 use rusqlite::params;
 
+#[cfg(test)]
 use super::super::SCHEMA_VERSION;
 use super::super::failure;
+#[cfg(test)]
 use super::super::state_kind;
+#[cfg(test)]
 use super::StoredLifecycle;
+#[cfg(test)]
 use super::row_codec::decode_legacy_record;
+#[cfg(test)]
 use super::row_codec::encode_lifecycle;
+#[cfg(test)]
 use crate::model::TaskRequest;
+#[cfg(test)]
 use crate::model::TaskRequestInfo;
 use crate::store::StoreError;
 
+/// Schema version for the numeric-ID typed request format.
+pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 4;
+
 /// Canonical recovery index SQL; equality makes reopen repairs idempotent.
+#[cfg(test)]
 const UNFINISHED_INDEX_SQL: &str =
     "CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE +state_kind IN ('Queued','Running')";
 
@@ -38,6 +51,7 @@ const UNFINISHED_INDEX_SQL: &str =
 ///
 /// Returns a store error for unsupported versions, invalid schemas, migration
 /// failures, or SQLite operation failures.
+#[cfg(test)]
 pub(in crate::store::sqlite_task_store) fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -90,11 +104,137 @@ pub(in crate::store::sqlite_task_store) fn initialize_schema(connection: &mut Co
     transaction.commit().map_err(failure)
 }
 
+/// Initializes the typed-request schema without rewriting legacy task data.
+///
+/// This entry point is intentionally separate from [`initialize_schema`]
+/// during the API cutover. A database with any older task schema is rejected
+/// with an explicit migration diagnostic; no UUID key or task record is
+/// rewritten or removed.
+pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
+    connection: &mut Connection,
+) -> Result<(), StoreError> {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(failure)?;
+    if version != 0 && version != NEXT_SCHEMA_VERSION {
+        return Err(StoreError::Failure(format!(
+            "SQLite task schema version {version} uses the legacy UUID format; explicit task ID mapping is required before opening with the typed task API"
+        )));
+    }
+    let transaction = connection.transaction().map_err(failure)?;
+    let table_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if version == NEXT_SCHEMA_VERSION {
+        if !table_exists {
+            return Err(StoreError::Failure(
+                "typed SQLite task schema is missing table `tasks`".into(),
+            ));
+        }
+        validate_next_schema(&transaction)?;
+    } else if table_exists {
+        return Err(StoreError::Failure(
+            "SQLite task database contains an unversioned legacy `tasks` table; explicit task ID mapping is required before opening with the typed task API".into(),
+        ));
+    } else {
+        transaction
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=20 AND id NOT GLOB '*[^0-9]*'),
+                    state_kind TEXT NOT NULL,
+                    accepted_at INTEGER NOT NULL,
+                    kind_id TEXT NOT NULL,
+                    category TEXT,
+                    payload_type_id TEXT NOT NULL,
+                    payload_schema_version INTEGER NOT NULL,
+                    codec_id TEXT NOT NULL,
+                    correlation_key TEXT,
+                    idempotency_key TEXT UNIQUE,
+                    request_info_json TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    record_format_version INTEGER NOT NULL,
+                    lifecycle_json TEXT NOT NULL,
+                    state_version INTEGER NOT NULL DEFAULT 0,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    started_at INTEGER,
+                    progress_attempt INTEGER,
+                    progress_version INTEGER NOT NULL DEFAULT 0,
+                    progress_json TEXT
+                );
+                CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);
+                CREATE INDEX tasks_kind_category_accepted_id ON tasks(kind_id, category, accepted_at, id);
+                CREATE INDEX tasks_category_accepted_id ON tasks(category, accepted_at, id);
+                CREATE INDEX tasks_state_accepted_id ON tasks(state_kind, accepted_at, id);
+                CREATE INDEX tasks_correlation_accepted_id ON tasks(correlation_key, accepted_at, id);
+                CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE state_kind IN ('Queued','Running');",
+            )
+            .map_err(failure)?;
+        transaction
+            .pragma_update(None, "user_version", NEXT_SCHEMA_VERSION)
+            .map_err(failure)?;
+    }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS tasks_kind_category_accepted_id ON tasks(kind_id, category, accepted_at, id);
+             CREATE INDEX IF NOT EXISTS tasks_category_accepted_id ON tasks(category, accepted_at, id);
+             CREATE INDEX IF NOT EXISTS tasks_state_accepted_id ON tasks(state_kind, accepted_at, id);
+             CREATE INDEX IF NOT EXISTS tasks_correlation_accepted_id ON tasks(correlation_key, accepted_at, id);
+             CREATE INDEX IF NOT EXISTS tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE state_kind IN ('Queued','Running');",
+        )
+        .map_err(failure)?;
+    transaction.commit().map_err(failure)
+}
+
+/// Validates required columns for the typed request schema.
+fn validate_next_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let columns = {
+        let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(failure)?;
+        rows.collect::<Result<std::collections::HashSet<_>, _>>()
+            .map_err(failure)?
+    };
+    for required in [
+        "id",
+        "state_kind",
+        "accepted_at",
+        "kind_id",
+        "category",
+        "payload_type_id",
+        "payload_schema_version",
+        "codec_id",
+        "request_info_json",
+        "payload",
+        "record_format_version",
+        "lifecycle_json",
+        "state_version",
+        "attempt",
+        "started_at",
+        "progress_attempt",
+        "progress_version",
+        "progress_json",
+    ] {
+        if !columns.contains(required) {
+            return Err(StoreError::Failure(format!(
+                "typed SQLite task schema is missing required column `{required}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Ensures every history/recovery index exists in the schema transaction.
 ///
 /// History indexes and record bytes are retained. An older recovery index
 /// definition is replaced atomically in the caller's transaction. SQLite DDL
 /// failures roll back every change for fresh, upgraded and version-3 databases.
+#[cfg(test)]
 fn ensure_indexes(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     transaction
         .execute_batch(
@@ -111,6 +251,7 @@ fn ensure_indexes(transaction: &Transaction<'_>) -> Result<(), StoreError> {
 ///
 /// The canonical SQL is checked before DDL, so repeated opens do not rebuild
 /// the index. A failed replacement is rolled back with the schema transaction.
+#[cfg(test)]
 fn ensure_unfinished_index(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let existing: Option<String> = transaction
         .query_row(
@@ -144,6 +285,7 @@ fn ensure_unfinished_index(transaction: &Transaction<'_>) -> Result<(), StoreErr
 /// # Errors
 ///
 /// Returns a store error when inspection fails or a required column is absent.
+#[cfg(test)]
 fn validate_schema_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
@@ -187,6 +329,7 @@ fn validate_schema_three(transaction: &Transaction<'_>) -> Result<(), StoreError
 ///
 /// Returns a store error when the old schema is invalid, a row cannot be
 /// decoded, indexed values disagree, or a SQLite operation fails.
+#[cfg(test)]
 fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
@@ -262,6 +405,7 @@ fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), Stor
 ///
 /// Returns a store error when required columns are absent, records are invalid,
 /// or a SQLite operation fails.
+#[cfg(test)]
 fn migrate_legacy_schema(transaction: &Transaction<'_>, schema_version: i64) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;

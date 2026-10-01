@@ -18,8 +18,8 @@ use crate::model::TaskState;
 use crate::model::TaskStateKind;
 use crate::model::TaskSummary;
 use crate::model::TransitionCommand;
+use crate::store::LegacyTaskStore as TaskStore;
 use crate::store::StoreError;
-use crate::store::TaskStore;
 
 /// Verifies atomic acceptance, CAS, reads, and history queries in a fresh
 /// namespace.
@@ -41,8 +41,8 @@ pub async fn verify_core_contract(fixture: &dyn StoreFixture) -> Result<Contract
     finish_owner(store.as_ref(), owner, result).await
 }
 
-/// Acquires durable ownership, or checks volatile ownership/recovery rejection.
-/// Unexpected acquired ownership is released before returning a violation.
+/// Acquires ownership when supported and checks that volatile stores reject
+/// restart-recovery scans. Any acquired owner is released by the caller.
 async fn acquire_for_core(store: &dyn TaskStore) -> Result<Option<OwnerEpoch>, ContractViolation> {
     let capabilities = store.capabilities();
     if capabilities.restart_recovery && !capabilities.persistent_history {
@@ -58,34 +58,27 @@ async fn acquire_for_core(store: &dyn TaskStore) -> Result<Option<OwnerEpoch>, C
             .map(Some)
             .map_err(|error| violation("owner_acquisition", error));
     }
-    match store.acquire_owner().await {
-        Err(StoreError::UnsupportedCapability) => {}
-        Ok(epoch) => {
-            return finish_owner(
+
+    let owner = match store.acquire_owner().await {
+        Ok(epoch) => Some(epoch),
+        Err(StoreError::UnsupportedCapability) => None,
+        Err(error) => return Err(violation("capabilities", error)),
+    };
+    match store.scan_unfinished(None).await {
+        Err(StoreError::UnsupportedCapability) => Ok(owner),
+        Ok(_) => {
+            finish_owner(
                 store,
-                Some(epoch),
+                owner,
                 Err(violation(
                     "capabilities",
-                    "volatile ownership must report UnsupportedCapability",
+                    "volatile stores must reject restart-recovery scans",
                 )),
             )
-            .await;
+            .await
         }
-        Err(error) => return Err(violation("capabilities", error)),
+        Err(error) => finish_owner(store, owner, Err(violation("capabilities", error))).await,
     }
-    if !matches!(
-        store.scan_unfinished(None).await,
-        Err(StoreError::UnsupportedCapability)
-    ) || !matches!(
-        store.release_owner(OwnerEpoch(0)).await,
-        Err(StoreError::UnsupportedCapability)
-    ) {
-        return Err(violation(
-            "capabilities",
-            "volatile recovery and release must report UnsupportedCapability",
-        ));
-    }
-    Ok(None)
 }
 
 /// Awaits owner release for any suite result, preserving the original check

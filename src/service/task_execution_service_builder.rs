@@ -35,8 +35,8 @@ use crate::handler::TaskHandlerRegistry;
 use crate::model::ResourceCapacity;
 use crate::scheduling::FairFifoPolicy;
 use crate::scheduling::SchedulingPolicy;
+use crate::store::LegacyTaskStore;
 use crate::store::MemoryTaskStore;
-use crate::store::TaskStore;
 
 /// Explicit component assembly and resource policy for one task service.
 ///
@@ -60,7 +60,7 @@ use crate::store::TaskStore;
 #[must_use = "configure the builder and call build to start the service"]
 pub struct TaskExecutionServiceBuilder {
     /// Selected persistent or volatile task history store.
-    store: Option<Arc<dyn TaskStore>>,
+    store: Option<Arc<dyn LegacyTaskStore>>,
     /// Selected resource reservation and execution backend.
     engine: Option<Arc<dyn TaskExecutionEngine>>,
     /// Selected candidate ordering policy.
@@ -191,7 +191,7 @@ impl TaskExecutionServiceBuilder {
     /// A builder initialized with those components.
     #[inline]
     pub fn from_components(
-        store: Arc<dyn TaskStore>,
+        store: Arc<dyn LegacyTaskStore>,
         engine: Arc<dyn TaskExecutionEngine>,
         policy: Arc<dyn SchedulingPolicy>,
     ) -> Self {
@@ -208,7 +208,7 @@ impl TaskExecutionServiceBuilder {
     ///
     /// This builder with the supplied store selected.
     #[inline]
-    pub fn store(mut self, store: Arc<dyn TaskStore>) -> Self {
+    pub fn store(mut self, store: Arc<dyn LegacyTaskStore>) -> Self {
         self.store = Some(store);
         self
     }
@@ -688,8 +688,8 @@ mod tests {
     use crate::model::TaskOutput;
     #[cfg(feature = "sqlite")]
     use crate::model::TaskState;
+    use crate::store::LegacyTaskStore;
     use crate::store::MemoryTaskStore;
-    use crate::store::TaskStore;
 
     #[cfg(feature = "sqlite")]
     struct Echo;
@@ -724,21 +724,36 @@ mod tests {
 
     #[tokio_crate::test]
     async fn test_owner_guard_without_lease_is_a_noop() {
-        let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(4));
+        let store: Arc<dyn LegacyTaskStore> = Arc::new(MemoryTaskStore::new(4));
         let mut guard = super::OwnerGuard::new(store, None);
         guard.release().await.expect("no lease needs no release");
         assert!(guard.transfer().is_none());
     }
 
     #[tokio_crate::test]
-    async fn test_owner_guard_preserves_release_failure() {
-        let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(4));
-        let mut guard = super::OwnerGuard::new(store, Some(crate::model::OwnerEpoch(1)));
+    async fn test_owner_guard_holds_and_releases_memory_owner_epoch() {
+        let memory_store = Arc::new(MemoryTaskStore::new(4));
+        let epoch = memory_store
+            .acquire_owner()
+            .await
+            .expect("memory store grants local ownership");
+        let store: Arc<dyn LegacyTaskStore> = Arc::clone(&memory_store) as Arc<dyn LegacyTaskStore>;
+        let mut guard = super::OwnerGuard::new(store, Some(epoch));
         assert!(matches!(
-            guard.release().await,
-            Err(crate::store::StoreError::UnsupportedCapability)
+            memory_store.acquire_owner().await,
+            Err(crate::store::StoreError::OwnerConflict)
         ));
+        guard.release().await.expect("guard releases its owner epoch");
         assert!(guard.transfer().is_none());
+        let replacement = memory_store
+            .acquire_owner()
+            .await
+            .expect("released owner can reacquire");
+        assert!(replacement.0 > epoch.0);
+        memory_store
+            .release_owner(replacement)
+            .await
+            .expect("replacement owner releases");
     }
 
     #[cfg(feature = "sqlite")]
@@ -748,7 +763,7 @@ mod tests {
         let store = Arc::new(crate::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
         let epoch = store.acquire_owner().await.expect("store acquires ownership");
         drop(super::OwnerGuard::new(
-            Arc::clone(&store) as Arc<dyn TaskStore>,
+            Arc::clone(&store) as Arc<dyn LegacyTaskStore>,
             Some(epoch),
         ));
 
@@ -774,8 +789,8 @@ mod tests {
     #[tokio_crate::test]
     async fn test_sqlite_builder_recovers_unfinished_records() {
         use crate::model::AcceptOutcome;
+        use crate::store::LegacyTaskStore;
         use crate::store::SqliteTaskStore;
-        use crate::store::TaskStore;
 
         let path = std::env::temp_dir().join(format!("qubit-task-unit-recovery-{}.sqlite", TaskId::generate()));
         let store = SqliteTaskStore::open(&path).unwrap();

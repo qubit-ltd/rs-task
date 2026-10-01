@@ -8,9 +8,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::model::TaskId;
 use crate::model::TaskState;
-use crate::model::TaskSummary;
 
 /// Immutable status-change event suitable for duplicate-aware consumers.
 ///
@@ -22,7 +20,7 @@ use crate::model::TaskSummary;
 /// use qubit_task::model::TaskState;
 ///
 /// let event = TaskEvent {
-///     task_id: TaskId::generate(),
+///     task_id: "42".into(),
 ///     state_version: 1,
 ///     state: TaskState::Running,
 ///     correlation_key: None,
@@ -32,7 +30,7 @@ use crate::model::TaskSummary;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskEvent {
     /// Stable task identifier.
-    pub task_id: TaskId,
+    pub task_id: String,
     /// Monotonic status revision; consumers may discard older revisions.
     pub state_version: u64,
     /// Current lifecycle state.
@@ -41,7 +39,8 @@ pub struct TaskEvent {
     pub correlation_key: Option<String>,
 }
 
-impl From<&TaskSummary> for TaskEvent {
+#[cfg(test)]
+impl From<&crate::model::TaskSummary> for TaskEvent {
     /// Copies the task identity, revision, state, and correlation key.
     ///
     /// # Parameters
@@ -51,12 +50,25 @@ impl From<&TaskSummary> for TaskEvent {
     /// # Returns
     ///
     /// An immutable event snapshot without request payload data.
-    fn from(record: &TaskSummary) -> Self {
+    fn from(record: &crate::model::TaskSummary) -> Self {
         Self {
-            task_id: record.id,
+            task_id: record.id.to_string(),
             state_version: record.state_version,
             state: record.state.clone(),
             correlation_key: record.request.correlation_key.clone(),
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl From<&crate::model::TaskSummary> for TaskEvent {
+    /// Copies the typed task identity, revision, state, and correlation key.
+    fn from(record: &crate::model::TaskSummary) -> Self {
+        Self {
+            task_id: record.id.to_string(),
+            state_version: record.state_version,
+            state: record.state.clone(),
+            correlation_key: record.correlation_key.clone(),
         }
     }
 }

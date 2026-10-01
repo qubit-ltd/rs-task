@@ -13,7 +13,8 @@ use parking_lot::Mutex;
 use super::usage::Usage;
 
 /// Resource amounts held by one execution reservation.
-pub(in crate::engine::local_task_execution_engine) type Allocation = (u32, Vec<String>, BTreeMap<String, u64>);
+pub(in crate::engine::local_task_execution_engine) type Allocation =
+    (u32, u64, u64, Vec<String>, BTreeMap<String, u64>);
 /// Active reservations indexed by their release token.
 pub(in crate::engine::local_task_execution_engine) type AllocationLedger = HashMap<u64, Allocation>;
 
@@ -36,8 +37,10 @@ pub(in crate::engine::local_task_execution_engine) struct ResourceLedger {
 /// * `ledger` - Shared resource totals and reservation map.
 pub(in crate::engine::local_task_execution_engine) fn release_reservation(token: u64, ledger: &Mutex<ResourceLedger>) {
     let mut ledger = ledger.lock();
-    if let Some((cpu, gpus, custom)) = ledger.allocations.remove(&token) {
+    if let Some((cpu, memory, disk, gpus, custom)) = ledger.allocations.remove(&token) {
         ledger.usage.cpu = ledger.usage.cpu.saturating_sub(cpu);
+        ledger.usage.memory = ledger.usage.memory.saturating_sub(memory);
+        ledger.usage.disk = ledger.usage.disk.saturating_sub(disk);
         ledger.usage.gpus.retain(|id| !gpus.contains(id));
         for (name, amount) in custom {
             if let Some(value) = ledger.usage.custom.get_mut(&name) {

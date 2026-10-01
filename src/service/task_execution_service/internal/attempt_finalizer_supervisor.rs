@@ -71,9 +71,9 @@ mod tests {
 
     use super::super::retry_queue_reservation::RetryQueueReservation;
     use super::spawn_attempt_finalizer;
-    use crate::TaskExecutionServiceBuilder;
     use crate::model::TaskId;
     use crate::model::TaskRequest;
+    use crate::service::task_execution_service_builder::TaskExecutionServiceBuilder;
 
     #[test]
     fn test_attempt_finalizer_supervisor_unpolled_drop_restores_resources() {

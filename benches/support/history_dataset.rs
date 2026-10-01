@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use qubit_id::Id;
 use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
 
@@ -12,12 +13,10 @@ pub struct HistoryDataset {
     pub correlation_key: String,
 }
 
-/// Creates a schema-version-3 database with deterministic legal task rows.
-/// Secondary indexes are deliberately left to SqliteTaskStore::open so the
+/// Creates a schema-version-4 database with deterministic legal task rows.
+/// Secondary indexes are deliberately left to SqliteTaskStore::open_next so the
 /// first-open/index-build cost can be measured independently of seeding.
 pub fn create(size: usize, directory: &std::path::Path) -> Result<HistoryDataset, Box<dyn std::error::Error>> {
-    use qubit_task::model::TaskRequest;
-    use qubit_task::model::TaskRequestInfo;
     use rusqlite::Connection;
     use rusqlite::params;
     use serde_json::json;
@@ -29,29 +28,40 @@ pub fn create(size: usize, directory: &std::path::Path) -> Result<HistoryDataset
             id TEXT PRIMARY KEY NOT NULL,
             state_kind TEXT NOT NULL,
             accepted_at INTEGER NOT NULL,
+            kind_id TEXT NOT NULL,
+            category TEXT,
+            payload_type_id TEXT NOT NULL,
+            payload_schema_version INTEGER NOT NULL,
+            codec_id TEXT NOT NULL,
             correlation_key TEXT,
             idempotency_key TEXT UNIQUE,
             request_info_json TEXT NOT NULL,
             payload BLOB NOT NULL,
-            record_format_version INTEGER NOT NULL DEFAULT 3,
-            lifecycle_json TEXT NOT NULL
+            record_format_version INTEGER NOT NULL DEFAULT 4,
+            lifecycle_json TEXT NOT NULL,
+            state_version INTEGER NOT NULL DEFAULT 0,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            started_at INTEGER,
+            progress_attempt INTEGER,
+            progress_version INTEGER NOT NULL DEFAULT 0,
+            progress_json TEXT
         );
         CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);
-        PRAGMA user_version=3;",
+        PRAGMA user_version=4;",
     )?;
 
     let transaction = connection.transaction()?;
     let mut insert = transaction.prepare(
-        "INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json)
-         VALUES (?1,?2,?3,?4,NULL,?5,X'',3,?6)",
+        "INSERT INTO tasks (id,state_kind,accepted_at,kind_id,category,payload_type_id,payload_schema_version,codec_id,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json,state_version)
+         VALUES (?1,?2,?3,'benchmark',NULL,'qubit_task.benchmark.Payload',1,'qubit.bytes.json',?4,NULL,?5,X'',4,?6,1)",
     )?;
     let mut rng = FixedRng(0x6a09_e667_f3bc_c909);
-    let mut cursor = TaskCursor::new(0, TaskId::generate());
+    let mut cursor = TaskCursor::new(0, TaskId::from_id(Id::new(0)));
     let mut correlation_key = String::from("correlation-0");
     for index in 0..size {
         let random = rng.next();
-        let id = format!("00000000-0000-4000-8000-{index:012x}");
-        let task_id: TaskId = serde_json::from_str(&format!("\"{id}\""))?;
+        let task_id = TaskId::from_id(Id::new((index + 1) as u64));
+        let id = task_id.to_padded_decimal();
         let accepted_at = (index as i64) * 1000 + (random % 1000) as i64;
         let bucket = index % 1000;
         let (state_kind, state_json) = match bucket {
@@ -68,22 +78,29 @@ pub fn create(size: usize, directory: &std::path::Path) -> Result<HistoryDataset
         } else {
             Some(format!("correlation-{key}"))
         };
-        let request = TaskRequest::new("benchmark", "1", Vec::new());
-        let mut request_info = TaskRequestInfo::from(&request);
-        request_info.correlation_key = correlation.clone();
-        let request_info_json = serde_json::to_string(&request_info)?;
+        let request_info_json = json!({
+            "kind_id": "benchmark",
+            "category": null,
+            "payload_type_id": "qubit_task.benchmark.Payload",
+            "payload_schema_version": 1,
+            "payload_codec_id": "qubit.bytes.json",
+            "metadata": qubit_metadata::Metadata::new(),
+            "resource_limit": qubit_task::model::ResourceRequest::default(),
+            "correlation_key": correlation,
+            "idempotency_key": null
+        })
+        .to_string();
         let lifecycle_json = json!({
-            "id": task_id,
             "state": state_json,
             "state_version": 1,
             "attempt": 0,
-            "retry_not_before_ms": null,
             "accepted_at_ms": accepted_at,
             "started_at_ms": null,
             "finished_at_ms": null,
-            "assigned_resources": [],
+            "progress": null,
             "output": null,
-            "cancel_requested": false
+            "cancel_requested": false,
+            "cancel_error": null
         })
         .to_string();
         insert.execute(params![

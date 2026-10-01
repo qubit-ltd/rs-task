@@ -354,7 +354,7 @@ mod tests {
 
     fn event(version: u64) -> TaskEvent {
         TaskEvent {
-            task_id: TaskId::generate(),
+            task_id: TaskId::generate().to_string(),
             state_version: version,
             state: TaskState::Queued,
             correlation_key: None,
