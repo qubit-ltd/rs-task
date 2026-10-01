@@ -72,6 +72,9 @@ pub enum TaskServiceError {
         /// Lifecycle state observed when the operation was rejected.
         actual: TaskStateKind,
     },
+    /// Cancellation must be resolved before a blocked task can be resumed.
+    #[error("task has a pending cancellation request")]
+    CancellationPending,
     /// The task used all configured execution attempts and cannot be requeued.
     #[error("task exhausted its execution attempt budget ({attempts}/{limit})")]
     AttemptsExhausted {

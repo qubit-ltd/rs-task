@@ -16,10 +16,6 @@ pub enum EngineError {
     /// Request exceeds configured capacity or requires unknown resources.
     #[error("requested resources cannot be satisfied by this engine")]
     Unsatisfiable,
-    /// The legacy test engine has shut down and cannot reserve resources.
-    #[cfg(test)]
-    #[error("task execution engine is closed")]
-    Closed,
     /// The engine exhausted its non-reusable reservation identifiers.
     #[error("task execution reservation identifier space is exhausted")]
     ReservationTokenExhausted,
