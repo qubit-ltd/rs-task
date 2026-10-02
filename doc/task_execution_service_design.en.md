@@ -22,7 +22,7 @@ A handler registered for a `kind_id` accepts one payload `type_id` and declares 
 
 Memory and SQLite stores implement the same typed store contract. SQLite uses its typed numeric-ID schema; an incompatible legacy UUID schema is rejected with a diagnostic rather than silently reinterpreted. Store ownership fences concurrent service instances, and recovery resumes retained queued work after acquiring ownership.
 
-One scheduler scans queued summaries in bounded pages and starts handlers only while a running slot is available. `max_running_tasks` defaults to available parallelism; `scan_page_size` defaults to 128 and is capped at 256. Retry deadlines are persisted in SQLite schema version 5 and observed across restarts. Only explicitly retryable handler failures are retried, up to the configured attempt limit. Blocked tasks can be resumed with their observed state version after operators repair configuration.
+One scheduler scans queued summaries in bounded pages and starts handlers only while a running slot is available. `max_running_tasks` defaults to available parallelism; `scan_page_size` defaults to 128 and is capped at 256. Retry deadlines are persisted in SQLite schema version 5 and observed across restarts. Schema version 6 adds a lifecycle event outbox; migration from typed schema version 4 or 5 is transactional and preserves existing task rows. Only explicitly retryable handler failures are retried, up to the configured attempt limit. Blocked tasks can be resumed with their observed state version after operators repair configuration.
 
 ## Execution and resource admission
 
@@ -42,4 +42,6 @@ SQLite persistence supports process restart recovery with at-least-once executio
 
 Store failures in background scheduling and finalization are latched. New writes stop, and `shutdown()` drains active work before returning the stored failure and releasing ownership. Diagnostic reads continue to use the store.
 
-The optional Event Bus integration exposes `TaskEvent` transport types and codecs, but lifecycle publication is not currently connected to the typed execution service. Task queries remain the authoritative source of state. See the [typed API guide](typed-task-api.md) for the end-to-end example and concrete API contracts.
+When configured with `TaskExecutionServiceBuilder::event_bus`, the service enables the store outbox and starts an asynchronous publisher after task recovery. Each lifecycle snapshot is inserted in the same SQLite transaction as its task transition, then published to `task.lifecycle` and removed after accepted publication. This requires persistent outbox support; `MemoryTaskStore` is not durable and rejects this configuration. Only transitions written while the outbox is enabled are captured; startup does not backfill older task states.
+
+Delivery is at-least-once. If a publish result is unknown, or the process stops after the bus accepted the event but before the outbox row is deleted, the same snapshot may be published again. Consumers should deduplicate by `(TaskId, state_version)`, ignore stale versions, and query the service after a gap. Monitor outbox row count and oldest-row age, and check Redis `XLEN` and `XPENDING` when Redis Streams is the provider. See the [typed API guide](typed-task-api.md) and [user guide](user-guide.md#publish-lifecycle-changes) for usage and operational boundaries.

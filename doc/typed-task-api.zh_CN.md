@@ -112,8 +112,8 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 - `max_running_tasks` 限制活跃 handler 数，`scan_page_size` 限制每次 queued 摘要扫描量。待执行任务保留在 store 中，只有拿到运行名额后才创建执行协程。
 - handler 的 `TaskRunError.retryable` 决定是否重试。默认 `max_attempts` 为 3，`RetryPolicy` 延迟从 1 秒增长到 60 秒。queued 状态和 `retry_not_before_ms` 一起保存，重启恢复仍遵守截止时间。不可重试错误、panic、取消和超过尝试上限都会结束任务。
 - 调用 `resume_blocked(id, expected_state_version)` 可在修复配置并使用兼容 handler 或 codec 重启服务后重新排队。状态版本冲突时先重新读取摘要；存在待处理取消时不能恢复。
-- 后台存储故障会被锁存：停止写入和调度，保留诊断读取；`shutdown()` 排空活跃工作后返回存储故障。SQLite typed schema 版本 4 会事务迁移到版本 5；旧 UUID schema 仍需显式映射数据。
+- 后台存储故障会被锁存：停止写入和调度，保留诊断读取；`shutdown()` 排空活跃工作后返回存储故障。SQLite typed schema 版本 4 或 5 会事务迁移到版本 6；迁移会新增生命周期 outbox，不删除已有任务数据。旧 UUID schema 仍需显式映射数据。
 - `TaskContext::progress_builder()` 使用 `rs-progress::AsyncReporter`。`report_async()` 等待进度持久化后才返回。后续查询可看到 stage 和 metric 快照，但它们不会改变生命周期 `state_version`；上报错误会返回处理器。
 - typed 历史页按 `(accepted_at_ms, 数值 task id)` 升序排序。`after` 是排他键游标，不是 offset；每次查询读取自己的存储快照。只有存在 lookahead 记录时才有 `next`。过滤器包括 state、业务 `category` 和 correlation key；`kind_id` 用于处理器路由，与 `category` 独立。
 
-Redis 通知 fixture 验证 typed `TaskEvent` 传输和消费者行为。目前生命周期事件尚未接入 typed execution service，因此消费者应通过服务查询接口读取权威状态。
+需要持久生命周期通知时，启用 `event-bus`、注册应用提供的 `TaskEvent` codec，并设置 `TaskExecutionServiceBuilder::event_bus`。生命周期状态写入时会在同一事务内写入 SQLite outbox，再由后台异步重放。语义为至少一次：发布结果不确定，或在 outbox 删除前崩溃，都可能让消费者收到重复事件。消费者应按 `(TaskId, state_version)` 去重，并以任务查询为准。启用 publisher 不会补发此前已提交的历史状态。`MemoryTaskStore` 不支持持久 outbox。配置边界和监控方法见[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。

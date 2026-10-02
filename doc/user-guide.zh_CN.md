@@ -22,6 +22,12 @@
 
 `sqlite` feature 提供持久化任务历史与恢复。恢复采用至少一次语义：若任务在外部副作用完成后、终态写入前中断，恢复后可能再次运行，因此应用副作用需要幂等性或事务保护。服务只在单进程内调度，不提供分布式调度或业务副作用恰好一次保证。
 
-可选的 `event-bus` 集成和 Redis provider fixture 演示 `TaskEvent` 传输与消费者处理。目前 typed execution service 尚未接入 typed 任务生命周期事件发布；消费者应以任务查询接口返回的记录为准。
+## 发布任务生命周期变化
 
-更多背景见[详细设计](task_execution_service_design.md)、[迁移指南](migration-0.8.zh_CN.md)和 [API 文档](https://docs.rs/qubit-task)。
+需要向外发送生命周期通知时，启用 `event-bus` feature，并将 `Arc<AsyncEventBus>` 传给 `TaskExecutionServiceBuilder::event_bus`。应用还需在 bus 上注册自己的 `TaskEvent` codec。服务要求 store 支持持久 outbox：`SqliteTaskStore` 提供此能力，`MemoryTaskStore` 则会在构建服务时返回 `UnsupportedCapability`。不配置 `event_bus` 时，服务不会记录生命周期通知。
+
+publisher 启用后，每次生命周期状态提交都会与对应 outbox 行在同一个 SQLite 事务中写入。后台 worker 按稳定顺序将事件发往 `task.lifecycle`，确认接纳后再删除 outbox 行。服务启动时会重放已有待发事件；启用 outbox 之前提交的状态不会补发。投递语义为至少一次：发布结果不确定，或 bus 已接纳事件但进程在 SQLite 删除记录前崩溃，都可能产生重复。消费者应为每个 `TaskId` 保存最高 `state_version`，忽略重复和旧版本；发现版本缺口时查询任务服务。事件只用于通知，任务查询才是权威状态。
+
+关闭时 worker 会持续排空，直到 outbox 清空或 `notification_shutdown_timeout` 到期。超时会返回错误，尚未发送的行仍保留在 SQLite，供下次启动重放。运维时应监控 SQLite outbox 行数和最老行年龄，并结合 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`，区分 publisher 堵塞、stream 积压和消费者未确认等情况。
+
+更多背景见[详细设计](task_execution_service_design.md)、[迁移指南](migration.zh_CN.md)和 [API 文档](https://docs.rs/qubit-task)。
