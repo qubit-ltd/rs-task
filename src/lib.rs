@@ -14,7 +14,6 @@ pub mod model;
 pub mod service;
 pub mod store;
 
-#[cfg(feature = "event-bus")]
 pub mod event;
 
 pub use handler::CancellationMode;

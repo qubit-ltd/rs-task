@@ -58,3 +58,11 @@ impl From<&crate::model::TaskSummary> for TaskEvent {
         }
     }
 }
+
+impl TaskEvent {
+    /// Captures the identity, revision, state and correlation of a committed typed summary.
+    #[must_use]
+    pub fn from_typed_summary(summary: &crate::model::next::TaskSummary) -> Self {
+        Self::from(summary)
+    }
+}
