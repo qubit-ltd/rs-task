@@ -9,8 +9,8 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
-use qubit_model_metadata::metadata::ModelId;
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelId;
+use qubit_model_id::ModelIdBuf;
 
 use crate::model::next::EncodedPayload;
 use crate::model::next::Payload;

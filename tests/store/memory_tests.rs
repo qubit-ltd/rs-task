@@ -36,7 +36,7 @@ fn encoded_request(key: Option<&str>, bytes: Vec<u8>) -> StoredTaskRequest {
         kind_id: "memory.encoded".to_owned(),
         category: Some("integration".to_owned()),
         payload: StoredPayload {
-            type_id: qubit_model_metadata::metadata::ModelIdBuf::parse("qubit_task.tests.Payload")
+            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload")
                 .expect("model ID is valid"),
             schema_version: 2,
             codec_id: "qubit.bytes.json".to_owned(),

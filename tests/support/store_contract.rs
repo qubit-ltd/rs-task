@@ -25,7 +25,7 @@ fn request(idempotency_key: Option<&str>, bytes: &[u8]) -> StoredTaskRequest {
         kind_id: "contract.handler".into(),
         category: Some("contract".into()),
         payload: StoredPayload {
-            type_id: qubit_model_metadata::metadata::ModelIdBuf::parse("contract.Payload").expect("valid model ID"),
+            type_id: qubit_model_id::ModelIdBuf::parse("contract.Payload").expect("valid model ID"),
             schema_version: 1,
             codec_id: "contract.bytes".into(),
             bytes: bytes.to_vec(),

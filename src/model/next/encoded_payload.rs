@@ -8,7 +8,7 @@
 use std::marker::PhantomData;
 
 use qubit_codec::ValueCodecId;
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelIdBuf;
 
 use super::StoredPayload;
 
