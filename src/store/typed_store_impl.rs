@@ -69,6 +69,16 @@ impl TaskStore for MemoryTaskStore {
 
 #[cfg(feature = "sqlite")]
 impl TaskStore for super::SqliteTaskStore {
+    fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.enable_outbox()
+    }
+    fn list_event_outbox<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> {
+        self.list_outbox(limit)
+    }
+    fn mark_event_published<'a>(&'a self, task_id: TaskId, state_version: u64) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.mark_outbox_published(task_id, state_version)
+    }
+
     fn capabilities(&self) -> StoreCapabilities {
         LegacyTaskStore::capabilities(self)
     }

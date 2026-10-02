@@ -150,12 +150,53 @@ pub struct SqliteTaskStore {
     operation_slot: Arc<sync::Semaphore>,
     /// Selects the in-progress typed numeric-ID schema path.
     typed_schema: bool,
+    outbox_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Tracks blocking worker overlap in unit tests.
     #[cfg(test)]
     worker_counts: Arc<WorkerCounts>,
 }
 
 impl SqliteTaskStore {
+    /// Serializes outbox operations with epoch validation and owner release.
+    /// Returns `OwnerConflict` if ownership has not been acquired or was released.
+    fn run_outbox<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
+    where T: Send + 'static, F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static {
+        let owner_state = Arc::clone(&self.owner_state);
+        self.run(move |connection| {
+            let owner = owner_state.lock();
+            if owner.epoch.is_none() || owner.lock_file.is_none() { return Err(StoreError::OwnerConflict); }
+            operation(connection)
+        })
+    }
+
+    /// Enables subsequent transactional snapshots while holding the owner barrier.
+    pub(super) fn enable_outbox(&self) -> TaskFuture<'_, Result<(), StoreError>> {
+        let enabled = Arc::clone(&self.outbox_enabled);
+        self.run_outbox(move |_| { enabled.store(true, std::sync::atomic::Ordering::Release); Ok(()) })
+    }
+
+    /// Reads a bounded oldest-first page; rejects absent ownership and invalid limits.
+    pub(super) fn list_outbox(&self, limit: usize) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
+        self.run_outbox(move |connection| {
+            if !(1..=256).contains(&limit) { return Err(StoreError::InvalidRequest("outbox page limit must be 1..=256")); }
+            let mut statement = connection.prepare("SELECT task_id,state_version,event_id,event_json FROM task_event_outbox ORDER BY created_at_ms,task_id,state_version LIMIT ?1").map_err(failure)?;
+            let rows = statement.query_map([limit as i64], |row| Ok((row.get::<_, String>(0)?,row.get::<_, u64>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?))).map_err(failure)?;
+            rows.map(|row| {
+                let (id, state_version, event_id, event_json) = row.map_err(failure)?;
+                let task_id = crate::model::next::TaskId::from_id(qubit_id::Id::new(id.parse::<u64>().map_err(failure)?));
+                Ok(super::EventOutboxEntry { task_id, state_version, event_id, event_json })
+            }).collect()
+        })
+    }
+
+    /// Deletes a confirmed event idempotently while ownership remains fenced.
+    pub(super) fn mark_outbox_published(&self, id: crate::model::next::TaskId, version: u64) -> TaskFuture<'_, Result<(), StoreError>> {
+        self.run_outbox(move |connection| {
+            connection.execute("DELETE FROM task_event_outbox WHERE task_id=?1 AND state_version=?2", rusqlite::params![id.to_padded_decimal(), version]).map_err(failure)?;
+            Ok(())
+        })
+    }
+
     /// Opens a database, applies its schema, and locks its physical file.
     ///
     /// # Parameters
@@ -195,6 +236,7 @@ impl SqliteTaskStore {
             })),
             operation_slot: Arc::new(sync::Semaphore::new(1)),
             typed_schema: false,
+            outbox_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             worker_counts: Arc::new(WorkerCounts::default()),
         })
@@ -228,6 +270,7 @@ impl SqliteTaskStore {
             })),
             operation_slot: Arc::new(sync::Semaphore::new(1)),
             typed_schema: true,
+            outbox_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             worker_counts: Arc::new(WorkerCounts::default()),
         })
