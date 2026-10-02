@@ -503,6 +503,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qubit-model-id"
+version = "0.1.0"
+
+[[package]]
 name = "qubit-model-metadata"
 version = "0.1.0"
 dependencies = [
@@ -510,6 +514,7 @@ dependencies = [
  "bitflags",
  "chrono",
  "qubit-id 0.6.0",
+ "qubit-model-id",
  "qubit-redact 0.9.0",
  "qubit-reflect",
  "serde",

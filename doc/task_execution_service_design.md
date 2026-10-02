@@ -26,7 +26,7 @@
 
 ## 执行与资源准入
 
-本地执行引擎在启动处理器前预留请求的 CPU 槽位、GPU 设备或标签、内存字节、磁盘字节和自定义整数单位。预留用于核算并发任务，在执行结束后释放。它们不会固定 CPU 核心、在操作系统层面发现或隔离 GPU，也不会强制限制进程实际的内存或磁盘用量。超过配置容量的请求无法运行；容量足够的请求会等待资源空闲。
+单一调度器在启动 CAS 前预留请求的 CPU 槽位、GPU 设备或标签、内存字节、磁盘字节和自定义整数单位。暂时拿不到资源的任务保留在队列中，调度器继续检查后续可运行任务。这种工作保留策略不保证严格 FIFO，较小任务可能越过较早的资源阻塞任务。只有成功启动 CAS 的任务才占运行名额；所有完成或启动失败路径都会释放预留。配额不会固定 CPU 核心、在操作系统层面发现或隔离 GPU，也不会强制限制进程实际的内存或磁盘用量。
 
 任务生命周期包括 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked` 和 `Cancelled`。状态迁移会比较已保存的 state version 和 attempt，以拒绝过期写入。排队或 blocked 的任务可直接取消。运行中的任务按处理器声明的模式取消：协作式 handler 检查 `TaskContext::is_cancelled()`，并在安全边界停止；外部 hook 模式由 hook 执行取消。若 handler 不支持运行中取消，服务会向调用方报告。
 
@@ -42,4 +42,4 @@ SQLite 持久化支持进程重启恢复，执行语义为至少一次。若任�
 
 后台调度或结果写入遇到存储故障时会锁存故障并停止新写入。`shutdown()` 等待活跃工作结束后返回该故障，再释放 owner；诊断读取仍会访问 store。
 
-可选 Event Bus 集成提供 `TaskEvent` 传输类型和 codec，但生命周期发布目前尚未接入 typed execution service。任务查询仍是权威状态来源。完整示例和具体 API 契约见[typed API 指南](typed-task-api.zh_CN.md)。
+启用可选 Event Bus feature 后，builder 可配置 `AsyncEventBus`、显式 `Topic<TaskEvent>`、有界本地队列和 shutdown 排空超时。服务仅在持久化成功后入队快照。队列满和 provider 错误会计数，不回滚任务状态；shutdown 排空超时后丢弃剩余通知并释放 owner。事件含 schema version 1 和 typed `TaskId`；消费者按 task ID 与 state version 去重，并从查询接口对账，因为系统没有事务 outbox。进度不是生命周期事件。应用可显式调用有界 `TaskStore::prune_terminal_before` 清理终态历史，该操作会释放幂等键供复用。完整 API 契约见[typed API 指南](typed-task-api.zh_CN.md)。

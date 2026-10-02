@@ -7,6 +7,8 @@
 // =============================================================================
 //! Typed store implementations backed by the existing atomic store engines.
 
+use std::num::NonZeroUsize;
+
 use super::LegacyTaskStore;
 use super::MemoryTaskStore;
 use super::StoreError;
@@ -58,6 +60,27 @@ impl TaskStore for MemoryTaskStore {
         LegacyTaskStore::list_encoded(self, query)
     }
 
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<crate::model::next::TaskCursor>,
+        limit: NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        LegacyTaskStore::list_ready_queued(self, after, limit, now_ms)
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        LegacyTaskStore::next_retry_deadline(self, now_ms)
+    }
+
+    fn prune_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        LegacyTaskStore::prune_typed_terminal_before(self, finished_before_ms, max_rows)
+    }
+
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         LegacyTaskStore::acquire_owner(self)
     }
@@ -99,6 +122,27 @@ impl TaskStore for super::SqliteTaskStore {
 
     fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         LegacyTaskStore::list_encoded(self, query)
+    }
+
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<crate::model::next::TaskCursor>,
+        limit: NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        LegacyTaskStore::list_ready_queued(self, after, limit, now_ms)
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        LegacyTaskStore::next_retry_deadline(self, now_ms)
+    }
+
+    fn prune_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        LegacyTaskStore::prune_typed_terminal_before(self, finished_before_ms, max_rows)
     }
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {

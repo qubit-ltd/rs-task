@@ -1,6 +1,14 @@
 # Migrating to qubit-task 0.8
 
-Version 0.8 contains intentional breaking changes to store pagination and fault cleanup. Update downstream `TaskStore` implementations and callers together; the release does not retain compatibility overloads.
+Version 0.8 contains intentional breaking changes to store pagination, typed scheduling queries, terminal pruning, and task notifications. Update downstream `TaskStore` implementations and callers together; no compatibility overloads are retained.
+
+## Implement the typed scheduler and retention methods
+
+Custom `TaskStore` implementations must add `list_ready_queued(after, limit, now_ms)`, `next_retry_deadline(now_ms)`, and `prune_terminal_before(finished_before_ms, max_rows)`. Ready scans return only `Queued` records with no retry deadline or a deadline at or before `now_ms`, ordered by `(accepted_at_ms, numeric TaskId)` and bounded to 1–256 rows. `next_retry_deadline` returns the minimum queued deadline strictly after `now_ms`. Pruning removes at most the requested count of `Succeeded`, `Failed`, `Panicked`, or `Cancelled` records whose `finished_at_ms` is strictly before the cutoff, ordered by `(finished_at_ms, TaskId)`. Remove idempotency keys atomically with rows; a pruned key becomes reusable. Queued and blocked records are never eligible.
+
+## Configure lifecycle notifications explicitly
+
+`TaskEvent.task_id` is now typed `TaskId` and each payload includes `schema_version = 1`. Update JSON codecs and consumers together. With the `event-bus` feature, opt in through `event_notifications(async_bus, topic, queue_capacity, shutdown_flush_timeout)`. The service publishes snapshots only after store commits; progress is excluded. A full bounded queue drops snapshots, provider errors increment `failed`, and `notification_stats()` exposes cumulative counts. `shutdown()` attempts to flush before releasing store ownership; after timeout it aborts the publisher, counts remaining items as dropped, and still completes task shutdown. Notifications have no transactional outbox and may be lost, duplicated, or reordered; reconcile from task queries and deduplicate by `(TaskId, state_version)`. Scheduling can let a later resource-compatible task pass an earlier blocked task, so do not rely on strict FIFO.
 
 ## Replace task-ID recovery cursors
 

@@ -60,6 +60,60 @@ pub(in crate::store::sqlite_task_store) fn list_encoded(
     Ok(TaskPage { records, next })
 }
 
+/// Lists bounded queued work whose retry deadline has elapsed.
+pub(in crate::store::sqlite_task_store) fn list_ready_queued(
+    connection: &Connection,
+    after: Option<TaskCursor>,
+    limit: std::num::NonZeroUsize,
+    now_ms: u64,
+) -> Result<TaskPage, StoreError> {
+    if limit.get() > crate::model::next::MAX_TASK_QUERY_LIMIT {
+        return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
+    }
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
+    let fetch =
+        i64::try_from(limit.get() + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
+    let mut sql = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)".to_string();
+    let mut values = vec![rusqlite::types::Value::Integer(now)];
+    if let Some(cursor) = after {
+        let accepted = i64::try_from(cursor.accepted_at_ms)
+            .map_err(|_| StoreError::InvalidRequest("task cursor timestamp is too large"))?;
+        values.push(rusqlite::types::Value::Integer(accepted));
+        values.push(rusqlite::types::Value::Text(cursor.id.to_padded_decimal()));
+        sql.push_str(" AND (accepted_at,id)>(?2,?3)");
+    }
+    let limit_idx = values.len() + 1;
+    sql.push_str(&format!(" ORDER BY accepted_at,id LIMIT ?{limit_idx}"));
+    values.push(rusqlite::types::Value::Integer(fetch));
+    let mut statement = connection.prepare(&sql).map_err(failure)?;
+    let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(failure)?;
+    let mut records = Vec::new();
+    while let Some(row) = rows.next().map_err(failure)? {
+        records.push(decode_summary(
+            row.get::<_, String>(0).map_err(failure)?,
+            &row.get::<_, String>(1).map_err(failure)?,
+            &row.get::<_, String>(2).map_err(failure)?,
+        )?);
+    }
+    let has_more = records.len() > limit.get();
+    records.truncate(limit.get());
+    let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
+    Ok(TaskPage { records, next })
+}
+
+/// Finds the minimum queued retry deadline strictly after the supplied time.
+pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
+    connection: &Connection,
+    now_ms: u64,
+) -> Result<Option<u64>, StoreError> {
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
+    connection.query_row(
+        "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
+        [now],
+        |row| row.get::<_, Option<i64>>(0),
+    ).map_err(failure)?.map(|value| u64::try_from(value).map_err(failure)).transpose()
+}
+
 /// Immutable typed request fields stored separately from payload bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StoredRequestInfo {

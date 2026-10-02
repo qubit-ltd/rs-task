@@ -8,6 +8,10 @@
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::AsyncEventBus;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::model::Topic;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
@@ -15,10 +19,14 @@ use qubit_id::IdGenerator;
 use super::typed_task_execution_service::TypedServiceOptions;
 use super::typed_task_execution_service::TypedTaskExecutionService;
 use crate::engine::LocalTaskExecutionEngine;
+#[cfg(feature = "event-bus")]
+use crate::event::TaskEvent;
 use crate::handler::typed::TypedTaskHandlerRegistry;
 use crate::model::ResourceCapacity;
 use crate::service::RetryPolicy;
 use crate::service::TaskServiceError;
+#[cfg(feature = "event-bus")]
+use crate::service::task_event_dispatcher::TaskEventConfig;
 use crate::store::TaskStore;
 
 /// Builder for the typed task service. ID generation is always explicit.
@@ -32,6 +40,8 @@ pub struct TypedTaskExecutionServiceBuilder {
     scan_page_size: usize,
     max_attempts: u32,
     retry_policy: RetryPolicy,
+    #[cfg(feature = "event-bus")]
+    event_notifications: Option<TaskEventConfig>,
 }
 
 impl TypedTaskExecutionServiceBuilder {
@@ -58,6 +68,8 @@ impl TypedTaskExecutionServiceBuilder {
             scan_page_size: 128,
             max_attempts: 3,
             retry_policy: RetryPolicy::default(),
+            #[cfg(feature = "event-bus")]
+            event_notifications: None,
         }
     }
 
@@ -91,6 +103,25 @@ impl TypedTaskExecutionServiceBuilder {
         self
     }
 
+    /// Enables best-effort lifecycle publication through the configured event
+    /// bus.
+    #[cfg(feature = "event-bus")]
+    pub fn event_notifications(
+        mut self,
+        bus: Arc<AsyncEventBus>,
+        topic: Topic<TaskEvent>,
+        queue_capacity: std::num::NonZeroUsize,
+        shutdown_flush_timeout: std::time::Duration,
+    ) -> Self {
+        self.event_notifications = Some(TaskEventConfig {
+            bus,
+            topic,
+            capacity: queue_capacity,
+            flush_timeout: shutdown_flush_timeout,
+        });
+        self
+    }
+
     /// Returns the handler registry being assembled.
     pub fn handlers_mut(&mut self) -> &mut TypedTaskHandlerRegistry {
         &mut self.handlers
@@ -109,6 +140,8 @@ impl TypedTaskExecutionServiceBuilder {
                 scan_page_size: self.scan_page_size,
                 max_attempts: self.max_attempts,
                 retry_policy: self.retry_policy,
+                #[cfg(feature = "event-bus")]
+                event_notifications: self.event_notifications,
             },
         )
         .await
