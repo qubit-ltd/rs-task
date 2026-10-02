@@ -1,6 +1,14 @@
 # qubit-task 0.8 迁移说明
 
-0.8 有意破坏了存储分页与故障清理接口。下游 `TaskStore` 实现和调用方需要一起更新；本版本不保留兼容重载。
+0.8 有意破坏了存储分页、typed 调度查询、终态清理和任务通知 API。下游 `TaskStore` 实现和调用方需要一起更新；本版本不保留兼容重载。
+
+## 实现 typed 调度和保留策略接口
+
+自定义 `TaskStore` 必须实现 `list_ready_queued(after, limit, now_ms)`、`next_retry_deadline(now_ms)` 和 `prune_terminal_before(finished_before_ms, max_rows)`。ready scan 只返回没有 retry deadline 或 deadline 不晚于 `now_ms` 的 `Queued` 记录，按 `(accepted_at_ms, 数值 TaskId)` 排序，每页 1–256 条。`next_retry_deadline` 返回严格大于 `now_ms` 的最小 queued deadline。清理最多删除指定数量、`finished_at_ms` 严格早于 cutoff 的 `Succeeded`、`Failed`、`Panicked` 或 `Cancelled` 记录，按 `(finished_at_ms, TaskId)` 排序。必须与任务行原子删除幂等键；被清理的 key 可以复用。Queued 和 Blocked 永远不符合清理条件。
+
+## 显式配置生命周期通知
+
+`TaskEvent.task_id` 改为 typed `TaskId`，payload 增加 `schema_version = 1`。JSON codec 和消费者需要一起更新。启用 `event-bus` feature 后，通过 `event_notifications(async_bus, topic, queue_capacity, shutdown_flush_timeout)` opt in。服务仅在 store commit 后发布快照；进度不发布。有限本地队列满时丢弃快照，provider 错误增加 `failed`，累计计数可通过 `notification_stats()` 查询。`shutdown()` 在释放 store owner 前尝试 flush；超时后中止发布 worker、将剩余项计为 dropped，并继续完成任务 shutdown。通知没有事务 outbox，可能丢失、重复或乱序；消费者应从任务查询接口对账，并按 `(TaskId, state_version)` 去重。调度允许后续资源匹配任务越过较早的资源阻塞任务，不保证严格 FIFO。
 
 ## 将恢复游标从任务 ID 改为位置游标
 
