@@ -26,8 +26,7 @@ fn request() -> StoredTaskRequest {
         kind_id: "output.test".to_owned(),
         category: None,
         payload: StoredPayload {
-            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload")
-                .expect("valid model ID"),
+            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload").expect("valid model ID"),
             schema_version: 1,
             codec_id: "qubit.bytes.json".to_owned(),
             bytes: vec![1],
