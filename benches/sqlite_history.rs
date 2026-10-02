@@ -8,6 +8,7 @@
 #[path = "support/history_dataset.rs"]
 mod history_dataset;
 
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ const QUERY_SAMPLES: usize = 25;
 const QUERY_WARMUPS: usize = 3;
 const SHUTDOWN_SAMPLES: usize = 5;
 const PAGE_SIZE: usize = 32;
+const READY_SCAN_PAGE_SIZE: usize = 256;
 
 #[derive(Serialize)]
 struct Report {
@@ -43,6 +45,11 @@ struct Report {
 #[derive(Serialize)]
 struct DatasetReport {
     rows: usize,
+    ready_queue_rows: usize,
+    ready_queue_pages: usize,
+    scheduler_queries_per_wake: usize,
+    ready_queue_max_page: usize,
+    ready_retry_mix: &'static str,
     seed: &'static str,
     indexless_database_bytes: u64,
     legacy_index_build_ms: f64,
@@ -56,6 +63,8 @@ struct DatasetReport {
     deep_no_filter_page: Timing,
     deep_single_correlation_page: Timing,
     unfinished_recovery_page: Timing,
+    ready_queue_scan: Timing,
+    retry_deadline_query: Timing,
     legacy_or_no_index_baseline: Timing,
     legacy_or_baseline: Timing,
     count_states: Timing,
@@ -76,6 +85,8 @@ struct QueryPlans {
     deep_no_filter: Vec<String>,
     deep_single_correlation: Vec<String>,
     unfinished_recovery: Vec<String>,
+    ready_queue: Vec<String>,
+    retry_deadline: Vec<String>,
     legacy_or_no_index_baseline: Vec<String>,
     legacy_or_baseline: Vec<String>,
 }
@@ -118,7 +129,7 @@ struct Options {
 
 fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     let mut output = None;
-    let mut sizes = vec![10_000, 100_000];
+    let mut sizes = vec![1_000, 10_000, 100_000];
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -133,13 +144,17 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
                             .map_err(|_| format!("invalid dataset size: {value}"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                if sizes.is_empty() || sizes.iter().any(|size| ![10_000, 20_000, 100_000].contains(size)) {
-                    return Err("supported sizes are 10000, 20000, and 100000".into());
+                if sizes.is_empty()
+                    || sizes
+                        .iter()
+                        .any(|size| ![1_000, 10_000, 20_000, 100_000].contains(size))
+                {
+                    return Err("supported sizes are 1000, 10000, 20000, and 100000".into());
                 }
             }
             "--bench" => {}
             "--help" | "-h" => {
-                println!("sqlite_history [--output <absolute-json>] [--sizes 10000,20000,100000]");
+                println!("sqlite_history [--output <absolute-json>] [--sizes 1000,10000,20000,100000]");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}").into()),
@@ -195,6 +210,10 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     let store = SqliteTaskStore::open_next(&dataset.database_path)?;
     let first_store_open_and_compound_index_build_ms = elapsed_ms(open_start.elapsed());
     let sqlite = Connection::open(&dataset.database_path)?;
+    sqlite.execute(
+        "UPDATE tasks SET retry_not_before_ms=CASE WHEN CAST(id AS INTEGER)%4=0 THEN 0 ELSE 9223372036854775807 END WHERE state_kind='Queued'",
+        [],
+    )?;
     sqlite.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     let indexed_database_bytes = file_size(&dataset.database_path)?;
     let deep_no_filter_plan = production_plan(
@@ -220,6 +239,16 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
          WHERE +state_kind IN ('Queued','Running') AND (accepted_at,id) > (?1,?2)
          ORDER BY accepted_at,id LIMIT 257",
         params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_padded_decimal()],
+    )?;
+    let ready_queue_plan = explain(
+        &sqlite,
+        "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ORDER BY accepted_at,id LIMIT ?2",
+        params![i64::MAX, PAGE_SIZE as i64 + 1],
+    )?;
+    let retry_deadline_plan = explain(
+        &sqlite,
+        "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
+        params![i64::MAX - 1],
     )?;
 
     let runtime_store = &store;
@@ -269,6 +298,51 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
             .await?;
         Ok(page.records.len())
     })?;
+    let (ready_queue_rows, ready_queue_pages, ready_queue_max_page) = runtime.block_on(async {
+        let mut after = None;
+        let mut rows = 0;
+        let mut pages = 0;
+        let mut max_page = 0;
+        loop {
+            let page = runtime_store
+                .list_ready_queued(
+                    after,
+                    NonZeroUsize::new(READY_SCAN_PAGE_SIZE).unwrap(),
+                    i64::MAX as u64 - 1,
+                )
+                .await?;
+            rows += page.records.len();
+            pages += 1;
+            max_page = max_page.max(page.records.len());
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        Ok::<_, qubit_task::store::StoreError>((rows, pages, max_page))
+    })?;
+    let ready_queue_scan = measure(runtime, || async {
+        let mut after = None;
+        let mut rows = 0;
+        loop {
+            let page = runtime_store
+                .list_ready_queued(
+                    after,
+                    NonZeroUsize::new(READY_SCAN_PAGE_SIZE).unwrap(),
+                    i64::MAX as u64 - 1,
+                )
+                .await?;
+            rows += page.records.len();
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        Ok(rows)
+    })?;
+    let retry_deadline_query = measure(runtime, || async {
+        runtime_store.next_retry_deadline(i64::MAX as u64 - 1).await
+    })?;
     let count_states = measure_sync(|| {
         sqlite.query_row("SELECT COUNT(*) FROM tasks WHERE state_kind='Queued'", [], |row| {
             row.get::<_, i64>(0)
@@ -286,12 +360,19 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
         deep_no_filter: deep_no_filter_plan,
         deep_single_correlation: deep_single_correlation_plan,
         unfinished_recovery: unfinished_recovery_plan,
+        ready_queue: ready_queue_plan,
+        retry_deadline: retry_deadline_plan,
         legacy_or_no_index_baseline: legacy_or_no_index_plan,
         legacy_or_baseline: legacy_or_baseline_plan,
     };
     Ok(DatasetReport {
         rows: size,
-        seed: "xorshift64 seed 0x6a09e667f3bcc909; deterministic padded numeric IDs; identical prefix across sizes",
+        ready_queue_rows,
+        ready_queue_pages,
+        scheduler_queries_per_wake: ready_queue_pages + 1,
+        ready_queue_max_page,
+        ready_retry_mix: "queued rows with numeric task ID divisible by four are due; other queued rows retry at SQLite i64::MAX; scan time is i64::MAX-1",
+        seed: "xorshift64 seed 0x6a09e667f3bcc909; deterministic padded numeric IDs; identical prefix across sizes; ready scan adds future retry deadlines to 75% of Queued rows",
         indexless_database_bytes,
         legacy_index_build_ms,
         legacy_indexed_database_bytes,
@@ -304,6 +385,8 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
         deep_no_filter_page,
         deep_single_correlation_page,
         unfinished_recovery_page,
+        ready_queue_scan,
+        retry_deadline_query,
         legacy_or_no_index_baseline,
         legacy_or_baseline,
         count_states,
