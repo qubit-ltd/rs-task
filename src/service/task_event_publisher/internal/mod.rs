@@ -7,6 +7,6 @@
 // =============================================================================
 //! Private state for bounded task event publication.
 
-mod counters;
+mod publisher_state;
 
-pub(in crate::service::task_event_publisher) use counters::Counters;
+pub(in crate::service::task_event_publisher) use publisher_state::PublisherState;

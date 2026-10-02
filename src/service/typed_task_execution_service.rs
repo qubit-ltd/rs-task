@@ -65,6 +65,10 @@ struct TypedServiceCore {
     shutting_down: AtomicBool,
     shutdown_lock: tokio::sync::Mutex<()>,
     owner_released: AtomicBool,
+    #[cfg(feature = "event-bus")]
+    publisher: Option<super::task_event_publisher::TaskEventPublisher>,
+    #[cfg(feature = "event-bus")]
+    notification_close_error: Mutex<Option<String>>,
 }
 
 pub(super) struct TypedServiceOptions {
@@ -72,6 +76,10 @@ pub(super) struct TypedServiceOptions {
     pub(super) scan_page_size: usize,
     pub(super) max_attempts: u32,
     pub(super) retry_policy: RetryPolicy,
+    #[cfg(feature = "event-bus")]
+    pub(super) event_bus: Option<Arc<qubit_event_bus::AsyncEventBus>>,
+    #[cfg(feature = "event-bus")]
+    pub(super) notification_shutdown_timeout: std::time::Duration,
 }
 
 struct InFlightGuard(Arc<TypedServiceCore>, TaskId);
@@ -101,6 +109,17 @@ impl TypedTaskExecutionService {
         options: TypedServiceOptions,
     ) -> Result<Self, TaskServiceError> {
         let owner = store.acquire_owner().await?;
+        #[cfg(feature = "event-bus")]
+        let publisher = if let Some(bus) = options.event_bus {
+            let prepared = async {
+                store.enable_event_outbox().await?;
+                super::task_event_publisher::TaskEventPublisher::new(Arc::clone(&store), bus, options.notification_shutdown_timeout)
+            }.await;
+            match prepared {
+                Ok(publisher) => Some(publisher),
+                Err(error) => { store.release_owner(owner).await?; return Err(error); }
+            }
+        } else { None };
         let service = Self {
             core: Arc::new(TypedServiceCore {
                 store,
@@ -125,6 +144,10 @@ impl TypedTaskExecutionService {
                 shutting_down: AtomicBool::new(false),
                 shutdown_lock: tokio::sync::Mutex::new(()),
                 owner_released: AtomicBool::new(false),
+                #[cfg(feature = "event-bus")]
+                publisher,
+                #[cfg(feature = "event-bus")]
+                notification_close_error: Mutex::new(None),
             }),
         };
         if let Err(error) = service.recover_unfinished().await {
@@ -134,6 +157,8 @@ impl TypedTaskExecutionService {
             }
             return Err(error);
         }
+        #[cfg(feature = "event-bus")]
+        if let Some(publisher) = &service.core.publisher { publisher.start().await; }
         let scheduler = service.clone();
         let scheduler_core = Arc::clone(&service.core);
         tokio::spawn(async move {
@@ -232,6 +257,7 @@ impl TypedTaskExecutionService {
     pub async fn shutdown(&self) -> Result<(), TaskServiceError> {
         let _shutdown = self.core.shutdown_lock.lock().await;
         if self.core.owner_released.load(Ordering::Acquire) {
+            self.check_notification_close()?;
             return self.check_fault();
         }
         {
@@ -257,11 +283,18 @@ impl TypedTaskExecutionService {
             }
             notified.await;
         }
+        #[cfg(feature = "event-bus")]
+        if let Some(publisher) = &self.core.publisher {
+            if let Err(error) = publisher.close().await {
+                *self.core.notification_close_error.lock() = Some(error.to_string());
+            }
+        }
         if let Err(error) = self.core.store.release_owner(self.core.owner).await {
             self.latch_fault(&error);
             return Err(TaskServiceError::StoreUnavailable(error.to_string()));
         }
         self.core.owner_released.store(true, Ordering::Release);
+        self.check_notification_close()?;
         if let Some(fault) = self.core.fault.lock().clone() {
             Err(TaskServiceError::StoreUnavailable(fault))
         } else {
@@ -396,7 +429,23 @@ impl TypedTaskExecutionService {
             .map_or(Ok(()), |fault| Err(TaskServiceError::StoreUnavailable(fault)))
     }
 
+    /// Retains notification shutdown failures across repeated shutdown calls.
+    fn check_notification_close(&self) -> Result<(), TaskServiceError> {
+        #[cfg(feature = "event-bus")]
+        if let Some(error) = self.core.notification_close_error.lock().clone() {
+            return Err(TaskServiceError::NotificationClose(error));
+        }
+        Ok(())
+    }
+
+    /// Wakes durable notification publication after a committed store operation.
+    fn notify_notifications(&self) {
+        #[cfg(feature = "event-bus")]
+        if let Some(publisher) = &self.core.publisher { publisher.notify(); }
+    }
+
     fn store_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
+        if result.is_ok() { self.notify_notifications(); }
         result.map_err(|error| {
             if !matches!(
                 error,
@@ -632,6 +681,7 @@ impl TypedTaskExecutionService {
                     return;
                 }
             };
+            self.notify_notifications();
             drop(admission);
             let prepared = match prepare_handler(
                 &self.core.handlers,
@@ -750,6 +800,7 @@ impl TypedTaskExecutionService {
                 self.latch_fault(error);
             }
         }
+        self.notify_notifications();
     }
 
     async fn finish(&self, started: &TaskSummary, state: TaskState, output: Option<TaskOutput>, retryable: bool) {
@@ -796,6 +847,7 @@ impl TypedTaskExecutionService {
                 self.latch_fault(error);
             }
         }
+        self.notify_notifications();
     }
 
     async fn check_competing_transition(&self, id: TaskId, expected_version: u64) {

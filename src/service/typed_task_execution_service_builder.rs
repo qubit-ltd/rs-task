@@ -32,6 +32,10 @@ pub struct TypedTaskExecutionServiceBuilder {
     scan_page_size: usize,
     max_attempts: u32,
     retry_policy: RetryPolicy,
+    #[cfg(feature = "event-bus")]
+    event_bus: Option<Arc<qubit_event_bus::AsyncEventBus>>,
+    #[cfg(feature = "event-bus")]
+    notification_shutdown_timeout: std::time::Duration,
 }
 
 impl TypedTaskExecutionServiceBuilder {
@@ -58,6 +62,10 @@ impl TypedTaskExecutionServiceBuilder {
             scan_page_size: 128,
             max_attempts: 3,
             retry_policy: RetryPolicy::default(),
+            #[cfg(feature = "event-bus")]
+            event_bus: None,
+            #[cfg(feature = "event-bus")]
+            notification_shutdown_timeout: std::time::Duration::from_secs(5),
         }
     }
 
@@ -91,6 +99,23 @@ impl TypedTaskExecutionServiceBuilder {
         self
     }
 
+    /// Enables durable lifecycle publication to `task.lifecycle`.
+    /// The store must support a persistent outbox; register a TaskEvent codec
+    /// in the supplied bus for encoded providers. Failed publications remain durable.
+    #[cfg(feature = "event-bus")]
+    pub fn event_bus(mut self, bus: Arc<qubit_event_bus::AsyncEventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
+    /// Sets the maximum notification drain duration during shutdown (default 5 seconds).
+    /// Expiry leaves pending events durable and reports `NotificationClose`.
+    #[cfg(feature = "event-bus")]
+    pub fn notification_shutdown_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.notification_shutdown_timeout = timeout;
+        self
+    }
+
     /// Returns the handler registry being assembled.
     pub fn handlers_mut(&mut self) -> &mut TypedTaskHandlerRegistry {
         &mut self.handlers
@@ -109,6 +134,10 @@ impl TypedTaskExecutionServiceBuilder {
                 scan_page_size: self.scan_page_size,
                 max_attempts: self.max_attempts,
                 retry_policy: self.retry_policy,
+                #[cfg(feature = "event-bus")]
+                event_bus: self.event_bus,
+                #[cfg(feature = "event-bus")]
+                notification_shutdown_timeout: self.notification_shutdown_timeout,
             },
         )
         .await
