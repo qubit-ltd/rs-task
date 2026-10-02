@@ -8,7 +8,7 @@
 //! Docker-backed disposable Redis server for integration tests.
 
 use std::error::Error;
-use std::net::TcpListener;
+use std::net::SocketAddr;
 use std::process::Command;
 use std::process::Stdio;
 use std::thread::sleep;
@@ -26,7 +26,7 @@ impl RedisServer {
     /// Starts an owned Redis 7 container with an ephemeral local host port.
     ///
     /// Returns the ready fixture. Blocks on Docker/process and readiness IO;
-    /// returns port-bind, Docker, output-decoding, or readiness failure
+    /// returns Docker, port-discovery, output-decoding, or readiness failure
     /// errors.
     pub fn start() -> Result<Self, Box<dyn Error>> {
         Self::start_version("7-alpine")
@@ -36,19 +36,17 @@ impl RedisServer {
     /// port.
     ///
     /// Returns the ready owned fixture. Performs Docker/process and readiness
-    /// IO; returns port-bind, Docker, output-decoding, or readiness failure
+    /// IO; returns Docker, port-discovery, output-decoding, or readiness failure
     /// errors. The partially created fixture cleans up its container if
     /// readiness fails.
     pub fn start_version(image_tag: &str) -> Result<Self, Box<dyn Error>> {
         let image = format!("redis:{image_tag}");
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let port_mapping = format!("127.0.0.1:{port}:6379");
         let output = Command::new("docker")
             .args([
                 "run",
                 "-d",
                 "-p",
-                port_mapping.as_str(),
+                "127.0.0.1::6379",
                 &image,
                 "redis-server",
                 "--appendonly",
@@ -56,13 +54,18 @@ impl RedisServer {
             ])
             .output()?;
         if !output.status.success() {
-            return Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into());
+            return Err(format!(
+                "docker run failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
         }
         let container_id = String::from_utf8(output.stdout)?.trim().to_owned();
-        let server = Self {
+        let mut server = Self {
             container_id,
-            url: format!("redis://127.0.0.1:{port}/"),
+            url: String::new(),
         };
+        server.refresh_url()?;
         for _ in 0..50 {
             if Client::open(server.url.as_str())
                 .and_then(|client| client.get_connection())
@@ -75,12 +78,41 @@ impl RedisServer {
         Err("Redis container did not become ready".into())
     }
 
+    /// Resolves Docker's assigned loopback port after container start or restart.
+    /// Returns process, mapping, or address-parse errors; the owned container remains
+    /// guarded by Drop if discovery fails.
+    fn refresh_url(&mut self) -> Result<(), Box<dyn Error>> {
+        let output = Command::new("docker")
+            .args(["port", &self.container_id, "6379/tcp"])
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "could not resolve Redis port: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        let mapping = String::from_utf8(output.stdout)?;
+        let address: SocketAddr = mapping.trim().parse()?;
+        if !address.ip().is_loopback() {
+            return Err("isolated Redis port must bind to loopback".into());
+        }
+        self.url = format!("redis://{address}/");
+        Ok(())
+    }
+
     /// Stops the owned container and returns only after Docker confirms it stopped.
     /// This supplies an observed outage boundary without relying on elapsed time.
     pub fn stop(&self) -> Result<(), Box<dyn Error>> {
-        let output = Command::new("docker").args(["stop", &self.container_id]).output()?;
+        let output = Command::new("docker")
+            .args(["stop", &self.container_id])
+            .output()?;
         if !output.status.success() {
-            return Err(format!("could not stop isolated Redis: {}", String::from_utf8_lossy(&output.stderr)).into());
+            return Err(format!(
+                "could not stop isolated Redis: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
         }
         Ok(())
     }
@@ -91,7 +123,9 @@ impl RedisServer {
     /// Docker/Redis IO and returns process, unsuccessful restart, or
     /// readiness failure errors.
     pub fn restart(&mut self) -> Result<(), Box<dyn Error>> {
-        let output = Command::new("docker").args(["restart", &self.container_id]).output()?;
+        let output = Command::new("docker")
+            .args(["restart", &self.container_id])
+            .output()?;
         if !output.status.success() {
             return Err(format!(
                 "could not restart the isolated Redis server: {}",
@@ -99,6 +133,7 @@ impl RedisServer {
             )
             .into());
         }
+        self.refresh_url()?;
         for _ in 0..100 {
             if Client::open(self.url.as_str())
                 .and_then(|client| client.get_connection())
