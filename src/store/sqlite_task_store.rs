@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-#[cfg(test)]
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -36,6 +35,8 @@ use internal::initialize_next_schema;
 #[cfg(test)]
 use internal::initialize_schema;
 use internal::list_encoded;
+use internal::list_ready_queued;
+use internal::next_retry_deadline;
 #[cfg(test)]
 use internal::read_stored_summary_row;
 #[cfg(test)]
@@ -669,6 +670,16 @@ impl LegacyTaskStore for SqliteTaskStore {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
         self.run(move |connection| list_encoded(connection, query))
+    }
+
+    fn list_ready_queued<'a>(&'a self, after: Option<crate::model::next::TaskCursor>, limit: NonZeroUsize, now_ms: u64) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        if !self.typed_schema { return Box::pin(async { Err(StoreError::UnsupportedCapability) }); }
+        self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        if !self.typed_schema { return Box::pin(async { Err(StoreError::UnsupportedCapability) }); }
+        self.run(move |connection| next_retry_deadline(connection, now_ms))
     }
 
     /// Loads task lifecycle and immutable metadata without the payload.
