@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelIdBuf;
 
 /// Encoded payload bytes stored for recovery without retaining Rust types.
 #[derive(Debug, Clone, PartialEq, Eq)]

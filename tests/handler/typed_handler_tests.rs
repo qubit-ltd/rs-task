@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::HandlerDispatchError;
 use qubit_task::HandlerRegistrationError;
