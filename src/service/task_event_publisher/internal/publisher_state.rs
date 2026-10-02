@@ -18,6 +18,8 @@ pub(in crate::service::task_event_publisher) struct PublisherState {
     pub(in crate::service::task_event_publisher) topic: Topic<TaskEvent>,
     /// Wake signal for new committed rows.
     pub(in crate::service::task_event_publisher) changed: Notify,
+    /// One-shot signal interrupting failure backoff when shutdown first starts.
+    pub(in crate::service::task_event_publisher) close_changed: Notify,
     /// Requests draining followed by worker exit.
     pub(in crate::service::task_event_publisher) closing: AtomicBool,
     /// Last observed bounded page count, adjusted after confirmed deletion.
@@ -29,7 +31,7 @@ pub(in crate::service::task_event_publisher) struct PublisherState {
 impl PublisherState {
     /// Creates shared state for one owned publisher worker.
     pub(in crate::service::task_event_publisher) fn new(store: Arc<dyn TaskStore>, bus: Arc<AsyncEventBus>, topic: Topic<TaskEvent>) -> Self {
-        Self { store, bus, topic, changed: Notify::new(), closing: AtomicBool::new(false), pending: AtomicUsize::new(0), last_error: parking_lot::Mutex::new(None) }
+        Self { store, bus, topic, changed: Notify::new(), close_changed: Notify::new(), closing: AtomicBool::new(false), pending: AtomicUsize::new(0), last_error: parking_lot::Mutex::new(None) }
     }
 
     /// Publishes in stable store order, retaining the failed head on every error.
@@ -59,11 +61,20 @@ impl PublisherState {
             // Notifications wake idle reads. Failures retain their finite backoff even
             // under a sustained stream of new commits, avoiding an outage retry storm.
             if failed {
-                tokio::time::sleep(wait).await;
+                self.wait_after_failure(wait).await;
                 backoff = (backoff * 2).min(Duration::from_secs(1));
             } else {
                 tokio::select! { _ = self.changed.notified() => {}, _ = tokio::time::sleep(wait) => {} }
             }
+        }
+    }
+
+    /// Waits for retry eligibility, allowing the first close signal one immediate
+    /// drain attempt. Ordinary commit notifications never bypass failure backoff.
+    async fn wait_after_failure(&self, delay: Duration) {
+        tokio::select! {
+            _ = self.close_changed.notified() => {},
+            _ = tokio::time::sleep(delay) => {},
         }
     }
 
@@ -78,5 +89,31 @@ impl PublisherState {
             receipt.check_admission(AdmissionRequirement::AtLeastOneAccepted).map_err(|error| error.to_string())?;
         }
         self.store.mark_event_published(entry.task_id, entry.state_version).await.map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use futures::poll;
+    use qubit_event_bus::{AsyncEventBusRegistry, EventBusConfig};
+    use qubit_event_bus::model::Topic;
+    use crate::store::MemoryTaskStore;
+    use super::PublisherState;
+
+    #[tokio::test]
+    async fn test_failure_backoff_consumes_only_one_close_signal() {
+        let registry = AsyncEventBusRegistry::with_local().expect("local registry");
+        let bus = Arc::new(registry.create(&EventBusConfig::default()).await.expect("local bus"));
+        let state = PublisherState::new(Arc::new(MemoryTaskStore::new(1)), bus, Topic::new("task.lifecycle").expect("topic"));
+        let mut first = Box::pin(state.wait_after_failure(Duration::from_secs(3600)));
+        assert!(poll!(first.as_mut()).is_pending());
+        state.changed.notify_one();
+        assert!(poll!(first.as_mut()).is_pending(), "commits cannot bypass failure backoff");
+        state.close_changed.notify_one();
+        assert!(poll!(first.as_mut()).is_ready(), "close must interrupt a long retry wait");
+        let mut second = Box::pin(state.wait_after_failure(Duration::from_secs(3600)));
+        assert!(poll!(second.as_mut()).is_pending(), "sustained errors remain rate limited after the close retry");
     }
 }
