@@ -30,6 +30,12 @@ name = "qubit_task"
 doctest = true
 test = true
 
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
 [[bench]]
 name = "sqlite_history"
 harness = false
