@@ -30,18 +30,18 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 The `sqlite` feature enables durable task history and recovery. The scheduler scans queued summaries in bounded pages and runs at most `max_running_tasks` handlers concurrently. A handler error is retried only when `retryable` is true, with a persisted deadline; the default is three attempts with exponential delay from one to sixty seconds. `resume_blocked` requeues a blocked task using its observed state version after configuration is repaired. Recovery is at-least-once: a task interrupted after an external side effect may run again, so application effects need idempotency or transaction protection. Scheduling is process-local; distributed scheduling and exactly-once business effects are outside the crate's guarantees.
 
-The optional `event-bus` feature provides `TaskEvent` transport integration. The typed execution service does not currently publish lifecycle events; query the service for authoritative state.
+With the optional `event-bus` feature, `TaskExecutionServiceBuilder::event_bus` publishes lifecycle snapshots from a durable SQLite outbox. The schema v6 migration preserves existing task rows. Delivery is asynchronous and at-least-once: consumers should deduplicate by `(TaskId, state_version)` and query the service for authoritative state. `MemoryTaskStore` does not provide durable outbox support.
 
 ## Documentation
 
 - [User guide](doc/user-guide.md)
 - [Detailed design](doc/task_execution_service_design.en.md)
-- [Migration guide](doc/migration-0.8.en.md)
+- [Migration guide](doc/migration.md)
 - [API reference](https://docs.rs/qubit-task)
 
 ## Task notification delivery
 
-Task notifications are best-effort. A successful publisher `close` means the local queue worker drained and stopped; inspect notification statistics to determine provider publication outcomes. Do not treat close success as destination admission or handler completion.
+The publisher replays committed outbox rows after service recovery and drains them on shutdown up to `notification_shutdown_timeout`. An uncertain publish receipt or a crash after Redis accepts an event but before the outbox row is deleted can cause a duplicate. Consumers should retain the highest `state_version` per task and ignore duplicate or stale events. Enabling the publisher does not backfill lifecycle states committed before the service started with it. Monitor pending outbox row count and oldest-row age, together with Redis stream `XLEN` and consumer-group `XPENDING`.
 
 ## Checks
 

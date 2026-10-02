@@ -48,11 +48,35 @@ interrupt in-flight I/O. Redis does not deduplicate by EventId.
 
 Consumers keep the highest `state_version` for each TaskId, ignore same-version
 duplicates and stale events, and query the service after a gap. Parallel state
-changes need not arrive in increasing version order. Best-effort notifications
-can be missing; use a transactional outbox outside this crate when a durable
-handoff is required. Do not repeat a committed task transition because its
-notification failed. Facade DLQ forwarding and source acknowledgement are not
-atomic, so logical dead-letters also need consumer deduplication.
+changes need not arrive in increasing version order. Do not repeat a committed
+task transition because its notification failed. Facade DLQ forwarding and
+source acknowledgement are not atomic, so logical dead-letters also need
+consumer deduplication.
+
+## Enable the durable task lifecycle outbox
+
+With the `event-bus` feature enabled, configure
+`TaskExecutionServiceBuilder::event_bus` and register the application's
+`TaskEvent` codec on the supplied `AsyncEventBus`. The configured store must
+implement persistent outbox operations. `SqliteTaskStore` does; `MemoryTaskStore`
+does not and service construction returns `UnsupportedCapability` for it.
+
+Typed SQLite schema version 6 adds `task_event_outbox`. Opening a typed schema
+version 4 or 5 database migrates it transactionally and preserves existing task
+rows. No historical lifecycle snapshots are generated: only transitions made
+after the service enables the outbox are captured. The migration does not
+remove existing task data. Existing legacy UUID schemas still require explicit
+data mapping before they can be opened by the typed API.
+
+Lifecycle writes and outbox inserts share a SQLite transaction. A background
+worker publishes rows asynchronously and deletes each row only after accepted
+publication. This is at-least-once delivery: an uncertain result or a crash
+after the bus accepted an event but before row deletion can cause a duplicate.
+Deduplicate using `(TaskId, state_version)` and query the task service for
+authoritative state. Monitor the outbox row count and oldest-row age; with Redis
+Streams, also inspect stream `XLEN` and consumer-group `XPENDING`. Shutdown drains
+until empty or `notification_shutdown_timeout`; pending rows survive a timeout
+and are retried after restart.
 
 Run the application compile, notification uncertainty, schema compatibility,
 state-version convergence, Redis recovery, and shutdown tests before deploying.

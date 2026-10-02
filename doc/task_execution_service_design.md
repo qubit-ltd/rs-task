@@ -22,7 +22,7 @@
 
 内存与 SQLite store 实现相同的 typed store 契约。SQLite 使用 typed numeric-ID schema；遇到不兼容的旧 UUID schema 时会返回诊断错误，不会静默重新解释数据。Store ownership 用于隔离并发服务实例；恢复会在取得 ownership 后继续处理保留的 queued 任务。
 
-单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 5 中，重启后仍会遵守；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可携带观察到的 state version 恢复 Blocked 任务。
+单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 5 中，重启后仍会遵守。schema 版本 6 新增生命周期事件 outbox；从 typed schema 版本 4 或 5 升级采用事务迁移，并保留已有任务记录。仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可携带观察到的 state version 恢复 Blocked 任务。
 
 ## 执行与资源准入
 
@@ -42,4 +42,6 @@ SQLite 持久化支持进程重启恢复，执行语义为至少一次。若任�
 
 后台调度或结果写入遇到存储故障时会锁存故障并停止新写入。`shutdown()` 等待活跃工作结束后返回该故障，再释放 owner；诊断读取仍会访问 store。
 
-可选 Event Bus 集成提供 `TaskEvent` 传输类型和 codec，但生命周期发布目前尚未接入 typed execution service。任务查询仍是权威状态来源。完整示例和具体 API 契约见[typed API 指南](typed-task-api.zh_CN.md)。
+配置 `TaskExecutionServiceBuilder::event_bus` 后，服务会启用 store outbox，并在任务恢复后启动异步 publisher。每个生命周期快照与任务状态迁移写入同一个 SQLite 事务，随后发布到 `task.lifecycle`；确认接纳后才删除 outbox 行。此功能要求 store 提供持久 outbox，`MemoryTaskStore` 不具备此能力，也不适合作为 durable 配置。outbox 启用前提交的状态不会在启动时回填。
+
+投递语义为至少一次。若发布回执不确定，或 bus 已接纳事件但进程在删除 outbox 行前停止，同一快照可能再次发布。消费者应按 `(TaskId, state_version)` 去重、忽略旧版本，并在发现版本缺口时查询服务。应监控 outbox 行数与最老行年龄；使用 Redis Streams 时，还应查看 `XLEN` 和 `XPENDING`。具体配置和运维边界见[带类型 API 指南](typed-task-api.zh_CN.md)与[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。
