@@ -561,7 +561,7 @@ async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
             .expect("committed recovery page reads");
         assert_eq!(page.records.len(), expected);
         for summary in &page.records {
-            assert!(cursor.is_none_or(|previous| TaskCursor::from(&*summary) > previous));
+            assert!(cursor.is_none_or(|previous| TaskCursor::from(summary) > previous));
             assert!(ids.insert(summary.id), "no task repeats across pages");
             let stored = store
                 .get_encoded_task(summary.id)

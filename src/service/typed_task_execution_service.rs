@@ -6,7 +6,6 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -21,8 +20,13 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_progress::AsyncReporter;
 
+#[cfg(feature = "event-bus")]
+use super::task_event_dispatcher::NotificationStats;
+#[cfg(feature = "event-bus")]
+use super::task_event_dispatcher::TaskEventDispatcher;
 use crate::engine::EngineError;
 use crate::engine::LocalTaskExecutionEngine;
+use crate::engine::TypedResourceReservation;
 use crate::handler::TaskRunOutcome;
 use crate::handler::typed::CancellationMode;
 use crate::handler::typed::TypedTaskContext;
@@ -54,7 +58,6 @@ struct TypedServiceCore {
     scheduler_changed: tokio::sync::Notify,
     scheduler_stopped: AtomicBool,
     scheduler_stopped_changed: tokio::sync::Notify,
-    scheduled_ids: Mutex<HashSet<TaskId>>,
     max_running_tasks: usize,
     scan_page_size: usize,
     max_attempts: u32,
@@ -65,6 +68,8 @@ struct TypedServiceCore {
     shutting_down: AtomicBool,
     shutdown_lock: tokio::sync::Mutex<()>,
     owner_released: AtomicBool,
+    #[cfg(feature = "event-bus")]
+    event_dispatcher: Option<Arc<TaskEventDispatcher>>,
 }
 
 pub(super) struct TypedServiceOptions {
@@ -72,13 +77,14 @@ pub(super) struct TypedServiceOptions {
     pub(super) scan_page_size: usize,
     pub(super) max_attempts: u32,
     pub(super) retry_policy: RetryPolicy,
+    #[cfg(feature = "event-bus")]
+    pub(super) event_notifications: Option<super::task_event_dispatcher::TaskEventConfig>,
 }
 
-struct InFlightGuard(Arc<TypedServiceCore>, TaskId);
+struct InFlightGuard(Arc<TypedServiceCore>);
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.0.scheduled_ids.lock().remove(&self.1);
         self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
         self.0.in_flight_changed.notify_waiters();
         self.0.scheduler_changed.notify_one();
@@ -101,6 +107,10 @@ impl TypedTaskExecutionService {
         options: TypedServiceOptions,
     ) -> Result<Self, TaskServiceError> {
         let owner = store.acquire_owner().await?;
+        #[cfg(feature = "event-bus")]
+        let event_dispatcher = options
+            .event_notifications
+            .map(|config| TaskEventDispatcher::new(config.bus, config.topic, config.capacity, config.flush_timeout));
         let service = Self {
             core: Arc::new(TypedServiceCore {
                 store,
@@ -114,7 +124,6 @@ impl TypedTaskExecutionService {
                 scheduler_changed: tokio::sync::Notify::new(),
                 scheduler_stopped: AtomicBool::new(false),
                 scheduler_stopped_changed: tokio::sync::Notify::new(),
-                scheduled_ids: Mutex::new(HashSet::new()),
                 max_running_tasks: options.max_running_tasks,
                 scan_page_size: options.scan_page_size,
                 max_attempts: options.max_attempts,
@@ -125,6 +134,8 @@ impl TypedTaskExecutionService {
                 shutting_down: AtomicBool::new(false),
                 shutdown_lock: tokio::sync::Mutex::new(()),
                 owner_released: AtomicBool::new(false),
+                #[cfg(feature = "event-bus")]
+                event_dispatcher,
             }),
         };
         if let Err(error) = service.recover_unfinished().await {
@@ -166,6 +177,8 @@ impl TypedTaskExecutionService {
         let id = TaskId::from_id(self.core.id_generator.generate()?);
         let accepted = self.store_result(self.core.store.accept_encoded(id, stored).await)?;
         if accepted.created {
+            #[cfg(feature = "event-bus")]
+            self.publish_task_event(&accepted.summary);
             self.core.scheduler_changed.notify_one();
         }
         Ok(accepted.summary)
@@ -179,6 +192,22 @@ impl TypedTaskExecutionService {
     /// Queries typed task summaries using category filters and numeric cursors.
     pub async fn query(&self, query: TaskQuery) -> Result<TaskPage, TaskServiceError> {
         Ok(self.core.store.list_encoded(query).await?)
+    }
+
+    /// Returns best-effort lifecycle notification counters when enabled.
+    #[cfg(feature = "event-bus")]
+    pub fn notification_stats(&self) -> NotificationStats {
+        self.core
+            .event_dispatcher
+            .as_ref()
+            .map_or_else(NotificationStats::default, |dispatcher| dispatcher.stats())
+    }
+
+    #[cfg(feature = "event-bus")]
+    fn publish_task_event(&self, summary: &TaskSummary) {
+        if let Some(dispatcher) = &self.core.event_dispatcher {
+            dispatcher.enqueue(crate::event::TaskEvent::from(summary));
+        }
     }
 
     /// Requeues a blocked task after its configuration or handler is repaired.
@@ -222,6 +251,8 @@ impl TypedTaskExecutionService {
                 })
                 .await,
         )?;
+        #[cfg(feature = "event-bus")]
+        self.publish_task_event(&resumed);
         self.core.scheduler_changed.notify_one();
         Ok(resumed)
     }
@@ -256,6 +287,10 @@ impl TypedTaskExecutionService {
                 break;
             }
             notified.await;
+        }
+        #[cfg(feature = "event-bus")]
+        if let Some(dispatcher) = &self.core.event_dispatcher {
+            dispatcher.shutdown().await;
         }
         if let Err(error) = self.core.store.release_owner(self.core.owner).await {
             self.latch_fault(&error);
@@ -300,7 +335,10 @@ impl TypedTaskExecutionService {
                     })
                     .await,
             )?;
+            #[cfg(feature = "event-bus")]
+            self.publish_task_event(&updated);
             let _ = updated;
+            self.core.scheduler_changed.notify_one();
             return Ok(CancelOutcome::CancelledBeforeStart);
         }
         if summary.cancel_requested {
@@ -319,7 +357,7 @@ impl TypedTaskExecutionService {
         if descriptor.cancellation_mode == CancellationMode::Unsupported {
             return Ok(CancelOutcome::CancellationUnsupported);
         }
-        self.store_result(
+        let _cancellation_requested = self.store_result(
             self.core
                 .store
                 .transition_encoded(TransitionCommand {
@@ -335,6 +373,8 @@ impl TypedTaskExecutionService {
                 })
                 .await,
         )?;
+        #[cfg(feature = "event-bus")]
+        self.publish_task_event(&_cancellation_requested);
         match descriptor.cancellation_mode {
             CancellationMode::Unsupported => Ok(CancelOutcome::CancellationUnsupported),
             CancellationMode::Cooperative => {
@@ -354,7 +394,7 @@ impl TypedTaskExecutionService {
                     let latest = self
                         .store_result(self.core.store.get_encoded_task(id).await)?
                         .ok_or(crate::store::StoreError::NotFound)?;
-                    self.store_result(
+                    let _cancellation_error = self.store_result(
                         self.core
                             .store
                             .transition_encoded(TransitionCommand {
@@ -370,6 +410,8 @@ impl TypedTaskExecutionService {
                             })
                             .await,
                     )?;
+                    #[cfg(feature = "event-bus")]
+                    self.publish_task_event(&_cancellation_error);
                     return Err(TaskServiceError::TypedRequest(
                         "external cancellation hook failed".into(),
                     ));
@@ -437,7 +479,7 @@ impl TypedTaskExecutionService {
                     } else {
                         (TaskState::Queued, false)
                     };
-                    let recovered = self
+                    let _recovered = self
                         .core
                         .store
                         .transition_encoded(TransitionCommand {
@@ -452,7 +494,8 @@ impl TypedTaskExecutionService {
                             output: None,
                         })
                         .await?;
-                    let _ = recovered;
+                    #[cfg(feature = "event-bus")]
+                    self.publish_task_event(&_recovered);
                 }
             }
             after = page.next;
@@ -471,41 +514,138 @@ impl TypedTaskExecutionService {
             let notified = self.core.scheduler_changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let mut launched = false;
-            let mut retry_at = None;
-            while self.core.in_flight.load(Ordering::Acquire) < self.core.max_running_tasks
-                && !self.core.shutting_down.load(Ordering::Acquire)
-                && self.core.fault.lock().is_none()
-            {
-                let (candidate, deadline) = match self.next_queued_candidate().await {
-                    Ok(candidate) => candidate,
-                    Err(error) => {
-                        self.latch_fault(error);
-                        return;
+            if self.core.in_flight.load(Ordering::Acquire) < self.core.max_running_tasks {
+                let now = now_ms();
+                let mut after = None;
+                loop {
+                    if self.core.shutting_down.load(Ordering::Acquire)
+                        || self.core.fault.lock().is_some()
+                        || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
+                    {
+                        break;
                     }
-                };
-                retry_at = deadline;
-                let Some(id) = candidate else { break };
-                if !self.core.scheduled_ids.lock().insert(id) {
-                    break;
+                    let page = match self
+                        .core
+                        .store
+                        .list_ready_queued(
+                            after,
+                            std::num::NonZeroUsize::new(self.core.scan_page_size).expect("scan size is nonzero"),
+                            now,
+                        )
+                        .await
+                    {
+                        Ok(page) => page,
+                        Err(error) => {
+                            self.latch_fault(error);
+                            return;
+                        }
+                    };
+                    for summary in &page.records {
+                        if self.core.shutting_down.load(Ordering::Acquire)
+                            || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
+                        {
+                            break;
+                        }
+                        let Some(descriptor) = self.core.handlers.descriptor(&summary.kind_id) else {
+                            self.mark_blocked(summary, "handler is not registered").await;
+                            continue;
+                        };
+                        if summary.payload_type_id != descriptor.payload_type_id.as_str()
+                            || !descriptor
+                                .accepted_schema_versions
+                                .contains(&summary.payload_schema_version)
+                        {
+                            self.mark_blocked(
+                                summary,
+                                "handler does not accept the payload identity or schema version",
+                            )
+                            .await;
+                            continue;
+                        }
+                        if self.core.codecs.get(&summary.payload_codec_id).is_none() {
+                            self.mark_blocked(summary, "payload bytes codec is not registered")
+                                .await;
+                            continue;
+                        }
+                        let reservation = match self
+                            .core
+                            .engine
+                            .try_prepare_typed(summary.id, summary.resource_limit.clone())
+                        {
+                            Ok(reservation) => reservation,
+                            Err(EngineError::TemporarilyUnavailable) => continue,
+                            Err(EngineError::Unsatisfiable) => {
+                                self.mark_blocked(summary, "requested resources exceed configured capacity")
+                                    .await;
+                                continue;
+                            }
+                            Err(error) => {
+                                self.mark_blocked(summary, &error.to_string()).await;
+                                continue;
+                            }
+                        };
+                        let admission = self.core.admission.read().await;
+                        if self.core.shutting_down.load(Ordering::Acquire) {
+                            drop(reservation);
+                            break;
+                        }
+                        let running = match self
+                            .core
+                            .store
+                            .start_encoded(crate::model::next::StartCommand {
+                                id: summary.id,
+                                expected_state_version: summary.state_version,
+                                started_at_ms: now_ms(),
+                            })
+                            .await
+                        {
+                            Ok(running) => running,
+                            Err(crate::store::StoreError::Conflict | crate::store::StoreError::NotFound) => {
+                                drop(admission);
+                                drop(reservation);
+                                continue;
+                            }
+                            Err(error) => {
+                                drop(admission);
+                                drop(reservation);
+                                self.latch_fault(error);
+                                return;
+                            }
+                        };
+                        drop(admission);
+                        #[cfg(feature = "event-bus")]
+                        self.publish_task_event(&running);
+                        self.core.in_flight.fetch_add(1, Ordering::AcqRel);
+                        let service = self.clone();
+                        let core = Arc::clone(&self.core);
+                        let id = summary.id;
+                        tokio::spawn(async move {
+                            let _in_flight = InFlightGuard(core);
+                            if AssertUnwindSafe(service.run_one(id, running, reservation))
+                                .catch_unwind()
+                                .await
+                                .is_err()
+                            {
+                                service.latch_fault(format!(
+                                    "task execution supervisor panicked for {}",
+                                    id.to_padded_decimal()
+                                ));
+                            }
+                        });
+                    }
+                    after = page.next;
+                    if after.is_none() {
+                        break;
+                    }
                 }
-                self.core.in_flight.fetch_add(1, Ordering::AcqRel);
-                let service = self.clone();
-                let core = Arc::clone(&self.core);
-                tokio::spawn(async move {
-                    let _in_flight = InFlightGuard(core, id);
-                    if AssertUnwindSafe(service.run_one(id)).catch_unwind().await.is_err() {
-                        service.latch_fault(format!(
-                            "task execution supervisor panicked for {}",
-                            id.to_padded_decimal()
-                        ));
-                    }
-                });
-                launched = true;
             }
-            if launched {
-                continue;
-            }
+            let retry_at = match self.core.store.next_retry_deadline(now_ms()).await {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    self.latch_fault(error);
+                    return;
+                }
+            };
             if let Some(retry_at) = retry_at {
                 let wait = std::time::Duration::from_millis(retry_at.saturating_sub(now_ms()));
                 let _ = tokio::time::timeout(wait, notified).await;
@@ -515,220 +655,112 @@ impl TypedTaskExecutionService {
         }
     }
 
-    async fn next_queued_candidate(&self) -> Result<(Option<TaskId>, Option<u64>), crate::store::StoreError> {
-        let mut after = None;
-        let mut retry_at: Option<u64> = None;
-        loop {
-            let page = self
-                .core
-                .store
-                .list_encoded(TaskQuery {
-                    states: vec![crate::model::TaskStateKind::Queued],
-                    after,
-                    limit: self.core.scan_page_size,
-                    ..TaskQuery::default()
-                })
-                .await?;
-            for summary in &page.records {
-                if self.core.scheduled_ids.lock().contains(&summary.id) {
-                    continue;
-                }
-                if let Some(deadline) = summary.retry_not_before_ms.filter(|deadline| *deadline > now_ms()) {
-                    retry_at = Some(retry_at.map_or(deadline, |current| current.min(deadline)));
-                } else {
-                    return Ok((Some(summary.id), retry_at));
-                }
+    async fn run_one(&self, id: TaskId, running: TaskSummary, reservation: TypedResourceReservation) {
+        let task = match self.core.store.get_encoded_task(id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return,
+            Err(error) => {
+                self.latch_fault(error);
+                return;
             }
-            let Some(cursor) = page.next else {
-                return Ok((None, retry_at));
-            };
-            after = Some(cursor);
+        };
+        if !matches!(task.summary.state, TaskState::Running) {
+            return;
         }
-    }
-
-    async fn run_one(&self, id: TaskId) {
-        'retry: loop {
-            if self.core.shutting_down.load(Ordering::Acquire) {
-                return;
-            }
-            let task = match self.core.store.get_encoded_task(id).await {
-                Ok(Some(task)) => task,
-                Ok(None) => return,
-                Err(error) => {
-                    self.latch_fault(error);
-                    return;
-                }
-            };
-            let summary = task.summary;
-            if !matches!(summary.state, TaskState::Queued) {
-                return;
-            }
-            let Some(descriptor) = self.core.handlers.descriptor(&summary.kind_id) else {
-                self.mark_blocked(&summary, "handler is not registered").await;
-                return;
-            };
-            if summary.payload_type_id != descriptor.payload_type_id.as_str()
-                || !descriptor
-                    .accepted_schema_versions
-                    .contains(&summary.payload_schema_version)
-            {
-                self.mark_blocked(
-                    &summary,
-                    "handler does not accept the payload identity or schema version",
+        let prepared = match prepare_handler(
+            &self.core.handlers,
+            &self.core.codecs,
+            &running.kind_id,
+            task.request.payload,
+        ) {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                self.finish(
+                    &running,
+                    TaskState::Failed {
+                        category: "payload_decode".into(),
+                        message,
+                    },
+                    None,
+                    false,
                 )
                 .await;
                 return;
             }
-            if self.core.codecs.get(&summary.payload_codec_id).is_none() {
-                self.mark_blocked(&summary, "payload bytes codec is not registered")
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.core
+            .cancellations
+            .lock()
+            .insert((id, running.attempt), Arc::clone(&cancelled));
+        let latest_cancel_requested = match self.core.store.get_encoded_task(id).await {
+            Ok(task) => task.is_some_and(|task| task.summary.cancel_requested),
+            Err(error) => {
+                self.latch_fault(error);
+                return;
+            }
+        };
+        if latest_cancel_requested {
+            cancelled.store(true, Ordering::Release);
+        }
+        let reporter: Arc<dyn AsyncReporter> = Arc::new(super::task_progress_reporter::TaskProgressReporter::new(
+            Arc::clone(&self.core.store),
+            id,
+            running.attempt,
+        ));
+        let context = TypedTaskContext::new(id, running.attempt, cancelled, reporter);
+        let execution = AssertUnwindSafe(prepared.run(context)).catch_unwind().await;
+        self.core.cancellations.lock().remove(&(id, running.attempt));
+        drop(reservation);
+        match execution {
+            Ok(Ok(TaskRunOutcome::Succeeded(output))) => {
+                if output.summary.len() <= MAX_TASK_OUTPUT_SUMMARY_BYTES {
+                    self.finish(&running, TaskState::Succeeded, Some(output), false).await;
+                } else {
+                    self.finish(
+                        &running,
+                        TaskState::Failed {
+                            category: "task_output_too_large".into(),
+                            message: format!(
+                                "task output summary exceeds the {MAX_TASK_OUTPUT_SUMMARY_BYTES}-byte limit"
+                            ),
+                        },
+                        None,
+                        false,
+                    )
                     .await;
-                return;
+                }
             }
-            let reservation = match self
-                .core
-                .engine
-                .try_prepare_typed(id, task.request.resource_limit.clone())
-            {
-                Ok(reservation) => reservation,
-                Err(EngineError::Unsatisfiable) => {
-                    self.mark_blocked(&summary, "requested resources exceed configured capacity")
-                        .await;
-                    return;
-                }
-                Err(EngineError::TemporarilyUnavailable) => {
-                    let notified = self.core.in_flight_changed.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
-                    notified.await;
-                    continue 'retry;
-                }
-                Err(error) => {
-                    self.mark_blocked(&summary, &error.to_string()).await;
-                    return;
-                }
-            };
-            let admission = self.core.admission.read().await;
-            if self.core.shutting_down.load(Ordering::Acquire) {
-                drop(reservation);
-                return;
-            }
-            let running = match self
-                .core
-                .store
-                .start_encoded(crate::model::next::StartCommand {
-                    id,
-                    expected_state_version: summary.state_version,
-                    started_at_ms: now_ms(),
-                })
+            Ok(Ok(TaskRunOutcome::Cancelled)) => self.finish(&running, TaskState::Cancelled, None, false).await,
+            Ok(Err(error)) => {
+                let retryable = error.retryable;
+                self.finish(
+                    &running,
+                    TaskState::Failed {
+                        category: error.category,
+                        message: error.message,
+                    },
+                    None,
+                    retryable,
+                )
                 .await
-            {
-                Ok(summary) => summary,
-                Err(crate::store::StoreError::Conflict) => {
-                    self.check_competing_transition(id, summary.state_version).await;
-                    return;
-                }
-                Err(error) => {
-                    self.latch_fault(error);
-                    return;
-                }
-            };
-            drop(admission);
-            let prepared = match prepare_handler(
-                &self.core.handlers,
-                &self.core.codecs,
-                &running.kind_id,
-                task.request.payload,
-            ) {
-                Ok(prepared) => prepared,
-                Err(message) => {
-                    self.finish(
-                        &running,
-                        TaskState::Failed {
-                            category: "payload_decode".into(),
-                            message,
-                        },
-                        None,
-                        false,
-                    )
-                    .await;
-                    return;
-                }
-            };
-            let cancelled = Arc::new(AtomicBool::new(false));
-            self.core
-                .cancellations
-                .lock()
-                .insert((id, running.attempt), Arc::clone(&cancelled));
-            let latest_cancel_requested = match self.core.store.get_encoded_task(id).await {
-                Ok(task) => task.is_some_and(|task| task.summary.cancel_requested),
-                Err(error) => {
-                    self.latch_fault(error);
-                    return;
-                }
-            };
-            if latest_cancel_requested {
-                cancelled.store(true, Ordering::Release);
             }
-            let reporter: Arc<dyn AsyncReporter> = Arc::new(super::task_progress_reporter::TaskProgressReporter::new(
-                Arc::clone(&self.core.store),
-                id,
-                running.attempt,
-            ));
-            let context = TypedTaskContext::new(id, running.attempt, cancelled, reporter);
-            let execution = AssertUnwindSafe(prepared.run(context)).catch_unwind().await;
-            self.core.cancellations.lock().remove(&(id, running.attempt));
-            drop(reservation);
-            match execution {
-                Ok(Ok(TaskRunOutcome::Succeeded(output))) => {
-                    if output.summary.len() <= MAX_TASK_OUTPUT_SUMMARY_BYTES {
-                        self.finish(&running, TaskState::Succeeded, Some(output), false).await;
-                    } else {
-                        self.finish(
-                            &running,
-                            TaskState::Failed {
-                                category: "task_output_too_large".into(),
-                                message: format!(
-                                    "task output summary exceeds the {MAX_TASK_OUTPUT_SUMMARY_BYTES}-byte limit"
-                                ),
-                            },
-                            None,
-                            false,
-                        )
-                        .await;
-                    }
-                }
-                Ok(Ok(TaskRunOutcome::Cancelled)) => self.finish(&running, TaskState::Cancelled, None, false).await,
-                Ok(Err(error)) => {
-                    let retryable = error.retryable;
-                    self.finish(
-                        &running,
-                        TaskState::Failed {
-                            category: error.category,
-                            message: error.message,
-                        },
-                        None,
-                        retryable,
-                    )
-                    .await
-                }
-                Err(_) => {
-                    self.finish(
-                        &running,
-                        TaskState::Panicked {
-                            message: "typed task handler panicked".into(),
-                        },
-                        None,
-                        false,
-                    )
-                    .await
-                }
+            Err(_) => {
+                self.finish(
+                    &running,
+                    TaskState::Panicked {
+                        message: "typed task handler panicked".into(),
+                    },
+                    None,
+                    false,
+                )
+                .await
             }
-            return;
         }
     }
 
     async fn mark_blocked(&self, summary: &TaskSummary, reason: &str) {
-        if let Err(error) = self
+        match self
             .core
             .store
             .transition_encoded(TransitionCommand {
@@ -744,11 +776,14 @@ impl TypedTaskExecutionService {
             })
             .await
         {
-            if matches!(error, crate::store::StoreError::Conflict) {
-                self.check_competing_transition(summary.id, summary.state_version).await;
-            } else {
-                self.latch_fault(error);
+            Ok(_updated) => {
+                #[cfg(feature = "event-bus")]
+                self.publish_task_event(&_updated);
             }
+            Err(crate::store::StoreError::Conflict) => {
+                self.check_competing_transition(summary.id, summary.state_version).await
+            }
+            Err(error) => self.latch_fault(error),
         }
     }
 
@@ -773,7 +808,7 @@ impl TypedTaskExecutionService {
             now_ms().saturating_add(delay.as_millis().min(u64::MAX as u128) as u64)
         });
         let final_state = if retry { TaskState::Queued } else { state };
-        if let Err(error) = self
+        match self
             .core
             .store
             .transition_encoded(TransitionCommand {
@@ -789,12 +824,15 @@ impl TypedTaskExecutionService {
             })
             .await
         {
-            if matches!(error, crate::store::StoreError::Conflict) {
-                self.check_competing_transition(started.id, latest.summary.state_version)
-                    .await;
-            } else {
-                self.latch_fault(error);
+            Ok(_updated) => {
+                #[cfg(feature = "event-bus")]
+                self.publish_task_event(&_updated);
             }
+            Err(crate::store::StoreError::Conflict) => {
+                self.check_competing_transition(started.id, latest.summary.state_version)
+                    .await
+            }
+            Err(error) => self.latch_fault(error),
         }
     }
 
