@@ -191,6 +191,7 @@ impl TypedTaskExecutionService {
         let id = TaskId::from_id(self.core.id_generator.generate()?);
         let accepted = self.store_result(self.core.store.accept_encoded(id, stored).await)?;
         if accepted.created {
+            self.notify_notifications();
             self.core.scheduler_changed.notify_one();
         }
         Ok(accepted.summary)
@@ -231,7 +232,7 @@ impl TypedTaskExecutionService {
         if task.summary.cancel_requested {
             return Err(TaskServiceError::CancellationPending);
         }
-        let resumed = self.store_result(
+        let resumed = self.store_write_result(
             self.core
                 .store
                 .transition_encoded(TransitionCommand {
@@ -317,7 +318,7 @@ impl TypedTaskExecutionService {
             return Ok(CancelOutcome::AlreadyTerminal);
         }
         if matches!(summary.state, TaskState::Queued | TaskState::Blocked { .. }) {
-            let updated = self.store_result(
+            let updated = self.store_write_result(
                 self.core
                     .store
                     .transition_encoded(TransitionCommand {
@@ -352,7 +353,7 @@ impl TypedTaskExecutionService {
         if descriptor.cancellation_mode == CancellationMode::Unsupported {
             return Ok(CancelOutcome::CancellationUnsupported);
         }
-        self.store_result(
+        self.store_write_result(
             self.core
                 .store
                 .transition_encoded(TransitionCommand {
@@ -387,7 +388,7 @@ impl TypedTaskExecutionService {
                     let latest = self
                         .store_result(self.core.store.get_encoded_task(id).await)?
                         .ok_or(crate::store::StoreError::NotFound)?;
-                    self.store_result(
+                    self.store_write_result(
                         self.core
                             .store
                             .transition_encoded(TransitionCommand {
@@ -444,8 +445,14 @@ impl TypedTaskExecutionService {
         if let Some(publisher) = &self.core.publisher { publisher.notify(); }
     }
 
+    /// Signals the outbox only after a lifecycle write has committed successfully.
+    fn store_write_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
+        let value = self.store_result(result)?;
+        self.notify_notifications();
+        Ok(value)
+    }
+
     fn store_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
-        if result.is_ok() { self.notify_notifications(); }
         result.map_err(|error| {
             if !matches!(
                 error,
@@ -799,8 +806,9 @@ impl TypedTaskExecutionService {
             } else {
                 self.latch_fault(error);
             }
+        } else {
+            self.notify_notifications();
         }
-        self.notify_notifications();
     }
 
     async fn finish(&self, started: &TaskSummary, state: TaskState, output: Option<TaskOutput>, retryable: bool) {
@@ -846,8 +854,9 @@ impl TypedTaskExecutionService {
             } else {
                 self.latch_fault(error);
             }
+        } else {
+            self.notify_notifications();
         }
-        self.notify_notifications();
     }
 
     async fn check_competing_transition(&self, id: TaskId, expected_version: u64) {

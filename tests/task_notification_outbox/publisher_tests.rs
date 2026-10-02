@@ -5,7 +5,7 @@ use std::time::Duration;
 use qubit_event_bus::{AsyncEventBus, EventBusFacadeConfig};
 use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::error::SpiError;
-use qubit_event_bus::model::{ProviderId, PublishAcknowledgement, PublishEffect};
+use qubit_event_bus::model::{AdmissionStatus, DestinationAdmission, ProviderId, PublishAcknowledgement, PublishEffect, SubscriberId};
 use qubit_event_bus::spi::{AsyncEventBusSpi, AsyncEventSubscriptionSpi, DelayedDeliveryCapability, DurabilityCapability, EventBusCapabilities, OrderingCapability, OutboundMessage, PayloadModes, PublishGuarantee, PublishVisibility, ReplayCapability, SettlementCapabilities, ShutdownMode, ShutdownOutcome, SpiFuture, SpiSubscriptionRequest, SubscriptionModes};
 use qubit_task::{TaskExecutionService, TaskExecutionServiceBuilder};
 use qubit_task::model::{TaskId, StartCommand, TaskState, TransitionCommand};
@@ -15,8 +15,36 @@ use qubit_task::store::{MemoryTaskStore, SqliteTaskStore, TaskStore};
 #[path = "../fixtures/doc-examples/src/task_event_codec.rs"]
 mod task_event_codec;
 
-/// Mode: 0 accepts, 1 rejects, 2 loses acknowledgement, 3 never returns.
-struct FakeSpi { mode: AtomicU8, ids: Mutex<Vec<String>> }
+const OPAQUE_ACCEPTED: u8 = 0;
+const NOT_ACCEPTED_ERROR: u8 = 1;
+const UNCERTAIN_ERROR: u8 = 2;
+const HUNG_PUBLISH: u8 = 3;
+const ACCEPTED: u8 = 4;
+const PARTIALLY_ACCEPTED: u8 = 5;
+const DROPPED: u8 = 6;
+const NO_DESTINATIONS: u8 = 7;
+const NONE_ACCEPTED: u8 = 8;
+
+/// A fixed-capability provider with controllable admission and fault outcomes.
+struct FakeSpi { mode: AtomicU8, ids: Mutex<Vec<String>>, visibility: PublishVisibility }
+
+/// Creates one individual destination acknowledgement for the receipt matrix.
+fn destination(id: u64, status: AdmissionStatus) -> DestinationAdmission {
+    DestinationAdmission::new(qubit_id::Id::new(id), SubscriberId::new(format!("subscriber-{id}")).expect("subscriber ID"), status)
+}
+
+/// Produces a successful receipt without conflating acceptance with successful IO.
+fn acknowledgement(mode: u8) -> Option<PublishAcknowledgement> {
+    match mode {
+        OPAQUE_ACCEPTED => Some(PublishAcknowledgement::Accepted { provider_message_id: None, metadata: Default::default() }),
+        ACCEPTED => Some(PublishAcknowledgement::DestinationAdmissions(vec![destination(1, AdmissionStatus::Accepted)])),
+        PARTIALLY_ACCEPTED => Some(PublishAcknowledgement::DestinationAdmissions(vec![destination(1, AdmissionStatus::Accepted), destination(2, AdmissionStatus::Rejected("queue full".into()))])),
+        DROPPED => Some(PublishAcknowledgement::DroppedByInterceptor),
+        NO_DESTINATIONS => Some(PublishAcknowledgement::DestinationAdmissions(Vec::new())),
+        NONE_ACCEPTED => Some(PublishAcknowledgement::DestinationAdmissions(vec![destination(1, AdmissionStatus::Filtered), destination(2, AdmissionStatus::Rejected("queue full".into()))])),
+        _ => None,
+    }
+}
 impl AsyncEventBusSpi for FakeSpi {
     fn capabilities(&self) -> EventBusCapabilities {
         EventBusCapabilities::builder().payload_modes(PayloadModes::Encoded)
@@ -24,15 +52,15 @@ impl AsyncEventBusSpi for FakeSpi {
             .delayed_delivery(DelayedDeliveryCapability::None).durability(DurabilityCapability::Ephemeral)
             .subscription_modes(SubscriptionModes::EPHEMERAL).consumer_groups(false)
             .replay(ReplayCapability::None).publish_guarantee(PublishGuarantee::Accepted)
-            .publish_visibility(PublishVisibility::Opaque).build().expect("capabilities")
+            .publish_visibility(self.visibility).build().expect("capabilities")
     }
     fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         Box::pin(async move {
             self.ids.lock().expect("ids").push(message.id().as_str().to_owned());
             let mode = self.mode.load(Ordering::Acquire);
-            if mode == 3 { return std::future::pending().await; }
-            if mode == 0 { return Ok(PublishAcknowledgement::Accepted { provider_message_id: None, metadata: Default::default() }); }
-            Err(SpiError::Publish { provider_id: "fake".into(), resource: None, kind: "injected", retryable: Some(false), effect: if mode == 1 { PublishEffect::NotAccepted } else { PublishEffect::MayHaveBeenAccepted }, source: Box::new(std::io::Error::other("injected")) })
+            if mode == HUNG_PUBLISH { return std::future::pending().await; }
+            if let Some(receipt) = acknowledgement(mode) { return Ok(receipt); }
+            Err(SpiError::Publish { provider_id: "fake".into(), resource: None, kind: "injected", retryable: Some(false), effect: if mode == NOT_ACCEPTED_ERROR { PublishEffect::NotAccepted } else { PublishEffect::MayHaveBeenAccepted }, source: Box::new(std::io::Error::other("injected")) })
         })
     }
     fn subscribe<'a>(&'a self, _: SpiSubscriptionRequest) -> SpiFuture<'a, Result<Box<dyn AsyncEventSubscriptionSpi>, SpiError>> {
@@ -48,7 +76,8 @@ impl qubit_id::IdGenerator for Ids {
 
 /// Builds an encoded facade that exercises codec lookup and admission checking.
 fn bus(mode: u8, codec: bool) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
-    let spi = Arc::new(FakeSpi { mode: AtomicU8::new(mode), ids: Mutex::new(Vec::new()) });
+    let visibility = if mode >= ACCEPTED { PublishVisibility::DestinationAdmissions } else { PublishVisibility::Opaque };
+    let spi = Arc::new(FakeSpi { mode: AtomicU8::new(mode), ids: Mutex::new(Vec::new()), visibility });
     let mut registry = CodecRegistry::new();
     if codec { registry.register(Arc::new(task_event_codec::TaskEventJsonCodec::new().expect("codec"))); }
     let config = EventBusFacadeConfig::new().with_codec_registry(Arc::new(registry));
@@ -81,28 +110,33 @@ async fn service_with_timeout(store: Arc<dyn TaskStore>, bus: Arc<AsyncEventBus>
 
 #[tokio::test]
 async fn test_startup_replay_deletes_only_confirmed_admissions() {
-    let store = seed().await;
-    let (bus, spi) = bus(0, true);
-    let service = service(store.clone(), bus).await.expect("service");
-    service.shutdown().await.expect("drained");
-    assert_eq!(*spi.ids.lock().expect("ids"), ["task:42:0", "task:42:1", "task:42:2"]);
-    let owner = store.acquire_owner().await.expect("owner released");
-    assert!(store.list_event_outbox(128).await.expect("empty").is_empty());
-    store.release_owner(owner).await.expect("release");
+    for mode in [OPAQUE_ACCEPTED, ACCEPTED, PARTIALLY_ACCEPTED] {
+        let store = seed().await;
+        let (bus, spi) = bus(mode, true);
+        let service = service(store.clone(), bus).await.expect("service");
+        service.shutdown().await.expect("drained");
+        assert_eq!(*spi.ids.lock().expect("ids"), ["task:42:0", "task:42:1", "task:42:2"]);
+        let owner = store.acquire_owner().await.expect("owner released");
+        assert!(store.list_event_outbox(128).await.expect("empty").is_empty());
+        store.release_owner(owner).await.expect("release");
+    }
 }
 
 #[tokio::test]
 async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
-    for mode in [1,2,3] {
+    for mode in [NOT_ACCEPTED_ERROR, UNCERTAIN_ERROR, HUNG_PUBLISH, DROPPED, NO_DESTINATIONS, NONE_ACCEPTED] {
         let store = seed().await;
         let (bus, spi) = bus(mode, true);
         let first = service_with_timeout(store.clone(), bus.clone(), Duration::from_millis(500)).await.expect("service");
         assert!(matches!(first.shutdown().await, Err(TaskServiceError::NotificationClose(_))));
         assert!(matches!(first.shutdown().await, Err(TaskServiceError::NotificationClose(_))), "repeated shutdown retains its drain failure");
         let owner = store.acquire_owner().await.expect("released despite timeout");
-        assert_eq!(store.list_event_outbox(128).await.expect("retained").len(), 3);
+        let retained = store.list_event_outbox(128).await.expect("retained");
+        assert_eq!(retained.iter().map(|event| event.event_id.as_str()).collect::<Vec<_>>(), ["task:42:0", "task:42:1", "task:42:2"]);
+        assert!(spi.ids.lock().expect("ids").iter().all(|id| id == "task:42:0"), "a failed head must retain order");
         store.release_owner(owner).await.expect("release");
-        spi.mode.store(0, Ordering::Release);
+        let accepted_mode = if spi.visibility == PublishVisibility::DestinationAdmissions { ACCEPTED } else { OPAQUE_ACCEPTED };
+        spi.mode.store(accepted_mode, Ordering::Release);
         let second = service(store, bus).await.expect("restart");
         second.shutdown().await.expect("replayed");
         let ids = spi.ids.lock().expect("ids");
@@ -113,7 +147,7 @@ async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
 
 #[tokio::test]
 async fn test_missing_codec_preserves_outbox_and_memory_store_is_rejected() {
-    let (bus, spi) = bus(0, false);
+    let (bus, spi) = bus(OPAQUE_ACCEPTED, false);
     let store = seed().await;
     let service = service_with_timeout(store.clone(), bus.clone(), Duration::from_millis(500)).await.expect("service");
     assert!(matches!(service.shutdown().await, Err(TaskServiceError::NotificationClose(_))));
@@ -131,14 +165,14 @@ async fn test_service_cancellation_persists_snapshot_before_publication() {
     let id = TaskId::from_id(qubit_id::Id::new(42));
     store.accept_encoded(id, super::request()).await.expect("existing task");
     store.transition_encoded(TransitionCommand { id, expected_state_version: 0, expected_attempt: 0, state: TaskState::Blocked { reason: "operator intervention".into() }, cancel_requested: false, cancel_error: None, retry_not_before_ms: None, finished_at_ms: None, output: None }).await.expect("blocked task");
-    let (bus, spi) = bus(1, true);
+    let (bus, spi) = bus(NOT_ACCEPTED_ERROR, true);
     let service = service(store.clone(), bus).await.expect("service");
     let _outcome = service.cancel(id).await.expect("cancel blocked task");
     let events = store.list_event_outbox(128).await.expect("committed snapshot");
     assert_eq!(events.len(), 1, "enabling notifications does not backfill old history");
     assert_eq!(events[0].state_version, 2);
     assert!(events[0].event_json.contains("Cancelled"));
-    spi.mode.store(0, Ordering::Release);
+    spi.mode.store(OPAQUE_ACCEPTED, Ordering::Release);
     service.shutdown().await.expect("drain cancellation event");
 }
 

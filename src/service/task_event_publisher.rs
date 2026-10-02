@@ -50,7 +50,9 @@ impl TaskEventPublisher {
     /// future retains its handle so a later shutdown can finish the same barrier.
     /// Returns `NotificationClose` if rows remain or the worker panics.
     pub(super) async fn close(&self) -> Result<(), TaskServiceError> {
-        self.state.closing.store(true, Ordering::Release);
+        if !self.state.closing.swap(true, Ordering::AcqRel) {
+            self.state.close_changed.notify_one();
+        }
         self.notify();
         let mut worker = self.worker.lock().await;
         let Some(handle) = worker.as_mut() else { return Ok(()); };
