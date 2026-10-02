@@ -186,7 +186,8 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
                 CREATE INDEX tasks_correlation_accepted_id ON tasks(correlation_key, accepted_at, id);
                 CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE state_kind IN ('Queued','Running');
                 CREATE INDEX tasks_queued_accepted_id ON tasks(accepted_at, id) WHERE state_kind='Queued';
-                CREATE INDEX tasks_queued_retry_deadline ON tasks(retry_not_before_ms) WHERE state_kind='Queued' AND retry_not_before_ms IS NOT NULL;",
+                CREATE INDEX tasks_queued_retry_deadline ON tasks(retry_not_before_ms) WHERE state_kind='Queued' AND retry_not_before_ms IS NOT NULL;
+                CREATE INDEX tasks_terminal_finished_id ON tasks(CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id) WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled');",
             )
             .map_err(failure)?;
         transaction
@@ -202,7 +203,8 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
              CREATE INDEX IF NOT EXISTS tasks_correlation_accepted_id ON tasks(correlation_key, accepted_at, id);
              CREATE INDEX IF NOT EXISTS tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE state_kind IN ('Queued','Running');
              CREATE INDEX IF NOT EXISTS tasks_queued_accepted_id ON tasks(accepted_at, id) WHERE state_kind='Queued';
-             CREATE INDEX IF NOT EXISTS tasks_queued_retry_deadline ON tasks(retry_not_before_ms) WHERE state_kind='Queued' AND retry_not_before_ms IS NOT NULL;",
+             CREATE INDEX IF NOT EXISTS tasks_queued_retry_deadline ON tasks(retry_not_before_ms) WHERE state_kind='Queued' AND retry_not_before_ms IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS tasks_terminal_finished_id ON tasks(CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id) WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled');",
         )
         .map_err(failure)?;
     transaction.commit().map_err(failure)
