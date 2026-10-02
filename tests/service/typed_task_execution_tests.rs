@@ -20,8 +20,8 @@ use qubit_event_bus::AsyncEventBus;
 use qubit_event_bus::local::LocalEventBusConfig;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::model::Topic;
-use qubit_model_metadata::metadata::ModelId;
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelId;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;

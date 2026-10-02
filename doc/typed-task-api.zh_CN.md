@@ -11,7 +11,7 @@
 ```rust,no_run
 use std::sync::Arc;
 use qubit_codec::{ValueBytesCodecDescriptor, ValueBytesCodecRegistration, ValueBytesCodecRegistry, ValueCodecId, ValueCodecRegistration, ValueCodecRegistrationSource};
-use qubit_model_metadata::metadata::{ModelId, ModelIdBuf};
+use qubit_model_id::{ModelId, ModelIdBuf};
 use qubit_progress::{Metric, Stage};
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::{CancellationMode, TaskContext, TaskHandlerDescriptor};

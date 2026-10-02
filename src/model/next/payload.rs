@@ -8,7 +8,7 @@
 use std::any::Any;
 
 use qubit_codec::ValueBytesCodecRegistry;
-use qubit_model_metadata::metadata::ModelId;
+use qubit_model_id::ModelId;
 
 use super::EncodedPayload;
 use super::PayloadEncodeError;

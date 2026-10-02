@@ -15,7 +15,7 @@ use std::time::UNIX_EPOCH;
 
 use qubit_id::Id;
 use qubit_metadata::Metadata;
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateKind;
