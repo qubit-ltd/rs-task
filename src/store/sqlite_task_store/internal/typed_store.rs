@@ -139,6 +139,7 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
     connection: &Connection,
     id: TaskId,
     request: StoredTaskRequest,
+    outbox_enabled: bool,
 ) -> Result<AcceptOutcome, StoreError> {
     let transaction = connection.unchecked_transaction().map_err(failure)?;
     let request_info = StoredRequestInfo::from(&request);
@@ -216,6 +217,7 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
         )
         .map_err(failure)?;
     let summary = decode_summary(id_key, &request_info_json, &lifecycle_json)?;
+    if outbox_enabled { insert_event_outbox(&transaction, &summary)?; }
     transaction.commit().map_err(failure)?;
     Ok(AcceptOutcome { summary, created: true })
 }
@@ -254,6 +256,7 @@ pub(in crate::store::sqlite_task_store) fn get_encoded_task(
 pub(in crate::store::sqlite_task_store) fn start_encoded(
     connection: &Connection,
     command: StartCommand,
+    outbox_enabled: bool,
 ) -> Result<TaskSummary, StoreError> {
     let id_key = command.id.to_padded_decimal();
     let transaction = connection.unchecked_transaction().map_err(failure)?;
@@ -309,6 +312,7 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
         return Err(StoreError::Conflict);
     }
     let summary = decode_summary(id_key, &request_json, &lifecycle_json)?;
+    if outbox_enabled { insert_event_outbox(&transaction, &summary)?; }
     transaction.commit().map_err(failure)?;
     Ok(summary)
 }
@@ -317,6 +321,7 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
 pub(in crate::store::sqlite_task_store) fn transition_encoded(
     connection: &Connection,
     command: crate::model::next::TransitionCommand,
+    outbox_enabled: bool,
 ) -> Result<TaskSummary, StoreError> {
     command
         .state
@@ -399,6 +404,7 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
         return Err(StoreError::Conflict);
     }
     let summary = decode_summary(id_key, &request_json, &lifecycle_json)?;
+    if outbox_enabled { insert_event_outbox(&transaction, &summary)?; }
     transaction.commit().map_err(failure)?;
     Ok(summary)
 }
@@ -517,4 +523,19 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Inserts the immutable notification before committing its lifecycle mutation.
+/// Snapshots larger than 128 KiB or SQLite failures roll back the surrounding transaction.
+fn insert_event_outbox(transaction: &rusqlite::Transaction<'_>, summary: &TaskSummary) -> Result<(), StoreError> {
+    let event = crate::event::TaskEvent::from_typed_summary(summary);
+    let json = serde_json::to_string(&event).map_err(failure)?;
+    if json.len() > 128 * 1024 { return Err(StoreError::InvalidRequest("task event snapshot exceeds 128 KiB")); }
+    let event_id = format!("task:{}:{}", summary.id, summary.state_version);
+    // A monotonic persisted ordering key also preserves lifecycle order across clock rollback.
+    transaction.execute(
+        "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) VALUES (?1,?2,?3,?4,MAX(?5,COALESCE((SELECT MAX(created_at_ms) FROM task_event_outbox),?5)))",
+        params![summary.id.to_padded_decimal(), summary.state_version, event_id, json, i64::try_from(now_ms()).map_err(failure)?],
+    ).map_err(failure)?;
+    Ok(())
 }

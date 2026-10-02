@@ -382,7 +382,8 @@ impl LegacyTaskStore for SqliteTaskStore {
                 ))
             });
         }
-        self.run_write(move |connection| accept_encoded(connection, id, request))
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| accept_encoded(connection, id, request, outbox_enabled.load(std::sync::atomic::Ordering::Acquire)))
     }
 
     /// Loads an encoded typed task without decoding its application payload.
@@ -427,7 +428,8 @@ impl LegacyTaskStore for SqliteTaskStore {
                 ))
             });
         }
-        self.run_write(move |connection| start_encoded(connection, command))
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| start_encoded(connection, command, outbox_enabled.load(std::sync::atomic::Ordering::Acquire)))
     }
 
     /// Applies a typed lifecycle transition atomically.
@@ -438,7 +440,8 @@ impl LegacyTaskStore for SqliteTaskStore {
         if !self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
-        self.run_write(move |connection| transition_encoded(connection, command))
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| transition_encoded(connection, command, outbox_enabled.load(std::sync::atomic::Ordering::Acquire)))
     }
 
     /// Acceptance and idempotency lookup share one SQLite transaction.
@@ -920,6 +923,7 @@ impl LegacyTaskStore for SqliteTaskStore {
     /// Returns an error for a stale epoch, absent owner, or lock failure.
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         let owner_state = Arc::clone(&self.owner_state);
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
         self.run(move |_| {
             let mut owner_state = owner_state.lock();
             if owner_state.epoch != Some(epoch) {
@@ -927,6 +931,7 @@ impl LegacyTaskStore for SqliteTaskStore {
             }
             let file = owner_state.lock_file.take().ok_or(StoreError::OwnerConflict)?;
             owner_state.epoch = None;
+            outbox_enabled.store(false, std::sync::atomic::Ordering::Release);
             file.unlock().map_err(failure)
         })
     }
