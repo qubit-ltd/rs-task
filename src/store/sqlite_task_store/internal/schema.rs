@@ -139,7 +139,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
             .execute_batch("ALTER TABLE tasks ADD COLUMN retry_not_before_ms INTEGER;")
             .map_err(failure)?;
         transaction
-            .pragma_update(None, "user_version", NEXT_SCHEMA_VERSION)
+            .pragma_update(None, "user_version", 5)
             .map_err(failure)?;
     }
     if version == NEXT_SCHEMA_VERSION || version == 5 || version == 4 {
@@ -593,12 +593,18 @@ mod tests {
 /// Rejects incomplete v6 databases without silently replacing their outbox.
 fn validate_outbox_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let mut statement = transaction.prepare("PRAGMA table_info(task_event_outbox)").map_err(failure)?;
-    let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(failure)?
-        .collect::<Result<std::collections::HashSet<_>, _>>().map_err(failure)?;
-    for required in ["task_id", "state_version", "event_id", "event_json", "created_at_ms"] {
-        if !columns.contains(required) {
-            return Err(StoreError::Failure(format!("SQLite event outbox is missing required column `{required}`")));
+    let columns = statement.query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(5)?))).map_err(failure)?
+        .collect::<Result<Vec<_>, _>>().map_err(failure)?;
+    for (name, kind, primary) in [("task_id", "TEXT", 1), ("state_version", "INTEGER", 2), ("event_id", "TEXT", 0), ("event_json", "TEXT", 0), ("created_at_ms", "INTEGER", 0)] {
+        if !columns.iter().any(|(column, ty, required, pk)| column == name && ty == kind && *required == 1 && *pk == primary) {
+            return Err(StoreError::Failure(format!("SQLite event outbox has invalid required column `{name}`")));
         }
+    }
+    let mut statement = transaction.prepare("PRAGMA index_info(task_event_outbox_created)").map_err(failure)?;
+    let index = statement.query_map([], |row| row.get::<_, String>(2)).map_err(failure)?
+        .collect::<Result<Vec<_>, _>>().map_err(failure)?;
+    if index != ["created_at_ms", "task_id", "state_version"] {
+        return Err(StoreError::Failure("SQLite event outbox is missing its ordered index".into()));
     }
     Ok(())
 }
