@@ -69,7 +69,7 @@ event-bus = ["dep:qubit-event-bus", "tokio/macros"]
 
 [dev-dependencies]
 proptest = "1.11"
-qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "0.6" }
+qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "0.7" }
 redis = { version = "0.32.7", default-features = false, features = ["streams"] }
 tokio = { version = "^1.53", features = ["macros", "rt-multi-thread", "time"] }
 
