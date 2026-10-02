@@ -600,6 +600,16 @@ fn validate_outbox_schema(transaction: &Transaction<'_>) -> Result<(), StoreErro
             return Err(StoreError::Failure(format!("SQLite event outbox has invalid required column `{name}`")));
         }
     }
+    let owns_index: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='task_event_outbox_created' AND tbl_name='task_event_outbox')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if !owns_index {
+        return Err(StoreError::Failure("SQLite event outbox is missing its ordered index".into()));
+    }
     let mut statement = transaction.prepare("PRAGMA index_info(task_event_outbox_created)").map_err(failure)?;
     let index = statement.query_map([], |row| row.get::<_, String>(2)).map_err(failure)?
         .collect::<Result<Vec<_>, _>>().map_err(failure)?;

@@ -445,7 +445,8 @@ pub trait TaskStore: Send + Sync {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
-    /// Reads the oldest snapshots in commit order, with a limit of 1 through 256.
+    /// Reads snapshots in deterministic `(created_at_ms, task_id, state_version)`
+    /// order, with a limit of 1 through 256.
     /// Requires active service ownership; invalid limits and storage failures are errors.
     fn list_event_outbox<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> {
         let _ = limit;

@@ -133,3 +133,25 @@ fn test_v6_missing_outbox_primary_key_is_rejected() {
     connection.execute_batch("DROP TABLE task_event_outbox; CREATE TABLE task_event_outbox(task_id TEXT NOT NULL,state_version INTEGER NOT NULL,event_id TEXT NOT NULL,event_json TEXT NOT NULL,created_at_ms INTEGER NOT NULL); CREATE INDEX task_event_outbox_created ON task_event_outbox(created_at_ms,task_id,state_version);").expect("remove primary key from fixture");
     assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
 }
+
+#[test]
+fn test_v6_outbox_index_on_another_table_is_rejected() {
+    let path = database_path();
+    drop(SqliteTaskStore::open_next(&path).expect("initialize database"));
+    let connection = rusqlite::Connection::open(&path).expect("open database");
+    connection.execute_batch(
+        "DROP INDEX task_event_outbox_created;
+         CREATE TABLE unrelated_events(created_at_ms INTEGER,task_id TEXT,state_version INTEGER);
+         CREATE INDEX task_event_outbox_created ON unrelated_events(created_at_ms,task_id,state_version);",
+    ).expect("install a same-named index on another table");
+    let error = match SqliteTaskStore::open_next(&path) {
+        Ok(_) => panic!("an index on another table cannot satisfy the outbox schema"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, StoreError::Failure(message) if message == "SQLite event outbox is missing its ordered index"));
+    let indexed_table: String = connection.query_row(
+        "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='task_event_outbox_created'",
+        [], |row| row.get(0),
+    ).expect("inspect preserved invalid index");
+    assert_eq!(indexed_table, "unrelated_events", "opening must not silently repair invalid v6 data");
+}
