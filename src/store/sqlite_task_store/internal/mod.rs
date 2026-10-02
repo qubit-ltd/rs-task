@@ -69,6 +69,8 @@ pub(super) use stored_task_row::StoredTaskRow;
 pub(super) use typed_store::accept_encoded;
 pub(super) use typed_store::get_encoded_task;
 pub(super) use typed_store::list_encoded;
+pub(super) use typed_store::list_ready_queued;
+pub(super) use typed_store::next_retry_deadline;
 pub(super) use typed_store::start_encoded;
 pub(super) use typed_store::transition_encoded;
 pub(super) use typed_store::update_progress;

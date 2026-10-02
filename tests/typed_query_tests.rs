@@ -12,10 +12,13 @@ use qubit_task::model::TaskId;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateKind;
+use qubit_task::model::StartCommand;
+use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
+use std::num::NonZeroUsize;
 
 fn request(category: &str, correlation_key: &str) -> StoredTaskRequest {
     StoredTaskRequest {
@@ -132,6 +135,47 @@ async fn assert_category_filter_and_exclusive_numeric_cursor(store: &dyn TaskSto
             [2, 10, u64::MAX]
         );
     }
+}
+
+async fn assert_ready_queue_contract(store: &dyn TaskStore) {
+    for value in [20, 10, 30, 40] {
+        let task_id = id(value);
+        let accepted = store.accept_encoded(task_id, request("ready", &format!("{value}"))).await.unwrap();
+        if value != 40 {
+            let running = store.start_encoded(StartCommand { id: task_id, expected_state_version: accepted.summary.state_version, started_at_ms: 10 }).await.unwrap();
+            store.transition_encoded(TransitionCommand {
+                id: task_id, expected_state_version: running.state_version, expected_attempt: running.attempt,
+                retry_not_before_ms: Some(match value { 20 => 100, 10 => 200, _ => 300 }),
+                state: TaskState::Queued, cancel_requested: false, cancel_error: None, finished_at_ms: None, output: None,
+            }).await.unwrap();
+        }
+    }
+    let first = store.list_ready_queued(None, NonZeroUsize::new(2).unwrap(), 200).await.unwrap();
+    assert_eq!(first.records.len(), 2);
+    assert!(first.next.is_some());
+    let second = store.list_ready_queued(first.next, NonZeroUsize::new(2).unwrap(), 200).await.unwrap();
+    assert_eq!(second.records.len(), 1);
+    assert!(second.next.is_none());
+    let mut ready = first.records.iter().chain(&second.records).map(|row| row.id).collect::<Vec<_>>();
+    ready.sort();
+    assert_eq!(ready, [id(10), id(20), id(40)]);
+    assert_eq!(store.next_retry_deadline(200).await.unwrap(), Some(300));
+    assert_eq!(store.next_retry_deadline(300).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn ready_queue_filters_due_retries_and_pages_in_memory() {
+    assert_ready_queue_contract(&MemoryTaskStore::new(16)).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn ready_queue_filters_due_retries_and_pages_in_sqlite() {
+    let db_path = std::env::temp_dir().join(format!("qubit-task-ready-{}.sqlite", uuid::Uuid::new_v4()));
+    let store = SqliteTaskStore::open_next(&db_path).unwrap();
+    assert_ready_queue_contract(&store).await;
+    drop(store);
+    remove_database(&db_path);
 }
 
 #[tokio::test]

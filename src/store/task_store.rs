@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-#[cfg(test)]
 use std::num::NonZeroUsize;
 
 use super::StoreError;
@@ -326,6 +325,21 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<crate::model::next::TaskCursor>,
+        limit: NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        let _ = (after, limit, now_ms);
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        let _ = now_ms;
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
     /// Deletes at most `max_rows` terminal records accepted before the supplied
     /// timestamp.
     ///
@@ -470,6 +484,17 @@ pub trait TaskStore: Send + Sync {
 
     /// Queries summaries in deterministic typed-task order.
     fn list_encoded<'a>(&'a self, query: TypedTaskQuery) -> TaskFuture<'a, Result<TypedTaskPage, StoreError>>;
+
+    /// Lists queued tasks that can start at `now_ms`, ordered for keyset scans.
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<crate::model::next::TaskCursor>,
+        limit: std::num::NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<TypedTaskPage, StoreError>>;
+
+    /// Returns the earliest queued retry deadline strictly after `now_ms`.
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>>;
 
     /// Acquires exclusive ownership before recovering unfinished tasks.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>>;

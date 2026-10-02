@@ -23,6 +23,7 @@ use crate::model::next::TaskId;
 use crate::model::next::TaskPage;
 use crate::model::next::TaskQuery;
 use crate::model::next::TaskSummary;
+use std::num::NonZeroUsize;
 use crate::model::next::TransitionCommand;
 
 impl TaskStore for MemoryTaskStore {
@@ -56,6 +57,14 @@ impl TaskStore for MemoryTaskStore {
 
     fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         LegacyTaskStore::list_encoded(self, query)
+    }
+
+    fn list_ready_queued<'a>(&'a self, after: Option<crate::model::next::TaskCursor>, limit: NonZeroUsize, now_ms: u64) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        LegacyTaskStore::list_ready_queued(self, after, limit, now_ms)
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        LegacyTaskStore::next_retry_deadline(self, now_ms)
     }
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
@@ -99,6 +108,14 @@ impl TaskStore for super::SqliteTaskStore {
 
     fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         LegacyTaskStore::list_encoded(self, query)
+    }
+
+    fn list_ready_queued<'a>(&'a self, after: Option<crate::model::next::TaskCursor>, limit: NonZeroUsize, now_ms: u64) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        LegacyTaskStore::list_ready_queued(self, after, limit, now_ms)
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        LegacyTaskStore::next_retry_deadline(self, now_ms)
     }
 
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
