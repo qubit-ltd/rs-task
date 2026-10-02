@@ -10,6 +10,8 @@
 mod cancel_outcome;
 mod retry_policy;
 mod retry_policy_error;
+#[cfg(feature = "event-bus")]
+mod task_event_publisher;
 mod task_progress_reporter;
 mod task_service_error;
 mod typed_task_execution_service;

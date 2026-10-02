@@ -106,3 +106,30 @@ fn test_v6_missing_outbox_index_is_rejected() {
     connection.execute_batch("DROP INDEX task_event_outbox_created").expect("remove index");
     assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
 }
+
+#[cfg(feature = "event-bus")]
+#[path = "task_notification_outbox/publisher_tests.rs"]
+mod publisher_tests;
+
+#[tokio::test]
+async fn test_oversized_event_rolls_back_acceptance() {
+    let store = SqliteTaskStore::open_next(database_path()).expect("store");
+    let owner = store.acquire_owner().await.expect("owner");
+    store.enable_event_outbox().await.expect("enable");
+    let id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(43));
+    let mut large = request();
+    large.correlation_key = Some("x".repeat(128 * 1024));
+    assert!(matches!(store.accept_encoded(id, large).await, Err(StoreError::InvalidRequest(_))));
+    assert!(store.get_encoded_task(id).await.expect("lookup").is_none());
+    assert!(store.list_event_outbox(128).await.expect("outbox").is_empty());
+    store.release_owner(owner).await.expect("release");
+}
+
+#[test]
+fn test_v6_missing_outbox_primary_key_is_rejected() {
+    let path = database_path();
+    drop(SqliteTaskStore::open_next(&path).expect("initialize database"));
+    let connection = rusqlite::Connection::open(&path).expect("open database");
+    connection.execute_batch("DROP TABLE task_event_outbox; CREATE TABLE task_event_outbox(task_id TEXT NOT NULL,state_version INTEGER NOT NULL,event_id TEXT NOT NULL,event_json TEXT NOT NULL,created_at_ms INTEGER NOT NULL); CREATE INDEX task_event_outbox_created ON task_event_outbox(created_at_ms,task_id,state_version);").expect("remove primary key from fixture");
+    assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
+}
