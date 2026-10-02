@@ -118,7 +118,7 @@ mod tests {
                     kind_id: "test.progress".to_owned(),
                     category: Some("test".to_owned()),
                     payload: StoredPayload {
-                        type_id: qubit_model_metadata::metadata::ModelIdBuf::parse("qubit_task.tests.ProgressPayload")
+                        type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.ProgressPayload")
                             .expect("model ID is valid"),
                         schema_version: 1,
                         codec_id: "qubit.test.bytes".to_owned(),

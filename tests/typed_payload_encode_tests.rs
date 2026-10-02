@@ -11,7 +11,7 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
-use qubit_model_metadata::metadata::ModelId;
+use qubit_model_id::ModelId;
 use qubit_task::Payload;
 use qubit_task::ResourceRequest;
 use qubit_task::TaskRequest;

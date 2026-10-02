@@ -49,7 +49,7 @@ qubit-event-bus = { path = "../rs-event-bus", version = "0.18", optional = true 
 qubit-codec = { path = "../rs-codec", version = "0.16", features = ["registry"] }
 qubit-id = { version = "0.6", features = ["serde"] }
 qubit-metadata = { version = "0.6.2", features = ["json"] }
-qubit-model-metadata = { path = "../rs-model-metadata", version = "0.1.0" }
+qubit-model-id = { path = "../rs-model-metadata/model-id", version = "0.1.0" }
 qubit-progress = { path = "../rs-progress", version = "0.8.4" }
 qubit-spi = "0.13"
 rusqlite = { version = "^0.32", features = ["bundled"], optional = true }
