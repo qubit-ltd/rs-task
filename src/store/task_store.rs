@@ -340,6 +340,15 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
+    fn prune_typed_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        let _ = (finished_before_ms, max_rows);
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
     /// Deletes at most `max_rows` terminal records accepted before the supplied
     /// timestamp.
     ///
@@ -495,6 +504,18 @@ pub trait TaskStore: Send + Sync {
 
     /// Returns the earliest queued retry deadline strictly after `now_ms`.
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>>;
+
+    /// Deletes a bounded batch of terminal tasks whose finish time is before
+    /// the cutoff.
+    ///
+    /// Deletion is ordered by `(finished_at_ms, task_id)`. Only succeeded,
+    /// failed, panicked, and cancelled tasks are eligible. The operation is
+    /// explicit; stores never prune history automatically.
+    fn prune_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>>;
 
     /// Acquires exclusive ownership before recovering unfinished tasks.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>>;

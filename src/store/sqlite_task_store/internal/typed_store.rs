@@ -71,11 +71,13 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
         return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
     }
     let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
-    let fetch = i64::try_from(limit.get() + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
-    let mut sql = format!("SELECT id,request_info_json,lifecycle_json FROM tasks WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)");
+    let fetch =
+        i64::try_from(limit.get() + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
+    let mut sql = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)".to_string();
     let mut values = vec![rusqlite::types::Value::Integer(now)];
     if let Some(cursor) = after {
-        let accepted = i64::try_from(cursor.accepted_at_ms).map_err(|_| StoreError::InvalidRequest("task cursor timestamp is too large"))?;
+        let accepted = i64::try_from(cursor.accepted_at_ms)
+            .map_err(|_| StoreError::InvalidRequest("task cursor timestamp is too large"))?;
         values.push(rusqlite::types::Value::Integer(accepted));
         values.push(rusqlite::types::Value::Text(cursor.id.to_padded_decimal()));
         sql.push_str(" AND (accepted_at,id)>(?2,?3)");
@@ -106,7 +108,7 @@ pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
 ) -> Result<Option<u64>, StoreError> {
     let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
     connection.query_row(
-        "SELECT MIN(retry_not_before_ms) FROM tasks WHERE state_kind='Queued' AND retry_not_before_ms>?1",
+        "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
         [now],
         |row| row.get::<_, Option<i64>>(0),
     ).map_err(failure)?.map(|value| u64::try_from(value).map_err(failure)).transpose()
