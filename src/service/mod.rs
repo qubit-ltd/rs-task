@@ -8,6 +8,8 @@
 //! Unified task submission, status, scheduling, and lifecycle facade.
 
 mod cancel_outcome;
+#[cfg(feature = "event-bus")]
+mod notification_stats;
 mod retry_policy;
 mod retry_policy_error;
 #[cfg(feature = "event-bus")]
@@ -18,6 +20,8 @@ mod typed_task_execution_service;
 mod typed_task_execution_service_builder;
 
 pub use cancel_outcome::CancelOutcome;
+#[cfg(feature = "event-bus")]
+pub use notification_stats::NotificationStats;
 pub use retry_policy::RetryPolicy;
 pub use retry_policy_error::RetryPolicyError;
 pub use task_service_error::TaskServiceError;

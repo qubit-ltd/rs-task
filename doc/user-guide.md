@@ -30,4 +30,14 @@ With the publisher enabled, each committed lifecycle snapshot is written to SQLi
 
 On shutdown the worker drains until empty or `notification_shutdown_timeout` expires; a timeout is reported and remaining rows stay durable for a later restart. Monitor SQLite outbox row count and oldest-row age, plus Redis stream `XLEN` and consumer-group `XPENDING`. These measurements distinguish a stalled publisher from stream growth or a consumer that is not acknowledging work.
 
+The service's `notification_stats()` reports process-local queued, published, and failed counts; it does not report the durable backlog. Query SQLite for that backlog and its age:
+
+```sql
+SELECT COUNT(*) AS pending,
+       CASE WHEN MIN(created_at_ms) IS NULL THEN 0
+            ELSE CAST(strftime('%s', 'now') AS INTEGER) * 1000 - MIN(created_at_ms)
+       END AS oldest_age_ms
+FROM task_event_outbox;
+```
+
 See the [detailed design](task_execution_service_design.en.md), [migration guide](migration.md), and [API reference](https://docs.rs/qubit-task) for more context.

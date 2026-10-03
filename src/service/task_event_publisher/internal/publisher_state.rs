@@ -21,6 +21,7 @@ use qubit_event_bus::model::Topic;
 use tokio::sync::Notify;
 
 use crate::event::TaskEvent;
+use crate::service::task_event_publisher::internal::Counters;
 use crate::store::EventOutboxEntry;
 use crate::store::TaskStore;
 
@@ -40,6 +41,8 @@ pub(in crate::service::task_event_publisher) struct PublisherState {
     pub(in crate::service::task_event_publisher) closing: AtomicBool,
     /// Last observed bounded page count, adjusted after confirmed deletion.
     pub(in crate::service::task_event_publisher) pending: AtomicUsize,
+    /// Process-local lifecycle publication outcomes.
+    pub(in crate::service::task_event_publisher) counters: Counters,
     /// Latest publication or storage diagnostic retained for shutdown.
     pub(in crate::service::task_event_publisher) last_error: parking_lot::Mutex<Option<String>>,
 }
@@ -59,6 +62,7 @@ impl PublisherState {
             close_changed: Notify::new(),
             closing: AtomicBool::new(false),
             pending: AtomicUsize::new(0),
+            counters: Counters::default(),
             last_error: parking_lot::Mutex::new(None),
         }
     }
@@ -83,6 +87,7 @@ impl PublisherState {
                     self.pending.store(entries.len(), Ordering::Release);
                     for entry in entries {
                         if let Err(error) = self.publish(&entry).await {
+                            self.counters.failed.fetch_add(1, Ordering::Relaxed);
                             *self.last_error.lock() = Some(error);
                             failed = true;
                             break;
@@ -95,6 +100,7 @@ impl PublisherState {
                     }
                 }
                 Err(error) => {
+                    self.counters.failed.fetch_add(1, Ordering::Relaxed);
                     *self.last_error.lock() = Some(error.to_string());
                     failed = true;
                 }
@@ -142,7 +148,9 @@ impl PublisherState {
         self.store
             .mark_event_published(entry.task_id, entry.state_version)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.counters.published.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 

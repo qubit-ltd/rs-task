@@ -21,6 +21,8 @@ use qubit_id::IdGenerator;
 use qubit_progress::AsyncReporter;
 
 #[cfg(feature = "event-bus")]
+use super::NotificationStats;
+#[cfg(feature = "event-bus")]
 use super::task_event_publisher::TaskEventPublisher;
 use crate::engine::EngineError;
 use crate::engine::LocalTaskExecutionEngine;
@@ -213,6 +215,16 @@ impl TypedTaskExecutionService {
     /// Queries typed task summaries using category filters and numeric cursors.
     pub async fn query(&self, query: TaskQuery) -> Result<TaskPage, TaskServiceError> {
         Ok(self.core.store.list_encoded(query).await?)
+    }
+
+    /// Returns process-local notification outcomes. Durable backlog remains in
+    /// SQLite and is not bounded by this snapshot.
+    #[cfg(feature = "event-bus")]
+    pub fn notification_stats(&self) -> NotificationStats {
+        self.core
+            .publisher
+            .as_ref()
+            .map_or_else(NotificationStats::default, TaskEventPublisher::stats)
     }
 
     #[cfg(feature = "event-bus")]

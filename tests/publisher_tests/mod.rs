@@ -259,6 +259,10 @@ async fn test_startup_replay_deletes_only_confirmed_admissions() {
         let (bus, spi) = bus(mode, true);
         let service = service(store.clone(), bus).await.expect("service");
         service.shutdown().await.expect("drained");
+        let stats = service.notification_stats();
+        assert_eq!(stats.published, 3);
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(stats.failed, 0);
         assert_eq!(*spi.ids.lock().expect("ids"), ["task:42:0", "task:42:1", "task:42:2"]);
         let owner = store.acquire_owner().await.expect("owner released");
         assert!(store.list_event_outbox(128).await.expect("empty").is_empty());
