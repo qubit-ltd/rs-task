@@ -11,7 +11,7 @@ typed-contract = []
 
 [dependencies]
 qubit-task = { path = "../../..", default-features = false }
-qubit-id = { version = "0.6" }
+qubit-id = { version = "0.7" }
 qubit-metadata = { version = "0.6.2", features = ["json"] }
 qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "0.1.0" }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }

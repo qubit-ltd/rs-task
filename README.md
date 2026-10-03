@@ -24,7 +24,7 @@ The [typed task API guide](doc/typed-task-api.md) contains the complete example 
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.8", features = ["sqlite"] }
+qubit-task = { version = "0.10", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 

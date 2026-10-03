@@ -883,6 +883,8 @@ dependencies = [
 [[package]]
 name = "qubit-codec"
 version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4e907054590c1818cb69fae360b2bf60d69890199dea8edd9bd991bb98a3c5b"
 dependencies = [
  "inventory",
  "qubit-utils",
@@ -913,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "qubit-argument",
  "qubit-clock",
@@ -972,9 +974,9 @@ checksum = "1f6ad59d1256f6c62bc2fe153bdd87f224d7cfd7fa81b58dd8ab03aa4836f21a"
 
 [[package]]
 name = "qubit-id"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81a4ddf466a87d57a9b9a33f635e9e6395631a8b8e7e1d1139f2f53f6958a4f1"
+checksum = "9d861eb71f4ce5e46d1a956cc631859e9f9f45a5a4dd310a2e0acb570acd34d8"
 dependencies = [
  "getrandom 0.4.3",
  "parking_lot",
@@ -1027,7 +1029,9 @@ version = "0.1.0"
 
 [[package]]
 name = "qubit-progress"
-version = "0.8.4"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d10d16ca6635e68ad50425113e36a027d5a5e97f944550b419fed26764f7b17"
 dependencies = [
  "qubit-fast-cas",
 ]
@@ -1080,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-task"
-version = "0.8.0"
+version = "0.10.0"
 dependencies = [
  "fs2",
  "futures",
@@ -1441,7 +1445,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",
