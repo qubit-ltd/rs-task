@@ -22,6 +22,22 @@ The runnable typed examples are [`examples/task_service.rs`](../examples/task_se
 
 The `sqlite` feature enables durable task history and recovery. Recovery is at-least-once: work interrupted after an external side effect may run again, so application effects need idempotency or transaction protection. The service schedules in one process; it does not provide distributed scheduling or exactly-once business effects.
 
-The optional `event-bus` integration and Redis provider fixtures demonstrate `TaskEvent` transport and consumer handling. Typed task lifecycle publication is not currently wired into the typed execution service; consumers should not treat transport events as the authoritative task record.
+## Publish lifecycle changes
 
-See the [detailed design](task_execution_service_design.en.md), [migration guide](migration-0.8.en.md), and [API reference](https://docs.rs/qubit-task) for more context.
+Applications that need lifecycle notifications can enable the `event-bus` feature and pass an `Arc<AsyncEventBus>` to `TaskExecutionServiceBuilder::event_bus`. Register the application's `TaskEvent` codec on that bus. The service requires a store with persistent outbox support; `SqliteTaskStore` provides it, while `MemoryTaskStore` returns `UnsupportedCapability` during service construction. Without `event_bus`, lifecycle notifications are not recorded.
+
+With the publisher enabled, each committed lifecycle snapshot is written to SQLite in the same transaction as its task state change. A background worker sends rows in stable order to `task.lifecycle`, then deletes a row after accepted publication. Rows present at startup are replayed after task recovery; states committed before the outbox was enabled are not backfilled. Publication is at-least-once: an unknown result or a crash after the bus accepted an event but before SQLite deleted its row can produce a duplicate. Consumers should keep the highest `state_version` per `TaskId`, ignore duplicates and stale versions, and query the task service if versions are missing. The event is a notification, not an authoritative state record.
+
+On shutdown the worker drains until empty or `notification_shutdown_timeout` expires; a timeout is reported and remaining rows stay durable for a later restart. Monitor SQLite outbox row count and oldest-row age, plus Redis stream `XLEN` and consumer-group `XPENDING`. These measurements distinguish a stalled publisher from stream growth or a consumer that is not acknowledging work.
+
+The service's `notification_stats()` reports process-local queued, published, and failed counts; it does not report the durable backlog. Query SQLite for that backlog and its age:
+
+```sql
+SELECT COUNT(*) AS pending,
+       CASE WHEN MIN(created_at_ms) IS NULL THEN 0
+            ELSE CAST(strftime('%s', 'now') AS INTEGER) * 1000 - MIN(created_at_ms)
+       END AS oldest_age_ms
+FROM task_event_outbox;
+```
+
+See the [detailed design](task_execution_service_design.en.md), [migration guide](migration.md), and [API reference](https://docs.rs/qubit-task) for more context.

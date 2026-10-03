@@ -26,11 +26,12 @@ Redis 独立限制 wire 8 MiB、payload 1 MiB、headers 64 KiB。历史记录需
 
 ## 观察未知效果，不重做任务状态迁移
 
-通知失败仍不回滚任务状态。`publish_error` 统计发布失败，
-`uncertain_publish` 统计其中效果为 `MayHaveBeenAccepted` 的通知，它们可能
-已经到达 provider。累计分类上属于子集，但各字段通过独立原子读取获得，
-发布进行中可能来自不同瞬间，快照不是原子分区，不保证当时观察到
-`uncertain_publish <= publish_error`。两者都不证明 subscriber 完成。
+任务生命周期 `NotificationStats` 只统计当前进程：`queued` 表示已通知
+publisher 的状态写入数，`published` 表示已接纳并从 SQLite 删除的事件数，
+`failed` 表示发布或删除失败次数。由于已提交 outbox 行不会丢弃，`dropped`
+始终为零。这些计数不会跨重启保留，也不表示 subscriber 已处理；持久积压
+和最老行年龄应直接查询 SQLite。发布结果未知时保留 outbox 行并用稳定
+EventId 重试，因此消费者可能收到重复事件。
 
 核心公开错误为 `PublishFailure`，包含原 EventId、聚合效果和结构化原因。
 默认 `DuplicateRiskPolicy::Forbid` 禁止盲重试未知效果，自定义规则不能绕过。
@@ -38,9 +39,29 @@ Redis 独立限制 wire 8 MiB、payload 1 MiB、headers 64 KiB。历史记录需
 I/O。Redis 不按 EventId 自动去重。
 
 消费者为每个 TaskId 保留最高 `state_version`，忽略同版本重复和旧事件，
-发现缺口后查询服务。并发状态变更不保证按版本递增到达。尽力通知可以缺失，
-需要可靠移交时由业务在本库之外实现事务 outbox。不能因通知失败重做已提交
-状态迁移。facade 死信转发与源确认也不是原子操作，逻辑死信同样需要去重。
+发现缺口后查询服务。并发状态变更不保证按版本递增到达。不能因通知失败
+重做已提交状态迁移。facade 死信转发与源确认也不是原子操作，逻辑死信
+同样需要去重。
+
+## 启用持久化生命周期 outbox
+
+启用 `event-bus` feature 后，配置 `TaskExecutionServiceBuilder::event_bus`，
+并在传入的 `AsyncEventBus` 上注册应用提供的 `TaskEvent` codec。store 必须
+实现持久 outbox 操作：`SqliteTaskStore` 支持，`MemoryTaskStore` 不支持；
+使用后者构建服务会返回 `UnsupportedCapability`。
+
+typed SQLite schema 版本 6 新增 `task_event_outbox`。打开版本 4 或 5 的
+typed 数据库时会执行事务迁移，并保留原有任务记录。迁移不会生成历史
+lifecycle 快照：只有服务启用 outbox 后发生的状态变化才会被记录，也不会
+删除已有任务数据。旧 UUID schema 仍须先显式映射，才能由 typed API 打开。
+
+生命周期状态写入与 outbox 插入处于同一个 SQLite 事务。后台 worker 异步
+发布 outbox 行，只在 bus 接纳后删除记录，因此语义为至少一次：发布结果
+不确定，或 bus 已接纳但进程在删除记录前崩溃，都可能造成重复。消费者应按
+`(TaskId, state_version)` 去重，并通过任务服务查询权威状态。监控 outbox
+行数和最老行年龄；使用 Redis Streams 时，还要检查 stream 的 `XLEN` 和
+consumer group 的 `XPENDING`。关闭时会持续排空，直到队列清空或
+`notification_shutdown_timeout` 到期；超时留下的行会在下次启动时重试。
 
 部署前运行应用编译、通知未知效果、schema 兼容、状态版本收敛、Redis 恢复
 和关闭测试。更早的任务 API 迁移仍见用户手册。

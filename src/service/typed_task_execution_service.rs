@@ -21,9 +21,9 @@ use qubit_id::IdGenerator;
 use qubit_progress::AsyncReporter;
 
 #[cfg(feature = "event-bus")]
-use super::task_event_dispatcher::NotificationStats;
+use super::NotificationStats;
 #[cfg(feature = "event-bus")]
-use super::task_event_dispatcher::TaskEventDispatcher;
+use super::task_event_publisher::TaskEventPublisher;
 use crate::engine::EngineError;
 use crate::engine::LocalTaskExecutionEngine;
 use crate::engine::TypedResourceReservation;
@@ -69,7 +69,9 @@ struct TypedServiceCore {
     shutdown_lock: tokio::sync::Mutex<()>,
     owner_released: AtomicBool,
     #[cfg(feature = "event-bus")]
-    event_dispatcher: Option<Arc<TaskEventDispatcher>>,
+    publisher: Option<TaskEventPublisher>,
+    #[cfg(feature = "event-bus")]
+    notification_close_error: Mutex<Option<String>>,
 }
 
 pub(super) struct TypedServiceOptions {
@@ -78,7 +80,9 @@ pub(super) struct TypedServiceOptions {
     pub(super) max_attempts: u32,
     pub(super) retry_policy: RetryPolicy,
     #[cfg(feature = "event-bus")]
-    pub(super) event_notifications: Option<super::task_event_dispatcher::TaskEventConfig>,
+    pub(super) event_bus: Option<Arc<qubit_event_bus::AsyncEventBus>>,
+    #[cfg(feature = "event-bus")]
+    pub(super) notification_shutdown_timeout: std::time::Duration,
 }
 
 struct InFlightGuard(Arc<TypedServiceCore>);
@@ -108,9 +112,22 @@ impl TypedTaskExecutionService {
     ) -> Result<Self, TaskServiceError> {
         let owner = store.acquire_owner().await?;
         #[cfg(feature = "event-bus")]
-        let event_dispatcher = options
-            .event_notifications
-            .map(|config| TaskEventDispatcher::new(config.bus, config.topic, config.capacity, config.flush_timeout));
+        let publisher = if let Some(bus) = options.event_bus {
+            let prepared = async {
+                store.enable_event_outbox().await?;
+                TaskEventPublisher::new(Arc::clone(&store), bus, options.notification_shutdown_timeout)
+            }
+            .await;
+            match prepared {
+                Ok(publisher) => Some(publisher),
+                Err(error) => {
+                    store.release_owner(owner).await?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let service = Self {
             core: Arc::new(TypedServiceCore {
                 store,
@@ -135,7 +152,9 @@ impl TypedTaskExecutionService {
                 shutdown_lock: tokio::sync::Mutex::new(()),
                 owner_released: AtomicBool::new(false),
                 #[cfg(feature = "event-bus")]
-                event_dispatcher,
+                publisher,
+                #[cfg(feature = "event-bus")]
+                notification_close_error: Mutex::new(None),
             }),
         };
         if let Err(error) = service.recover_unfinished().await {
@@ -144,6 +163,10 @@ impl TypedTaskExecutionService {
                 return Err(TaskServiceError::Store(release_error));
             }
             return Err(error);
+        }
+        #[cfg(feature = "event-bus")]
+        if let Some(publisher) = &service.core.publisher {
+            publisher.start().await;
         }
         let scheduler = service.clone();
         let scheduler_core = Arc::clone(&service.core);
@@ -178,7 +201,7 @@ impl TypedTaskExecutionService {
         let accepted = self.store_result(self.core.store.accept_encoded(id, stored).await)?;
         if accepted.created {
             #[cfg(feature = "event-bus")]
-            self.publish_task_event(&accepted.summary);
+            self.notify_notifications();
             self.core.scheduler_changed.notify_one();
         }
         Ok(accepted.summary)
@@ -194,20 +217,37 @@ impl TypedTaskExecutionService {
         Ok(self.core.store.list_encoded(query).await?)
     }
 
-    /// Returns best-effort lifecycle notification counters when enabled.
+    /// Returns process-local notification outcomes. Durable backlog remains in
+    /// SQLite and is not bounded by this snapshot.
     #[cfg(feature = "event-bus")]
     pub fn notification_stats(&self) -> NotificationStats {
         self.core
-            .event_dispatcher
+            .publisher
             .as_ref()
-            .map_or_else(NotificationStats::default, |dispatcher| dispatcher.stats())
+            .map_or_else(NotificationStats::default, TaskEventPublisher::stats)
     }
 
     #[cfg(feature = "event-bus")]
-    fn publish_task_event(&self, summary: &TaskSummary) {
-        if let Some(dispatcher) = &self.core.event_dispatcher {
-            dispatcher.enqueue(crate::event::TaskEvent::from(summary));
+    fn notify_notifications(&self) {
+        if let Some(publisher) = &self.core.publisher {
+            publisher.notify();
         }
+    }
+
+    #[cfg(feature = "event-bus")]
+    fn check_notification_close(&self) -> Result<(), TaskServiceError> {
+        self.core
+            .notification_close_error
+            .lock()
+            .clone()
+            .map_or(Ok(()), |error| Err(TaskServiceError::NotificationClose(error)))
+    }
+
+    fn store_write_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
+        let value = self.store_result(result)?;
+        #[cfg(feature = "event-bus")]
+        self.notify_notifications();
+        Ok(value)
     }
 
     /// Requeues a blocked task after its configuration or handler is repaired.
@@ -235,7 +275,7 @@ impl TypedTaskExecutionService {
         if task.summary.cancel_requested {
             return Err(TaskServiceError::CancellationPending);
         }
-        let resumed = self.store_result(
+        let resumed = self.store_write_result(
             self.core
                 .store
                 .transition_encoded(TransitionCommand {
@@ -251,8 +291,6 @@ impl TypedTaskExecutionService {
                 })
                 .await,
         )?;
-        #[cfg(feature = "event-bus")]
-        self.publish_task_event(&resumed);
         self.core.scheduler_changed.notify_one();
         Ok(resumed)
     }
@@ -263,7 +301,10 @@ impl TypedTaskExecutionService {
     pub async fn shutdown(&self) -> Result<(), TaskServiceError> {
         let _shutdown = self.core.shutdown_lock.lock().await;
         if self.core.owner_released.load(Ordering::Acquire) {
-            return self.check_fault();
+            self.check_fault()?;
+            #[cfg(feature = "event-bus")]
+            self.check_notification_close()?;
+            return Ok(());
         }
         {
             let _admission = self.core.admission.write().await;
@@ -289,8 +330,10 @@ impl TypedTaskExecutionService {
             notified.await;
         }
         #[cfg(feature = "event-bus")]
-        if let Some(dispatcher) = &self.core.event_dispatcher {
-            dispatcher.shutdown().await;
+        if let Some(publisher) = &self.core.publisher
+            && let Err(error) = publisher.close().await
+        {
+            *self.core.notification_close_error.lock() = Some(error.to_string());
         }
         if let Err(error) = self.core.store.release_owner(self.core.owner).await {
             self.latch_fault(&error);
@@ -300,6 +343,8 @@ impl TypedTaskExecutionService {
         if let Some(fault) = self.core.fault.lock().clone() {
             Err(TaskServiceError::StoreUnavailable(fault))
         } else {
+            #[cfg(feature = "event-bus")]
+            self.check_notification_close()?;
             Ok(())
         }
     }
@@ -319,7 +364,7 @@ impl TypedTaskExecutionService {
             return Ok(CancelOutcome::AlreadyTerminal);
         }
         if matches!(summary.state, TaskState::Queued | TaskState::Blocked { .. }) {
-            let updated = self.store_result(
+            let updated = self.store_write_result(
                 self.core
                     .store
                     .transition_encoded(TransitionCommand {
@@ -335,8 +380,6 @@ impl TypedTaskExecutionService {
                     })
                     .await,
             )?;
-            #[cfg(feature = "event-bus")]
-            self.publish_task_event(&updated);
             let _ = updated;
             self.core.scheduler_changed.notify_one();
             return Ok(CancelOutcome::CancelledBeforeStart);
@@ -357,7 +400,7 @@ impl TypedTaskExecutionService {
         if descriptor.cancellation_mode == CancellationMode::Unsupported {
             return Ok(CancelOutcome::CancellationUnsupported);
         }
-        let _cancellation_requested = self.store_result(
+        let _cancellation_requested = self.store_write_result(
             self.core
                 .store
                 .transition_encoded(TransitionCommand {
@@ -373,8 +416,6 @@ impl TypedTaskExecutionService {
                 })
                 .await,
         )?;
-        #[cfg(feature = "event-bus")]
-        self.publish_task_event(&_cancellation_requested);
         match descriptor.cancellation_mode {
             CancellationMode::Unsupported => Ok(CancelOutcome::CancellationUnsupported),
             CancellationMode::Cooperative => {
@@ -394,7 +435,7 @@ impl TypedTaskExecutionService {
                     let latest = self
                         .store_result(self.core.store.get_encoded_task(id).await)?
                         .ok_or(crate::store::StoreError::NotFound)?;
-                    let _cancellation_error = self.store_result(
+                    let _cancellation_error = self.store_write_result(
                         self.core
                             .store
                             .transition_encoded(TransitionCommand {
@@ -410,8 +451,6 @@ impl TypedTaskExecutionService {
                             })
                             .await,
                     )?;
-                    #[cfg(feature = "event-bus")]
-                    self.publish_task_event(&_cancellation_error);
                     return Err(TaskServiceError::TypedRequest(
                         "external cancellation hook failed".into(),
                     ));
@@ -479,23 +518,22 @@ impl TypedTaskExecutionService {
                     } else {
                         (TaskState::Queued, false)
                     };
-                    let _recovered = self
-                        .core
-                        .store
-                        .transition_encoded(TransitionCommand {
-                            id: summary.id,
-                            expected_state_version: summary.state_version,
-                            expected_attempt: summary.attempt,
-                            retry_not_before_ms: None,
-                            state,
-                            cancel_requested: keep_cancel,
-                            cancel_error: summary.cancel_error.clone(),
-                            finished_at_ms: None,
-                            output: None,
-                        })
-                        .await?;
-                    #[cfg(feature = "event-bus")]
-                    self.publish_task_event(&_recovered);
+                    let _recovered = self.store_write_result(
+                        self.core
+                            .store
+                            .transition_encoded(TransitionCommand {
+                                id: summary.id,
+                                expected_state_version: summary.state_version,
+                                expected_attempt: summary.attempt,
+                                retry_not_before_ms: None,
+                                state,
+                                cancel_requested: keep_cancel,
+                                cancel_error: summary.cancel_error.clone(),
+                                finished_at_ms: None,
+                                output: None,
+                            })
+                            .await,
+                    )?;
                 }
             }
             after = page.next;
@@ -614,7 +652,7 @@ impl TypedTaskExecutionService {
                         };
                         drop(admission);
                         #[cfg(feature = "event-bus")]
-                        self.publish_task_event(&running);
+                        self.notify_notifications();
                         self.core.in_flight.fetch_add(1, Ordering::AcqRel);
                         let service = self.clone();
                         let core = Arc::clone(&self.core);
@@ -778,7 +816,7 @@ impl TypedTaskExecutionService {
         {
             Ok(_updated) => {
                 #[cfg(feature = "event-bus")]
-                self.publish_task_event(&_updated);
+                self.notify_notifications();
             }
             Err(crate::store::StoreError::Conflict) => {
                 self.check_competing_transition(summary.id, summary.state_version).await
@@ -826,7 +864,7 @@ impl TypedTaskExecutionService {
         {
             Ok(_updated) => {
                 #[cfg(feature = "event-bus")]
-                self.publish_task_event(&_updated);
+                self.notify_notifications();
             }
             Err(crate::store::StoreError::Conflict) => {
                 self.check_competing_transition(started.id, latest.summary.state_version)

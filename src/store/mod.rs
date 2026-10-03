@@ -7,7 +7,9 @@
 // =============================================================================
 //! Pluggable task history and recovery storage.
 
+mod event_outbox_entry;
 mod memory_task_store;
+pub use event_outbox_entry::EventOutboxEntry;
 #[cfg(feature = "sqlite")]
 mod sqlite_task_store;
 mod store_error;
