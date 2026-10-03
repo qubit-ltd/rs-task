@@ -19,6 +19,6 @@ pub struct NotificationStats {
     pub published: u64,
     /// Events dropped before publication; always zero for the durable outbox.
     pub dropped: u64,
-    /// Publication or outbox deletion attempts that failed in this process.
+    /// Publication or outbox operations that failed in this process.
     pub failed: u64,
 }
