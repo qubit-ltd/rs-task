@@ -1,6 +1,14 @@
 # qubit-task 0.8 迁移说明
 
-0.8 有意破坏了存储分页与故障清理接口。下游 `TaskStore` 实现和调用方需要一起更新；本版本不保留兼容重载。
+0.8 有意破坏了存储分页、typed 调度查询、终态清理和任务通知 API。下游 `TaskStore` 实现和调用方需要一起更新；本版本不保留兼容重载。
+
+## 实现 typed 调度和保留策略接口
+
+自定义 `TaskStore` 必须实现 `list_ready_queued(after, limit, now_ms)`、`next_retry_deadline(now_ms)` 和 `prune_terminal_before(finished_before_ms, max_rows)`。ready scan 只返回没有 retry deadline 或 deadline 不晚于 `now_ms` 的 `Queued` 记录，按 `(accepted_at_ms, 数值 TaskId)` 排序，每页 1–256 条。`next_retry_deadline` 返回严格大于 `now_ms` 的最小 queued deadline。清理最多删除指定数量、`finished_at_ms` 严格早于 cutoff 的 `Succeeded`、`Failed`、`Panicked` 或 `Cancelled` 记录，按 `(finished_at_ms, TaskId)` 排序。必须与任务行原子删除幂等键；被清理的 key 可以复用。Queued 和 Blocked 永远不符合清理条件。
+
+## 显式配置生命周期通知
+
+`TaskEvent.task_id` 改为 typed `TaskId`，payload 增加 `schema_version = 1`。JSON codec 和消费者需要一起更新。启用 `event-bus` feature 后，通过 `TaskExecutionServiceBuilder::event_bus` opt in，并注册应用提供的 `TaskEvent` codec。SQLite schema version 6 会增加持久生命周期 outbox，同时保留已有任务记录；状态迁移和事件快照在同一事务中提交。任务恢复后 publisher 会重放待发送行，只有 provider 确认接纳后才删除对应行。投递语义为至少一次：接纳结果不确定，或删除前崩溃，都可能产生重复；消费者应按 `(TaskId, state_version)` 去重，并从任务查询接口对账。启用发布不会回填此前的状态。`MemoryTaskStore` 不支持持久 outbox。`shutdown()` 会排空至 `notification_shutdown_timeout`；超时会报告错误，剩余行仍保留在 SQLite 供后续重放。调度允许后续资源匹配任务越过较早的资源阻塞任务，不保证严格 FIFO。
 
 ## 将恢复游标从任务 ID 改为位置游标
 

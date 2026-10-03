@@ -61,11 +61,15 @@ impl EventCodec<TaskEvent> for TaskEventJsonCodec {
     fn encode(&self, value: &TaskEvent) -> Result<Arc<[u8]>, CodecError> {
         serde_json::to_vec(value)
             .map(Arc::from)
-            .map_err(|source| CodecError::Encode { source: Box::new(source) })
+            .map_err(|source| CodecError::Encode {
+                source: Box::new(source),
+            })
     }
 
     fn decode(&self, payload: &EncodedPayload) -> Result<TaskEvent, CodecError> {
-        serde_json::from_slice(payload.bytes()).map_err(|source| CodecError::Decode { source: Box::new(source) })
+        serde_json::from_slice(payload.bytes()).map_err(|source| CodecError::Decode {
+            source: Box::new(source),
+        })
     }
 }
 // guide-codec-end

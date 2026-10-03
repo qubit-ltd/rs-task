@@ -8,6 +8,8 @@
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::AsyncEventBus;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
@@ -33,7 +35,7 @@ pub struct TypedTaskExecutionServiceBuilder {
     max_attempts: u32,
     retry_policy: RetryPolicy,
     #[cfg(feature = "event-bus")]
-    event_bus: Option<Arc<qubit_event_bus::AsyncEventBus>>,
+    event_bus: Option<Arc<AsyncEventBus>>,
     #[cfg(feature = "event-bus")]
     notification_shutdown_timeout: std::time::Duration,
 }
@@ -99,17 +101,19 @@ impl TypedTaskExecutionServiceBuilder {
         self
     }
 
-    /// Enables durable lifecycle publication to `task.lifecycle`.
-    /// The store must support a persistent outbox; register a TaskEvent codec
-    /// in the supplied bus for encoded providers. Failed publications remain durable.
+    /// Enables durable lifecycle publication to the `task.lifecycle` topic.
+    /// The store must support a persistent outbox; register a `TaskEvent` codec
+    /// in the supplied bus for encoded providers. Failed publications remain
+    /// durable.
     #[cfg(feature = "event-bus")]
-    pub fn event_bus(mut self, bus: Arc<qubit_event_bus::AsyncEventBus>) -> Self {
+    pub fn event_bus(mut self, bus: Arc<AsyncEventBus>) -> Self {
         self.event_bus = Some(bus);
         self
     }
 
-    /// Sets the maximum notification drain duration during shutdown (default 5 seconds).
-    /// Expiry leaves pending events durable and reports `NotificationClose`.
+    /// Sets the maximum notification drain duration during shutdown (default 5
+    /// seconds). Expiry leaves pending events durable and reports
+    /// `NotificationClose`.
     #[cfg(feature = "event-bus")]
     pub fn notification_shutdown_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.notification_shutdown_timeout = timeout;

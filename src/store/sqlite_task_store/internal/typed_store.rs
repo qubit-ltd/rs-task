@@ -60,6 +60,60 @@ pub(in crate::store::sqlite_task_store) fn list_encoded(
     Ok(TaskPage { records, next })
 }
 
+/// Lists bounded queued work whose retry deadline has elapsed.
+pub(in crate::store::sqlite_task_store) fn list_ready_queued(
+    connection: &Connection,
+    after: Option<TaskCursor>,
+    limit: std::num::NonZeroUsize,
+    now_ms: u64,
+) -> Result<TaskPage, StoreError> {
+    if limit.get() > crate::model::next::MAX_TASK_QUERY_LIMIT {
+        return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
+    }
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
+    let fetch =
+        i64::try_from(limit.get() + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
+    let mut sql = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)".to_string();
+    let mut values = vec![rusqlite::types::Value::Integer(now)];
+    if let Some(cursor) = after {
+        let accepted = i64::try_from(cursor.accepted_at_ms)
+            .map_err(|_| StoreError::InvalidRequest("task cursor timestamp is too large"))?;
+        values.push(rusqlite::types::Value::Integer(accepted));
+        values.push(rusqlite::types::Value::Text(cursor.id.to_padded_decimal()));
+        sql.push_str(" AND (accepted_at,id)>(?2,?3)");
+    }
+    let limit_idx = values.len() + 1;
+    sql.push_str(&format!(" ORDER BY accepted_at,id LIMIT ?{limit_idx}"));
+    values.push(rusqlite::types::Value::Integer(fetch));
+    let mut statement = connection.prepare(&sql).map_err(failure)?;
+    let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(failure)?;
+    let mut records = Vec::new();
+    while let Some(row) = rows.next().map_err(failure)? {
+        records.push(decode_summary(
+            row.get::<_, String>(0).map_err(failure)?,
+            &row.get::<_, String>(1).map_err(failure)?,
+            &row.get::<_, String>(2).map_err(failure)?,
+        )?);
+    }
+    let has_more = records.len() > limit.get();
+    records.truncate(limit.get());
+    let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
+    Ok(TaskPage { records, next })
+}
+
+/// Finds the minimum queued retry deadline strictly after the supplied time.
+pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
+    connection: &Connection,
+    now_ms: u64,
+) -> Result<Option<u64>, StoreError> {
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
+    connection.query_row(
+        "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
+        [now],
+        |row| row.get::<_, Option<i64>>(0),
+    ).map_err(failure)?.map(|value| u64::try_from(value).map_err(failure)).transpose()
+}
+
 /// Immutable typed request fields stored separately from payload bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StoredRequestInfo {
@@ -217,7 +271,9 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
         )
         .map_err(failure)?;
     let summary = decode_summary(id_key, &request_info_json, &lifecycle_json)?;
-    if outbox_enabled { insert_event_outbox(&transaction, &summary)?; }
+    if outbox_enabled {
+        insert_event_outbox(&transaction, &summary)?;
+    }
     transaction.commit().map_err(failure)?;
     Ok(AcceptOutcome { summary, created: true })
 }
@@ -312,7 +368,9 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
         return Err(StoreError::Conflict);
     }
     let summary = decode_summary(id_key, &request_json, &lifecycle_json)?;
-    if outbox_enabled { insert_event_outbox(&transaction, &summary)?; }
+    if outbox_enabled {
+        insert_event_outbox(&transaction, &summary)?;
+    }
     transaction.commit().map_err(failure)?;
     Ok(summary)
 }
@@ -404,7 +462,9 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
         return Err(StoreError::Conflict);
     }
     let summary = decode_summary(id_key, &request_json, &lifecycle_json)?;
-    if outbox_enabled { insert_event_outbox(&transaction, &summary)?; }
+    if outbox_enabled {
+        insert_event_outbox(&transaction, &summary)?;
+    }
     transaction.commit().map_err(failure)?;
     Ok(summary)
 }
@@ -526,13 +586,17 @@ fn now_ms() -> u64 {
 }
 
 /// Inserts the immutable notification before committing its lifecycle mutation.
-/// Snapshots larger than 128 KiB or SQLite failures roll back the surrounding transaction.
+/// Snapshots larger than 128 KiB or SQLite failures roll back the surrounding
+/// transaction.
 fn insert_event_outbox(transaction: &rusqlite::Transaction<'_>, summary: &TaskSummary) -> Result<(), StoreError> {
     let event = crate::event::TaskEvent::from_typed_summary(summary);
     let json = serde_json::to_string(&event).map_err(failure)?;
-    if json.len() > 128 * 1024 { return Err(StoreError::InvalidRequest("task event snapshot exceeds 128 KiB")); }
+    if json.len() > 128 * 1024 {
+        return Err(StoreError::InvalidRequest("task event snapshot exceeds 128 KiB"));
+    }
     let event_id = format!("task:{}:{}", summary.id, summary.state_version);
-    // A monotonic persisted ordering key also preserves lifecycle order across clock rollback.
+    // A monotonic persisted ordering key also preserves lifecycle order across
+    // clock rollback.
     transaction.execute(
         "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) VALUES (?1,?2,?3,?4,MAX(?5,COALESCE((SELECT MAX(created_at_ms) FROM task_event_outbox),?5)))",
         params![summary.id.to_padded_decimal(), summary.state_version, event_id, json, i64::try_from(now_ms()).map_err(failure)?],

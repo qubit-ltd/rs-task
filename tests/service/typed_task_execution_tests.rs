@@ -14,8 +14,8 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
-use qubit_model_metadata::metadata::ModelId;
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelId;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -238,6 +238,31 @@ impl TaskStore for FailingListStore {
             self.inner.list_encoded(query)
         }
     }
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<qubit_task::model::TaskCursor>,
+        limit: std::num::NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
+        if self.fail_next_list.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected list failure".into())) })
+        } else {
+            self.inner.list_ready_queued(after, limit, now_ms)
+        }
+    }
+    fn next_retry_deadline<'a>(
+        &'a self,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<Option<u64>, qubit_task::store::StoreError>> {
+        self.inner.next_retry_deadline(now_ms)
+    }
+    fn prune_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: std::num::NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, qubit_task::store::StoreError>> {
+        self.inner.prune_terminal_before(finished_before_ms, max_rows)
+    }
     fn acquire_owner<'a>(
         &'a self,
     ) -> TaskFuture<'a, Result<qubit_task::model::OwnerEpoch, qubit_task::store::StoreError>> {
@@ -406,7 +431,7 @@ async fn sqlite_retry_deadline_survives_service_restart() {
             .unwrap()
             .as_nanos(),
     ));
-    let retry_delay = std::time::Duration::from_millis(400);
+    let retry_delay = std::time::Duration::from_secs(3);
     let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
     let mut first_builder =
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1251))))
