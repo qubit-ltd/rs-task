@@ -13,8 +13,8 @@ path = "../../../examples/task_service.rs"
 qubit-event-bus = { path = "../../../../rs-event-bus", version = "0.19", features = ["discovery"] }
 qubit-event-bus-redis = { path = "../../../../rs-event-bus-redis", version = "0.7" }
 qubit-spi = "0.13"
-qubit-task = { path = "../..", features = ["event-bus", "inventory", "sqlite"] }
-qubit-codec = { path = "../../../../rs-codec", version = "0.16", features = ["registry"] }
+qubit-task = { path = "../../..", features = ["event-bus", "inventory", "sqlite"] }
+qubit-codec = { version = "0.16", features = ["registry"] }
 qubit-id = { path = "../../../../rs-id", version = "0.6" }
 qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
