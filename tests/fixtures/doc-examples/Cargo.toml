@@ -11,11 +11,14 @@ path = "../../../examples/task_service.rs"
 
 [dependencies]
 qubit-event-bus = { path = "../../../../rs-event-bus", version = "0.18", features = ["discovery"] }
-qubit-event-bus-redis = { path = "../../../../rs-event-bus-redis", version = "0.5" }
+qubit-event-bus-redis = { path = "../../../../rs-event-bus-redis", version = "0.6" }
 qubit-spi = "0.13"
 qubit-task = { path = "../../..", features = ["event-bus", "inventory", "sqlite"] }
 qubit-codec = { path = "../../../../rs-codec", version = "0.16", features = ["registry"] }
 qubit-id = { path = "../../../../rs-id", version = "0.6" }
-qubit-model-metadata = { path = "../../../../rs-model-metadata", version = "0.1.0" }
+qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
+
+[workspace]

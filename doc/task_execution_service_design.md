@@ -22,11 +22,11 @@
 
 内存与 SQLite store 实现相同的 typed store 契约。SQLite 使用 typed numeric-ID schema；遇到不兼容的旧 UUID schema 时会返回诊断错误，不会静默重新解释数据。Store ownership 用于隔离并发服务实例；恢复会在取得 ownership 后继续处理保留的 queued 任务。
 
-单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 5 中，重启后仍会遵守。schema 版本 6 新增生命周期事件 outbox；从 typed schema 版本 4 或 5 升级采用事务迁移，并保留已有任务记录。仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可携带观察到的 state version 恢复 Blocked 任务。
+单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 6 中，重启后仍会遵守；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可携带观察到的 state version 恢复 Blocked 任务。
 
 ## 执行与资源准入
 
-本地执行引擎在启动处理器前预留请求的 CPU 槽位、GPU 设备或标签、内存字节、磁盘字节和自定义整数单位。预留用于核算并发任务，在执行结束后释放。它们不会固定 CPU 核心、在操作系统层面发现或隔离 GPU，也不会强制限制进程实际的内存或磁盘用量。超过配置容量的请求无法运行；容量足够的请求会等待资源空闲。
+单一调度器在启动 CAS 前预留请求的 CPU 槽位、GPU 设备或标签、内存字节、磁盘字节和自定义整数单位。暂时拿不到资源的任务保留在队列中，调度器继续检查后续可运行任务。这种工作保留策略不保证严格 FIFO，较小任务可能越过较早的资源阻塞任务。只有成功启动 CAS 的任务才占运行名额；所有完成或启动失败路径都会释放预留。配额不会固定 CPU 核心、在操作系统层面发现或隔离 GPU，也不会强制限制进程实际的内存或磁盘用量。
 
 任务生命周期包括 `Queued`、`Running`、`Blocked`、`Succeeded`、`Failed`、`Panicked` 和 `Cancelled`。状态迁移会比较已保存的 state version 和 attempt，以拒绝过期写入。排队或 blocked 的任务可直接取消。运行中的任务按处理器声明的模式取消：协作式 handler 检查 `TaskContext::is_cancelled()`，并在安全边界停止；外部 hook 模式由 hook 执行取消。若 handler 不支持运行中取消，服务会向调用方报告。
 
@@ -44,4 +44,4 @@ SQLite 持久化支持进程重启恢复，执行语义为至少一次。若任�
 
 配置 `TaskExecutionServiceBuilder::event_bus` 后，服务会启用 store outbox，并在任务恢复后启动异步 publisher。每个生命周期快照与任务状态迁移写入同一个 SQLite 事务，随后发布到 `task.lifecycle`；确认接纳后才删除 outbox 行。此功能要求 store 提供持久 outbox，`MemoryTaskStore` 不具备此能力，也不适合作为 durable 配置。outbox 启用前提交的状态不会在启动时回填。
 
-投递语义为至少一次。若发布回执不确定，或 bus 已接纳事件但进程在删除 outbox 行前停止，同一快照可能再次发布。消费者应按 `(TaskId, state_version)` 去重、忽略旧版本，并在发现版本缺口时查询服务。应监控 outbox 行数与最老行年龄；使用 Redis Streams 时，还应查看 `XLEN` 和 `XPENDING`。具体配置和运维边界见[带类型 API 指南](typed-task-api.zh_CN.md)与[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。
+投递语义为至少一次。若发布回执不确定，或 bus 已接纳事件但进程在删除 outbox 行前停止，同一快照可能再次发布。消费者应按 `(TaskId, state_version)` 去重、忽略旧版本，并在发现版本缺口时查询服务。应监控 outbox 行数与最老行年龄；使用 Redis Streams 时，还应查看 `XLEN` 和 `XPENDING`。具体配置和运维边界见[带类型 API 指南](typed-task-api.zh_CN.md)与[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。应用仍可显式调用有界 `TaskStore::prune_terminal_before` 清理终态历史，该操作会释放幂等键供复用。

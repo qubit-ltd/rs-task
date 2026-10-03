@@ -153,7 +153,7 @@ fn create_event_bus(url: &str, namespace: &str, register_task_codec: bool) -> Re
         codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec {
             content_type: ContentType::new("application/json")?,
             schema_id: SchemaId::new("task-event-v1")?,
-        }));
+        }))?;
     }
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
@@ -183,12 +183,12 @@ async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result
             .build()?,
         move |delivery| {
             let payload = delivery.payload();
-            let _ = sender.send((payload.task_id.clone(), payload.state_version, payload.state.clone()));
+            let _ = sender.send((payload.task_id, payload.state_version, payload.state.clone()));
             Ok::<(), DeliveryError>(())
         },
     )?;
 
-    let id = TaskId::from_id(Id::new(42)).to_string();
+    let id = TaskId::from_id(Id::new(42));
     for (state_version, state) in [
         (0, TaskState::Queued),
         (1, TaskState::Running),
@@ -197,7 +197,8 @@ async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result
         let _ = bus.publish(PublishRequest::new(
             Topic::<TaskEvent>::new("task.lifecycle")?,
             TaskEvent {
-                task_id: id.clone(),
+                schema_version: 1,
+                task_id: id,
                 state_version,
                 state,
                 correlation_key: None,
@@ -247,14 +248,15 @@ fn test_redis_facade_rejects_task_event_subscription_without_codec() -> Result<(
     Ok(())
 }
 
-/// Checks the historical JSON field contract with absent transport schema.
+/// Checks the explicit typed lifecycle event JSON contract.
 #[test]
-fn test_task_event_codec_accepts_historical_schema_less_json() -> Result<(), Box<dyn Error>> {
+fn test_task_event_codec_accepts_typed_event_json() -> Result<(), Box<dyn Error>> {
     let codec = TaskEventJsonCodec {
         content_type: ContentType::new("application/json")?,
         schema_id: SchemaId::new("task-event-v1")?,
     };
-    let bytes = br#"{"task_id":"00000000-0000-0000-0000-000000000001","state_version":2,"state":"Succeeded","correlation_key":"historical-task"}"#;
+    let bytes =
+        br#"{"schema_version":1,"task_id":1,"state_version":2,"state":"Succeeded","correlation_key":"typed-task"}"#;
     let payload = EncodedPayload::new(Arc::from(bytes.as_slice()), codec.content_type.clone(), None);
     codec.validate_metadata(&payload)?;
     let versioned = EncodedPayload::new(
@@ -266,9 +268,11 @@ fn test_task_event_codec_accepts_historical_schema_less_json() -> Result<(), Box
     assert_eq!(codec.schema_id(), Some(&codec.schema_id));
     assert_eq!(codec.decode(&versioned)?.state_version, 2);
     let event = codec.decode(&payload)?;
+    assert_eq!(event.schema_version, 1);
+    assert_eq!(event.task_id, TaskId::from_id(Id::new(1)));
     assert_eq!(event.state_version, 2);
     assert_eq!(event.state, TaskState::Succeeded);
-    assert_eq!(event.correlation_key.as_deref(), Some("historical-task"));
+    assert_eq!(event.correlation_key.as_deref(), Some("typed-task"));
     Ok(())
 }
 
@@ -300,7 +304,7 @@ fn test_task_event_codec_rejects_unknown_metadata() -> Result<(), Box<dyn Error>
 /// Applies task snapshots at the consumer, independently of transport order.
 #[derive(Default)]
 struct TaskProjection {
-    latest: HashMap<String, TaskEvent>,
+    latest: HashMap<TaskId, TaskEvent>,
     applied: usize,
 }
 
@@ -315,7 +319,7 @@ impl TaskProjection {
         {
             return;
         }
-        self.latest.insert(event.task_id.clone(), event.clone());
+        self.latest.insert(event.task_id, event.clone());
         self.applied += 1;
     }
 }
@@ -332,7 +336,6 @@ fn assert_consumer_convergence(bus: &EventBus, request: SubscribeRequest<TaskEve
         sender.send(()).expect("consumer signal receiver");
     })?;
     let task_id = TaskId::from_id(Id::new(43));
-    let task_id_string = task_id.to_string();
     for (state_version, state) in [
         (2, TaskState::Running),
         (2, TaskState::Running),
@@ -343,7 +346,8 @@ fn assert_consumer_convergence(bus: &EventBus, request: SubscribeRequest<TaskEve
         let _ = bus.publish(PublishRequest::new(
             topic.clone(),
             TaskEvent {
-                task_id: task_id_string.clone(),
+                schema_version: 1,
+                task_id,
                 state_version,
                 state,
                 correlation_key: None,
@@ -352,7 +356,7 @@ fn assert_consumer_convergence(bus: &EventBus, request: SubscribeRequest<TaskEve
         received.recv_timeout(Duration::from_secs(5))?;
     }
     let projection = projection.lock().expect("projection lock");
-    let latest = projection.latest.get(&task_id_string).expect("consumer projected task");
+    let latest = projection.latest.get(&task_id).expect("consumer projected task");
     assert_eq!(latest.state_version, 3, "stale event cannot replace newer state");
     assert_eq!(latest.state, TaskState::Succeeded);
     assert_eq!(

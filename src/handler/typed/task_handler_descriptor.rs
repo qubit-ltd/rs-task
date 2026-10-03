@@ -7,7 +7,7 @@
 // =============================================================================
 use std::collections::HashSet;
 
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelIdBuf;
 
 use super::cancellation_mode::CancellationMode;
 use super::handler_registration_error::HandlerRegistrationError;

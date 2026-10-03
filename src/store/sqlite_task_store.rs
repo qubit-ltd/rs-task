@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-#[cfg(test)]
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -36,6 +35,8 @@ use internal::initialize_next_schema;
 #[cfg(test)]
 use internal::initialize_schema;
 use internal::list_encoded;
+use internal::list_ready_queued;
+use internal::next_retry_deadline;
 #[cfg(test)]
 use internal::read_stored_summary_row;
 #[cfg(test)]
@@ -47,7 +48,6 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 #[cfg(test)]
 use rusqlite::OptionalExtension;
-#[cfg(test)]
 use rusqlite::params;
 #[cfg(test)]
 use rusqlite::params_from_iter;
@@ -158,24 +158,35 @@ pub struct SqliteTaskStore {
 
 impl SqliteTaskStore {
     /// Serializes outbox operations with epoch validation and owner release.
-    /// Returns `OwnerConflict` if ownership has not been acquired or was released.
+    /// Returns `OwnerConflict` if ownership has not been acquired or was
+    /// released.
     fn run_outbox<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
-    where T: Send + 'static, F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static {
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
+    {
         let owner_state = Arc::clone(&self.owner_state);
         self.run(move |connection| {
             let owner = owner_state.lock();
-            if owner.epoch.is_none() || owner.lock_file.is_none() { return Err(StoreError::OwnerConflict); }
+            if owner.epoch.is_none() || owner.lock_file.is_none() {
+                return Err(StoreError::OwnerConflict);
+            }
             operation(connection)
         })
     }
 
-    /// Enables subsequent transactional snapshots while holding the owner barrier.
+    /// Enables subsequent transactional snapshots while holding the owner
+    /// barrier.
     pub(super) fn enable_outbox(&self) -> TaskFuture<'_, Result<(), StoreError>> {
         let enabled = Arc::clone(&self.outbox_enabled);
-        self.run_outbox(move |_| { enabled.store(true, std::sync::atomic::Ordering::Release); Ok(()) })
+        self.run_outbox(move |_| {
+            enabled.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        })
     }
 
-    /// Reads a bounded oldest-first page; rejects absent ownership and invalid limits.
+    /// Reads a bounded oldest-first page; rejects absent ownership and invalid
+    /// limits.
     pub(super) fn list_outbox(&self, limit: usize) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
         self.run_outbox(move |connection| {
             if !(1..=256).contains(&limit) { return Err(StoreError::InvalidRequest("outbox page limit must be 1..=256")); }
@@ -190,9 +201,18 @@ impl SqliteTaskStore {
     }
 
     /// Deletes a confirmed event idempotently while ownership remains fenced.
-    pub(super) fn mark_outbox_published(&self, id: crate::model::next::TaskId, version: u64) -> TaskFuture<'_, Result<(), StoreError>> {
+    pub(super) fn mark_outbox_published(
+        &self,
+        id: crate::model::next::TaskId,
+        version: u64,
+    ) -> TaskFuture<'_, Result<(), StoreError>> {
         self.run_outbox(move |connection| {
-            connection.execute("DELETE FROM task_event_outbox WHERE task_id=?1 AND state_version=?2", rusqlite::params![id.to_padded_decimal(), version]).map_err(failure)?;
+            connection
+                .execute(
+                    "DELETE FROM task_event_outbox WHERE task_id=?1 AND state_version=?2",
+                    rusqlite::params![id.to_padded_decimal(), version],
+                )
+                .map_err(failure)?;
             Ok(())
         })
     }
@@ -383,7 +403,14 @@ impl LegacyTaskStore for SqliteTaskStore {
             });
         }
         let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| accept_encoded(connection, id, request, outbox_enabled.load(std::sync::atomic::Ordering::Acquire)))
+        self.run_write(move |connection| {
+            accept_encoded(
+                connection,
+                id,
+                request,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
     }
 
     /// Loads an encoded typed task without decoding its application payload.
@@ -429,7 +456,13 @@ impl LegacyTaskStore for SqliteTaskStore {
             });
         }
         let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| start_encoded(connection, command, outbox_enabled.load(std::sync::atomic::Ordering::Acquire)))
+        self.run_write(move |connection| {
+            start_encoded(
+                connection,
+                command,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
     }
 
     /// Applies a typed lifecycle transition atomically.
@@ -441,7 +474,13 @@ impl LegacyTaskStore for SqliteTaskStore {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
         let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| transition_encoded(connection, command, outbox_enabled.load(std::sync::atomic::Ordering::Acquire)))
+        self.run_write(move |connection| {
+            transition_encoded(
+                connection,
+                command,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
     }
 
     /// Acceptance and idempotency lookup share one SQLite transaction.
@@ -715,6 +754,73 @@ impl LegacyTaskStore for SqliteTaskStore {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
         self.run(move |connection| list_encoded(connection, query))
+    }
+
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<crate::model::next::TaskCursor>,
+        limit: NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
+        self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
+        self.run(move |connection| next_retry_deadline(connection, now_ms))
+    }
+
+    fn prune_typed_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        if !self.typed_schema {
+            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
+        }
+        let finished_before_ms = match i64::try_from(finished_before_ms) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async {
+                    Err(StoreError::InvalidRequest(
+                        "task finish cutoff exceeds the SQLite integer range",
+                    ))
+                });
+            }
+        };
+        let max_rows = match i64::try_from(max_rows.get()) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async {
+                    Err(StoreError::InvalidRequest(
+                        "task history prune limit exceeds the SQLite integer range",
+                    ))
+                });
+            }
+        };
+        self.run_write(move |connection| {
+            let transaction = connection.unchecked_transaction().map_err(failure)?;
+            let mut statement = transaction
+                .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER) < ?1 ORDER BY CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id LIMIT ?2")
+                .map_err(failure)?;
+            let rows = statement
+                .query_map(params![finished_before_ms, max_rows], |row| row.get::<_, String>(0))
+                .map_err(failure)?;
+            let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
+            drop(statement);
+            for id in &ids {
+                transaction
+                    .execute("DELETE FROM tasks WHERE id=?1", [id])
+                    .map_err(failure)?;
+            }
+            transaction.commit().map_err(failure)?;
+            Ok(ids.len())
+        })
     }
 
     /// Loads task lifecycle and immutable metadata without the payload.

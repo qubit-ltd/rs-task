@@ -1,37 +1,60 @@
-//! Real typed service → SQLite outbox → Redis → duplicate-aware durable consumer.
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+//! Real typed service → SQLite outbox → Redis → duplicate-aware durable
+//! consumer.
 #![cfg(all(feature = "sqlite", feature = "event-bus"))]
 
-#[path = "redis_task_outbox/support.rs"]
-mod support;
-
+mod redis_task_outbox_support;
 use std::collections::HashMap;
 use std::error::Error;
 use std::process::Command;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 
+use qubit_event_bus::AsyncEventBus;
+use qubit_event_bus::DeliveryError;
+use qubit_event_bus::EventBus;
+use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::EventBusFacadeConfig;
+use qubit_event_bus::EventBusRegistry;
 use qubit_event_bus::codec::CodecRegistry;
-use qubit_event_bus::model::{
-    ConsumerGroup, ProviderId, ProviderOptions, StartPosition, SubscribeRequest, SubscriberId,
-    SubscriptionDurability, Topic,
-};
+use qubit_event_bus::model::ConsumerGroup;
+use qubit_event_bus::model::ProviderId;
+use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::SubscriberId;
+use qubit_event_bus::model::SubscriptionDurability;
+use qubit_event_bus::model::Topic;
 use qubit_event_bus::spi::ShutdownMode;
-use qubit_event_bus::{
-    AsyncEventBus, DeliveryError, EventBus, EventBusConfig, EventBusFacadeConfig, EventBusRegistry,
-};
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 use qubit_event_bus_redis::naming::stream_key;
-use qubit_model_metadata::metadata::ModelIdBuf;
-use qubit_spi::{AsyncServiceProvider, ProviderSelection};
+use qubit_model_id::ModelIdBuf;
+use qubit_spi::AsyncServiceProvider;
+use qubit_spi::ProviderSelection;
+use qubit_task::CancellationMode;
+use qubit_task::TaskContext;
+use qubit_task::TaskExecutionService;
+use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskHandler;
+use qubit_task::TaskHandlerDescriptor;
 use qubit_task::event::TaskEvent;
-use qubit_task::handler::{TaskRunOutcome, TaskRunResult};
-use qubit_task::model::{TaskId, TaskOutput, TaskState};
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
+use qubit_task::model::TaskId;
+use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskState;
 use qubit_task::service::TaskServiceError;
-use qubit_task::store::{SqliteTaskStore, TaskFuture, TaskStore};
-use qubit_task::{
-    CancellationMode, TaskContext, TaskExecutionService, TaskExecutionServiceBuilder, TaskHandler,
-    TaskHandlerDescriptor,
-};
+use qubit_task::store::SqliteTaskStore;
+use qubit_task::store::TaskFuture;
+use qubit_task::store::TaskStore;
+use redis_task_outbox_support::support;
 use support::controlled_redis::proxy::ControlledRedis;
 use support::interrupt_before_mark::InterruptBeforeMark;
 use support::redis_server::RedisServer;
@@ -45,7 +68,7 @@ const DEADLINE: Duration = Duration::from_secs(15);
 /// Configures identical wire codecs and stream namespaces for both facades.
 fn config(url: &str, namespace: &str) -> Result<EventBusConfig, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
-    codecs.register(Arc::new(TaskEventJsonCodec::new()?));
+    codecs.register(Arc::new(TaskEventJsonCodec::new()?))?;
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), namespace.into()),
@@ -58,7 +81,8 @@ fn config(url: &str, namespace: &str) -> Result<EventBusConfig, Box<dyn Error>> 
         .with_facade_config(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs))))
 }
 
-/// Creates the production asynchronous Redis provider with the task event codec.
+/// Creates the production asynchronous Redis provider with the task event
+/// codec.
 async fn producer(url: &str, namespace: &str) -> Result<Arc<AsyncEventBus>, Box<dyn Error>> {
     let config = config(url, namespace)?;
     let spi = AsyncRedisEventBusProvider
@@ -77,11 +101,7 @@ struct Handler {
     started: tokio::sync::mpsc::UnboundedSender<TaskId>,
 }
 impl TaskHandler<serde_json::Value> for Handler {
-    fn run<'a>(
-        &'a self,
-        input: serde_json::Value,
-        context: TaskContext,
-    ) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(&'a self, input: serde_json::Value, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             let _ = self.started.send(context.task_id());
             if input["cancel"].as_bool() == Some(true) {
@@ -96,18 +116,13 @@ impl TaskHandler<serde_json::Value> for Handler {
     }
 }
 
-/// Builds the real typed service; returned channel identifies actual handler start.
+/// Builds the real typed service; returned channel identifies actual handler
+/// start.
 async fn service(
     store: Arc<dyn TaskStore>,
     bus: Arc<AsyncEventBus>,
     timeout: Duration,
-) -> Result<
-    (
-        TaskExecutionService,
-        tokio::sync::mpsc::UnboundedReceiver<TaskId>,
-    ),
-    Box<dyn Error>,
-> {
+) -> Result<(TaskExecutionService, tokio::sync::mpsc::UnboundedReceiver<TaskId>), Box<dyn Error>> {
     let (started, receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut builder = TaskExecutionServiceBuilder::new(
         store,
@@ -128,7 +143,8 @@ async fn service(
     Ok((builder.build().await?, receiver))
 }
 
-/// Waits for a persisted terminal state, using actual store evidence under a deadline.
+/// Waits for a persisted terminal state, using actual store evidence under a
+/// deadline.
 async fn terminal(service: &TaskExecutionService, id: TaskId) -> Result<TaskState, Box<dyn Error>> {
     tokio::time::timeout(DEADLINE, async {
         loop {
@@ -155,23 +171,16 @@ fn wires(url: &str, namespace: &str) -> Result<Vec<serde_json::Value>, Box<dyn E
         .ids
         .iter()
         .map(|entry| {
-            let wire: String =
-                redis::from_redis_value(entry.map.get("wire").expect("provider wire field"))?;
+            let wire: String = redis::from_redis_value(entry.map.get("wire").expect("provider wire field"))?;
             Ok(serde_json::from_str(&wire)?)
         })
         .collect()
 }
 
 /// Consumes the actual durable stream and applies each task revision once.
-fn consume(
-    url: &str,
-    namespace: &str,
-) -> Result<HashMap<(String, u64), TaskState>, Box<dyn Error>> {
+fn consume(url: &str, namespace: &str) -> Result<HashMap<(TaskId, u64), TaskState>, Box<dyn Error>> {
     let records = wires(url, namespace)?;
-    assert!(
-        !records.is_empty(),
-        "the real Redis stream must contain task events"
-    );
+    assert!(!records.is_empty(), "the real Redis stream must contain task events");
     let bus: EventBus = EventBusRegistry::discover()?.create(&config(url, namespace)?)?;
     let (sender, receiver) = mpsc::channel();
     let subscription = bus.subscribe(
@@ -190,7 +199,7 @@ fn consume(
     let mut projection = HashMap::new();
     for _ in &records {
         let event = receiver.recv_timeout(DEADLINE)?;
-        let key = (event.task_id.clone(), event.state_version);
+        let key = (event.task_id, event.state_version);
         match projection.entry(key) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(event.state);
@@ -219,13 +228,13 @@ fn consume(
 }
 
 /// Verifies all three committed revisions of one successful typed task.
-fn assert_success(projection: &HashMap<(String, u64), TaskState>, id: TaskId) {
+fn assert_success(projection: &HashMap<(TaskId, u64), TaskState>, id: TaskId) {
     for (version, state) in [
         (0, TaskState::Queued),
         (1, TaskState::Running),
         (2, TaskState::Succeeded),
     ] {
-        assert_eq!(projection.get(&(id.to_string(), version)), Some(&state));
+        assert_eq!(projection.get(&(id, version)), Some(&state));
     }
 }
 
@@ -240,45 +249,24 @@ async fn test_typed_lifecycle_and_cancellation_reach_durable_consumer() -> TestR
     let done = service
         .submit(typed_support::request(serde_json::json!({}), "success"))
         .await?;
-    assert_eq!(
-        tokio::time::timeout(DEADLINE, started.recv()).await?,
-        Some(done.id)
-    );
+    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(done.id));
     assert_eq!(terminal(&service, done.id).await?, TaskState::Succeeded);
     let cancelled = service
-        .submit(typed_support::request(
-            serde_json::json!({"cancel": true}),
-            "cancel",
-        ))
+        .submit(typed_support::request(serde_json::json!({"cancel": true}), "cancel"))
         .await?;
     assert_eq!(
         tokio::time::timeout(DEADLINE, started.recv()).await?,
         Some(cancelled.id)
     );
     let _outcome = service.cancel(cancelled.id).await?;
-    assert_eq!(
-        terminal(&service, cancelled.id).await?,
-        TaskState::Cancelled
-    );
+    assert_eq!(terminal(&service, cancelled.id).await?, TaskState::Cancelled);
     service.shutdown().await?;
     let projection = consume(redis.url(), namespace)?;
     assert_success(&projection, done.id);
-    assert_eq!(
-        projection.get(&(cancelled.id.to_string(), 0)),
-        Some(&TaskState::Queued)
-    );
-    assert_eq!(
-        projection.get(&(cancelled.id.to_string(), 1)),
-        Some(&TaskState::Running)
-    );
-    assert_eq!(
-        projection.get(&(cancelled.id.to_string(), 2)),
-        Some(&TaskState::Running)
-    );
-    assert_eq!(
-        projection.get(&(cancelled.id.to_string(), 3)),
-        Some(&TaskState::Cancelled)
-    );
+    assert_eq!(projection.get(&(cancelled.id, 0)), Some(&TaskState::Queued));
+    assert_eq!(projection.get(&(cancelled.id, 1)), Some(&TaskState::Running));
+    assert_eq!(projection.get(&(cancelled.id, 2)), Some(&TaskState::Running));
+    assert_eq!(projection.get(&(cancelled.id, 3)), Some(&TaskState::Cancelled));
     assert_eq!(projection.len(), 7);
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
     Ok(())
@@ -345,8 +333,9 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
         "XADD committed upstream while its reply is held"
     );
     assert_eq!(store.list_event_outbox(128).await?.len(), 3);
-    // Keep later retries unavailable while the first, already applied XADD loses its reply.
-    // Docker completion and the facade error counter prove both fault boundaries.
+    // Keep later retries unavailable while the first, already applied XADD loses
+    // its reply. Docker completion and the facade error counter prove both
+    // fault boundaries.
     redis.stop()?;
     gate.release_without_reply();
     tokio::time::timeout(DEADLINE, async {
@@ -372,17 +361,14 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
     );
     let projection = consume(redis.url(), namespace)?;
     assert_success(&projection, done.id);
-    assert_eq!(
-        projection.len(),
-        3,
-        "four deliveries apply only three revisions"
-    );
+    assert_eq!(projection.len(), 3, "four deliveries apply only three revisions");
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
     let _report = fresh_bus.shutdown(ShutdownMode::Immediate).await?;
     Ok(())
 }
 
-/// Child-only entry: exit after confirmed Redis acceptance, before deleting any snapshot.
+/// Child-only entry: exit after confirmed Redis acceptance, before deleting any
+/// snapshot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_outbox_crash_child() -> TestResult {
     let Ok(path) = std::env::var("TASK_OUTBOX_CRASH_DATABASE") else {

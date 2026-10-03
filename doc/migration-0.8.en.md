@@ -1,6 +1,14 @@
 # Migrating to qubit-task 0.8
 
-Version 0.8 contains intentional breaking changes to store pagination and fault cleanup. Update downstream `TaskStore` implementations and callers together; the release does not retain compatibility overloads.
+Version 0.8 contains intentional breaking changes to store pagination, typed scheduling queries, terminal pruning, and task notifications. Update downstream `TaskStore` implementations and callers together; no compatibility overloads are retained.
+
+## Implement the typed scheduler and retention methods
+
+Custom `TaskStore` implementations must add `list_ready_queued(after, limit, now_ms)`, `next_retry_deadline(now_ms)`, and `prune_terminal_before(finished_before_ms, max_rows)`. Ready scans return only `Queued` records with no retry deadline or a deadline at or before `now_ms`, ordered by `(accepted_at_ms, numeric TaskId)` and bounded to 1–256 rows. `next_retry_deadline` returns the minimum queued deadline strictly after `now_ms`. Pruning removes at most the requested count of `Succeeded`, `Failed`, `Panicked`, or `Cancelled` records whose `finished_at_ms` is strictly before the cutoff, ordered by `(finished_at_ms, TaskId)`. Remove idempotency keys atomically with rows; a pruned key becomes reusable. Queued and blocked records are never eligible.
+
+## Configure lifecycle notifications explicitly
+
+`TaskEvent.task_id` is now typed `TaskId` and each payload includes `schema_version = 1`. Update JSON codecs and consumers together. With the `event-bus` feature, opt in through `TaskExecutionServiceBuilder::event_bus` and register the application's `TaskEvent` codec. SQLite schema version 6 adds a durable lifecycle outbox while preserving task rows; transitions and their event snapshots commit atomically. The publisher replays pending rows after service recovery and removes each row only after provider admission is confirmed. Delivery is at-least-once: uncertain admission or a crash before deletion can produce duplicates, so deduplicate by `(TaskId, state_version)` and reconcile from task queries. Enabling publication does not backfill earlier states. `MemoryTaskStore` does not support the persistent outbox. `shutdown()` drains until `notification_shutdown_timeout`; timeout is reported and remaining rows stay durable for restart. Scheduling can let a later resource-compatible task pass an earlier blocked task, so do not rely on strict FIFO.
 
 ## Replace task-ID recovery cursors
 

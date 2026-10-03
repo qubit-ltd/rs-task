@@ -6,7 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use qubit_metadata::Metadata;
-use qubit_model_metadata::metadata::ModelId;
+use qubit_model_id::ModelId;
 
 use super::Payload;
 use super::ResourceRequest;

@@ -11,7 +11,7 @@ This example follows one request from a typed value through codec registration a
 ```rust,no_run
 use std::sync::Arc;
 use qubit_codec::{ValueBytesCodecDescriptor, ValueBytesCodecRegistration, ValueBytesCodecRegistry, ValueCodecId, ValueCodecRegistration, ValueCodecRegistrationSource};
-use qubit_model_metadata::metadata::{ModelId, ModelIdBuf};
+use qubit_model_id::{ModelId, ModelIdBuf};
 use qubit_progress::{Metric, Stage};
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::{CancellationMode, TaskContext, TaskHandlerDescriptor};
@@ -107,13 +107,15 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 ## Runtime contracts
 
 - `TaskId` wraps `rs-id::Id`; the service requires an injected `IdGenerator`. Snowflake cross-process uniqueness depends on distinct node IDs and clock conditions. `to_padded_decimal()` produces a fixed-width decimal key for stable lexical database ordering.
-- CPU slots, GPU devices and labels, optional memory/disk bytes, and custom integer units are admission quotas reserved for each attempt. They account for concurrent reservations; they do not pin CPUs, discover or isolate GPUs at the OS level, or enforce actual process memory/disk usage. A request above configured capacity is unsatisfiable; a fitting request waits while capacity is occupied.
+- CPU slots, GPU devices and labels, optional memory/disk bytes, and custom integer units are admission quotas reserved for each attempt. They account for concurrent reservations; they do not pin CPUs, discover or isolate GPUs at the OS level, or enforce actual process memory/disk usage. A request above configured capacity is unsatisfiable. A temporarily unavailable request stays queued while the scheduler considers later resource-compatible work, so ordering is not strict FIFO.
 - Queued or blocked tasks can be cancelled directly. For running work, `CancellationMode::Cooperative` signals `TaskContext::is_cancelled()` and the handler must stop at a safe boundary and return `TaskRunOutcome::Cancelled`. `ExternalHook` requires a registered external hook. `Unsupported` cannot stop a running attempt.
 - `max_running_tasks` bounds active handlers and `scan_page_size` bounds queued-summary scans. The scheduler keeps queued work in the store and creates execution tasks only when it has a running slot.
 - A handler's `TaskRunError.retryable` controls retries. The default `max_attempts` is three, with `RetryPolicy` delays from one to sixty seconds. The queued state and `retry_not_before_ms` are stored together, so restart recovery honors the deadline. Non-retryable failures, panics, cancellation, and exhausted attempts are terminal.
 - `resume_blocked(id, expected_state_version)` requeues a blocked task after the caller repairs configuration and restarts with a compatible handler or codec. Read the latest summary before retrying a state-version conflict. A pending cancellation prevents resumption.
-- Background store failures are latched: writes and scheduling stop, diagnostic reads remain available, and `shutdown()` returns the stored failure after draining active work. SQLite typed schema version 4 or 5 migrates transactionally to version 6; migration adds the lifecycle outbox without deleting existing task data. Legacy UUID schemas still require explicit data mapping.
+- Background store failures are latched: writes and scheduling stop, diagnostic reads remain available, and `shutdown()` returns the stored failure after draining active work. SQLite typed schema versions 4 and 5 migrate transactionally to version 6; legacy UUID schemas still require explicit data mapping.
 - `TaskContext::progress_builder()` uses `rs-progress::AsyncReporter`. `report_async()` awaits persistence before returning. Current stage and metric snapshots appear on later task reads without changing lifecycle `state_version`; reporting errors are returned to the handler.
 - Typed history pages sort ascending by `(accepted_at_ms, numeric task id)`. `after` is an exclusive key cursor, not an offset; each query observes its own storage snapshot. `next` is present only when a lookahead row exists. Filters include state, business `category`, and correlation key. `kind_id` routes to a handler and is independent of `category`.
 
 For durable lifecycle notifications, enable `event-bus`, register an application `TaskEvent` codec, and set `TaskExecutionServiceBuilder::event_bus`. The SQLite outbox is populated atomically with lifecycle writes and replayed asynchronously. It is at-least-once: ambiguous publication or a crash before outbox deletion can produce duplicates. Deduplicate by `(TaskId, state_version)` and use task queries as the authority. Existing lifecycle states are not backfilled when the publisher is enabled. `MemoryTaskStore` does not support a persistent outbox. See the [user guide](user-guide.md#publish-lifecycle-changes) for setup boundaries and monitoring guidance.
+
+Call `TaskStore::prune_terminal_before(finished_before_ms, max_rows)` from an application-owned maintenance job to remove at most `max_rows` terminal records whose finish time is strictly before the cutoff. The store orders deletion by finish time and task ID and removes each idempotency key in the same operation. Pruned keys may be reused; queued and blocked tasks are never pruned.

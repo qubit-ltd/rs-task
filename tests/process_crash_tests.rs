@@ -36,8 +36,8 @@ use qubit_codec::ValueCodecRegistrationSource;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
-use qubit_model_metadata::metadata::ModelId;
-use qubit_model_metadata::metadata::ModelIdBuf;
+use qubit_model_id::ModelId;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionService;
@@ -561,7 +561,7 @@ async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
             .expect("committed recovery page reads");
         assert_eq!(page.records.len(), expected);
         for summary in &page.records {
-            assert!(cursor.is_none_or(|previous| TaskCursor::from(&*summary) > previous));
+            assert!(cursor.is_none_or(|previous| TaskCursor::from(summary) > previous));
             assert!(ids.insert(summary.id), "no task repeats across pages");
             let stored = store
                 .get_encoded_task(summary.id)

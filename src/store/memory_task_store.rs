@@ -819,6 +819,89 @@ impl LegacyTaskStore for MemoryTaskStore {
         })
     }
 
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<crate::model::next::TaskCursor>,
+        limit: NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        Box::pin(async move {
+            if limit.get() > crate::model::next::MAX_TASK_QUERY_LIMIT {
+                return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
+            }
+            let state = self.state.lock();
+            let mut records = state
+                .encoded_tasks
+                .values()
+                .filter(|task| {
+                    task.summary.state == TaskState::Queued
+                        && task
+                            .summary
+                            .retry_not_before_ms
+                            .is_none_or(|deadline| deadline <= now_ms)
+                        && after.is_none_or(|cursor| {
+                            (task.summary.accepted_at_ms, task.summary.id) > (cursor.accepted_at_ms, cursor.id)
+                        })
+                })
+                .map(|task| task.summary.clone())
+                .collect::<Vec<_>>();
+            records.sort_unstable_by_key(|summary| (summary.accepted_at_ms, summary.id));
+            let has_more = records.len() > limit.get();
+            records.truncate(limit.get());
+            let next = has_more.then(|| records.last().map(EncodedTaskCursor::from)).flatten();
+            Ok(EncodedTaskPage { records, next })
+        })
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        Box::pin(async move {
+            Ok(self
+                .state
+                .lock()
+                .encoded_tasks
+                .values()
+                .filter(|task| task.summary.state == TaskState::Queued)
+                .filter_map(|task| task.summary.retry_not_before_ms)
+                .filter(|deadline| *deadline > now_ms)
+                .min())
+        })
+    }
+
+    fn prune_typed_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock();
+            let mut candidates = state
+                .encoded_tasks
+                .values()
+                .filter_map(|task| {
+                    let finished_at_ms = task.summary.finished_at_ms?;
+                    (matches!(
+                        task.summary.state,
+                        TaskState::Succeeded
+                            | TaskState::Failed { .. }
+                            | TaskState::Panicked { .. }
+                            | TaskState::Cancelled
+                    ) && finished_at_ms < finished_before_ms)
+                        .then_some((finished_at_ms, task.summary.id))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_unstable();
+            let expired = candidates
+                .into_iter()
+                .take(max_rows.get())
+                .map(|(_, id)| id)
+                .collect::<Vec<_>>();
+            for id in &expired {
+                state.remove_encoded_task(*id);
+            }
+            Ok(expired.len())
+        })
+    }
+
     /// Deletes at most the requested number of old terminal records.
     ///
     /// # Parameters

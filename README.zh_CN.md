@@ -36,12 +36,14 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 - [用户指南](doc/user-guide.zh_CN.md)
 - [详细设计](doc/task_execution_service_design.md)
-- [迁移指南](doc/migration.zh_CN.md)
+- [迁移指南](doc/migration-0.8.zh_CN.md)
 - [API 文档](https://docs.rs/qubit-task)
 
 ## 任务通知投递
 
 服务恢复后 publisher 会重放已提交的 outbox 行；关闭时会在 `notification_shutdown_timeout` 限时内排空。发布回执不确定，或 Redis 已接纳事件但进程在删除 outbox 行前崩溃，都可能造成重复。消费者应为每个任务保留最高 `state_version`，忽略重复和旧版本事件。启用 publisher 不会补发服务启用前已经提交的历史状态。监控 outbox 待处理行数和最老行年龄，并同时查看 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`。
+
+调度器按 keyset 顺序扫描可运行的排队任务。暂时拿不到所需资源的任务会被跳过，让后续资源匹配的任务先启动，因此不保证严格 FIFO。应用可调用 `TaskStore::prune_terminal_before(finished_before_ms, max_rows)` 显式清理一批旧终态记录；清理也会释放幂等键供后续复用，Queued 和 Blocked 任务会保留。
 
 ## 检查
 
