@@ -10,7 +10,7 @@ name = "task_service"
 path = "../../../examples/task_service.rs"
 
 [dependencies]
-qubit-event-bus = { path = "../../../../rs-event-bus", version = "0.19", features = ["discovery"] }
+qubit-event-bus = { path = "../../../../rs-event-bus", version = "0.20", features = ["discovery"] }
 qubit-event-bus-redis = { path = "../../../../rs-event-bus-redis", version = "0.7" }
 qubit-spi = "0.13"
 qubit-task = { path = "../../..", features = ["event-bus", "inventory", "sqlite"] }
