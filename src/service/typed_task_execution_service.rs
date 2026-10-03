@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -22,6 +23,8 @@ use qubit_progress::AsyncReporter;
 
 #[cfg(feature = "event-bus")]
 use super::NotificationStats;
+use super::owner_release_guard::OwnerReleaseGuard;
+use super::owner_release_guard::OwnerReleaseWorker;
 #[cfg(feature = "event-bus")]
 use super::task_event_publisher::TaskEventPublisher;
 use crate::engine::EngineError;
@@ -32,7 +35,6 @@ use crate::handler::typed::CancellationMode;
 use crate::handler::typed::TypedTaskContext;
 use crate::handler::typed::TypedTaskHandlerRegistry;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
-use crate::model::OwnerEpoch;
 use crate::model::TaskOutput;
 use crate::model::TaskState;
 use crate::model::next::TaskId;
@@ -53,20 +55,24 @@ struct TypedServiceCore {
     engine: Arc<LocalTaskExecutionEngine>,
     handlers: TypedTaskHandlerRegistry,
     cancellations: Mutex<HashMap<(TaskId, u32), Arc<AtomicBool>>>,
-    owner: OwnerEpoch,
+    owner_guard: tokio::sync::Mutex<Option<OwnerReleaseGuard>>,
     admission: tokio::sync::RwLock<()>,
     scheduler_changed: tokio::sync::Notify,
     scheduler_stopped: AtomicBool,
     scheduler_stopped_changed: tokio::sync::Notify,
     max_running_tasks: usize,
     scan_page_size: usize,
+    max_resource_bypasses: usize,
     max_attempts: u32,
     retry_policy: RetryPolicy,
     fault: Mutex<Option<String>>,
     in_flight: AtomicUsize,
     in_flight_changed: tokio::sync::Notify,
     shutting_down: AtomicBool,
-    shutdown_lock: tokio::sync::Mutex<()>,
+    shutdown_changed: tokio::sync::Notify,
+    shutdown_completed: tokio::sync::Notify,
+    shutdown_progress: Mutex<ShutdownProgress>,
+    public_gone: AtomicBool,
     owner_released: AtomicBool,
     #[cfg(feature = "event-bus")]
     publisher: Option<TaskEventPublisher>,
@@ -74,15 +80,78 @@ struct TypedServiceCore {
     notification_close_error: Mutex<Option<String>>,
 }
 
+impl TypedServiceCore {
+    /// Signals the supervisor without blocking the dropping handle or caller.
+    fn request_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.scheduler_changed.notify_waiters();
+        self.shutdown_changed.notify_waiters();
+    }
+}
+
+struct PublicLifetime {
+    core: Weak<TypedServiceCore>,
+}
+
+impl Drop for PublicLifetime {
+    fn drop(&mut self) {
+        if let Some(core) = self.core.upgrade() {
+            core.public_gone.store(true, Ordering::Release);
+            core.request_shutdown();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ServiceRunner {
+    core: Arc<TypedServiceCore>,
+}
+
+#[derive(Clone)]
+enum ShutdownOutcome {
+    Complete,
+    StoreUnavailable(String),
+    #[cfg(feature = "event-bus")]
+    NotificationClose(String),
+}
+
+#[derive(Default)]
+struct ShutdownProgress {
+    attempt: usize,
+    results: Vec<ShutdownOutcome>,
+    retryable_release: bool,
+    retry_requested: bool,
+}
+
+impl ShutdownOutcome {
+    /// Reconstructs an owned public error for each independent shutdown waiter.
+    fn into_result(self) -> Result<(), TaskServiceError> {
+        match self {
+            Self::Complete => Ok(()),
+            Self::StoreUnavailable(error) => Err(TaskServiceError::StoreUnavailable(error)),
+            #[cfg(feature = "event-bus")]
+            Self::NotificationClose(error) => Err(TaskServiceError::NotificationClose(error)),
+        }
+    }
+}
+
 pub(super) struct TypedServiceOptions {
     pub(super) max_running_tasks: usize,
     pub(super) scan_page_size: usize,
+    pub(super) max_resource_bypasses: usize,
     pub(super) max_attempts: u32,
     pub(super) retry_policy: RetryPolicy,
     #[cfg(feature = "event-bus")]
     pub(super) event_bus: Option<Arc<qubit_event_bus::AsyncEventBus>>,
     #[cfg(feature = "event-bus")]
     pub(super) notification_shutdown_timeout: std::time::Duration,
+}
+
+/// Tracks the oldest resource-waiting task and successful newer starts.
+#[derive(Default)]
+struct ResourceFairness {
+    anchor: Option<(TaskId, u64)>,
+    bypasses: usize,
 }
 
 struct InFlightGuard(Arc<TypedServiceCore>);
@@ -99,6 +168,7 @@ impl Drop for InFlightGuard {
 #[derive(Clone)]
 pub struct TypedTaskExecutionService {
     core: Arc<TypedServiceCore>,
+    _lifetime: Arc<PublicLifetime>,
 }
 
 impl TypedTaskExecutionService {
@@ -110,7 +180,9 @@ impl TypedTaskExecutionService {
         handlers: TypedTaskHandlerRegistry,
         options: TypedServiceOptions,
     ) -> Result<Self, TaskServiceError> {
+        let cleanup_worker = OwnerReleaseWorker::shared().map_err(TaskServiceError::SchedulerUnavailable)?;
         let owner = store.acquire_owner().await?;
+        let mut owner_guard = OwnerReleaseGuard::new(Arc::clone(&store), owner, cleanup_worker);
         #[cfg(feature = "event-bus")]
         let publisher = if let Some(bus) = options.event_bus {
             let prepared = async {
@@ -121,44 +193,52 @@ impl TypedTaskExecutionService {
             match prepared {
                 Ok(publisher) => Some(publisher),
                 Err(error) => {
-                    store.release_owner(owner).await?;
+                    owner_guard.release().await?;
                     return Err(error);
                 }
             }
         } else {
             None
         };
+        let core = Arc::new(TypedServiceCore {
+            store,
+            codecs,
+            id_generator,
+            engine,
+            handlers,
+            cancellations: Mutex::new(HashMap::new()),
+            owner_guard: tokio::sync::Mutex::new(None),
+            admission: tokio::sync::RwLock::new(()),
+            scheduler_changed: tokio::sync::Notify::new(),
+            scheduler_stopped: AtomicBool::new(false),
+            scheduler_stopped_changed: tokio::sync::Notify::new(),
+            max_running_tasks: options.max_running_tasks,
+            scan_page_size: options.scan_page_size,
+            max_resource_bypasses: options.max_resource_bypasses,
+            max_attempts: options.max_attempts,
+            retry_policy: options.retry_policy,
+            fault: Mutex::new(None),
+            in_flight: AtomicUsize::new(0),
+            in_flight_changed: tokio::sync::Notify::new(),
+            shutting_down: AtomicBool::new(false),
+            shutdown_changed: tokio::sync::Notify::new(),
+            shutdown_completed: tokio::sync::Notify::new(),
+            shutdown_progress: Mutex::new(ShutdownProgress::default()),
+            public_gone: AtomicBool::new(false),
+            owner_released: AtomicBool::new(false),
+            #[cfg(feature = "event-bus")]
+            publisher,
+            #[cfg(feature = "event-bus")]
+            notification_close_error: Mutex::new(None),
+        });
         let service = Self {
-            core: Arc::new(TypedServiceCore {
-                store,
-                codecs,
-                id_generator,
-                engine,
-                handlers,
-                cancellations: Mutex::new(HashMap::new()),
-                owner,
-                admission: tokio::sync::RwLock::new(()),
-                scheduler_changed: tokio::sync::Notify::new(),
-                scheduler_stopped: AtomicBool::new(false),
-                scheduler_stopped_changed: tokio::sync::Notify::new(),
-                max_running_tasks: options.max_running_tasks,
-                scan_page_size: options.scan_page_size,
-                max_attempts: options.max_attempts,
-                retry_policy: options.retry_policy,
-                fault: Mutex::new(None),
-                in_flight: AtomicUsize::new(0),
-                in_flight_changed: tokio::sync::Notify::new(),
-                shutting_down: AtomicBool::new(false),
-                shutdown_lock: tokio::sync::Mutex::new(()),
-                owner_released: AtomicBool::new(false),
-                #[cfg(feature = "event-bus")]
-                publisher,
-                #[cfg(feature = "event-bus")]
-                notification_close_error: Mutex::new(None),
+            _lifetime: Arc::new(PublicLifetime {
+                core: Arc::downgrade(&core),
             }),
+            core,
         };
-        if let Err(error) = service.recover_unfinished().await {
-            let release = service.core.store.release_owner(owner).await;
+        if let Err(error) = service.runner().recover_unfinished().await {
+            let release = owner_guard.release().await;
             if let Err(release_error) = release {
                 return Err(TaskServiceError::Store(release_error));
             }
@@ -168,7 +248,12 @@ impl TypedTaskExecutionService {
         if let Some(publisher) = &service.core.publisher {
             publisher.start().await;
         }
-        let scheduler = service.clone();
+        *service
+            .core
+            .owner_guard
+            .try_lock()
+            .expect("runner owner guard is uncontended") = Some(owner_guard);
+        let scheduler = service.runner();
         let scheduler_core = Arc::clone(&service.core);
         tokio::spawn(async move {
             if AssertUnwindSafe(scheduler.scheduler_loop())
@@ -181,7 +266,38 @@ impl TypedTaskExecutionService {
             scheduler_core.scheduler_stopped.store(true, Ordering::Release);
             scheduler_core.scheduler_stopped_changed.notify_waiters();
         });
+        let supervisor = service.runner();
+        let supervisor_core = Arc::clone(&service.core);
+        tokio::spawn(async move {
+            if AssertUnwindSafe(supervisor.shutdown_supervisor())
+                .catch_unwind()
+                .await
+                .is_err()
+            {
+                let armed_guard = supervisor_core.owner_guard.lock().await.take();
+                drop(armed_guard);
+                let mut progress = supervisor_core.shutdown_progress.lock();
+                let outcome = ShutdownOutcome::StoreUnavailable("typed task shutdown supervisor panicked".into());
+                let attempt = progress.attempt;
+                if progress.results.len() == attempt {
+                    progress.results.push(outcome);
+                } else {
+                    progress.results[attempt] = outcome;
+                }
+                progress.retryable_release = false;
+                progress.retry_requested = false;
+                drop(progress);
+                supervisor_core.shutdown_completed.notify_waiters();
+            }
+        });
         Ok(service)
+    }
+
+    /// Creates an internal handle that never retains the public lifetime token.
+    fn runner(&self) -> ServiceRunner {
+        ServiceRunner {
+            core: Arc::clone(&self.core),
+        }
     }
 
     /// Encodes, assigns an ID, durably accepts, and dispatches a typed request.
@@ -190,7 +306,7 @@ impl TypedTaskExecutionService {
         request: TaskRequest<T>,
     ) -> Result<TaskSummary, TaskServiceError> {
         let _admission = self.core.admission.read().await;
-        self.check_fault()?;
+        self.runner().check_fault()?;
         if self.core.shutting_down.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
         }
@@ -198,10 +314,12 @@ impl TypedTaskExecutionService {
             .encode(&self.core.codecs)
             .map_err(|error| TaskServiceError::TypedRequest(error.to_string()))?;
         let id = TaskId::from_id(self.core.id_generator.generate()?);
-        let accepted = self.store_result(self.core.store.accept_encoded(id, stored).await)?;
+        let accepted = self
+            .runner()
+            .store_result(self.core.store.accept_encoded(id, stored).await)?;
         if accepted.created {
             #[cfg(feature = "event-bus")]
-            self.notify_notifications();
+            self.runner().notify_notifications();
             self.core.scheduler_changed.notify_one();
         }
         Ok(accepted.summary)
@@ -227,29 +345,6 @@ impl TypedTaskExecutionService {
             .map_or_else(NotificationStats::default, TaskEventPublisher::stats)
     }
 
-    #[cfg(feature = "event-bus")]
-    fn notify_notifications(&self) {
-        if let Some(publisher) = &self.core.publisher {
-            publisher.notify();
-        }
-    }
-
-    #[cfg(feature = "event-bus")]
-    fn check_notification_close(&self) -> Result<(), TaskServiceError> {
-        self.core
-            .notification_close_error
-            .lock()
-            .clone()
-            .map_or(Ok(()), |error| Err(TaskServiceError::NotificationClose(error)))
-    }
-
-    fn store_write_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
-        let value = self.store_result(result)?;
-        #[cfg(feature = "event-bus")]
-        self.notify_notifications();
-        Ok(value)
-    }
-
     /// Requeues a blocked task after its configuration or handler is repaired.
     pub async fn resume_blocked(
         &self,
@@ -257,11 +352,12 @@ impl TypedTaskExecutionService {
         expected_state_version: u64,
     ) -> Result<TaskSummary, TaskServiceError> {
         let _admission = self.core.admission.read().await;
-        self.check_fault()?;
+        self.runner().check_fault()?;
         if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
         }
         let task = self
+            .runner()
             .store_result(self.core.store.get_encoded_task(id).await)?
             .ok_or(crate::store::StoreError::NotFound)?;
         if task.summary.state_version != expected_state_version {
@@ -275,7 +371,7 @@ impl TypedTaskExecutionService {
         if task.summary.cancel_requested {
             return Err(TaskServiceError::CancellationPending);
         }
-        let resumed = self.store_write_result(
+        let resumed = self.runner().store_write_result(
             self.core
                 .store
                 .transition_encoded(TransitionCommand {
@@ -297,66 +393,41 @@ impl TypedTaskExecutionService {
 
     /// Stops submissions and dispatch, waits for active attempts, then releases
     /// exclusive store ownership. Queued tasks remain recoverable for the next
-    /// service owner.
+    /// service owner. Concurrent waiters share one release attempt's result;
+    /// a later call retries an owner release that returned a store error.
     pub async fn shutdown(&self) -> Result<(), TaskServiceError> {
-        let _shutdown = self.core.shutdown_lock.lock().await;
-        if self.core.owner_released.load(Ordering::Acquire) {
-            self.check_fault()?;
-            #[cfg(feature = "event-bus")]
-            self.check_notification_close()?;
-            return Ok(());
-        }
-        {
-            let _admission = self.core.admission.write().await;
-            self.core.shutting_down.store(true, Ordering::Release);
-            self.core.scheduler_changed.notify_waiters();
+        self.core.request_shutdown();
+        let (attempt, retry) = {
+            let mut progress = self.core.shutdown_progress.lock();
+            let retry = progress.retryable_release && progress.results.len() > progress.attempt;
+            if retry {
+                progress.attempt += 1;
+                progress.retry_requested = true;
+            }
+            (progress.attempt, retry)
+        };
+        if retry {
+            self.core.shutdown_changed.notify_waiters();
         }
         loop {
-            let notified = self.core.scheduler_stopped_changed.notified();
+            let notified = self.core.shutdown_completed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.core.scheduler_stopped.load(Ordering::Acquire) {
-                break;
+            if let Some(outcome) = self.core.shutdown_progress.lock().results.get(attempt).cloned() {
+                return outcome.into_result();
             }
             notified.await;
-        }
-        loop {
-            let notified = self.core.in_flight_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.core.in_flight.load(Ordering::Acquire) == 0 {
-                break;
-            }
-            notified.await;
-        }
-        #[cfg(feature = "event-bus")]
-        if let Some(publisher) = &self.core.publisher
-            && let Err(error) = publisher.close().await
-        {
-            *self.core.notification_close_error.lock() = Some(error.to_string());
-        }
-        if let Err(error) = self.core.store.release_owner(self.core.owner).await {
-            self.latch_fault(&error);
-            return Err(TaskServiceError::StoreUnavailable(error.to_string()));
-        }
-        self.core.owner_released.store(true, Ordering::Release);
-        if let Some(fault) = self.core.fault.lock().clone() {
-            Err(TaskServiceError::StoreUnavailable(fault))
-        } else {
-            #[cfg(feature = "event-bus")]
-            self.check_notification_close()?;
-            Ok(())
         }
     }
 
     /// Requests cancellation, persisting intent before signalling a handler.
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let _admission = self.core.admission.read().await;
-        self.check_fault()?;
+        self.runner().check_fault()?;
         if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
         }
-        let Some(task) = self.store_result(self.core.store.get_encoded_task(id).await)? else {
+        let Some(task) = self.runner().store_result(self.core.store.get_encoded_task(id).await)? else {
             return Err(TaskServiceError::Store(crate::store::StoreError::NotFound));
         };
         let summary = task.summary;
@@ -364,7 +435,7 @@ impl TypedTaskExecutionService {
             return Ok(CancelOutcome::AlreadyTerminal);
         }
         if matches!(summary.state, TaskState::Queued | TaskState::Blocked { .. }) {
-            let updated = self.store_write_result(
+            let updated = self.runner().store_write_result(
                 self.core
                     .store
                     .transition_encoded(TransitionCommand {
@@ -400,7 +471,7 @@ impl TypedTaskExecutionService {
         if descriptor.cancellation_mode == CancellationMode::Unsupported {
             return Ok(CancelOutcome::CancellationUnsupported);
         }
-        let _cancellation_requested = self.store_write_result(
+        let _cancellation_requested = self.runner().store_write_result(
             self.core
                 .store
                 .transition_encoded(TransitionCommand {
@@ -433,9 +504,10 @@ impl TypedTaskExecutionService {
                 if let Err(error) = hook.await {
                     let diagnostic = error.message;
                     let latest = self
+                        .runner()
                         .store_result(self.core.store.get_encoded_task(id).await)?
                         .ok_or(crate::store::StoreError::NotFound)?;
-                    let _cancellation_error = self.store_write_result(
+                    let _cancellation_error = self.runner().store_write_result(
                         self.core
                             .store
                             .transition_encoded(TransitionCommand {
@@ -459,16 +531,136 @@ impl TypedTaskExecutionService {
             }
         }
     }
+}
 
+impl ServiceRunner {
+    /// Waits for a stop request, drains work, and publishes one terminal
+    /// result.
+    async fn shutdown_supervisor(&self) {
+        loop {
+            let notified = self.core.shutdown_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.core.shutting_down.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+        let admission = self.core.admission.write().await;
+        self.core.scheduler_changed.notify_waiters();
+        drop(admission);
+        loop {
+            let notified = self.core.scheduler_stopped_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.core.scheduler_stopped.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+        loop {
+            let notified = self.core.in_flight_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.core.in_flight.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            notified.await;
+        }
+        #[cfg(feature = "event-bus")]
+        if let Some(publisher) = &self.core.publisher
+            && let Err(error) = publisher.close().await
+        {
+            *self.core.notification_close_error.lock() = Some(error.to_string());
+        }
+        loop {
+            let release = {
+                let mut guard = self.core.owner_guard.lock().await;
+                match guard.as_mut() {
+                    Some(owner_guard) => owner_guard.release().await,
+                    None => Err(crate::store::StoreError::Failure(
+                        "started service has no owner release guard".into(),
+                    )),
+                }
+            };
+            let release_error = release.err().map(|error| error.to_string());
+            let retryable = release_error.is_some();
+            if !retryable {
+                self.core.owner_released.store(true, Ordering::Release);
+            }
+            let outcome = if let Some(fault) = self.core.fault.lock().clone() {
+                ShutdownOutcome::StoreUnavailable(fault)
+            } else if let Some(error) = release_error {
+                ShutdownOutcome::StoreUnavailable(error)
+            } else {
+                #[cfg(feature = "event-bus")]
+                {
+                    if let Some(error) = self.core.notification_close_error.lock().clone() {
+                        ShutdownOutcome::NotificationClose(error)
+                    } else {
+                        ShutdownOutcome::Complete
+                    }
+                }
+                #[cfg(not(feature = "event-bus"))]
+                {
+                    ShutdownOutcome::Complete
+                }
+            };
+            {
+                let mut progress = self.core.shutdown_progress.lock();
+                progress.results.push(outcome);
+                progress.retryable_release = retryable;
+                progress.retry_requested = false;
+            }
+            self.core.shutdown_completed.notify_waiters();
+            if !retryable {
+                return;
+            }
+            loop {
+                let notified = self.core.shutdown_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.core.public_gone.load(Ordering::Acquire) {
+                    let armed_guard = self.core.owner_guard.lock().await.take();
+                    drop(armed_guard);
+                    return;
+                }
+                if self.core.shutdown_progress.lock().retry_requested {
+                    break;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    #[cfg(feature = "event-bus")]
+    /// Wakes the optional durable event publisher after a store write.
+    fn notify_notifications(&self) {
+        if let Some(publisher) = &self.core.publisher {
+            publisher.notify();
+        }
+    }
+
+    /// Converts a store write result and wakes the optional publisher.
+    fn store_write_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
+        let value = self.store_result(result)?;
+        #[cfg(feature = "event-bus")]
+        self.notify_notifications();
+        Ok(value)
+    }
+
+    /// Records the first scheduler/store fault and wakes every shutdown stage.
     fn latch_fault(&self, error: impl std::fmt::Display) {
         let mut fault = self.core.fault.lock();
         if fault.is_none() {
             *fault = Some(error.to_string());
         }
-        self.core.scheduler_changed.notify_waiters();
+        drop(fault);
+        self.core.request_shutdown();
         self.core.in_flight_changed.notify_waiters();
     }
 
+    /// Returns the first latched store or scheduler fault, if any.
     fn check_fault(&self) -> Result<(), TaskServiceError> {
         self.core
             .fault
@@ -477,6 +669,7 @@ impl TypedTaskExecutionService {
             .map_or(Ok(()), |fault| Err(TaskServiceError::StoreUnavailable(fault)))
     }
 
+    /// Latches operational store failures while preserving conflict errors.
     fn store_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
         result.map_err(|error| {
             if !matches!(
@@ -545,7 +738,8 @@ impl TypedTaskExecutionService {
     }
 
     async fn scheduler_loop(&self) {
-        loop {
+        let mut fairness = ResourceFairness::default();
+        'scheduler: loop {
             if self.core.shutting_down.load(Ordering::Acquire) || self.core.fault.lock().is_some() {
                 return;
             }
@@ -555,6 +749,8 @@ impl TypedTaskExecutionService {
             if self.core.in_flight.load(Ordering::Acquire) < self.core.max_running_tasks {
                 let now = now_ms();
                 let mut after = None;
+                let mut saw_anchor = fairness.anchor.is_none();
+                let mut completed_scan = false;
                 loop {
                     if self.core.shutting_down.load(Ordering::Acquire)
                         || self.core.fault.lock().is_some()
@@ -584,6 +780,9 @@ impl TypedTaskExecutionService {
                         {
                             break;
                         }
+                        if fairness.anchor == Some((summary.id, summary.accepted_at_ms)) {
+                            saw_anchor = true;
+                        }
                         let Some(descriptor) = self.core.handlers.descriptor(&summary.kind_id) else {
                             self.mark_blocked(summary, "handler is not registered").await;
                             continue;
@@ -611,7 +810,13 @@ impl TypedTaskExecutionService {
                             .try_prepare_typed(summary.id, summary.resource_limit.clone())
                         {
                             Ok(reservation) => reservation,
-                            Err(EngineError::TemporarilyUnavailable) => continue,
+                            Err(EngineError::TemporarilyUnavailable) => {
+                                if fairness.anchor.is_none() {
+                                    fairness.anchor = Some((summary.id, summary.accepted_at_ms));
+                                    saw_anchor = true;
+                                }
+                                continue;
+                            }
                             Err(EngineError::Unsatisfiable) => {
                                 self.mark_blocked(summary, "requested resources exceed configured capacity")
                                     .await;
@@ -622,6 +827,13 @@ impl TypedTaskExecutionService {
                                 continue;
                             }
                         };
+                        if let Some((anchor_id, anchor_accepted_at_ms)) = fairness.anchor
+                            && fairness.bypasses >= self.core.max_resource_bypasses
+                            && (summary.accepted_at_ms, summary.id) > (anchor_accepted_at_ms, anchor_id)
+                        {
+                            drop(reservation);
+                            continue;
+                        }
                         let admission = self.core.admission.read().await;
                         if self.core.shutting_down.load(Ordering::Acquire) {
                             drop(reservation);
@@ -651,6 +863,15 @@ impl TypedTaskExecutionService {
                             }
                         };
                         drop(admission);
+                        if let Some((anchor_id, anchor_accepted_at_ms)) = fairness.anchor {
+                            let key = (summary.accepted_at_ms, summary.id);
+                            let anchor_key = (anchor_accepted_at_ms, anchor_id);
+                            if key == anchor_key {
+                                fairness = ResourceFairness::default();
+                            } else if key > anchor_key {
+                                fairness.bypasses += 1;
+                            }
+                        }
                         #[cfg(feature = "event-bus")]
                         self.notify_notifications();
                         self.core.in_flight.fetch_add(1, Ordering::AcqRel);
@@ -671,10 +892,20 @@ impl TypedTaskExecutionService {
                             }
                         });
                     }
-                    after = page.next;
-                    if after.is_none() {
+                    if self.core.shutting_down.load(Ordering::Acquire)
+                        || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
+                    {
                         break;
                     }
+                    after = page.next;
+                    if after.is_none() {
+                        completed_scan = true;
+                        break;
+                    }
+                }
+                if completed_scan && !saw_anchor && fairness.anchor.is_some() {
+                    fairness = ResourceFairness::default();
+                    continue 'scheduler;
                 }
             }
             let retry_at = match self.core.store.next_retry_deadline(now_ms()).await {

@@ -143,12 +143,37 @@ struct ParallelismHandler {
     release: Arc<tokio::sync::Semaphore>,
 }
 
+struct GatedHandler {
+    started: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+impl TaskHandler<u32> for GatedHandler {
+    fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        let started = Arc::clone(&self.started);
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            started.add_permits(1);
+            release
+                .acquire()
+                .await
+                .expect("handler release gate remains open")
+                .forget();
+            Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+                summary: Vec::new(),
+            }))
+        })
+    }
+}
+
 struct FailingListStore {
     inner: Arc<MemoryTaskStore>,
     fail_next_list: std::sync::atomic::AtomicBool,
     fail_next_get: std::sync::atomic::AtomicBool,
     fail_next_start: std::sync::atomic::AtomicBool,
     fail_next_transition: std::sync::atomic::AtomicBool,
+    fail_next_release: std::sync::atomic::AtomicBool,
+    panic_next_release: std::sync::atomic::AtomicBool,
 }
 
 fn failing_store() -> Arc<FailingListStore> {
@@ -158,6 +183,8 @@ fn failing_store() -> Arc<FailingListStore> {
         fail_next_get: std::sync::atomic::AtomicBool::new(false),
         fail_next_start: std::sync::atomic::AtomicBool::new(false),
         fail_next_transition: std::sync::atomic::AtomicBool::new(false),
+        fail_next_release: std::sync::atomic::AtomicBool::new(false),
+        panic_next_release: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -272,8 +299,219 @@ impl TaskStore for FailingListStore {
         &'a self,
         epoch: qubit_task::model::OwnerEpoch,
     ) -> TaskFuture<'a, Result<(), qubit_task::store::StoreError>> {
+        if self.panic_next_release.swap(false, Ordering::AcqRel) {
+            panic!("injected release panic");
+        }
+        if self.fail_next_release.swap(false, Ordering::AcqRel) {
+            return Box::pin(async {
+                Err(qubit_task::store::StoreError::Failure(
+                    "injected release failure".into(),
+                ))
+            });
+        }
         self.inner.release_owner(epoch)
     }
+}
+
+struct BuildGateStore {
+    inner: Arc<dyn TaskStore>,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Semaphore,
+    first_list: std::sync::atomic::AtomicBool,
+}
+
+impl BuildGateStore {
+    fn new(inner: Arc<dyn TaskStore>) -> Self {
+        Self {
+            inner,
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Semaphore::new(0),
+            first_list: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+}
+
+impl TaskStore for BuildGateStore {
+    fn capabilities(&self) -> qubit_task::model::StoreCapabilities {
+        self.inner.capabilities()
+    }
+    fn accept_encoded<'a>(
+        &'a self,
+        id: TaskId,
+        request: StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<qubit_task::model::AcceptOutcome, qubit_task::store::StoreError>> {
+        self.inner.accept_encoded(id, request)
+    }
+    fn get_encoded_task<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>> {
+        self.inner.get_encoded_task(id)
+    }
+    fn start_encoded<'a>(
+        &'a self,
+        command: qubit_task::model::StartCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        self.inner.start_encoded(command)
+    }
+    fn transition_encoded<'a>(
+        &'a self,
+        command: qubit_task::model::TransitionCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        self.inner.transition_encoded(command)
+    }
+    fn update_progress<'a>(
+        &'a self,
+        command: qubit_task::model::ProgressCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        self.inner.update_progress(command)
+    }
+    fn list_encoded<'a>(
+        &'a self,
+        query: TaskQuery,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
+        Box::pin(async move {
+            if self.first_list.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                let permit = self
+                    .resume
+                    .acquire()
+                    .await
+                    .map_err(|error| qubit_task::store::StoreError::Failure(error.to_string()))?;
+                permit.forget();
+            }
+            self.inner.list_encoded(query).await
+        })
+    }
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<qubit_task::model::TaskCursor>,
+        limit: std::num::NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
+        self.inner.list_ready_queued(after, limit, now_ms)
+    }
+    fn next_retry_deadline<'a>(
+        &'a self,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<Option<u64>, qubit_task::store::StoreError>> {
+        self.inner.next_retry_deadline(now_ms)
+    }
+    fn prune_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: std::num::NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, qubit_task::store::StoreError>> {
+        self.inner.prune_terminal_before(finished_before_ms, max_rows)
+    }
+    fn acquire_owner<'a>(
+        &'a self,
+    ) -> TaskFuture<'a, Result<qubit_task::model::OwnerEpoch, qubit_task::store::StoreError>> {
+        self.inner.acquire_owner()
+    }
+    fn release_owner<'a>(
+        &'a self,
+        epoch: qubit_task::model::OwnerEpoch,
+    ) -> TaskFuture<'a, Result<(), qubit_task::store::StoreError>> {
+        self.inner.release_owner(epoch)
+    }
+}
+
+#[tokio::test]
+async fn build_cancellation_releases_memory_owner() {
+    let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(32));
+    let gate = Arc::new(BuildGateStore::new(Arc::clone(&inner)));
+    let entered = gate.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let first_store: Arc<dyn TaskStore> = gate.clone();
+    let build = tokio::spawn(async move {
+        TaskExecutionServiceBuilder::new(first_store, registry(), Arc::new(Ids(AtomicU64::new(1))))
+            .build()
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered)
+        .await
+        .expect("first build enters recovery");
+    build.abort();
+    let _ = build.await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match TaskExecutionServiceBuilder::new(Arc::clone(&inner), registry(), Arc::new(Ids(AtomicU64::new(2))))
+                .build()
+                .await
+            {
+                Ok(service) => {
+                    service.shutdown().await.expect("second service shuts down");
+                    break;
+                }
+                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                    tokio::task::yield_now().await
+                }
+                Err(error) => panic!("unexpected second build error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("cancelled build eventually releases memory owner");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn build_cancellation_releases_sqlite_file_lock() {
+    let path = std::env::temp_dir().join(format!(
+        "qubit-task-build-cancel-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos()
+    ));
+    let inner: Arc<dyn TaskStore> =
+        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).expect("first SQLite store opens"));
+    let gate = Arc::new(BuildGateStore::new(Arc::clone(&inner)));
+    let build = {
+        let entered = gate.entered.notified();
+        tokio::pin!(entered);
+        entered.as_mut().enable();
+        let first_store: Arc<dyn TaskStore> = gate.clone();
+        let build = tokio::spawn(async move {
+            TaskExecutionServiceBuilder::new(first_store, registry(), Arc::new(Ids(AtomicU64::new(1))))
+                .build()
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered)
+            .await
+            .expect("first SQLite build enters recovery");
+        build
+    };
+    build.abort();
+    let _ = build.await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match qubit_task::store::SqliteTaskStore::open_next(&path) {
+                Ok(second) => {
+                    let second: Arc<dyn TaskStore> = Arc::new(second);
+                    let service =
+                        TaskExecutionServiceBuilder::new(second, registry(), Arc::new(Ids(AtomicU64::new(2))))
+                            .build()
+                            .await
+                            .expect("second SQLite service builds");
+                    service.shutdown().await.expect("second SQLite service shuts down");
+                    break;
+                }
+                Err(qubit_task::store::StoreError::OwnerConflict) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected second SQLite open error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("cancelled build eventually releases SQLite file lock");
+    drop(gate);
+    drop(inner);
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".owner.lock");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
 }
 
 impl TaskHandler<u32> for ParallelismHandler {
@@ -995,6 +1233,275 @@ async fn shutdown_rejects_new_work_and_waits_for_running_attempts() {
         Err(qubit_task::service::TaskServiceError::ShuttingDown)
     ));
     assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
+}
+
+async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Arc<dyn TaskStore>) {
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(801))));
+    builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        )
+        .expect("gated handler registers");
+    let service = builder.build().await.expect("first service acquires owner");
+    service.submit(request()).await.expect("task is accepted");
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.acquire())
+        .await
+        .expect("handler starts")
+        .expect("start gate remains open")
+        .forget();
+    drop(service);
+
+    let build_next =
+        || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(802))));
+    assert!(matches!(
+        build_next().build().await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::OwnerConflict
+        ))
+    ));
+    release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match build_next().build().await {
+                Ok(next) => {
+                    next.shutdown().await.expect("second service shuts down");
+                    break;
+                }
+                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("unexpected second build error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("dropping the last service handle eventually releases owner");
+}
+
+#[tokio::test]
+async fn dropping_last_service_handle_drains_and_releases_owner_memory() {
+    let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
+    assert_dropping_last_service_handle_drains_and_releases_owner(store).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn dropping_last_service_handle_drains_and_releases_owner_sqlite() {
+    let path = std::env::temp_dir().join(format!(
+        "qubit-task-drop-owner-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos(),
+    ));
+    let store: Arc<dyn TaskStore> =
+        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).expect("SQLite store opens"));
+    assert_dropping_last_service_handle_drains_and_releases_owner(Arc::clone(&store)).await;
+    drop(store);
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".owner.lock");
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
+}
+
+#[tokio::test]
+async fn dropping_one_of_multiple_service_handles_keeps_owner() {
+    let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
+    let build = || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(811))));
+    let first = build().build().await.expect("first service acquires owner");
+    let remaining = first.clone();
+    drop(first);
+    remaining
+        .submit(request())
+        .await
+        .expect("remaining handle still accepts work");
+    assert!(matches!(
+        build().build().await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::OwnerConflict
+        ))
+    ));
+    remaining.shutdown().await.expect("remaining handle shuts down");
+    let next = build().build().await.expect("next owner acquires store");
+    next.shutdown().await.expect("next owner shuts down");
+}
+
+#[tokio::test]
+async fn concurrent_shutdown_calls_share_result() {
+    let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(821))))
+        .build()
+        .await
+        .expect("service builds");
+    let (first, second) = tokio::join!(service.shutdown(), service.shutdown());
+    assert!(first.is_ok(), "first shutdown result: {first:?}");
+    assert!(second.is_ok(), "second shutdown result: {second:?}");
+}
+
+#[tokio::test]
+async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
+    let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(831))));
+    builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        )
+        .expect("gated handler registers");
+    let service = builder.build().await.expect("first service acquires owner");
+    service.submit(request()).await.expect("task is accepted");
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.acquire())
+        .await
+        .expect("handler starts")
+        .expect("start gate remains open")
+        .forget();
+
+    let waiter_service = service.clone();
+    let waiter = tokio::spawn(async move { waiter_service.shutdown().await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                service.submit(request()).await,
+                Err(qubit_task::service::TaskServiceError::ShuttingDown)
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown request closes admission");
+    waiter.abort();
+    let _ = waiter.await;
+    release.add_permits(1);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(832))))
+                .build()
+                .await
+            {
+                Ok(next) => {
+                    next.shutdown().await.expect("next service shuts down");
+                    break;
+                }
+                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("unexpected next build error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("supervisor releases owner after waiter is aborted");
+    service
+        .shutdown()
+        .await
+        .expect("aborted waiter does not change terminal result");
+}
+
+#[tokio::test]
+async fn concurrent_shutdown_calls_share_store_fault() {
+    let store = failing_store();
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(841))))
+        .build()
+        .await
+        .expect("service builds");
+    store.fail_next_list.store(true, Ordering::Release);
+    service.submit(request()).await.expect("task is accepted");
+    wait_for_latched_store_fault(&service).await;
+    let (first, second) = tokio::join!(service.shutdown(), service.shutdown());
+    let (
+        Err(qubit_task::service::TaskServiceError::StoreUnavailable(first)),
+        Err(qubit_task::service::TaskServiceError::StoreUnavailable(second)),
+    ) = (first, second)
+    else {
+        panic!("both shutdown callers must observe the same store fault class");
+    };
+    assert_eq!(first, second);
+    assert!(first.contains("injected list failure"));
+}
+
+#[tokio::test]
+async fn panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worker() {
+    let store = failing_store();
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(851))))
+        .build()
+        .await
+        .expect("first service builds");
+    store.panic_next_release.store(true, Ordering::Release);
+
+    let shutdown = tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown())
+        .await
+        .expect("shutdown waiter is woken after release panic");
+    assert!(matches!(
+        shutdown,
+        Err(qubit_task::service::TaskServiceError::StoreUnavailable(message)) if message.contains("shutdown supervisor panicked")
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(852))))
+                .build()
+                .await
+            {
+                Ok(next) => {
+                    next.shutdown().await.expect("next service shuts down");
+                    break;
+                }
+                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("unexpected next build error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("cleanup worker retries armed owner after supervisor panic");
+}
+
+#[tokio::test]
+async fn subsequent_shutdown_retries_transient_owner_release_failure() {
+    let store = failing_store();
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(861))))
+        .build()
+        .await
+        .expect("first service builds");
+    store.fail_next_release.store(true, Ordering::Release);
+
+    let (first, concurrent) = tokio::join!(service.shutdown(), service.shutdown());
+    let (
+        Err(qubit_task::service::TaskServiceError::StoreUnavailable(first)),
+        Err(qubit_task::service::TaskServiceError::StoreUnavailable(concurrent)),
+    ) = (first, concurrent)
+    else {
+        panic!("both waiters in the first attempt must see its release failure");
+    };
+    assert_eq!(first, concurrent);
+    assert!(first.contains("injected release failure"));
+    service
+        .shutdown()
+        .await
+        .expect("later explicit shutdown retries owner release");
+    let next = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(862))))
+        .build()
+        .await
+        .expect("next service acquires the released owner");
+    next.shutdown().await.expect("next service shuts down");
 }
 
 #[tokio::test]

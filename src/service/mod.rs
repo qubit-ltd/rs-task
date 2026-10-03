@@ -10,6 +10,7 @@
 mod cancel_outcome;
 #[cfg(feature = "event-bus")]
 mod notification_stats;
+mod owner_release_guard;
 mod retry_policy;
 mod retry_policy_error;
 #[cfg(feature = "event-bus")]
