@@ -1,0 +1,366 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+//! Releases store ownership when construction or shutdown is cancelled.
+
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::mpsc;
+
+use futures::FutureExt;
+
+use crate::model::OwnerEpoch;
+use crate::store::StoreError;
+use crate::store::TaskStore;
+
+/// Holds an acquired owner epoch until release has finished.
+pub(super) struct OwnerReleaseGuard {
+    owner: Option<(Arc<dyn TaskStore>, OwnerEpoch)>,
+    cleanup: OwnerReleaseWorker,
+}
+
+struct ReleaseJob {
+    store: Arc<dyn TaskStore>,
+    epoch: OwnerEpoch,
+}
+
+/// A process-wide, pre-started cleanup thread for guards dropped while armed.
+#[derive(Clone)]
+pub(super) struct OwnerReleaseWorker {
+    sender: tokio::sync::mpsc::UnboundedSender<ReleaseJob>,
+}
+
+impl OwnerReleaseWorker {
+    /// Starts the cleanup runtime before owner acquisition and returns its
+    /// sender. A failed thread or runtime startup leaves the caller free to
+    /// fail the build.
+    pub(super) fn shared() -> Result<Self, String> {
+        static WORKER: OnceLock<Mutex<Option<OwnerReleaseWorker>>> = OnceLock::new();
+        let slot = WORKER.get_or_init(|| Mutex::new(None));
+        let mut slot = slot
+            .lock()
+            .map_err(|error| format!("owner cleanup worker lock poisoned: {error}"))?;
+        if let Some(worker) = slot.as_ref() {
+            return Ok(worker.clone());
+        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(0);
+        std::thread::Builder::new()
+            .name("task-owner-release".into())
+            .spawn(move || run_cleanup_worker(receiver, ready_sender))
+            .map_err(|error| format!("failed to start owner cleanup worker: {error}"))?;
+        ready_receiver
+            .recv()
+            .map_err(|error| format!("owner cleanup worker stopped before ready: {error}"))??;
+        let worker = Self { sender };
+        *slot = Some(worker.clone());
+        Ok(worker)
+    }
+}
+
+/// Creates the cleanup runtime, acknowledges readiness, then processes jobs.
+fn run_cleanup_worker(
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<ReleaseJob>,
+    ready: mpsc::SyncSender<Result<(), String>>,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = ready.send(Err(format!("failed to create owner cleanup runtime: {error}")));
+            return;
+        }
+    };
+    if ready.send(Ok(())).is_err() {
+        return;
+    }
+    runtime.block_on(async move {
+        while let Some(ReleaseJob { store, epoch }) = receiver.recv().await {
+            tokio::spawn(async move {
+                let release = async { store.release_owner(epoch).await };
+                match AssertUnwindSafe(release).catch_unwind().await {
+                    Ok(result) => log_release_error(epoch, result),
+                    Err(_) => eprintln!("owner cleanup worker panicked while releasing epoch {epoch:?}"),
+                }
+            });
+        }
+    });
+}
+
+impl OwnerReleaseGuard {
+    /// Arms the guard for `epoch` acquired from `store`.
+    pub(super) fn new(store: Arc<dyn TaskStore>, epoch: OwnerEpoch, cleanup: OwnerReleaseWorker) -> Self {
+        Self {
+            owner: Some((store, epoch)),
+            cleanup,
+        }
+    }
+
+    /// Releases ownership and disarms the guard after the store future returns.
+    ///
+    /// If this future is cancelled while waiting, dropping the still-armed
+    /// guard queues the same store release on the pre-started cleanup thread.
+    /// Store errors are returned to callers; a failed attempt leaves the
+    /// guard armed for retry.
+    pub(super) async fn release(&mut self) -> Result<(), StoreError> {
+        let Some((store, epoch)) = self.owner.as_ref() else {
+            return Ok(());
+        };
+        let store = Arc::clone(store);
+        let epoch = *epoch;
+        let result = store.release_owner(epoch).await;
+        if result.is_ok() {
+            self.owner = None;
+        }
+        result
+    }
+}
+
+impl Drop for OwnerReleaseGuard {
+    fn drop(&mut self) {
+        let Some((store, epoch)) = self.owner.take() else {
+            return;
+        };
+        if let Err(error) = self.cleanup.sender.send(ReleaseJob { store, epoch }) {
+            eprintln!("failed to queue owner cleanup for epoch {epoch:?}; ownership may remain held: {error}");
+        }
+    }
+}
+
+/// Reports a store release failure with its owner generation.
+fn log_release_error(epoch: OwnerEpoch, result: Result<(), StoreError>) {
+    if let Err(error) = result {
+        eprintln!("failed to release task store owner epoch {epoch:?}: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+    use tokio::sync::Semaphore;
+
+    use super::OwnerReleaseGuard;
+    use super::OwnerReleaseWorker;
+    use crate::model::OwnerEpoch;
+    use crate::model::StoreCapabilities;
+    use crate::model::next::AcceptOutcome;
+    use crate::model::next::ProgressCommand;
+    use crate::model::next::StartCommand;
+    use crate::model::next::StoredTask;
+    use crate::model::next::StoredTaskRequest;
+    use crate::model::next::TaskCursor;
+    use crate::model::next::TaskId;
+    use crate::model::next::TaskPage;
+    use crate::model::next::TaskQuery;
+    use crate::model::next::TaskSummary;
+    use crate::model::next::TransitionCommand;
+    use crate::store::MemoryTaskStore;
+    use crate::store::StoreError;
+    use crate::store::TaskFuture;
+    use crate::store::TaskStore;
+
+    struct GatedReleaseStore {
+        inner: MemoryTaskStore,
+        entered: Notify,
+        resume: Semaphore,
+        first_release: AtomicBool,
+        fail_next_release: AtomicBool,
+    }
+
+    impl GatedReleaseStore {
+        /// Creates a real memory-backed owner with one blocked release attempt.
+        fn new() -> Self {
+            Self {
+                inner: MemoryTaskStore::new(32),
+                entered: Notify::new(),
+                resume: Semaphore::new(0),
+                first_release: AtomicBool::new(true),
+                fail_next_release: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl TaskStore for GatedReleaseStore {
+        fn capabilities(&self) -> StoreCapabilities {
+            self.inner.capabilities()
+        }
+        fn accept_encoded<'a>(
+            &'a self,
+            id: TaskId,
+            request: StoredTaskRequest,
+        ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
+            self.inner.accept_encoded(id, request)
+        }
+        fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+            self.inner.get_encoded_task(id)
+        }
+        fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+            self.inner.start_encoded(command)
+        }
+        fn transition_encoded<'a>(
+            &'a self,
+            command: TransitionCommand,
+        ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+            self.inner.transition_encoded(command)
+        }
+        fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+            self.inner.update_progress(command)
+        }
+        fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+            self.inner.list_encoded(query)
+        }
+        fn list_ready_queued<'a>(
+            &'a self,
+            after: Option<TaskCursor>,
+            limit: NonZeroUsize,
+            now_ms: u64,
+        ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+            self.inner.list_ready_queued(after, limit, now_ms)
+        }
+        fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+            self.inner.next_retry_deadline(now_ms)
+        }
+        fn prune_terminal_before<'a>(
+            &'a self,
+            finished_before_ms: u64,
+            max_rows: NonZeroUsize,
+        ) -> TaskFuture<'a, Result<usize, StoreError>> {
+            self.inner.prune_terminal_before(finished_before_ms, max_rows)
+        }
+        fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
+            self.inner.acquire_owner()
+        }
+        fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+            Box::pin(async move {
+                if self.first_release.swap(false, Ordering::AcqRel) {
+                    self.entered.notify_one();
+                    let permit = self
+                        .resume
+                        .acquire()
+                        .await
+                        .map_err(|error| StoreError::Failure(error.to_string()))?;
+                    permit.forget();
+                }
+                if self.fail_next_release.swap(false, Ordering::AcqRel) {
+                    return Err(StoreError::Failure("transient release failure".into()));
+                }
+                self.inner.release_owner(epoch).await
+            })
+        }
+    }
+
+    /// Cancelling `release()` leaves the guard armed for Drop cleanup.
+    #[tokio::test]
+    async fn test_cancelled_release_future_still_releases_owner() {
+        let store = Arc::new(GatedReleaseStore::new());
+        let epoch = store.acquire_owner().await.expect("first owner acquired");
+        let dyn_store: Arc<dyn TaskStore> = store.clone();
+        let mut guard = OwnerReleaseGuard::new(
+            dyn_store,
+            epoch,
+            OwnerReleaseWorker::shared().expect("cleanup worker starts"),
+        );
+        let entered = store.entered.notified();
+        tokio::pin!(entered);
+        entered.as_mut().enable();
+        {
+            let release = guard.release();
+            tokio::pin!(release);
+            tokio::select! {
+                result = &mut release => panic!("release unexpectedly completed: {result:?}"),
+                () = &mut entered => {},
+            }
+        }
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match store.acquire_owner().await {
+                    Ok(next_epoch) => {
+                        store.release_owner(next_epoch).await.expect("second owner released");
+                        break;
+                    }
+                    Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
+                    Err(error) => panic!("unexpected owner acquisition error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("Drop eventually releases owner after release future cancellation");
+    }
+
+    /// A failed release leaves the same epoch available for a later retry.
+    #[tokio::test]
+    async fn test_failed_release_stays_armed_for_retry() {
+        let store = Arc::new(GatedReleaseStore::new());
+        store.first_release.store(false, Ordering::Release);
+        store.fail_next_release.store(true, Ordering::Release);
+        let epoch = store.acquire_owner().await.expect("first owner acquired");
+        let dyn_store: Arc<dyn TaskStore> = store.clone();
+        let mut guard = OwnerReleaseGuard::new(
+            dyn_store,
+            epoch,
+            OwnerReleaseWorker::shared().expect("cleanup worker starts"),
+        );
+
+        assert!(matches!(
+            guard.release().await,
+            Err(StoreError::Failure(message)) if message == "transient release failure"
+        ));
+        assert!(matches!(store.acquire_owner().await, Err(StoreError::OwnerConflict)));
+        guard.release().await.expect("retry releases the same owner epoch");
+        let next_epoch = store.acquire_owner().await.expect("owner can be reacquired");
+        store.release_owner(next_epoch).await.expect("second owner released");
+    }
+
+    /// A blocked cleanup must not prevent an unrelated owner from draining.
+    #[tokio::test]
+    async fn test_pending_release_does_not_block_other_cleanup() {
+        let worker = OwnerReleaseWorker::shared().expect("cleanup worker starts");
+        let blocked = Arc::new(GatedReleaseStore::new());
+        let blocked_epoch = blocked.acquire_owner().await.expect("blocked owner acquired");
+        let blocked_store: Arc<dyn TaskStore> = blocked.clone();
+        let blocked_guard = OwnerReleaseGuard::new(blocked_store, blocked_epoch, worker.clone());
+        let entered = blocked.entered.notified();
+        tokio::pin!(entered);
+        entered.as_mut().enable();
+        drop(blocked_guard);
+        tokio::time::timeout(Duration::from_secs(2), entered)
+            .await
+            .expect("first release enters its gate");
+
+        let other = Arc::new(MemoryTaskStore::new(16));
+        let other_epoch = other.acquire_owner().await.expect("other owner acquired");
+        let other_store: Arc<dyn TaskStore> = other.clone();
+        drop(OwnerReleaseGuard::new(other_store, other_epoch, worker));
+        let other_released = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match other.acquire_owner().await {
+                    Ok(epoch) => {
+                        other.release_owner(epoch).await.expect("other owner released");
+                        break;
+                    }
+                    Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
+                    Err(error) => panic!("unexpected owner acquisition error: {error}"),
+                }
+            }
+        })
+        .await
+        .is_ok();
+        blocked.resume.add_permits(1);
+        assert!(
+            other_released,
+            "pending cleanup held the worker behind an unrelated owner"
+        );
+    }
+}
