@@ -32,6 +32,7 @@ pub struct TypedTaskExecutionServiceBuilder {
     handlers: TypedTaskHandlerRegistry,
     max_running_tasks: usize,
     scan_page_size: usize,
+    max_resource_bypasses: usize,
     max_attempts: u32,
     retry_policy: RetryPolicy,
     #[cfg(feature = "event-bus")]
@@ -62,6 +63,7 @@ impl TypedTaskExecutionServiceBuilder {
             handlers: TypedTaskHandlerRegistry::new(),
             max_running_tasks: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
             scan_page_size: 128,
+            max_resource_bypasses: 32,
             max_attempts: 3,
             retry_policy: RetryPolicy::default(),
             #[cfg(feature = "event-bus")]
@@ -86,6 +88,14 @@ impl TypedTaskExecutionServiceBuilder {
     /// Sets the scheduler's bounded queued-summary scan page size (1–256).
     pub fn scan_page_size(mut self, limit: std::num::NonZeroUsize) -> Self {
         self.scan_page_size = limit.get().min(256);
+        self
+    }
+
+    /// Limits successful newer starts while an older ready task awaits
+    /// resources. The default is 32. Once reached, the scheduler gives the
+    /// older task priority until it starts or leaves the ready queue.
+    pub fn max_resource_bypasses(mut self, limit: std::num::NonZeroUsize) -> Self {
+        self.max_resource_bypasses = limit.get();
         self
     }
 
@@ -136,6 +146,7 @@ impl TypedTaskExecutionServiceBuilder {
             TypedServiceOptions {
                 max_running_tasks: self.max_running_tasks,
                 scan_page_size: self.scan_page_size,
+                max_resource_bypasses: self.max_resource_bypasses,
                 max_attempts: self.max_attempts,
                 retry_policy: self.retry_policy,
                 #[cfg(feature = "event-bus")]
