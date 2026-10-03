@@ -10,8 +10,6 @@ use std::sync::Arc;
 use qubit_codec::ValueBytesCodecRegistry;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::AsyncEventBus;
-#[cfg(feature = "event-bus")]
-use qubit_event_bus::model::Topic;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
@@ -19,14 +17,10 @@ use qubit_id::IdGenerator;
 use super::typed_task_execution_service::TypedServiceOptions;
 use super::typed_task_execution_service::TypedTaskExecutionService;
 use crate::engine::LocalTaskExecutionEngine;
-#[cfg(feature = "event-bus")]
-use crate::event::TaskEvent;
 use crate::handler::typed::TypedTaskHandlerRegistry;
 use crate::model::ResourceCapacity;
 use crate::service::RetryPolicy;
 use crate::service::TaskServiceError;
-#[cfg(feature = "event-bus")]
-use crate::service::task_event_dispatcher::TaskEventConfig;
 use crate::store::TaskStore;
 
 /// Builder for the typed task service. ID generation is always explicit.
@@ -41,7 +35,9 @@ pub struct TypedTaskExecutionServiceBuilder {
     max_attempts: u32,
     retry_policy: RetryPolicy,
     #[cfg(feature = "event-bus")]
-    event_notifications: Option<TaskEventConfig>,
+    event_bus: Option<Arc<AsyncEventBus>>,
+    #[cfg(feature = "event-bus")]
+    notification_shutdown_timeout: std::time::Duration,
 }
 
 impl TypedTaskExecutionServiceBuilder {
@@ -69,7 +65,9 @@ impl TypedTaskExecutionServiceBuilder {
             max_attempts: 3,
             retry_policy: RetryPolicy::default(),
             #[cfg(feature = "event-bus")]
-            event_notifications: None,
+            event_bus: None,
+            #[cfg(feature = "event-bus")]
+            notification_shutdown_timeout: std::time::Duration::from_secs(5),
         }
     }
 
@@ -103,22 +101,22 @@ impl TypedTaskExecutionServiceBuilder {
         self
     }
 
-    /// Enables best-effort lifecycle publication through the configured event
-    /// bus.
+    /// Enables durable lifecycle publication to the `task.lifecycle` topic.
+    /// The store must support a persistent outbox; register a `TaskEvent` codec
+    /// in the supplied bus for encoded providers. Failed publications remain
+    /// durable.
     #[cfg(feature = "event-bus")]
-    pub fn event_notifications(
-        mut self,
-        bus: Arc<AsyncEventBus>,
-        topic: Topic<TaskEvent>,
-        queue_capacity: std::num::NonZeroUsize,
-        shutdown_flush_timeout: std::time::Duration,
-    ) -> Self {
-        self.event_notifications = Some(TaskEventConfig {
-            bus,
-            topic,
-            capacity: queue_capacity,
-            flush_timeout: shutdown_flush_timeout,
-        });
+    pub fn event_bus(mut self, bus: Arc<AsyncEventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
+    /// Sets the maximum notification drain duration during shutdown (default 5
+    /// seconds). Expiry leaves pending events durable and reports
+    /// `NotificationClose`.
+    #[cfg(feature = "event-bus")]
+    pub fn notification_shutdown_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.notification_shutdown_timeout = timeout;
         self
     }
 
@@ -141,7 +139,9 @@ impl TypedTaskExecutionServiceBuilder {
                 max_attempts: self.max_attempts,
                 retry_policy: self.retry_policy,
                 #[cfg(feature = "event-bus")]
-                event_notifications: self.event_notifications,
+                event_bus: self.event_bus,
+                #[cfg(feature = "event-bus")]
+                notification_shutdown_timeout: self.notification_shutdown_timeout,
             },
         )
         .await

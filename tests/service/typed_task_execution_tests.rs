@@ -14,12 +14,6 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
-#[cfg(feature = "event-bus")]
-use qubit_event_bus::AsyncEventBus;
-#[cfg(feature = "event-bus")]
-use qubit_event_bus::local::LocalEventBusConfig;
-#[cfg(feature = "event-bus")]
-use qubit_event_bus::model::Topic;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
@@ -27,8 +21,6 @@ use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
-#[cfg(feature = "event-bus")]
-use qubit_task::event::TaskEvent;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
@@ -388,53 +380,6 @@ async fn typed_submit_decodes_runs_and_persists_terminal_state() {
     assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
     let completed = service.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(completed.output.unwrap().summary, b"typed-result");
-}
-
-#[cfg(feature = "event-bus")]
-#[tokio::test]
-async fn automatic_lifecycle_publish_failure_does_not_change_task_outcome() {
-    let bus = Arc::new(AsyncEventBus::local(LocalEventBusConfig::new()).await.unwrap());
-    let _shutdown_report = bus
-        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
-        .await
-        .unwrap();
-    let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(901))))
-        .capacity(ResourceCapacity {
-            cpu_slots: 1,
-            ..ResourceCapacity::default()
-        })
-        .event_notifications(
-            bus,
-            Topic::<TaskEvent>::new("task.lifecycle").unwrap(),
-            std::num::NonZeroUsize::new(8).unwrap(),
-            std::time::Duration::from_secs(1),
-        );
-    builder
-        .handlers_mut()
-        .register::<u32, _>(
-            descriptor(CancellationMode::Cooperative),
-            Arc::new(Handler {
-                cooperative_cancel: false,
-            }),
-        )
-        .unwrap();
-    let service = builder.build().await.unwrap();
-    let accepted = service.submit(request()).await.unwrap();
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
-    service.shutdown().await.unwrap();
-    assert_eq!(service.notification_stats().queued, 3);
-    assert_eq!(service.notification_stats().failed, 3);
-    assert_eq!(
-        store
-            .get_encoded_task(accepted.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .summary
-            .state,
-        TaskState::Succeeded
-    );
 }
 
 #[tokio::test]

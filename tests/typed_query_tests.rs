@@ -377,7 +377,7 @@ async fn typed_schema_four_migrates_retry_deadline_column_without_losing_rows() 
         "qubit-task-typed-schema-migration-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
-    let sqlite = SqliteTaskStore::open_next(&db_path).expect("schema 5 opens");
+    let sqlite = SqliteTaskStore::open_next(&db_path).expect("schema 6 opens");
     let stored_id = id(801);
     sqlite
         .accept_encoded(stored_id, request("migration", "preserve"))
@@ -387,11 +387,11 @@ async fn typed_schema_four_migrates_retry_deadline_column_without_losing_rows() 
 
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection
-        .execute_batch("DROP INDEX tasks_queued_retry_deadline; ALTER TABLE tasks DROP COLUMN retry_not_before_ms; PRAGMA user_version=4;")
+        .execute_batch("DROP TABLE task_event_outbox; DROP INDEX tasks_queued_retry_deadline; ALTER TABLE tasks DROP COLUMN retry_not_before_ms; PRAGMA user_version=4;")
         .unwrap();
     drop(connection);
 
-    let migrated = SqliteTaskStore::open_next(&db_path).expect("typed schema 4 migrates to 5");
+    let migrated = SqliteTaskStore::open_next(&db_path).expect("typed schema 4 migrates to 6");
     let loaded = migrated.get_encoded_task(stored_id).await.unwrap().unwrap();
     assert_eq!(loaded.summary.id, stored_id);
     assert_eq!(loaded.summary.category.as_deref(), Some("migration"));

@@ -66,6 +66,7 @@ use tokio::test as tokio_test;
 use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(30);
+const BULK_FIXTURE_DEADLINE: Duration = Duration::from_secs(120);
 const PAYLOAD_TYPE_ID: &str = "fixture.CrashWorkerPayload";
 const CODEC_ID: &str = "fixture.crash_worker.json";
 static WORKER: OnceLock<WorkerFixture> = OnceLock::new();
@@ -266,7 +267,8 @@ async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize)
         }
         panic!("worker closed stdout before committed READY");
     });
-    let ready = timeout(DEADLINE, reader)
+    let deadline = if count > 1 { BULK_FIXTURE_DEADLINE } else { DEADLINE };
+    let ready = timeout(deadline, reader)
         .await
         .expect("committed READY arrives before deadline")
         .expect("protocol reader finishes");

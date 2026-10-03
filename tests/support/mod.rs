@@ -9,3 +9,8 @@
 // subset.
 #[allow(dead_code)]
 pub mod store_contract;
+
+#[cfg(feature = "event-bus")]
+#[path = "../fixtures/doc-examples/src/task_event_codec.rs"]
+#[allow(dead_code)]
+pub mod task_event_codec;

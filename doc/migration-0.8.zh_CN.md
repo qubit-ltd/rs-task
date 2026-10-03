@@ -8,7 +8,7 @@
 
 ## 显式配置生命周期通知
 
-`TaskEvent.task_id` 改为 typed `TaskId`，payload 增加 `schema_version = 1`。JSON codec 和消费者需要一起更新。启用 `event-bus` feature 后，通过 `event_notifications(async_bus, topic, queue_capacity, shutdown_flush_timeout)` opt in。服务仅在 store commit 后发布快照；进度不发布。有限本地队列满时丢弃快照，provider 错误增加 `failed`，累计计数可通过 `notification_stats()` 查询。`shutdown()` 在释放 store owner 前尝试 flush；超时后中止发布 worker、将剩余项计为 dropped，并继续完成任务 shutdown。通知没有事务 outbox，可能丢失、重复或乱序；消费者应从任务查询接口对账，并按 `(TaskId, state_version)` 去重。调度允许后续资源匹配任务越过较早的资源阻塞任务，不保证严格 FIFO。
+`TaskEvent.task_id` 改为 typed `TaskId`，payload 增加 `schema_version = 1`。JSON codec 和消费者需要一起更新。启用 `event-bus` feature 后，通过 `TaskExecutionServiceBuilder::event_bus` opt in，并注册应用提供的 `TaskEvent` codec。SQLite schema version 6 会增加持久生命周期 outbox，同时保留已有任务记录；状态迁移和事件快照在同一事务中提交。任务恢复后 publisher 会重放待发送行，只有 provider 确认接纳后才删除对应行。投递语义为至少一次：接纳结果不确定，或删除前崩溃，都可能产生重复；消费者应按 `(TaskId, state_version)` 去重，并从任务查询接口对账。启用发布不会回填此前的状态。`MemoryTaskStore` 不支持持久 outbox。`shutdown()` 会排空至 `notification_shutdown_timeout`；超时会报告错误，剩余行仍保留在 SQLite 供后续重放。调度允许后续资源匹配任务越过较早的资源阻塞任务，不保证严格 FIFO。
 
 ## 将恢复游标从任务 ID 改为位置游标
 

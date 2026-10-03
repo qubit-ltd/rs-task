@@ -28,6 +28,15 @@ pub struct TaskEvent {
 
 impl From<&crate::model::next::TaskSummary> for TaskEvent {
     fn from(summary: &crate::model::next::TaskSummary) -> Self {
+        Self::from_typed_summary(summary)
+    }
+}
+
+impl TaskEvent {
+    /// Captures the identity, revision, state and correlation of a committed
+    /// typed summary.
+    #[must_use]
+    pub fn from_typed_summary(summary: &crate::model::next::TaskSummary) -> Self {
         Self {
             schema_version: 1,
             task_id: summary.id,

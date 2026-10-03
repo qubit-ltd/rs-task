@@ -345,7 +345,7 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
     let schema_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version reads");
-    assert_eq!(schema_version, 5);
+    assert_eq!(schema_version, 6);
     let category_index: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='tasks_category_accepted_id')",

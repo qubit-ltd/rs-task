@@ -153,7 +153,7 @@ fn create_event_bus(url: &str, namespace: &str, register_task_codec: bool) -> Re
         codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec {
             content_type: ContentType::new("application/json")?,
             schema_id: SchemaId::new("task-event-v1")?,
-        }));
+        }))?;
     }
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),

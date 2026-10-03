@@ -24,13 +24,15 @@ fn test_typed_task_guides_link_and_describe_lifecycle_events() {
     );
 
     assert!(
-        english.contains("Typed task lifecycle publication is not currently wired into the typed execution service")
-            && english.contains("consumers should not treat transport events as the authoritative task record"),
-        "English user guide must state that task queries are authoritative until lifecycle publication is wired"
+        english.contains("TaskExecutionServiceBuilder::event_bus")
+            && english.contains("SQLite outbox")
+            && english.contains("at-least-once"),
+        "English user guide must document durable lifecycle publication"
     );
     assert!(
-        chinese.contains("typed execution service 尚未接入 typed 任务生命周期事件发布")
-            && chinese.contains("消费者应以任务查询接口返回的记录为准"),
-        "Chinese user guide must state that task queries are authoritative until lifecycle publication is wired"
+        chinese.contains("TaskExecutionServiceBuilder::event_bus")
+            && chinese.contains("SQLite outbox")
+            && chinese.contains("至少一次"),
+        "Chinese user guide must document durable lifecycle publication"
     );
 }

@@ -13,7 +13,6 @@ use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::AsyncEventBusRegistry;
 use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::facade::EventBusFacadeConfig;
-use qubit_event_bus::model::Topic;
 use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 use qubit_task::event::TaskEvent;
@@ -40,11 +39,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ].into())
         .with_facade_config(facade);
     let bus = Arc::new(AsyncEventBusRegistry::discover()?.create(&config).await?);
-    let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
-
     let mut builder = service_builder()?;
     register_handler(&mut builder)?;
-    builder = builder.event_notifications(bus.clone(), topic, std::num::NonZeroUsize::new(16).unwrap(), std::time::Duration::from_secs(3));
+    builder = builder.event_bus(bus.clone());
     let service = builder.build().await?;
     let accepted = service.submit(request(serde_json::json!({"source": "guide"}), "guide-1")).await?;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {

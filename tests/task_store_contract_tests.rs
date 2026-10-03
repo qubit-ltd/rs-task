@@ -111,7 +111,7 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
                     kind_id: "prune.atomic".into(),
                     category: None,
                     payload: StoredPayload {
-                        type_id: qubit_model_metadata::metadata::ModelIdBuf::parse("test.PruneAtomic").unwrap(),
+                        type_id: qubit_model_id::ModelIdBuf::parse("test.PruneAtomic").unwrap(),
                         schema_version: 1,
                         codec_id: "qubit.bytes.json".into(),
                         bytes: vec![index as u8],

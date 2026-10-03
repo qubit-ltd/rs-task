@@ -30,7 +30,7 @@ use crate::model::legacy::TaskRequestInfo;
 use crate::store::StoreError;
 
 /// Schema version for the numeric-ID typed request format.
-pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 5;
+pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 6;
 
 /// Canonical recovery index SQL; equality makes reopen repairs idempotent.
 #[cfg(test)]
@@ -116,7 +116,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(failure)?;
-    if version != 0 && version != 4 && version != NEXT_SCHEMA_VERSION {
+    if version != 0 && version != 4 && version != 5 && version != NEXT_SCHEMA_VERSION {
         return Err(StoreError::Failure(format!(
             "SQLite task schema version {version} uses the legacy UUID format; explicit task ID mapping is required before opening with the typed task API"
         )));
@@ -138,11 +138,9 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
         transaction
             .execute_batch("ALTER TABLE tasks ADD COLUMN retry_not_before_ms INTEGER;")
             .map_err(failure)?;
-        transaction
-            .pragma_update(None, "user_version", NEXT_SCHEMA_VERSION)
-            .map_err(failure)?;
+        transaction.pragma_update(None, "user_version", 5).map_err(failure)?;
     }
-    if version == NEXT_SCHEMA_VERSION || version == 4 {
+    if version == NEXT_SCHEMA_VERSION || version == 5 || version == 4 {
         if !table_exists {
             return Err(StoreError::Failure(
                 "typed SQLite task schema is missing table `tasks`".into(),
@@ -207,6 +205,21 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
              CREATE INDEX IF NOT EXISTS tasks_terminal_finished_id ON tasks(CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id) WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled');",
         )
         .map_err(failure)?;
+    if version != NEXT_SCHEMA_VERSION {
+        transaction
+            .execute_batch(
+                "CREATE TABLE task_event_outbox (
+            task_id TEXT NOT NULL, state_version INTEGER NOT NULL,
+            event_id TEXT NOT NULL, event_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY(task_id,state_version));
+            CREATE INDEX task_event_outbox_created ON task_event_outbox(created_at_ms,task_id,state_version);",
+            )
+            .map_err(failure)?;
+        transaction
+            .pragma_update(None, "user_version", NEXT_SCHEMA_VERSION)
+            .map_err(failure)?;
+    }
+    validate_outbox_schema(&transaction)?;
     transaction.commit().map_err(failure)
 }
 
@@ -499,6 +512,67 @@ fn migrate_legacy_schema(transaction: &Transaction<'_>, schema_version: i64) -> 
     transaction
         .execute_batch("DROP TABLE tasks; ALTER TABLE tasks_v2 RENAME TO tasks;")
         .map_err(failure)?;
+    Ok(())
+}
+
+/// Rejects incomplete v6 databases without silently replacing their outbox.
+fn validate_outbox_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let mut statement = transaction
+        .prepare("PRAGMA table_info(task_event_outbox)")
+        .map_err(failure)?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    for (name, kind, primary) in [
+        ("task_id", "TEXT", 1),
+        ("state_version", "INTEGER", 2),
+        ("event_id", "TEXT", 0),
+        ("event_json", "TEXT", 0),
+        ("created_at_ms", "INTEGER", 0),
+    ] {
+        if !columns
+            .iter()
+            .any(|(column, ty, required, pk)| column == name && ty == kind && *required == 1 && *pk == primary)
+        {
+            return Err(StoreError::Failure(format!(
+                "SQLite event outbox has invalid required column `{name}`"
+            )));
+        }
+    }
+    let owns_index: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='task_event_outbox_created' AND tbl_name='task_event_outbox')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if !owns_index {
+        return Err(StoreError::Failure(
+            "SQLite event outbox is missing its ordered index".into(),
+        ));
+    }
+    let mut statement = transaction
+        .prepare("PRAGMA index_info(task_event_outbox_created)")
+        .map_err(failure)?;
+    let index = statement
+        .query_map([], |row| row.get::<_, String>(2))
+        .map_err(failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    if index != ["created_at_ms", "task_id", "state_version"] {
+        return Err(StoreError::Failure(
+            "SQLite event outbox is missing its ordered index".into(),
+        ));
+    }
     Ok(())
 }
 
