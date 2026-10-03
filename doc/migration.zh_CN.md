@@ -28,7 +28,7 @@ Redis 独立限制 wire 8 MiB、payload 1 MiB、headers 64 KiB。历史记录需
 
 任务生命周期 `NotificationStats` 只统计当前进程：`queued` 表示已通知
 publisher 的状态写入数，`published` 表示已接纳并从 SQLite 删除的事件数，
-`failed` 表示发布或删除失败次数。由于已提交 outbox 行不会丢弃，`dropped`
+`failed` 表示 outbox 读取、发布或删除失败次数。由于已提交 outbox 行不会丢弃，`dropped`
 始终为零。这些计数不会跨重启保留，也不表示 subscriber 已处理；持久积压
 和最老行年龄应直接查询 SQLite。发布结果未知时保留 outbox 行并用稳定
 EventId 重试，因此消费者可能收到重复事件。

@@ -34,7 +34,7 @@ records need more; do not delete pending records to hide an overflow.
 
 Task lifecycle `NotificationStats` are process-local: `queued` counts writes
 signalled to the publisher, `published` counts accepted events removed from
-SQLite, `failed` counts failed publish or delete attempts, and `dropped` stays
+SQLite, `failed` counts failed outbox reads, publications, or deletions, and `dropped` stays
 zero because committed outbox rows are retained. These counters do not survive
 restart and do not measure subscriber completion. Query SQLite for the durable
 backlog and oldest row age. Unknown outcomes retain the row and can cause a
