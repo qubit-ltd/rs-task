@@ -16,6 +16,7 @@ use qubit_event_bus::model::Topic;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::service::NotificationStats;
 use crate::service::TaskServiceError;
 use crate::store::TaskStore;
 
@@ -62,7 +63,12 @@ impl TaskEventPublisher {
 
     /// Wakes the worker after a committed lifecycle write.
     pub(super) fn notify(&self) {
+        self.state.counters.queued.fetch_add(1, Ordering::Relaxed);
         self.state.changed.notify_one();
+    }
+
+    pub(super) fn stats(&self) -> NotificationStats {
+        self.state.counters.snapshot()
     }
 
     /// Drains existing events up to the configured deadline, aborts stalled

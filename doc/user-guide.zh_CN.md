@@ -30,4 +30,14 @@ publisher 启用后，每次生命周期状态提交都会与对应 outbox 行�
 
 关闭时 worker 会持续排空，直到 outbox 清空或 `notification_shutdown_timeout` 到期。超时会返回错误，尚未发送的行仍保留在 SQLite，供下次启动重放。运维时应监控 SQLite outbox 行数和最老行年龄，并结合 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`，区分 publisher 堵塞、stream 积压和消费者未确认等情况。
 
+`notification_stats()` 返回当前进程内排队、已发布和失败次数，不代表持久 backlog。可直接查询 SQLite 获取待处理行数和最老行年龄：
+
+```sql
+SELECT COUNT(*) AS pending,
+       CASE WHEN MIN(created_at_ms) IS NULL THEN 0
+            ELSE CAST(strftime('%s', 'now') AS INTEGER) * 1000 - MIN(created_at_ms)
+       END AS oldest_age_ms
+FROM task_event_outbox;
+```
+
 更多背景见[详细设计](task_execution_service_design.md)、[迁移指南](migration.zh_CN.md)和 [API 文档](https://docs.rs/qubit-task)。
