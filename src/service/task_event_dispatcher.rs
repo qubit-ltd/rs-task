@@ -2,6 +2,8 @@
 //    Copyright (c) 2025 - 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -15,20 +17,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::event::TaskEvent;
+use crate::service::NotificationStats;
 
 pub(super) struct TaskEventConfig {
     pub(super) bus: Arc<AsyncEventBus>,
     pub(super) topic: Topic<TaskEvent>,
     pub(super) capacity: std::num::NonZeroUsize,
     pub(super) flush_timeout: Duration,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NotificationStats {
-    pub queued: u64,
-    pub published: u64,
-    pub dropped: u64,
-    pub failed: u64,
 }
 
 #[derive(Default)]
@@ -132,13 +127,21 @@ impl TaskEventDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use qubit_event_bus::AsyncEventBus;
+    use qubit_event_bus::model::Topic;
+
+    use super::TaskEventDispatcher;
+    use crate::event::TaskEvent;
     use crate::model::TaskState;
+    use crate::model::next::TaskId;
 
     fn event() -> TaskEvent {
         TaskEvent {
             schema_version: 1,
-            task_id: crate::model::next::TaskId::from_id(qubit_id::Id::new(1)),
+            task_id: TaskId::from_id(qubit_id::Id::new(1)),
             state_version: 1,
             state: TaskState::Queued,
             correlation_key: None,
