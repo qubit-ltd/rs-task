@@ -2,6 +2,8 @@
 //    Copyright (c) 2025 - 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use serde::Deserialize;
 use serde::Serialize;
@@ -38,7 +40,9 @@ impl From<&crate::model::next::TaskSummary> for TaskEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::event::TaskEvent;
+    use crate::model::TaskState;
+    use crate::model::next::TaskId;
 
     #[test]
     fn typed_task_event_round_trips_with_schema_version() {
