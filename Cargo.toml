@@ -45,7 +45,7 @@ required-features = ["sqlite"]
 futures = "^0.3"
 fs2 = { version = "^0.4", optional = true }
 parking_lot = "^0.12"
-qubit-event-bus = { path = "../rs-event-bus", version = "0.18", optional = true }
+qubit-event-bus = { path = "../rs-event-bus", version = "0.19", optional = true }
 qubit-codec = { path = "../rs-codec", version = "0.16", features = ["registry"] }
 qubit-id = { version = "0.6", features = ["serde"] }
 qubit-metadata = { version = "0.6.2", features = ["json"] }
@@ -64,6 +64,8 @@ default = []
 inventory = ["qubit-spi/inventory"]
 sqlite = ["dep:rusqlite", "dep:fs2"]
 event-bus = ["dep:qubit-event-bus"]
+
+[workspace]
 
 [dev-dependencies]
 proptest = "1.11"
