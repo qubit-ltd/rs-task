@@ -5,9 +5,6 @@ source "$project_root/.infra/lib/cleanup-build-artifacts.sh"
 dry_run=0
 if [ "${1:-}" = "--dry-run" ]; then dry_run=1; shift; fi
 [ "$#" -eq 0 ] || { echo "usage: $0 [--dry-run]" >&2; exit 2; }
-if [ "$dry_run" -eq 0 ]; then
-    "$project_root/.infra/bin/infra-tool.sh" rs-infra-tools sync-scripts --project "$project_root"
-fi
 updates=()
 for role in ci coverage dependency pages style tools verify; do
     config="$project_root/.infra/$role/tool.toml"
