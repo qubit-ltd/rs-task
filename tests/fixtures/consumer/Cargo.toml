@@ -7,6 +7,6 @@ publish = false
 [dependencies]
 qubit-task = { path = "../../.." }
 qubit-task-fixture-provider = { path = "../provider" }
-qubit-id = { path = "../../../../rs-id", version = "0.6" }
+qubit-id = { version = "0.7" }
 serde_json = "1"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }

@@ -12,4 +12,4 @@ event-bus = ["qubit-task/event-bus"]
 
 [dependencies]
 qubit-task = { path = "../../..", default-features = false }
-qubit-id = { path = "../../../../rs-id", version = "0.6" }
+qubit-id = { version = "0.7" }
