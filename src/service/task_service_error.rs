@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use crate::model::TaskStateKind;
+use crate::model::next::TaskId;
 use crate::store::StoreError;
 
 /// Failure reported by a service operation.
@@ -15,8 +16,8 @@ use crate::store::StoreError;
 /// ```
 /// use qubit_task::service::TaskServiceError;
 ///
-/// let error = TaskServiceError::QueueFull;
-/// assert_eq!(error.to_string(), "task queue is full");
+/// let error = TaskServiceError::ShuttingDown;
+/// assert_eq!(error.to_string(), "task execution service is shutting down");
 /// ```
 #[derive(Debug, thiserror::Error)]
 #[must_use]
@@ -34,38 +35,34 @@ pub enum TaskServiceError {
         #[from]
         StoreError,
     ),
-    /// The configured queue has no remaining waiting capacity.
-    #[error("task queue is full")]
-    QueueFull,
-    /// The request payload would exceed the configured in-flight byte budget.
+    /// The submission exceeds the available payload capacity.
     #[error(
-        "in-flight task payload budget exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available"
+        "task submission capacity exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available"
     )]
-    PayloadBudgetExceeded {
-        /// Payload bytes in the rejected submission.
+    SubmissionCapacityExceeded {
+        /// Bytes requested by the rejected submission.
         requested_bytes: usize,
-        /// Payload bytes remaining when the submission was checked.
+        /// Bytes available when the submission was checked.
         available_bytes: usize,
     },
-    /// The configured number of detached admission workers is already in
-    /// flight.
-    #[error("in-flight task operation limit reached ({limit})")]
-    OperationLimitExceeded {
-        /// Maximum number of concurrent external write operations.
+    /// The store already contains the maximum number of unfinished tasks.
+    #[error("unfinished task limit exceeded ({limit})")]
+    UnfinishedTaskLimitExceeded {
+        /// Maximum number of unfinished tasks allowed by the store.
         limit: usize,
     },
-    /// The request exceeds available configured capacity.
-    #[error("task request cannot be satisfied by configured resources")]
-    Unsatisfiable,
+    /// The idempotency key is already associated with different request data.
+    #[error("idempotency key conflicts with an existing task")]
+    IdempotencyConflict,
+    /// The submitted task identifier already exists.
+    #[error("task identifier already exists")]
+    DuplicateTaskId,
     /// The request contains invalid metadata or an oversized payload.
     #[error("invalid task request: {0}")]
     InvalidRequest(
         /// Validation diagnostic describing the rejected request field.
         String,
     ),
-    /// The requested task is blocked pending intervention.
-    #[error("task is blocked and requires intervention")]
-    Blocked,
     /// The expected record revision exists, but its lifecycle is not blocked.
     #[error("task is not blocked (current state: {actual:?})")]
     NotBlocked {
@@ -75,20 +72,9 @@ pub enum TaskServiceError {
     /// Cancellation must be resolved before a blocked task can be resumed.
     #[error("task has a pending cancellation request")]
     CancellationPending,
-    /// The task used all configured execution attempts and cannot be requeued.
-    #[error("task exhausted its execution attempt budget ({attempts}/{limit})")]
-    AttemptsExhausted {
-        /// Number of attempts already started.
-        attempts: u32,
-        /// Maximum attempts configured for the service.
-        limit: u32,
-    },
     /// New task submissions have been stopped.
     #[error("task execution service is shutting down")]
     ShuttingDown,
-    /// The caller's shutdown deadline expired while accepted work was draining.
-    #[error("task execution service did not shut down before the deadline")]
-    ShutdownTimedOut,
     /// A persistence failure suspended task acceptance and scheduling.
     #[error("task execution service is paused after a task store failure: {0}")]
     StoreUnavailable(
@@ -107,17 +93,16 @@ pub enum TaskServiceError {
         /// Notification publisher close or worker failure diagnostic.
         String,
     ),
-    /// No handler matches the submitted type and exact version.
-    #[error("no handler registered for `{task_type}` version `{version}`")]
-    MissingHandler {
-        /// Task type requested by the submitted record.
-        task_type: String,
-        /// Exact version requested by the submitted record.
-        version: String,
+    /// An external cancellation hook failed for a running task attempt.
+    #[error("external cancellation failed for task {task_id} attempt {attempt}: {message}")]
+    ExternalCancellationFailed {
+        /// Identifier of the task whose cancellation hook failed.
+        task_id: TaskId,
+        /// Running attempt for which the hook was invoked.
+        attempt: u32,
+        /// Failure diagnostic returned by the cancellation hook.
+        message: String,
     },
-    /// Reconstructable storage cannot accept a local closure.
-    #[error("local closure submission is unavailable with a restart-recoverable store")]
-    UnsupportedCapability,
     /// The running typed handler does not support cancellation.
     #[error("the running task handler does not support cancellation")]
     CancellationUnsupported,
