@@ -28,6 +28,12 @@
 
 publisher 启用后，每次生命周期状态提交都会与对应 outbox 行在同一个 SQLite 事务中写入。后台 worker 按稳定顺序将事件发往 `task.lifecycle`，确认接纳后再删除 outbox 行。服务启动时会重放已有待发事件；启用 outbox 之前提交的状态不会补发。投递语义为至少一次：发布结果不确定，或 bus 已接纳事件但进程在 SQLite 删除记录前崩溃，都可能产生重复。消费者应为每个 `TaskId` 保存最高 `state_version`，忽略重复和旧版本；发现版本缺口时查询任务服务。事件只用于通知，任务查询才是权威状态。
 
+### 持久化消费者投影
+
+在以 `TaskId` 为键的持久表中保存每个任务已处理的最高 `state_version` 和业务投影状态。一个 SQLite 事务内先读取 checkpoint，再决定是否修改业务投影。事件版本不高于 checkpoint 时直接忽略；首次收到版本 0 可以直接应用，首次收到高于 0 的版本，或后续事件跳过一个及以上版本时，必须调用 `TaskExecutionService::get` 查询权威状态和版本。查询失败或服务版本低于通知版本时终止事务。将选定的状态、checkpoint 与业务副作用写在同一事务中，最后提交。`tests/redis_task_outbox_tests.rs` 中的集成回归会关闭并重建 SQLite 消费者，再重放 Redis 中的重复记录。
+
+只有事务提交成功后，handler 才返回成功并由 bus ACK。事务或服务查询失败时，返回配置为重新入队（`FailureDirective::Requeue`）的 handler 错误，让 Redis 消息留在 pending 状态等待 Retry。不能先 ACK 再补写 checkpoint。publisher 产生的稳定 `EventId` 仅供关联重复 wire 记录；Redis provider 不会按 `EventId` 去重。跨进程重启防止业务副作用重复依靠消费者的持久任务版本检查。
+
 关闭时 worker 会持续排空，直到 outbox 清空或 `notification_shutdown_timeout` 到期。超时会返回错误，尚未发送的行仍保留在 SQLite，供下次启动重放。运维时应监控 SQLite outbox 行数和最老行年龄，并结合 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`，区分 publisher 堵塞、stream 积压和消费者未确认等情况。
 
 `notification_stats()` 返回当前进程内排队、已发布和失败次数，不代表持久 backlog。可直接查询 SQLite 获取待处理行数和最老行年龄：

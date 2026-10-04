@@ -41,7 +41,7 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 ## 任务通知投递
 
-服务恢复后 publisher 会重放已提交的 outbox 行；关闭时会在 `notification_shutdown_timeout` 限时内排空。发布回执不确定，或 Redis 已接纳事件但进程在删除 outbox 行前崩溃，都可能造成重复。消费者应为每个任务保留最高 `state_version`，忽略重复和旧版本事件。启用 publisher 不会补发服务启用前已经提交的历史状态。监控 outbox 待处理行数和最老行年龄，并同时查看 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`。
+服务恢复后 publisher 会重放已提交的 outbox 行；关闭时会在 `notification_shutdown_timeout` 限时内排空。发布回执不确定，或 Redis 已接纳事件但进程在删除 outbox 行前崩溃，都可能造成重复。消费者应为每个任务保留最高 `state_version`，忽略重复和旧版本事件。稳定的 `EventId` 仅用于关联，Redis provider 不会按它去重。事务化 checkpoint、版本缺口刷新及 ACK/Retry 顺序见[持久化消费者投影指南](doc/user-guide.zh_CN.md#持久化消费者投影)。启用 publisher 不会补发服务启用前已经提交的历史状态。监控 outbox 待处理行数和最老行年龄，并同时查看 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`。
 
 调度器按 keyset 顺序扫描可运行的排队任务。较早的任务暂时拿不到资源时，资源可用的后续任务可以先启动。默认允许后续任务成功越过 32 次；可用 `TaskExecutionServiceBuilder::max_resource_bypasses` 配置正整数上限。达到上限后，调度器优先等待较早的任务，期间其他不相关资源可能空置。计数只存在于当前进程，重启后清零。该策略不保证严格 FIFO，也不保证等待时间有上界。应用可调用 `TaskStore::prune_terminal_before(finished_before_ms, max_rows)` 显式清理一批旧终态记录；清理也会释放幂等键供后续复用，Queued 和 Blocked 任务会保留。
 
