@@ -71,6 +71,7 @@ use support::typed_support;
 
 type TestResult = Result<(), Box<dyn Error>>;
 type ProjectionResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+type ProjectionSnapshot = (Option<(u64, TaskState)>, Vec<u64>);
 const DEADLINE: Duration = Duration::from_secs(15);
 
 /// Widens a thread-safe projection error for the integration test result.
@@ -149,7 +150,7 @@ impl DurableProjection {
     }
 
     /// Reads the committed state and effect versions from a fresh connection.
-    fn snapshot(path: &Path, id: TaskId) -> ProjectionResult<(Option<(u64, TaskState)>, Vec<u64>)> {
+    fn snapshot(path: &Path, id: TaskId) -> ProjectionResult<ProjectionSnapshot> {
         let connection = Connection::open(path)?;
         let id = id.to_padded_decimal();
         let checkpoint: Option<(u64, String)> = connection
