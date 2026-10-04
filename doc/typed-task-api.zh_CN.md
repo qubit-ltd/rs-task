@@ -119,3 +119,9 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 需要持久生命周期通知时，启用 `event-bus`、注册应用提供的 `TaskEvent` codec，并设置 `TaskExecutionServiceBuilder::event_bus`。生命周期状态写入时会在同一事务内写入 SQLite outbox，再由后台异步重放。语义为至少一次：发布结果不确定，或在 outbox 删除前崩溃，都可能让消费者收到重复事件。消费者应按 `(TaskId, state_version)` 去重，并以任务查询为准。启用 publisher 不会补发此前已提交的历史状态。`MemoryTaskStore` 不支持持久 outbox。配置边界和监控方法见[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。
 
 应用可通过维护作业调用 `TaskStore::prune_terminal_before(finished_before_ms, max_rows)`，删除最多 `max_rows` 条 finish 时间严格早于 cutoff 的终态记录。删除顺序为 finish 时间和 task ID，幂等键会在同一操作中删除，因此之后可复用；Queued 和 Blocked 不会清理。
+
+## 提交拒绝与外部取消错误
+
+`submit()` 会把预期的容量和重复请求拒绝映射为 `TaskServiceError::SubmissionCapacityExceeded`、`UnfinishedTaskLimitExceeded`、`IdempotencyConflict` 或 `DuplicateTaskId`。这些拒绝只影响当前请求，服务仍可继续使用。其他 store 故障仍按操作性错误处理，并可能使服务进入锁存不可用状态。
+
+运行中任务使用 `CancellationMode::ExternalHook` 时，`cancel()` 会先持久化取消请求，再启动由服务托管的 hook 操作。同一 task `attempt` 的并发调用共享该操作；取消或中止等待 `cancel()` 的调用方不会停止 hook，`shutdown()` 会等待 hook 完成。hook 失败时，`cancel()` 返回 `TaskServiceError::ExternalCancellationFailed`，错误信息保存在 `TaskSummary.cancel_error`；任务仍在运行时，可再次调用 `cancel()` 重试。重试成功会清除该诊断，但 handler 仍负责报告最终状态。请确保 hook 对每个 (`TaskId`, `attempt`) 幂等，因为外部副作用可能已成功、但确认回执丢失。

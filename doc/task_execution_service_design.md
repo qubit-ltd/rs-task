@@ -45,3 +45,5 @@ SQLite 持久化支持进程重启恢复，执行语义为至少一次。若任�
 配置 `TaskExecutionServiceBuilder::event_bus` 后，服务会启用 store outbox，并在任务恢复后启动异步 publisher。每个生命周期快照与任务状态迁移写入同一个 SQLite 事务，随后发布到 `task.lifecycle`；确认接纳后才删除 outbox 行。此功能要求 store 提供持久 outbox，`MemoryTaskStore` 不具备此能力，也不适合作为 durable 配置。outbox 启用前提交的状态不会在启动时回填。
 
 投递语义为至少一次。若发布回执不确定，或 bus 已接纳事件但进程在删除 outbox 行前停止，同一快照可能再次发布。消费者应按 `(TaskId, state_version)` 去重、忽略旧版本，并在发现版本缺口时查询服务。应监控 outbox 行数与最老行年龄；使用 Redis Streams 时，还应查看 `XLEN` 和 `XPENDING`。具体配置和运维边界见[带类型 API 指南](typed-task-api.zh_CN.md)与[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。应用仍可显式调用有界 `TaskStore::prune_terminal_before` 清理终态历史，该操作会释放幂等键供复用。
+
+预期的提交拒绝（容量、未完成任务数上限、幂等冲突和重复任务 ID）返回结构化请求错误，不会锁存服务；其他操作性 store 故障仍按原逻辑处理。外部取消 hook 由服务托管：同一 attempt 的并发调用共享 hook，取消调用方不会中断 hook，`shutdown()` 会等待 hook 完成。hook 失败会留下可查询诊断；任务仍运行时可再次调用 `cancel()` 重试。hook 必须对 (`TaskId`, attempt) 幂等。

@@ -14,7 +14,7 @@
 - **路由与分类：** `kind_id` 选择处理器，`category` 是独立的业务分类，用于查询过滤。
 - **Payload 兼容性：** `Payload<T>` 将 `type_id`、`schema_version` 和 `codec_id` 与值绑定。一个处理器只接受一种 payload type ID，并显式声明支持的 schema 版本。一个 codec 可以服务多个 schema 版本。
 - **资源准入：** CPU、GPU、内存、磁盘和自定义单位是并发配额，由执行引擎内部预留；它们不会固定 CPU、隔离 GPU，也不会强制限制操作系统层面的内存或磁盘使用。
-- **生命周期与取消：** 排队中的任务可直接取消。运行中的处理器必须声明协作式取消能力或外部取消 hook；取消请求本身无法强行停止任意代码。
+- **生命周期与取消：** 排队中的任务可直接取消。运行中的处理器必须声明协作式取消能力或外部取消 hook；取消请求本身无法强行停止任意代码。外部 hook 失败会保留可查询诊断，任务仍在运行时可再次调用 `cancel()` 重试。同一 attempt 的并发调用共享一次 hook，取消调用方不会停止 hook，`shutdown()` 会等待 hook 完成。hook 应对每个 (`TaskId`, attempt) 幂等。
 - **进度：** 处理器通过 `rs-progress::AsyncReporter` 汇报进度。`report_async()` 等待持久化完成，之后读取任务会包含阶段和指标快照。
 - **历史：** typed 分页按 `(accepted_at_ms, numeric task id)` 升序排列。排他性的 `after` 游标是 keyset 游标；每次查询读取各自的存储快照。
 
