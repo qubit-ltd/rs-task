@@ -23,6 +23,7 @@ use qubit_codec::ValueCodecRegistrationSource;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -46,14 +47,20 @@ use tokio::main as tokio_main;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 
+struct WorkerPayload(serde_json::Value);
+
+impl HasModelId for WorkerPayload {
+    const MODEL_ID: ModelId = ModelId::new("fixture.CrashWorkerPayload");
+}
+
 /// Waits on an explicit gate so the parent can kill a genuinely running task.
 struct WorkerHandler {
     gate: Arc<Semaphore>,
     started: mpsc::UnboundedSender<TaskId>,
 }
 
-impl TaskHandler<serde_json::Value> for WorkerHandler {
-    fn run<'a>(&'a self, _payload: serde_json::Value, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+impl TaskHandler<WorkerPayload> for WorkerHandler {
+    fn run<'a>(&'a self, _payload: WorkerPayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             self.started
                 .send(context.task_id())
@@ -69,25 +76,25 @@ impl TaskHandler<serde_json::Value> for WorkerHandler {
 #[derive(Default)]
 struct JsonValueCodec;
 
-impl qubit_codec::ValueEncoder<serde_json::Value> for JsonValueCodec {
+impl qubit_codec::ValueEncoder<WorkerPayload> for JsonValueCodec {
     type Output = Vec<u8>;
     type Error = serde_json::Error;
 
-    fn encode(&mut self, value: &serde_json::Value) -> Result<Vec<u8>, Self::Error> {
-        serde_json::to_vec(value)
+    fn encode(&mut self, value: &WorkerPayload) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(&value.0)
     }
 }
 
 impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
-    type Output = serde_json::Value;
+    type Output = WorkerPayload;
     type Error = serde_json::Error;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
-        serde_json::from_slice(bytes)
+        serde_json::from_slice(bytes).map(WorkerPayload)
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, serde_json::Value>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, WorkerPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("fixture.crash_worker.json"),
     &JSON_DESCRIPTOR,
@@ -102,13 +109,12 @@ impl IdGenerator<Id, IdGenerationError> for WorkerIds {
     }
 }
 
-fn request(idempotency_key: String) -> TaskRequest<serde_json::Value> {
+fn request(idempotency_key: String) -> TaskRequest<WorkerPayload> {
     let mut request = TaskRequest::new(
         "crash-worker",
-        ModelId::new("fixture.CrashWorkerPayload"),
         1,
         ValueCodecId::new("fixture.crash_worker.json"),
-        serde_json::json!({"payload": "durable"}),
+        WorkerPayload(serde_json::json!({"payload": "durable"})),
     );
     request.idempotency_key = Some(idempotency_key);
     request
@@ -193,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         codecs,
         Arc::new(WorkerIds(AtomicU64::new(1_000_000))),
     );
-    builder.handlers_mut().register::<serde_json::Value, _>(
+    builder.handlers_mut().register::<WorkerPayload, _>(
         TaskHandlerDescriptor {
             kind_id: "crash-worker".into(),
             payload_type_id: ModelIdBuf::try_from("fixture.CrashWorkerPayload")?,

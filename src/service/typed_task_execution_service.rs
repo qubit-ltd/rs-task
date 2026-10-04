@@ -19,6 +19,7 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
 use qubit_progress::AsyncReporter;
 use tokio::sync::watch;
 
@@ -321,7 +322,7 @@ impl TypedTaskExecutionService {
     }
 
     /// Encodes, assigns an ID, durably accepts, and dispatches a typed request.
-    pub async fn submit<T: Send + Sync + 'static>(
+    pub async fn submit<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
     ) -> Result<TaskSummary, TaskServiceError> {

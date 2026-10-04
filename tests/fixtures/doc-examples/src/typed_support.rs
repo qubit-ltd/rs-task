@@ -18,6 +18,7 @@ use qubit_codec::ValueCodecRegistrationSource;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
@@ -33,29 +34,36 @@ use qubit_task::model::TaskRequest;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::TaskFuture;
 
+#[derive(Clone)]
+pub struct ExamplePayload(pub serde_json::Value);
+
+impl HasModelId for ExamplePayload {
+    const MODEL_ID: ModelId = ModelId::new("example.TaskPayload");
+}
+
 #[derive(Default)]
 pub struct JsonValueCodec;
 
-impl qubit_codec::ValueEncoder<serde_json::Value> for JsonValueCodec {
+impl qubit_codec::ValueEncoder<ExamplePayload> for JsonValueCodec {
     type Output = Vec<u8>;
     type Error = serde_json::Error;
 
-    fn encode(&mut self, value: &serde_json::Value) -> Result<Vec<u8>, Self::Error> {
-        serde_json::to_vec(value)
+    fn encode(&mut self, value: &ExamplePayload) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(&value.0)
     }
 }
 
 impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
-    type Output = serde_json::Value;
+    type Output = ExamplePayload;
     type Error = serde_json::Error;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
-        serde_json::from_slice(bytes)
+        serde_json::from_slice(bytes).map(ExamplePayload)
     }
 }
 
 pub static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
-    ValueBytesCodecDescriptor::of::<JsonValueCodec, serde_json::Value>();
+    ValueBytesCodecDescriptor::of::<JsonValueCodec, ExamplePayload>();
 pub static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("example.task.json"),
     &JSON_DESCRIPTOR,
@@ -88,13 +96,12 @@ pub fn service_builder() -> Result<TaskExecutionServiceBuilder, Box<dyn std::err
     ))
 }
 
-pub fn request(data: serde_json::Value, key: &str) -> TaskRequest<serde_json::Value> {
+pub fn request(data: serde_json::Value, key: &str) -> TaskRequest<ExamplePayload> {
     let mut request = TaskRequest::new(
         "example.process",
-        ModelId::new("example.TaskPayload"),
         1,
         ValueCodecId::new("example.task.json"),
-        data,
+        ExamplePayload(data),
     );
     request.category = Some("example".into());
     request.idempotency_key = Some(key.into());
@@ -104,14 +111,14 @@ pub fn request(data: serde_json::Value, key: &str) -> TaskRequest<serde_json::Va
 
 pub struct ExampleHandler;
 
-impl TaskHandler<serde_json::Value> for ExampleHandler {
-    fn run<'a>(&'a self, _input: serde_json::Value, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+impl TaskHandler<ExamplePayload> for ExampleHandler {
+    fn run<'a>(&'a self, _input: ExamplePayload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
 
 pub fn register_handler(builder: &mut TaskExecutionServiceBuilder) -> Result<(), Box<dyn std::error::Error>> {
-    builder.handlers_mut().register::<serde_json::Value, _>(
+    builder.handlers_mut().register::<ExamplePayload, _>(
         TaskHandlerDescriptor {
             kind_id: "example.process".into(),
             payload_type_id: ModelIdBuf::try_from("example.TaskPayload")?,

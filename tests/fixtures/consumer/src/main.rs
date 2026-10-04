@@ -14,12 +14,12 @@ use std::sync::Arc;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
-use qubit_task::CancellationMode;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task_fixture_provider::FixtureHandler;
+use qubit_task_fixture_provider::FixturePayload;
 use qubit_task_fixture_provider::codec_registry;
 use qubit_task_fixture_provider::descriptor;
 use qubit_task_fixture_provider::request;
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         codec_registry()?,
         Arc::new(FixtureIds(AtomicU64::new(1))),
     );
-    builder.handlers_mut().register::<serde_json::Value, _>(
+    builder.handlers_mut().register::<FixturePayload, _>(
         descriptor("fixture")?,
         Arc::new(FixtureHandler),
     )?;

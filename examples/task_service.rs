@@ -17,6 +17,7 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
+use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -37,6 +38,10 @@ use serde::Serialize;
 #[derive(Debug, Deserialize, Serialize)]
 struct EchoPayload {
     message: String,
+}
+
+impl HasModelId for EchoPayload {
+    const MODEL_ID: ModelId = ModelId::new("example.EchoPayload");
 }
 
 #[derive(Default)]
@@ -113,7 +118,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let service = builder.build().await?;
         let request = TaskRequest::new(
             "example.echo",
-            ModelId::new("example.EchoPayload"),
             1,
             ValueCodecId::new("example.echo.json"),
             EchoPayload {

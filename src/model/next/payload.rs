@@ -8,7 +8,7 @@
 use std::any::Any;
 
 use qubit_codec::ValueBytesCodecRegistry;
-use qubit_model_id::ModelId;
+use qubit_model_id::HasModelId;
 
 use super::EncodedPayload;
 use super::PayloadEncodeError;
@@ -16,8 +16,6 @@ use super::PayloadEncodeError;
 /// Typed input payload submitted by application code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Payload<T> {
-    /// Stable identity of the payload model.
-    pub type_id: ModelId,
     /// Version of the payload schema, independent of the codec version.
     pub schema_version: u32,
     /// Stable identity of the bytes codec.
@@ -26,19 +24,23 @@ pub struct Payload<T> {
     pub data: T,
 }
 
-impl<T> Payload<T> {
+impl<T: HasModelId> Payload<T> {
     /// Creates a payload with its stable model, schema, and codec identities.
-    pub fn new(type_id: ModelId, schema_version: u32, codec_id: qubit_codec::ValueCodecId, data: T) -> Self {
+    pub fn new(schema_version: u32, codec_id: qubit_codec::ValueCodecId, data: T) -> Self {
         Self {
-            type_id,
             schema_version,
             codec_id,
             data,
         }
     }
+
+    /// Returns the stable identity of the payload's Rust model type.
+    pub const fn type_id(&self) -> qubit_model_id::ModelId {
+        T::MODEL_ID
+    }
 }
 
-impl<T: 'static> Payload<T> {
+impl<T: HasModelId + 'static> Payload<T> {
     /// Encodes the value with its registered bytes codec.
     ///
     /// # Errors
@@ -56,7 +58,7 @@ impl<T: 'static> Payload<T> {
         }
         let bytes = descriptor.encode(&self.data as &dyn Any)?;
         Ok(EncodedPayload::new(
-            self.type_id.into(),
+            qubit_model_id::ModelIdBuf::from(T::MODEL_ID),
             self.schema_version,
             self.codec_id,
             bytes,

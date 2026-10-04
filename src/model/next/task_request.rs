@@ -6,7 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use qubit_metadata::Metadata;
-use qubit_model_id::ModelId;
+use qubit_model_id::HasModelId;
 
 use super::Payload;
 use super::ResourceRequest;
@@ -37,19 +37,30 @@ pub struct TaskRequest<T> {
     pub idempotency_key: Option<String>,
 }
 
-impl<T> TaskRequest<T> {
+impl<T: HasModelId> TaskRequest<T> {
     /// Creates a typed request with the supplied routing and payload identity.
-    pub fn new(
-        kind_id: impl Into<String>,
-        type_id: ModelId,
-        schema_version: u32,
-        codec_id: qubit_codec::ValueCodecId,
-        data: T,
-    ) -> Self {
+    /// The payload model identity always comes from `T::MODEL_ID`.
+    ///
+    /// Supplying an independent model ID is no longer supported:
+    ///
+    /// ```compile_fail
+    /// use qubit_codec::ValueCodecId;
+    /// use qubit_model_id::{HasModelId, ModelId};
+    /// use qubit_task::TaskRequest;
+    /// struct Input;
+    /// impl HasModelId for Input {
+    ///     const MODEL_ID: ModelId = ModelId::new("example.Input");
+    /// }
+    /// let _ = TaskRequest::new(
+    ///     "example.kind", ModelId::new("some.other.Model"), 1,
+    ///     ValueCodecId::new("example.codec"), Input,
+    /// );
+    /// ```
+    pub fn new(kind_id: impl Into<String>, schema_version: u32, codec_id: qubit_codec::ValueCodecId, data: T) -> Self {
         Self {
             kind_id: kind_id.into(),
             category: None,
-            payload: Payload::new(type_id, schema_version, codec_id, data),
+            payload: Payload::new(schema_version, codec_id, data),
             metadata: Metadata::new(),
             resource_limit: ResourceRequest::default(),
             correlation_key: None,
@@ -58,7 +69,7 @@ impl<T> TaskRequest<T> {
     }
 }
 
-impl<T: 'static> TaskRequest<T> {
+impl<T: HasModelId + 'static> TaskRequest<T> {
     /// Encodes a typed request for durable storage after validating metadata
     /// budgets.
     ///

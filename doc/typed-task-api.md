@@ -2,7 +2,7 @@
 
 The typed API keeps application values typed until acceptance. Payload identity has three independent parts: `type_id` identifies the model, `schema_version` identifies its schema, and `codec_id` identifies the bytes encoding. A handler is registered by `kind_id`, accepts exactly one payload `type_id`, and declares the schema versions it supports. A codec can support many schema versions; schema compatibility belongs to the handler descriptor.
 
-`Payload<T>` carries the value. `TaskRequest<T>::encode` resolves a `ValueBytesCodecDescriptor` from `ValueBytesCodecRegistry` and creates an `EncodedPayload<T>`; storage receives its type-erased `StoredPayload`. The bytes registry uses `ValueEncoder<T>` and `ValueDecoder<[u8]>`. Task metadata uses `rs-metadata::Metadata` and is limited to 32 entries and 16 KiB serialized bytes by the task request, in addition to `rs-metadata`'s wire budgets.
+`Payload<T>` derives its stable model identity from `T: HasModelId`; callers supply only schema version, codec ID, and value. `TaskRequest<T>::encode` resolves a `ValueBytesCodecDescriptor` from `ValueBytesCodecRegistry` and creates an `EncodedPayload<T>`; storage receives its type-erased `StoredPayload`. The bytes registry uses `ValueEncoder<T>` and `ValueDecoder<[u8]>`. Task metadata uses `rs-metadata::Metadata` and is limited to 32 entries and 16 KiB serialized bytes by the task request, in addition to `rs-metadata`'s wire budgets.
 
 ## End-to-end outline
 
@@ -11,7 +11,7 @@ This example follows one request from a typed value through codec registration a
 ```rust,no_run
 use std::sync::Arc;
 use qubit_codec::{ValueBytesCodecDescriptor, ValueBytesCodecRegistration, ValueBytesCodecRegistry, ValueCodecId, ValueCodecRegistration, ValueCodecRegistrationSource};
-use qubit_model_id::{ModelId, ModelIdBuf};
+use qubit_model_id::{HasModelId, ModelId, ModelIdBuf};
 use qubit_progress::{Metric, Stage};
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::{CancellationMode, TaskContext, TaskHandlerDescriptor};
@@ -24,6 +24,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 struct Resize { image: String, width: u32 }
+impl HasModelId for Resize {
+    const MODEL_ID: ModelId = ModelId::new("example.Resize");
+}
 #[derive(Default)]
 struct JsonCodec;
 impl qubit_codec::ValueEncoder<Resize> for JsonCodec {
@@ -89,7 +92,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
         cancellation_mode: CancellationMode::Cooperative,
     }, Arc::new(ResizeHandler))?;
     let tasks = builder.build().await?;
-    let mut request = TaskRequest::new("images.resize", ModelId::new("example.Resize"), 2,
+    let mut request = TaskRequest::new("images.resize", 2,
         ValueCodecId::new("example.resize.json"), Resize { image: "a.png".into(), width: 640 });
     request.category = Some("image-processing".into());
     request.resource_limit = ResourceRequest {

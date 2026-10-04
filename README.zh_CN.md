@@ -9,6 +9,9 @@
 
 `qubit-task` 将耗时的应用工作作为带类型、可查询的任务运行。应用提交带类型的 payload 后会得到稳定任务 ID，并可查询生命周期状态和实时进度。处理器声明任务 kind、payload 类型、支持的 schema 版本和取消模式。服务提供有界的进程内调度，并可选用 SQLite 持久化和至少一次恢复。
 
+类型化 payload 的身份来自其 Rust 类型的 `HasModelId` 实现。`TaskRequest::new` 只接收 kind、schema
+版本、codec ID 和值；调用方不能在构造时指定其他模型 ID。
+
 ## 带类型 API
 
 公开 API 将以下标识分别处理：

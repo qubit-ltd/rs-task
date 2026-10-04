@@ -9,6 +9,10 @@
 
 `qubit-task` runs long-lived application work as typed, queryable tasks. Applications submit a typed payload, receive a stable task ID, and can query lifecycle state and live progress. Handlers declare the task kind, payload type, supported schema versions, and cancellation mode. The service provides bounded in-process scheduling and optional SQLite persistence with at-least-once recovery.
 
+Typed payload identity comes from the submitted Rust type's `HasModelId`
+implementation. `TaskRequest::new` accepts the kind, schema version, codec ID,
+and value, so callers cannot choose a different model ID at construction.
+
 ## Typed API
 
 The public API keeps these identifiers separate:

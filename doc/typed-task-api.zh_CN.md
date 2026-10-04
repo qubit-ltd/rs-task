@@ -11,7 +11,7 @@
 ```rust,no_run
 use std::sync::Arc;
 use qubit_codec::{ValueBytesCodecDescriptor, ValueBytesCodecRegistration, ValueBytesCodecRegistry, ValueCodecId, ValueCodecRegistration, ValueCodecRegistrationSource};
-use qubit_model_id::{ModelId, ModelIdBuf};
+use qubit_model_id::{HasModelId, ModelId, ModelIdBuf};
 use qubit_progress::{Metric, Stage};
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::{CancellationMode, TaskContext, TaskHandlerDescriptor};
@@ -24,6 +24,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 struct Resize { image: String, width: u32 }
+impl HasModelId for Resize {
+    const MODEL_ID: ModelId = ModelId::new("example.Resize");
+}
 #[derive(Default)]
 struct JsonCodec;
 impl qubit_codec::ValueEncoder<Resize> for JsonCodec {
@@ -89,7 +92,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
         cancellation_mode: CancellationMode::Cooperative,
     }, Arc::new(ResizeHandler))?;
     let tasks = builder.build().await?;
-    let mut request = TaskRequest::new("images.resize", ModelId::new("example.Resize"), 2,
+    let mut request = TaskRequest::new("images.resize", 2,
         ValueCodecId::new("example.resize.json"), Resize { image: "a.png".into(), width: 640 });
     request.category = Some("image-processing".into());
     request.resource_limit = ResourceRequest {

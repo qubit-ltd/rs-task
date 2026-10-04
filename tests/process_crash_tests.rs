@@ -36,6 +36,7 @@ use qubit_codec::ValueCodecRegistrationSource;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
@@ -69,31 +70,37 @@ const DEADLINE: Duration = Duration::from_secs(30);
 const BULK_FIXTURE_DEADLINE: Duration = Duration::from_secs(120);
 const PAYLOAD_TYPE_ID: &str = "fixture.CrashWorkerPayload";
 const CODEC_ID: &str = "fixture.crash_worker.json";
+
+struct CrashPayload(Value);
+
+impl HasModelId for CrashPayload {
+    const MODEL_ID: ModelId = ModelId::new(PAYLOAD_TYPE_ID);
+}
 static WORKER: OnceLock<WorkerFixture> = OnceLock::new();
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(10_000);
 
 #[derive(Default)]
 struct JsonValueCodec;
 
-impl qubit_codec::ValueEncoder<Value> for JsonValueCodec {
+impl qubit_codec::ValueEncoder<CrashPayload> for JsonValueCodec {
     type Output = Vec<u8>;
     type Error = serde_json::Error;
 
-    fn encode(&mut self, value: &Value) -> Result<Self::Output, Self::Error> {
-        serde_json::to_vec(value)
+    fn encode(&mut self, value: &CrashPayload) -> Result<Self::Output, Self::Error> {
+        serde_json::to_vec(&value.0)
     }
 }
 
 impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
-    type Output = Value;
+    type Output = CrashPayload;
     type Error = serde_json::Error;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
-        serde_json::from_slice(bytes)
+        serde_json::from_slice(bytes).map(CrashPayload)
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, Value>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, CrashPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new(CODEC_ID),
     &JSON_DESCRIPTOR,
@@ -301,13 +308,12 @@ async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize)
     );
 }
 
-fn request(id: TaskId) -> TaskRequest<Value> {
+fn request(id: TaskId) -> TaskRequest<CrashPayload> {
     let mut request = TaskRequest::new(
         "crash-worker",
-        ModelId::new(PAYLOAD_TYPE_ID),
         1,
         ValueCodecId::new(CODEC_ID),
-        serde_json::json!({"payload": "durable"}),
+        CrashPayload(serde_json::json!({"payload": "durable"})),
     );
     request.idempotency_key = Some(id.to_string());
     request
@@ -319,8 +325,8 @@ struct RestartHandler {
     gate: Arc<Semaphore>,
 }
 
-impl TaskHandler<Value> for RestartHandler {
-    fn run<'a>(&'a self, _payload: Value, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+impl TaskHandler<CrashPayload> for RestartHandler {
+    fn run<'a>(&'a self, _payload: CrashPayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             self.count.fetch_add(1, Ordering::SeqCst);
             self.starts
@@ -356,7 +362,7 @@ fn service_builder(
     if let Some(starts) = starts {
         builder
             .handlers_mut()
-            .register::<Value, _>(
+            .register::<CrashPayload, _>(
                 TaskHandlerDescriptor {
                     kind_id: "crash-worker".into(),
                     payload_type_id: ModelIdBuf::try_from(PAYLOAD_TYPE_ID).expect("payload model ID is valid"),

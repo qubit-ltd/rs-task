@@ -17,7 +17,6 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
-use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
@@ -45,29 +44,36 @@ use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Counter(u32);
+
+impl qubit_model_id::HasModelId for Counter {
+    const MODEL_ID: qubit_model_id::ModelId = qubit_model_id::ModelId::new("test.ResourceReservationPayload");
+}
+
 #[derive(Default)]
 struct U32Codec;
 
-impl qubit_codec::ValueEncoder<u32> for U32Codec {
+impl qubit_codec::ValueEncoder<Counter> for U32Codec {
     type Output = Vec<u8>;
     type Error = std::convert::Infallible;
 
-    fn encode(&mut self, value: &u32) -> Result<Vec<u8>, Self::Error> {
-        Ok(value.to_le_bytes().to_vec())
+    fn encode(&mut self, value: &Counter) -> Result<Vec<u8>, Self::Error> {
+        Ok(value.0.to_le_bytes().to_vec())
     }
 }
 
 impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
-    type Output = u32;
+    type Output = Counter;
     type Error = std::array::TryFromSliceError;
 
-    fn decode(&mut self, bytes: &[u8]) -> Result<u32, Self::Error> {
+    fn decode(&mut self, bytes: &[u8]) -> Result<Counter, Self::Error> {
         let raw: [u8; 4] = bytes.try_into()?;
-        Ok(u32::from_le_bytes(raw))
+        Ok(Counter(u32::from_le_bytes(raw)))
     }
 }
 
-static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, u32>();
+static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, Counter>();
 static CODEC_REGISTRATION: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("qubit_task.typed_resource_tests.u32"),
     &CODEC_DESCRIPTOR,
@@ -96,13 +102,12 @@ fn descriptor() -> TaskHandlerDescriptor {
     }
 }
 
-fn request(cpu_slots: u32) -> TaskRequest<u32> {
+fn request(cpu_slots: u32) -> TaskRequest<Counter> {
     let mut request = TaskRequest::new(
         "test.resource-reservation",
-        ModelId::new("test.ResourceReservationPayload"),
         1,
         ValueCodecId::new("qubit_task.typed_resource_tests.u32"),
-        7,
+        Counter(7),
     );
     request.resource_limit = ResourceRequest {
         cpu_slots,
@@ -111,7 +116,7 @@ fn request(cpu_slots: u32) -> TaskRequest<u32> {
     request
 }
 
-fn request_resources(cpu_slots: u32, gpu_count: u32) -> TaskRequest<u32> {
+fn request_resources(cpu_slots: u32, gpu_count: u32) -> TaskRequest<Counter> {
     let mut task = request(cpu_slots);
     task.resource_limit.gpu_count = gpu_count;
     task
@@ -322,7 +327,7 @@ async fn bypass_fixture(
         .max_resource_bypasses(std::num::NonZeroUsize::new(1).expect("positive bypass limit"));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
@@ -364,8 +369,8 @@ struct GatedHandler {
     calls: Arc<AtomicUsize>,
 }
 
-impl TaskHandler<u32> for GatedHandler {
-    fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+impl TaskHandler<Counter> for GatedHandler {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 self.started.notify_one();
@@ -394,7 +399,7 @@ async fn typed_resource_request_above_capacity_is_blocked() {
     });
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::new(tokio::sync::Notify::new()),
@@ -431,7 +436,7 @@ async fn typed_resource_reservation_waits_until_capacity_is_released() {
     });
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
@@ -487,7 +492,7 @@ async fn scheduler_skips_resource_blocked_task_without_consuming_run_slot() {
     .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
@@ -864,7 +869,7 @@ async fn resource_release_during_ready_scan_is_not_lost() {
         .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
@@ -929,7 +934,7 @@ async fn cancel_during_start_cas_releases_reservation_without_running_handler() 
     );
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),

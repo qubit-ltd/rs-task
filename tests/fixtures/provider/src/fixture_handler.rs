@@ -13,6 +13,7 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
+use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::handler::TaskRunOutcome;
@@ -25,11 +26,17 @@ use qubit_task::TaskHandlerDescriptor;
 use qubit_task::TaskHandler;
 use qubit_task::store::TaskFuture;
 
+pub struct FixturePayload(pub serde_json::Value);
+
+impl HasModelId for FixturePayload {
+    const MODEL_ID: ModelId = ModelId::new("fixture.TaskPayload");
+}
+
 /// Minimal handler implemented in a crate separate from the service consumer.
 pub struct FixtureHandler;
 
-impl TaskHandler<serde_json::Value> for FixtureHandler {
-    fn run<'a>(&'a self, _payload: serde_json::Value, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+impl TaskHandler<FixturePayload> for FixtureHandler {
+    fn run<'a>(&'a self, _payload: FixturePayload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
@@ -37,25 +44,25 @@ impl TaskHandler<serde_json::Value> for FixtureHandler {
 #[derive(Default)]
 pub struct JsonValueCodec;
 
-impl qubit_codec::ValueEncoder<serde_json::Value> for JsonValueCodec {
+impl qubit_codec::ValueEncoder<FixturePayload> for JsonValueCodec {
     type Output = Vec<u8>;
     type Error = serde_json::Error;
 
-    fn encode(&mut self, value: &serde_json::Value) -> Result<Vec<u8>, Self::Error> {
-        serde_json::to_vec(value)
+    fn encode(&mut self, value: &FixturePayload) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(&value.0)
     }
 }
 
 impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
-    type Output = serde_json::Value;
+    type Output = FixturePayload;
     type Error = serde_json::Error;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
-        serde_json::from_slice(bytes)
+        serde_json::from_slice(bytes).map(FixturePayload)
     }
 }
 
-pub static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, serde_json::Value>();
+pub static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, FixturePayload>();
 pub static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("fixture.task.json"),
     &JSON_DESCRIPTOR,
@@ -75,13 +82,12 @@ pub fn descriptor(kind_id: &str) -> Result<TaskHandlerDescriptor, Box<dyn std::e
     })
 }
 
-pub fn request(kind_id: &str, payload: serde_json::Value, idempotency_key: String) -> TaskRequest<serde_json::Value> {
+pub fn request(kind_id: &str, payload: serde_json::Value, idempotency_key: String) -> TaskRequest<FixturePayload> {
     let mut request = TaskRequest::new(
         kind_id,
-        ModelId::new("fixture.TaskPayload"),
         1,
         ValueCodecId::new("fixture.task.json"),
-        payload,
+        FixturePayload(payload),
     );
     request.idempotency_key = Some(idempotency_key);
     request

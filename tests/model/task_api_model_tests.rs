@@ -9,8 +9,8 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
+use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
 
 use crate::model::next::EncodedPayload;
 use crate::model::next::Payload;
@@ -19,42 +19,43 @@ use crate::model::next::TaskId;
 use crate::model::next::TaskRequest;
 use crate::model::next::TaskRequestEncodeError;
 
+struct Counter(u32);
+
+impl HasModelId for Counter {
+    const MODEL_ID: ModelId = ModelId::new("qubit_task.tests.Counter");
+}
+
 #[derive(Default)]
 struct U32LeCodec;
 
-impl ValueEncoder<u32> for U32LeCodec {
+impl ValueEncoder<Counter> for U32LeCodec {
     type Output = Vec<u8>;
     type Error = std::convert::Infallible;
 
-    fn encode(&mut self, input: &u32) -> Result<Self::Output, Self::Error> {
-        Ok(input.to_le_bytes().to_vec())
+    fn encode(&mut self, input: &Counter) -> Result<Self::Output, Self::Error> {
+        Ok(input.0.to_le_bytes().to_vec())
     }
 }
 
 impl ValueDecoder<[u8]> for U32LeCodec {
-    type Output = u32;
+    type Output = Counter;
     type Error = std::array::TryFromSliceError;
 
     fn decode(&mut self, input: &[u8]) -> Result<Self::Output, Self::Error> {
         let bytes: [u8; 4] = input.try_into()?;
-        Ok(u32::from_le_bytes(bytes))
+        Ok(Counter(u32::from_le_bytes(bytes)))
     }
 }
 
-qubit_codec::register_value_bytes_codec!(id = "qubit_task.tests.u32_le", codec = U32LeCodec, value = u32);
+qubit_codec::register_value_bytes_codec!(id = "qubit_task.tests.u32_le", codec = U32LeCodec, value = Counter);
 
 #[test]
 fn test_typed_payload_encodes_and_erases_for_storage() {
     let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
-    let payload = Payload {
-        type_id: ModelId::new("qubit_task.tests.Counter"),
-        schema_version: 3,
-        codec_id: ValueCodecId::new("qubit_task.tests.u32_le"),
-        data: 0x1234_u32,
-    };
+    let payload = Payload::new(3, ValueCodecId::new("qubit_task.tests.u32_le"), Counter(0x1234));
 
     let encoded = payload.encode(registry).expect("payload encodes");
-    assert_eq!(encoded.type_id.as_str(), "qubit_task.tests.Counter");
+    assert_eq!(encoded.type_id().as_str(), "qubit_task.tests.Counter");
     assert_eq!(encoded.schema_version, 3);
     assert_eq!(encoded.bytes, 0x1234_u32.to_le_bytes());
 
@@ -66,12 +67,14 @@ fn test_typed_payload_encodes_and_erases_for_storage() {
 
 #[test]
 fn test_encoded_payload_preserves_type_and_schema_without_codec_version() {
-    let encoded: EncodedPayload<u32> = EncodedPayload::new(
-        ModelIdBuf::parse("qubit_task.tests.Counter").expect("valid model ID"),
+    let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
+    let encoded: EncodedPayload<Counter> = Payload::new(
         7,
         ValueCodecId::new("qubit_task.tests.u32_le"),
-        vec![1, 2, 3, 4],
-    );
+        Counter(u32::from_le_bytes([1, 2, 3, 4])),
+    )
+    .encode(registry)
+    .expect("payload encodes");
 
     let stored = encoded.into_stored();
     assert_eq!(stored.schema_version, 7);
@@ -102,10 +105,9 @@ fn test_resource_request_exposes_optional_memory_and_disk_quotas() {
 fn test_task_request_rejects_metadata_over_entry_budget() {
     let mut request = TaskRequest::new(
         "example.count",
-        ModelId::new("qubit_task.tests.Counter"),
         1,
         ValueCodecId::new("qubit_task.tests.u32_le"),
-        1_u32,
+        Counter(1),
     );
     for index in 0..=crate::model::next::MAX_TASK_METADATA_ENTRIES {
         request.metadata.insert(&format!("key_{index}"), "value");
@@ -125,10 +127,9 @@ fn test_task_request_rejects_empty_kind_id_before_encoding_payload() {
     for kind_id in ["", " \t\n"] {
         let request = TaskRequest::new(
             kind_id,
-            ModelId::new("qubit_task.tests.Counter"),
             1,
             ValueCodecId::new("qubit_task.tests.u32_le"),
-            1_u32,
+            Counter(1),
         );
 
         assert!(matches!(
@@ -142,10 +143,9 @@ fn test_task_request_rejects_empty_kind_id_before_encoding_payload() {
 fn test_task_request_rejects_metadata_over_serialized_byte_budget() {
     let mut request = TaskRequest::new(
         "example.count",
-        ModelId::new("qubit_task.tests.Counter"),
         1,
         ValueCodecId::new("qubit_task.tests.u32_le"),
-        1_u32,
+        Counter(1),
     );
     request.metadata.insert("notes", "x".repeat(16 * 1024));
 

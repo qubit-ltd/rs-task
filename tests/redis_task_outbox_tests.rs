@@ -207,11 +207,11 @@ async fn producer(url: &str, namespace: &str) -> Result<Arc<AsyncEventBus>, Box<
 struct Handler {
     started: tokio::sync::mpsc::UnboundedSender<TaskId>,
 }
-impl TaskHandler<serde_json::Value> for Handler {
-    fn run<'a>(&'a self, input: serde_json::Value, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+impl TaskHandler<typed_support::ExamplePayload> for Handler {
+    fn run<'a>(&'a self, input: typed_support::ExamplePayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             let _ = self.started.send(context.task_id());
-            if input["cancel"].as_bool() == Some(true) {
+            if input.0["cancel"].as_bool() == Some(true) {
                 while !context.is_cancelled() {
                     tokio::task::yield_now().await;
                 }
@@ -238,7 +238,7 @@ async fn service(
     )
     .event_bus(bus)
     .notification_shutdown_timeout(timeout);
-    builder.handlers_mut().register::<serde_json::Value, _>(
+    builder.handlers_mut().register::<typed_support::ExamplePayload, _>(
         TaskHandlerDescriptor {
             kind_id: "example.process".into(),
             payload_type_id: ModelIdBuf::try_from("example.TaskPayload")?,

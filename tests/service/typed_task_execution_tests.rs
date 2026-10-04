@@ -15,7 +15,6 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
-use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
@@ -37,27 +36,34 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Counter(u32);
+
+impl qubit_model_id::HasModelId for Counter {
+    const MODEL_ID: qubit_model_id::ModelId = qubit_model_id::ModelId::new("test.TypedServicePayload");
+}
+
 #[derive(Default)]
 struct U32Codec;
 
-impl qubit_codec::ValueEncoder<u32> for U32Codec {
+impl qubit_codec::ValueEncoder<Counter> for U32Codec {
     type Output = Vec<u8>;
     type Error = std::convert::Infallible;
-    fn encode(&mut self, value: &u32) -> Result<Vec<u8>, Self::Error> {
-        Ok(value.to_le_bytes().to_vec())
+    fn encode(&mut self, value: &Counter) -> Result<Vec<u8>, Self::Error> {
+        Ok(value.0.to_le_bytes().to_vec())
     }
 }
 
 impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
-    type Output = u32;
+    type Output = Counter;
     type Error = std::array::TryFromSliceError;
-    fn decode(&mut self, bytes: &[u8]) -> Result<u32, Self::Error> {
+    fn decode(&mut self, bytes: &[u8]) -> Result<Counter, Self::Error> {
         let raw: [u8; 4] = bytes.try_into()?;
-        Ok(u32::from_le_bytes(raw))
+        Ok(Counter(u32::from_le_bytes(raw)))
     }
 }
 
-static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, u32>();
+static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, Counter>();
 static CODEC_REGISTRATION: qubit_codec::ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("qubit_task.typed_service.u32"),
     &CODEC_DESCRIPTOR,
@@ -97,11 +103,11 @@ struct Handler {
     cooperative_cancel: bool,
 }
 
-impl TaskHandler<u32> for Handler {
-    fn run<'a>(&'a self, value: u32, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+impl TaskHandler<Counter> for Handler {
+    fn run<'a>(&'a self, value: Counter, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         let cancel = self.cooperative_cancel;
         Box::pin(async move {
-            assert_eq!(value, 42);
+            assert_eq!(value, Counter(42));
             if cancel {
                 while !context.is_cancelled() {
                     tokio::task::yield_now().await;
@@ -118,16 +124,16 @@ impl TaskHandler<u32> for Handler {
 
 struct PendingHandler;
 
-impl TaskHandler<u32> for PendingHandler {
-    fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+impl TaskHandler<Counter> for PendingHandler {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(std::future::pending())
     }
 }
 
 struct RetryOnceHandler(AtomicU64);
 
-impl TaskHandler<u32> for RetryOnceHandler {
-    fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+impl TaskHandler<Counter> for RetryOnceHandler {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         let attempt = self.0.fetch_add(1, Ordering::AcqRel);
         Box::pin(async move {
             if attempt == 0 {
@@ -157,8 +163,8 @@ struct GatedHandler {
     release: Arc<tokio::sync::Semaphore>,
 }
 
-impl TaskHandler<u32> for GatedHandler {
-    fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+impl TaskHandler<Counter> for GatedHandler {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         let started = Arc::clone(&self.started);
         let release = Arc::clone(&self.release);
         Box::pin(async move {
@@ -523,8 +529,8 @@ async fn build_cancellation_releases_sqlite_file_lock() {
     let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
 }
 
-impl TaskHandler<u32> for ParallelismHandler {
-    fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+impl TaskHandler<Counter> for ParallelismHandler {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
         self.maximum.fetch_max(active, Ordering::AcqRel);
         self.started.add_permits(1);
@@ -543,10 +549,10 @@ impl TaskHandler<u32> for ParallelismHandler {
 
 struct ContextProgressHandler;
 
-impl TaskHandler<u32> for ContextProgressHandler {
-    fn run<'a>(&'a self, value: u32, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+impl TaskHandler<Counter> for ContextProgressHandler {
+    fn run<'a>(&'a self, value: Counter, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
-            assert_eq!(value, 42);
+            assert_eq!(value, Counter(42));
             assert_eq!(context.task_id().to_padded_decimal(), "00000000000000000301");
             assert_eq!(context.attempt(), 1);
             assert!(!context.is_cancelled());
@@ -580,13 +586,12 @@ fn registry() -> Arc<ValueBytesCodecRegistry> {
     Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap())
 }
 
-fn request() -> TaskRequest<u32> {
+fn request() -> TaskRequest<Counter> {
     let mut request = TaskRequest::new(
         "test.typed-service",
-        ModelId::new("test.TypedServicePayload"),
         2,
         ValueCodecId::new("qubit_task.typed_service.u32"),
-        42,
+        Counter(42),
     );
     request.resource_limit.cpu_slots = 1;
     request
@@ -615,7 +620,7 @@ async fn typed_submit_decodes_runs_and_persists_terminal_state() {
     );
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -678,7 +683,7 @@ async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
 #[tokio::test]
 async fn typed_submit_rejection_payload_budget_keeps_service_running() {
     assert_eq!(
-        qubit_codec::ValueEncoder::encode(&mut U32Codec, &42)
+        qubit_codec::ValueEncoder::encode(&mut U32Codec, &Counter(42))
             .expect("u32 encodes")
             .len(),
         4
@@ -741,7 +746,7 @@ async fn typed_submit_rejection_idempotency_conflict_keeps_service_running() {
     service.submit(first).await.expect("first task is accepted");
     let mut conflicting = request();
     conflicting.idempotency_key = Some("shared-key".into());
-    conflicting.payload.data = 43;
+    conflicting.payload.data = Counter(43);
     assert!(matches!(
         service.submit(conflicting).await,
         Err(qubit_task::service::TaskServiceError::IdempotencyConflict)
@@ -761,7 +766,7 @@ async fn typed_submit_rejection_duplicate_id_keeps_service_running() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(ConstantId));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -803,7 +808,7 @@ async fn retryable_handler_error_is_persisted_and_retried_after_deadline() {
         );
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(RetryOnceHandler(AtomicU64::new(0))),
         )
@@ -846,7 +851,7 @@ async fn sqlite_retry_deadline_survives_service_restart() {
             .retry_policy(qubit_task::service::RetryPolicy::new(retry_delay, retry_delay).unwrap());
     first_builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(RetryOnceHandler(AtomicU64::new(0))),
         )
@@ -873,7 +878,7 @@ async fn sqlite_retry_deadline_survives_service_restart() {
         TaskExecutionServiceBuilder::new(Arc::clone(&reopened), registry(), Arc::new(Ids(AtomicU64::new(1252))));
     second_builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -916,7 +921,7 @@ async fn scheduler_never_exceeds_configured_running_limit() {
         .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
     builder
         .handlers_mut()
-        .register::<u32, _>(descriptor(CancellationMode::Cooperative), handler.clone())
+        .register::<Counter, _>(descriptor(CancellationMode::Cooperative), handler.clone())
         .unwrap();
     let service = builder.build().await.unwrap();
     let mut accepted = Vec::new();
@@ -945,7 +950,7 @@ async fn scheduler_store_failure_is_latched_and_reported_by_shutdown() {
     let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1501))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -968,7 +973,7 @@ async fn typed_service_latches_get_and_start_failures() {
             TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1551))));
         builder
             .handlers_mut()
-            .register::<u32, _>(
+            .register::<Counter, _>(
                 descriptor(CancellationMode::Cooperative),
                 Arc::new(Handler {
                     cooperative_cancel: false,
@@ -996,7 +1001,7 @@ async fn typed_service_latches_finalizer_transition_failure() {
     let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1581))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -1024,7 +1029,7 @@ async fn typed_context_exposes_attempt_cancellation_and_persisted_progress() {
     );
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(ContextProgressHandler),
         )
@@ -1051,7 +1056,7 @@ async fn typed_running_cancel_is_persisted_then_acknowledged_by_handler() {
     );
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: true,
@@ -1128,7 +1133,7 @@ async fn blocked_task_can_be_resumed_after_restarting_with_its_handler() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1302))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -1166,7 +1171,7 @@ async fn unsupported_schema_is_retained_as_blocked() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(401))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -1204,7 +1209,7 @@ async fn queued_typed_task_can_be_cancelled_before_resource_admission() {
     );
     builder
         .handlers_mut()
-        .register::<u32, _>(descriptor(CancellationMode::Cooperative), Arc::new(PendingHandler))
+        .register::<Counter, _>(descriptor(CancellationMode::Cooperative), Arc::new(PendingHandler))
         .unwrap();
     let service = builder.build().await.unwrap();
     let running = service.submit(request()).await.unwrap();
@@ -1233,7 +1238,7 @@ async fn running_handler_without_cancel_support_reports_unsupported() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(601))));
     builder
         .handlers_mut()
-        .register::<u32, _>(descriptor(CancellationMode::Unsupported), Arc::new(PendingHandler))
+        .register::<Counter, _>(descriptor(CancellationMode::Unsupported), Arc::new(PendingHandler))
         .unwrap();
     let service = builder.build().await.unwrap();
     let accepted = service.submit(request()).await.unwrap();
@@ -1260,7 +1265,7 @@ async fn repeated_idempotency_key_returns_the_existing_typed_task() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(801))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -1305,7 +1310,7 @@ async fn recovery_blocks_unsupported_schema_and_missing_codec() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(903))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
@@ -1322,8 +1327,12 @@ async fn recovery_blocks_unsupported_schema_and_missing_codec() {
 #[tokio::test]
 async fn external_cancel_retries_failed_hook() {
     struct FinishOnExternalCancel(Arc<tokio::sync::Notify>);
-    impl TaskHandler<u32> for FinishOnExternalCancel {
-        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    impl TaskHandler<Counter> for FinishOnExternalCancel {
+        fn run<'a>(
+            &'a self,
+            _value: Counter,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1355,7 +1364,7 @@ async fn external_cancel_retries_failed_hook() {
     });
     builder
         .handlers_mut()
-        .register_with_cancellation_hook::<u32, _>(
+        .register_with_cancellation_hook::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(FinishOnExternalCancel(hook_finished)),
             "test",
@@ -1397,8 +1406,12 @@ async fn external_cancel_retries_failed_hook() {
 #[tokio::test]
 async fn external_cancel_terminal_race_preserves_terminal_state() {
     struct FinishWhenReleased(Arc<tokio::sync::Notify>);
-    impl TaskHandler<u32> for FinishWhenReleased {
-        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    impl TaskHandler<Counter> for FinishWhenReleased {
+        fn run<'a>(
+            &'a self,
+            _value: Counter,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let release = Arc::clone(&self.0);
             Box::pin(async move {
                 release.notified().await;
@@ -1431,7 +1444,7 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(704))));
     builder
         .handlers_mut()
-        .register_with_cancellation_hook::<u32, _>(
+        .register_with_cancellation_hook::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(FinishWhenReleased(Arc::clone(&handler_release))),
             "test",
@@ -1472,8 +1485,12 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
 #[tokio::test]
 async fn external_cancel_concurrent_callers_share_hook() {
     struct FinishOnHook(Arc<tokio::sync::Notify>);
-    impl TaskHandler<u32> for FinishOnHook {
-        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    impl TaskHandler<Counter> for FinishOnHook {
+        fn run<'a>(
+            &'a self,
+            _value: Counter,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1505,7 +1522,7 @@ async fn external_cancel_concurrent_callers_share_hook() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(702))));
     builder
         .handlers_mut()
-        .register_with_cancellation_hook::<u32, _>(
+        .register_with_cancellation_hook::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(FinishOnHook(hook_finished)),
             "test",
@@ -1542,8 +1559,12 @@ async fn external_cancel_concurrent_callers_share_hook() {
 #[tokio::test]
 async fn external_cancel_aborted_waiter_does_not_abort_hook() {
     struct FinishOnHook(Arc<tokio::sync::Notify>);
-    impl TaskHandler<u32> for FinishOnHook {
-        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    impl TaskHandler<Counter> for FinishOnHook {
+        fn run<'a>(
+            &'a self,
+            _value: Counter,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1572,7 +1593,7 @@ async fn external_cancel_aborted_waiter_does_not_abort_hook() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(703))));
     builder
         .handlers_mut()
-        .register_with_cancellation_hook::<u32, _>(
+        .register_with_cancellation_hook::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(FinishOnHook(Arc::clone(&hook_finished))),
             "test",
@@ -1624,7 +1645,7 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(705))));
     builder
         .handlers_mut()
-        .register_with_cancellation_hook::<u32, _>(
+        .register_with_cancellation_hook::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(PendingHandler),
             "test",
@@ -1680,7 +1701,7 @@ async fn shutdown_rejects_new_work_and_waits_for_running_attempts() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(751))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: true,
@@ -1721,7 +1742,7 @@ async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Ar
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(801))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
@@ -1834,7 +1855,7 @@ async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(831))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
@@ -1994,7 +2015,7 @@ async fn shutdown_fences_cancel_calls_from_previous_owner() {
     let mut second_builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(762))));
     second_builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: true,
@@ -2035,8 +2056,12 @@ async fn shutdown_fences_cancel_calls_from_previous_owner() {
 async fn shutdown_waits_for_external_cancel_hook() {
     struct HookWaitHandler(Arc<tokio::sync::Notify>);
 
-    impl TaskHandler<u32> for HookWaitHandler {
-        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    impl TaskHandler<Counter> for HookWaitHandler {
+        fn run<'a>(
+            &'a self,
+            _value: Counter,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let hook_finished = Arc::clone(&self.0);
             Box::pin(async move {
                 hook_finished.notified().await;
@@ -2066,7 +2091,7 @@ async fn shutdown_waits_for_external_cancel_hook() {
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(771))));
     builder
         .handlers_mut()
-        .register_with_cancellation_hook::<u32, _>(
+        .register_with_cancellation_hook::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(HookWaitHandler(Arc::clone(&hook_finished))),
             "test",
@@ -2114,7 +2139,7 @@ async fn typed_service_persists_sqlite_terminal_transition() {
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1001))));
     builder
         .handlers_mut()
-        .register::<u32, _>(
+        .register::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(Handler {
                 cooperative_cancel: false,
