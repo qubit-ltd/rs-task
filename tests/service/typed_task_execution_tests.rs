@@ -1284,21 +1284,347 @@ async fn recovery_blocks_unsupported_schema_and_missing_codec() {
 }
 
 #[tokio::test]
-async fn external_cancel_hook_failure_remains_queryable() {
+async fn external_cancel_retries_failed_hook() {
+    struct FinishOnExternalCancel(Arc<tokio::sync::Notify>);
+    impl TaskHandler<u32> for FinishOnExternalCancel {
+        fn run<'a>(
+            &'a self,
+            _value: u32,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+            let finished = Arc::clone(&self.0);
+            Box::pin(async move {
+                finished.notified().await;
+                Ok(TaskRunOutcome::Cancelled)
+            })
+        }
+    }
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(701))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(701))));
     let hook_calls = Arc::new(AtomicU64::new(0));
     let hook_call_counter = Arc::clone(&hook_calls);
+    let hook_finished = Arc::new(tokio::sync::Notify::new());
+    let hook_signal = Arc::clone(&hook_finished);
     let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
-        hook_call_counter.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async {
+        let call = hook_call_counter.fetch_add(1, Ordering::Relaxed);
+        let hook_signal = Arc::clone(&hook_signal);
+        Box::pin(async move {
+            if call == 0 {
             Err(TaskRunError {
-                category: "cancel_failed".into(),
-                message: "remote cancellation failed".into(),
+                    category: "remote".into(),
+                    message: "temporary".into(),
+                retryable: false,
+            })
+            } else {
+                hook_signal.notify_one();
+                Ok(())
+            }
+        })
+    });
+    builder
+        .handlers_mut()
+        .register_with_cancellation_hook::<u32, _>(
+            descriptor(CancellationMode::ExternalHook),
+            Arc::new(FinishOnExternalCancel(hook_finished)),
+            "test",
+            hook,
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    for _ in 0..1000 {
+        if service
+            .get(accepted.id)
+            .await
+            .unwrap()
+            .is_some_and(|summary| matches!(summary.state, TaskState::Running))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    assert!(
+        matches!(service.cancel(accepted.id).await, Err(qubit_task::service::TaskServiceError::ExternalCancellationFailed { message, .. }) if message == "temporary")
+    );
+    let summary = service.get(accepted.id).await.unwrap().unwrap();
+    assert!(summary.cancel_requested);
+    assert_eq!(summary.cancel_error.as_deref(), Some("temporary"));
+    assert_eq!(
+        service.cancel(accepted.id).await.unwrap(),
+        CancelOutcome::CancellationRequested
+    );
+    assert_eq!(hook_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Cancelled
+    );
+    assert_eq!(
+        service.cancel(accepted.id).await.unwrap(),
+        CancelOutcome::AlreadyTerminal
+    );
+    assert_eq!(hook_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn external_cancel_terminal_race_preserves_terminal_state() {
+    struct FinishWhenReleased(Arc<tokio::sync::Notify>);
+    impl TaskHandler<u32> for FinishWhenReleased {
+        fn run<'a>(
+            &'a self,
+            _value: u32,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+            let release = Arc::clone(&self.0);
+            Box::pin(async move {
+                release.notified().await;
+                Ok(TaskRunOutcome::Succeeded(
+                    qubit_task::model::TaskOutput::default(),
+                ))
+            })
+        }
+    }
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let hook_started = Arc::new(tokio::sync::Notify::new());
+    let hook_release = Arc::new(tokio::sync::Notify::new());
+    let handler_release = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicU64::new(0));
+    let started = Arc::clone(&hook_started);
+    let release = Arc::clone(&hook_release);
+    let count = Arc::clone(&calls);
+    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+        count.fetch_add(1, Ordering::Relaxed);
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        Box::pin(async move {
+            started.notify_one();
+            release.notified().await;
+            Err(TaskRunError {
+                category: "remote".into(),
+                message: "late failure".into(),
                 retryable: false,
             })
         })
     });
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(704))));
+    builder
+        .handlers_mut()
+        .register_with_cancellation_hook::<u32, _>(
+            descriptor(CancellationMode::ExternalHook),
+            Arc::new(FinishWhenReleased(Arc::clone(&handler_release))),
+            "test",
+            hook,
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    for _ in 0..1000 {
+        if service
+            .get(accepted.id)
+            .await
+            .unwrap()
+            .is_some_and(|s| matches!(s.state, TaskState::Running))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    let cancel_service = service.clone();
+    let cancel = tokio::spawn(async move { cancel_service.cancel(accepted.id).await });
+    hook_started.notified().await;
+    handler_release.notify_one();
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Succeeded
+    );
+    hook_release.notify_one();
+    assert_eq!(
+        cancel.await.unwrap().unwrap(),
+        CancelOutcome::AlreadyTerminal
+    );
+    let terminal = service.get(accepted.id).await.unwrap().unwrap();
+    assert_eq!(terminal.state, TaskState::Succeeded);
+    assert_eq!(terminal.cancel_error, None);
+    assert_eq!(
+        service.cancel(accepted.id).await.unwrap(),
+        CancelOutcome::AlreadyTerminal
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn external_cancel_concurrent_callers_share_hook() {
+    struct FinishOnHook(Arc<tokio::sync::Notify>);
+    impl TaskHandler<u32> for FinishOnHook {
+        fn run<'a>(
+            &'a self,
+            _value: u32,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+            let finished = Arc::clone(&self.0);
+            Box::pin(async move {
+                finished.notified().await;
+                Ok(TaskRunOutcome::Cancelled)
+            })
+        }
+    }
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let hook_started = Arc::new(tokio::sync::Notify::new());
+    let hook_release = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicU64::new(0));
+    let hook_finished = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::clone(&hook_started);
+    let release = Arc::clone(&hook_release);
+    let call_count = Arc::clone(&calls);
+    let finished = Arc::clone(&hook_finished);
+    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+        call_count.fetch_add(1, Ordering::Relaxed);
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        let finished = Arc::clone(&finished);
+        Box::pin(async move {
+            started.notify_one();
+            release.notified().await;
+            finished.notify_one();
+            Ok(())
+        })
+    });
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(702))));
+    builder
+        .handlers_mut()
+        .register_with_cancellation_hook::<u32, _>(
+            descriptor(CancellationMode::ExternalHook),
+            Arc::new(FinishOnHook(hook_finished)),
+            "test",
+            hook,
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    for _ in 0..1000 {
+        if service
+            .get(accepted.id)
+            .await
+            .unwrap()
+            .is_some_and(|s| matches!(s.state, TaskState::Running))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    let first_service = service.clone();
+    let first = tokio::spawn(async move { first_service.cancel(accepted.id).await });
+    hook_started.notified().await;
+    let second_service = service.clone();
+    let second = tokio::spawn(async move { second_service.cancel(accepted.id).await });
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    hook_release.notify_one();
+    assert_eq!(
+        first.await.unwrap().unwrap(),
+        CancelOutcome::CancellationRequested
+    );
+    assert_eq!(
+        second.await.unwrap().unwrap(),
+        CancelOutcome::CancellationRequested
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn external_cancel_aborted_waiter_does_not_abort_hook() {
+    struct FinishOnHook(Arc<tokio::sync::Notify>);
+    impl TaskHandler<u32> for FinishOnHook {
+        fn run<'a>(
+            &'a self,
+            _value: u32,
+            _context: TaskContext,
+        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+            let finished = Arc::clone(&self.0);
+            Box::pin(async move {
+                finished.notified().await;
+                Ok(TaskRunOutcome::Cancelled)
+            })
+        }
+    }
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let hook_started = Arc::new(tokio::sync::Notify::new());
+    let hook_release = Arc::new(tokio::sync::Notify::new());
+    let hook_finished = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::clone(&hook_started);
+    let release = Arc::clone(&hook_release);
+    let finished = Arc::clone(&hook_finished);
+    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        let finished = Arc::clone(&finished);
+        Box::pin(async move {
+            started.notify_one();
+            release.notified().await;
+            finished.notify_one();
+            Ok(())
+        })
+    });
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(703))));
+    builder
+        .handlers_mut()
+        .register_with_cancellation_hook::<u32, _>(
+            descriptor(CancellationMode::ExternalHook),
+            Arc::new(FinishOnHook(Arc::clone(&hook_finished))),
+            "test",
+            hook,
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    for _ in 0..1000 {
+        if service
+            .get(accepted.id)
+            .await
+            .unwrap()
+            .is_some_and(|s| matches!(s.state, TaskState::Running))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    let cancel_service = service.clone();
+    let cancel = tokio::spawn(async move { cancel_service.cancel(accepted.id).await });
+    hook_started.notified().await;
+    cancel.abort();
+    let shutdown_service = service.clone();
+    let shutdown = tokio::spawn(async move { shutdown_service.shutdown().await });
+    tokio::task::yield_now().await;
+    assert!(!shutdown.is_finished());
+    hook_release.notify_one();
+    shutdown.await.unwrap().unwrap();
+    assert!(service.get(accepted.id).await.unwrap().is_some());
+    let _ = hook_finished;
+}
+
+#[tokio::test]
+async fn external_cancel_hook_panics_are_reported_and_retryable() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let calls = Arc::new(AtomicU64::new(0));
+    let hook_calls = Arc::clone(&calls);
+    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+        match hook_calls.fetch_add(1, Ordering::Relaxed) {
+            0 => panic!("hook factory failed"),
+            1 => Box::pin(async {
+                panic!("hook future failed");
+                #[allow(unreachable_code)]
+                Ok(())
+            }),
+            _ => Box::pin(async { Ok(()) }),
+        }
+    });
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(705))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<u32, _>(
@@ -1321,12 +1647,34 @@ async fn external_cancel_hook_failure_remains_queryable() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
-    assert!(service.cancel(accepted.id).await.is_err());
-    assert!(service.cancel(accepted.id).await.is_err());
-    assert_eq!(hook_calls.load(Ordering::Relaxed), 1);
-    let summary = service.get(accepted.id).await.unwrap().unwrap();
-    assert!(summary.cancel_requested);
-    assert_eq!(summary.cancel_error.as_deref(), Some("remote cancellation failed"));
+
+    assert!(matches!(
+        service.cancel(accepted.id).await,
+        Err(qubit_task::service::TaskServiceError::ExternalCancellationFailed {
+            message,
+            ..
+        }) if message == "hook factory failed"
+    ));
+    assert_eq!(
+        service.get(accepted.id).await.unwrap().unwrap().cancel_error.as_deref(),
+        Some("hook factory failed")
+    );
+    assert!(matches!(
+        service.cancel(accepted.id).await,
+        Err(qubit_task::service::TaskServiceError::ExternalCancellationFailed {
+            message,
+            ..
+        }) if message == "hook future failed"
+    ));
+    assert_eq!(
+        service.get(accepted.id).await.unwrap().unwrap().cancel_error.as_deref(),
+        Some("hook future failed")
+    );
+    assert_eq!(
+        service.cancel(accepted.id).await.unwrap(),
+        CancelOutcome::CancellationRequested
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
 }
 
 #[tokio::test]

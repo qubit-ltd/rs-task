@@ -12,6 +12,7 @@ use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use tokio::sync::watch;
 
 use futures::FutureExt;
 use parking_lot::Mutex;
@@ -55,6 +56,7 @@ struct TypedServiceCore {
     engine: Arc<LocalTaskExecutionEngine>,
     handlers: TypedTaskHandlerRegistry,
     cancellations: Mutex<HashMap<(TaskId, u32), Arc<AtomicBool>>>,
+    external_cancellations: Mutex<HashMap<(TaskId, u32), ExternalCancelEntry>>,
     owner_guard: tokio::sync::Mutex<Option<OwnerReleaseGuard>>,
     admission: tokio::sync::RwLock<()>,
     scheduler_changed: tokio::sync::Notify,
@@ -78,6 +80,23 @@ struct TypedServiceCore {
     publisher: Option<TaskEventPublisher>,
     #[cfg(feature = "event-bus")]
     notification_close_error: Mutex<Option<String>>,
+}
+
+enum ExternalCancelEntry {
+    InFlight(Arc<ExternalCancelFlight>),
+    Succeeded,
+}
+
+struct ExternalCancelFlight {
+    result: watch::Sender<Option<ExternalCancelResult>>,
+}
+
+#[derive(Clone)]
+enum ExternalCancelResult {
+    Success,
+    AlreadyTerminal,
+    HookFailed(String),
+    ServiceFailed(String),
 }
 
 impl TypedServiceCore {
@@ -207,6 +226,7 @@ impl TypedTaskExecutionService {
             engine,
             handlers,
             cancellations: Mutex::new(HashMap::new()),
+            external_cancellations: Mutex::new(HashMap::new()),
             owner_guard: tokio::sync::Mutex::new(None),
             admission: tokio::sync::RwLock::new(()),
             scheduler_changed: tokio::sync::Notify::new(),
@@ -424,10 +444,15 @@ impl TypedTaskExecutionService {
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let _admission = self.core.admission.read().await;
         self.runner().check_fault()?;
-        if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
+        if self.core.shutting_down.load(Ordering::Acquire)
+            || self.core.owner_released.load(Ordering::Acquire)
+        {
             return Err(TaskServiceError::ShuttingDown);
         }
-        let Some(task) = self.runner().store_result(self.core.store.get_encoded_task(id).await)? else {
+        let Some(task) = self
+            .runner()
+            .store_result(self.core.store.get_encoded_task(id).await)?
+        else {
             return Err(TaskServiceError::Store(crate::store::StoreError::NotFound));
         };
         let summary = task.summary;
@@ -455,14 +480,6 @@ impl TypedTaskExecutionService {
             self.core.scheduler_changed.notify_one();
             return Ok(CancelOutcome::CancelledBeforeStart);
         }
-        if summary.cancel_requested {
-            if summary.cancel_error.is_some() {
-                return Err(TaskServiceError::TypedRequest(
-                    "external cancellation hook previously failed".into(),
-                ));
-            }
-            return Ok(CancelOutcome::CancellationRequested);
-        }
         let descriptor = self
             .core
             .handlers
@@ -470,6 +487,39 @@ impl TypedTaskExecutionService {
             .ok_or(TaskServiceError::CancellationUnsupported)?;
         if descriptor.cancellation_mode == CancellationMode::Unsupported {
             return Ok(CancelOutcome::CancellationUnsupported);
+        }
+        if descriptor.cancellation_mode == CancellationMode::ExternalHook {
+            let key = (id, summary.attempt);
+            let (flight, start) = {
+                let mut entries = self.core.external_cancellations.lock();
+                match entries.get(&key) {
+                    Some(ExternalCancelEntry::InFlight(flight)) => (Arc::clone(flight), false),
+                    Some(ExternalCancelEntry::Succeeded) => {
+                        return Ok(CancelOutcome::CancellationRequested);
+                    }
+                    None => {
+                        let (result, _) = watch::channel(None);
+                        let flight = Arc::new(ExternalCancelFlight { result });
+                        entries.insert(key, ExternalCancelEntry::InFlight(Arc::clone(&flight)));
+                        (flight, true)
+                    }
+                }
+            };
+            if start {
+                self.core.in_flight.fetch_add(1, Ordering::AcqRel);
+                let core = Arc::clone(&self.core);
+                let kind_id = summary.kind_id.clone();
+                let task_flight = Arc::clone(&flight);
+                tokio::spawn(async move {
+                    let _in_flight = InFlightGuard(Arc::clone(&core));
+                    ServiceRunner::run_external_cancel(core, key, kind_id, task_flight).await;
+                });
+            }
+            drop(_admission);
+            return Self::wait_external_cancel(id, summary.attempt, flight).await;
+        }
+        if summary.cancel_requested {
+            return Ok(CancelOutcome::CancellationRequested);
         }
         let _cancellation_requested = self.runner().store_write_result(
             self.core
@@ -495,45 +545,145 @@ impl TypedTaskExecutionService {
                 }
                 Ok(CancelOutcome::CancellationRequested)
             }
-            CancellationMode::ExternalHook => {
-                let hook = self
-                    .core
-                    .handlers
-                    .cancel_externally(&summary.kind_id, id, summary.attempt)
-                    .ok_or(TaskServiceError::CancellationUnsupported)?;
-                if let Err(error) = hook.await {
-                    let diagnostic = error.message;
-                    let latest = self
-                        .runner()
-                        .store_result(self.core.store.get_encoded_task(id).await)?
-                        .ok_or(crate::store::StoreError::NotFound)?;
-                    let _cancellation_error = self.runner().store_write_result(
-                        self.core
-                            .store
-                            .transition_encoded(TransitionCommand {
-                                id,
-                                expected_state_version: latest.summary.state_version,
-                                expected_attempt: latest.summary.attempt,
-                                retry_not_before_ms: None,
-                                state: latest.summary.state,
-                                cancel_requested: true,
-                                cancel_error: Some(diagnostic),
-                                finished_at_ms: None,
-                                output: None,
-                            })
-                            .await,
-                    )?;
-                    return Err(TaskServiceError::TypedRequest(
-                        "external cancellation hook failed".into(),
-                    ));
-                }
-                Ok(CancelOutcome::CancellationRequested)
+            CancellationMode::ExternalHook => unreachable!("external hooks are handled above"),
+        }
+    }
+
+    async fn wait_external_cancel(id: TaskId, attempt: u32, flight: Arc<ExternalCancelFlight>) -> Result<CancelOutcome, TaskServiceError> {
+        let mut result = flight.result.subscribe();
+        loop {
+            if let Some(result) = result.borrow().clone() {
+                return match result {
+                    ExternalCancelResult::Success => Ok(CancelOutcome::CancellationRequested),
+                    ExternalCancelResult::AlreadyTerminal => Ok(CancelOutcome::AlreadyTerminal),
+                    ExternalCancelResult::HookFailed(message) => Err(TaskServiceError::ExternalCancellationFailed { task_id: id, attempt, message }),
+                    ExternalCancelResult::ServiceFailed(message) => Err(TaskServiceError::StoreUnavailable(message)),
+                };
+            }
+            if result.changed().await.is_err() {
+                return Err(TaskServiceError::SchedulerUnavailable("external cancellation task ended without a result".into()));
             }
         }
     }
 }
 
 impl ServiceRunner {
+    fn external_cancel_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+        panic
+            .downcast_ref::<&str>()
+            .map_or_else(
+                || {
+                    panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .unwrap_or_else(|| "external cancellation hook panicked".into())
+                },
+                |message| (*message).to_owned(),
+            )
+    }
+
+    async fn run_external_cancel(core: Arc<TypedServiceCore>, key: (TaskId, u32), kind_id: String, flight: Arc<ExternalCancelFlight>) {
+        let (id, attempt) = key;
+        let runner = Self { core: Arc::clone(&core) };
+        let result = async {
+            loop {
+                let task = match core.store.get_encoded_task(id).await {
+                    Ok(Some(task)) => task,
+                    Ok(None) => return ExternalCancelResult::ServiceFailed("task disappeared during external cancellation".into()),
+                    Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+                };
+                let summary = task.summary;
+                if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running) {
+                    return ExternalCancelResult::AlreadyTerminal;
+                }
+                if !summary.cancel_requested || summary.cancel_error.is_some() {
+                    match core.store.transition_encoded(TransitionCommand {
+                        id, expected_state_version: summary.state_version, expected_attempt: attempt,
+                        retry_not_before_ms: None, state: TaskState::Running, cancel_requested: true,
+                        cancel_error: None, finished_at_ms: None, output: None,
+                    }).await {
+                        Ok(_) => {}
+                        Err(crate::store::StoreError::Conflict) => continue,
+                        Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+                    }
+                }
+                break;
+            }
+            let hook = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                core.handlers.cancel_externally(&kind_id, id, attempt)
+            })) {
+                Ok(Some(hook)) => hook,
+                Ok(None) => {
+                    return ExternalCancelResult::ServiceFailed(
+                        "external cancellation hook is unavailable".into(),
+                    );
+                }
+                Err(panic) => {
+                    let message = Self::external_cancel_panic_message(panic);
+                    return Self::record_external_cancel_failure(&core, id, attempt, message).await;
+                }
+            };
+            match AssertUnwindSafe(hook).catch_unwind().await {
+                Ok(Ok(())) => loop {
+                    let task = match core.store.get_encoded_task(id).await {
+                        Ok(Some(task)) => task,
+                        Ok(None) => return ExternalCancelResult::ServiceFailed("task disappeared after external cancellation".into()),
+                        Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+                    };
+                    let summary = task.summary;
+                    if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running) {
+                        return ExternalCancelResult::AlreadyTerminal;
+                    }
+                    if summary.cancel_error.is_none() { return ExternalCancelResult::Success; }
+                    match core.store.transition_encoded(TransitionCommand {
+                        id, expected_state_version: summary.state_version, expected_attempt: attempt,
+                        retry_not_before_ms: None, state: TaskState::Running, cancel_requested: true,
+                        cancel_error: None, finished_at_ms: None, output: None,
+                    }).await {
+                        Ok(_) => return ExternalCancelResult::Success,
+                        Err(crate::store::StoreError::Conflict) => continue,
+                        Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+                    }
+                },
+                Ok(Err(error)) => Self::record_external_cancel_failure(&core, id, attempt, error.message).await,
+                Err(panic) => {
+                    let message = Self::external_cancel_panic_message(panic);
+                    Self::record_external_cancel_failure(&core, id, attempt, message).await
+                }
+            }
+        }.await;
+        match &result {
+            ExternalCancelResult::Success => { core.external_cancellations.lock().insert(key, ExternalCancelEntry::Succeeded); }
+            _ => { core.external_cancellations.lock().remove(&key); }
+        }
+        if let ExternalCancelResult::ServiceFailed(message) = &result { runner.latch_fault(message.clone()); }
+        flight.result.send_replace(Some(result));
+        core.scheduler_changed.notify_one();
+    }
+
+    async fn record_external_cancel_failure(core: &Arc<TypedServiceCore>, id: TaskId, attempt: u32, message: String) -> ExternalCancelResult {
+        loop {
+            let task = match core.store.get_encoded_task(id).await {
+                Ok(Some(task)) => task,
+                Ok(None) => return ExternalCancelResult::ServiceFailed("task disappeared while recording cancellation failure".into()),
+                Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+            };
+            let summary = task.summary;
+            if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running) {
+                return ExternalCancelResult::AlreadyTerminal;
+            }
+            match core.store.transition_encoded(TransitionCommand {
+                id, expected_state_version: summary.state_version, expected_attempt: attempt,
+                retry_not_before_ms: None, state: TaskState::Running, cancel_requested: true,
+                cancel_error: Some(message.clone()), finished_at_ms: None, output: None,
+            }).await {
+                Ok(_) => return ExternalCancelResult::HookFailed(message),
+                Err(crate::store::StoreError::Conflict) => continue,
+                Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+            }
+        }
+    }
+
     /// Waits for a stop request, drains work, and publishes one terminal
     /// result.
     async fn shutdown_supervisor(&self) {
@@ -1090,6 +1240,7 @@ impl ServiceRunner {
             }
         };
         if latest.summary.state.is_terminal() {
+            self.core.external_cancellations.lock().remove(&(started.id, started.attempt));
             return;
         }
         let retry = retryable && !latest.summary.cancel_requested && started.attempt < self.core.max_attempts;
@@ -1115,6 +1266,7 @@ impl ServiceRunner {
             .await
         {
             Ok(_updated) => {
+                self.core.external_cancellations.lock().remove(&(started.id, started.attempt));
                 #[cfg(feature = "event-bus")]
                 self.notify_notifications();
             }
