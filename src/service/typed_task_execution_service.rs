@@ -316,7 +316,7 @@ impl TypedTaskExecutionService {
         let id = TaskId::from_id(self.core.id_generator.generate()?);
         let accepted = self
             .runner()
-            .store_result(self.core.store.accept_encoded(id, stored).await)?;
+            .submission_store_result(self.core.store.accept_encoded(id, stored).await)?;
         if accepted.created {
             #[cfg(feature = "event-bus")]
             self.runner().notify_notifications();
@@ -680,6 +680,27 @@ impl ServiceRunner {
             }
             TaskServiceError::Store(error)
         })
+    }
+
+    /// Maps known rejection errors from a single submit store result to
+    /// structured service errors without changing the service state. Other
+    /// store errors retain the existing fault-latching behavior.
+    fn submission_store_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
+        match result {
+            Err(crate::store::StoreError::CapacityExceeded {
+                requested_bytes,
+                available_bytes,
+            }) => Err(TaskServiceError::SubmissionCapacityExceeded {
+                requested_bytes,
+                available_bytes,
+            }),
+            Err(crate::store::StoreError::UnfinishedRecordLimitExceeded { limit }) => {
+                Err(TaskServiceError::UnfinishedTaskLimitExceeded { limit })
+            }
+            Err(crate::store::StoreError::IdempotencyConflict) => Err(TaskServiceError::IdempotencyConflict),
+            Err(crate::store::StoreError::DuplicateTask) => Err(TaskServiceError::DuplicateTaskId),
+            other => self.store_result(other),
+        }
     }
 
     async fn recover_unfinished(&self) -> Result<(), TaskServiceError> {

@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -77,6 +78,14 @@ impl qubit_id::IdGenerator for Ids {
 }
 
 struct FailingIds;
+
+struct ConstantId;
+
+impl qubit_id::IdGenerator for ConstantId {
+    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
+        Ok(qubit_id::Id::new(2101))
+    }
+}
 
 impl qubit_id::IdGenerator for FailingIds {
     fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
@@ -618,6 +627,131 @@ async fn typed_submit_decodes_runs_and_persists_terminal_state() {
     assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
     let completed = service.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(completed.output.unwrap().summary, b"typed-result");
+}
+
+#[tokio::test]
+async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
+    let store = Arc::new(MemoryTaskStore::with_limits(
+        16,
+        NonZeroUsize::new(1024).expect("payload budget is nonzero"),
+        NonZeroUsize::new(1).expect("unfinished limit is nonzero"),
+    ));
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2001))))
+        .build()
+        .await
+        .expect("service starts");
+    let first = service.submit(request()).await.expect("first task is accepted");
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let summary = service.get(first.id).await.expect("task can be queried").expect("task exists");
+            if matches!(summary.state, TaskState::Blocked { .. }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    blocked.expect("missing handler blocks first task");
+    assert!(matches!(
+        service.submit(request()).await,
+        Err(qubit_task::service::TaskServiceError::UnfinishedTaskLimitExceeded { limit: 1 })
+    ));
+    assert_eq!(
+        service.cancel(first.id).await.expect("blocked task can be cancelled"),
+        CancelOutcome::CancelledBeforeStart
+    );
+    assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Cancelled);
+    service.submit(request()).await.expect("service accepts after cancellation");
+    service.shutdown().await.expect("ordinary rejection does not fault shutdown");
+}
+
+#[tokio::test]
+async fn typed_submit_rejection_payload_budget_keeps_service_running() {
+    assert_eq!(qubit_codec::ValueEncoder::encode(&mut U32Codec, &42).expect("u32 encodes").len(), 4);
+    let store = Arc::new(MemoryTaskStore::with_payload_budget(
+        16,
+        NonZeroUsize::new(4).expect("payload budget is nonzero"),
+    ));
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2021))))
+        .build()
+        .await
+        .expect("service starts");
+    let first = service.submit(request()).await.expect("first task is accepted");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let summary = service.get(first.id).await.expect("task can be queried").expect("task exists");
+            if matches!(summary.state, TaskState::Blocked { .. }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("missing handler blocks first task");
+    assert!(matches!(
+        service.submit(request()).await,
+        Err(qubit_task::service::TaskServiceError::SubmissionCapacityExceeded {
+            requested_bytes: 4,
+            available_bytes: 0
+        })
+    ));
+    assert_eq!(
+        service.cancel(first.id).await.expect("blocked task can be cancelled"),
+        CancelOutcome::CancelledBeforeStart
+    );
+    assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Cancelled);
+    service.submit(request()).await.expect("service accepts after cancellation");
+    service.shutdown().await.expect("ordinary rejection does not fault shutdown");
+}
+
+#[tokio::test]
+async fn typed_submit_rejection_idempotency_conflict_keeps_service_running() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2041))))
+        .build()
+        .await
+        .expect("service starts");
+    let mut first = request();
+    first.idempotency_key = Some("shared-key".into());
+    service.submit(first).await.expect("first task is accepted");
+    let mut conflicting = request();
+    conflicting.idempotency_key = Some("shared-key".into());
+    conflicting.payload.data = 43;
+    assert!(matches!(
+        service.submit(conflicting).await,
+        Err(qubit_task::service::TaskServiceError::IdempotencyConflict)
+    ));
+    let mut distinct = request();
+    distinct.idempotency_key = Some("distinct-key".into());
+    service.submit(distinct).await.expect("distinct key is accepted");
+    service.shutdown().await.expect("ordinary rejection does not fault shutdown");
+}
+
+#[tokio::test]
+async fn typed_submit_rejection_duplicate_id_keeps_service_running() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(ConstantId));
+    builder
+        .handlers_mut()
+        .register::<u32, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    let first = service.submit(request()).await.expect("first task is accepted");
+    assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Succeeded);
+    assert!(matches!(
+        service.submit(request()).await,
+        Err(qubit_task::service::TaskServiceError::DuplicateTaskId)
+    ));
+    assert_eq!(
+        service.get(first.id).await.expect("original can be queried").expect("original exists").state,
+        TaskState::Succeeded
+    );
+    service.shutdown().await.expect("ordinary rejection does not fault shutdown");
 }
 
 #[tokio::test]
