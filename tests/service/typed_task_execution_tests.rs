@@ -643,7 +643,11 @@ async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
     let first = service.submit(request()).await.expect("first task is accepted");
     let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            let summary = service.get(first.id).await.expect("task can be queried").expect("task exists");
+            let summary = service
+                .get(first.id)
+                .await
+                .expect("task can be queried")
+                .expect("task exists");
             if matches!(summary.state, TaskState::Blocked { .. }) {
                 break;
             }
@@ -661,13 +665,24 @@ async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
         CancelOutcome::CancelledBeforeStart
     );
     assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Cancelled);
-    service.submit(request()).await.expect("service accepts after cancellation");
-    service.shutdown().await.expect("ordinary rejection does not fault shutdown");
+    service
+        .submit(request())
+        .await
+        .expect("service accepts after cancellation");
+    service
+        .shutdown()
+        .await
+        .expect("ordinary rejection does not fault shutdown");
 }
 
 #[tokio::test]
 async fn typed_submit_rejection_payload_budget_keeps_service_running() {
-    assert_eq!(qubit_codec::ValueEncoder::encode(&mut U32Codec, &42).expect("u32 encodes").len(), 4);
+    assert_eq!(
+        qubit_codec::ValueEncoder::encode(&mut U32Codec, &42)
+            .expect("u32 encodes")
+            .len(),
+        4
+    );
     let store = Arc::new(MemoryTaskStore::with_payload_budget(
         16,
         NonZeroUsize::new(4).expect("payload budget is nonzero"),
@@ -679,7 +694,11 @@ async fn typed_submit_rejection_payload_budget_keeps_service_running() {
     let first = service.submit(request()).await.expect("first task is accepted");
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            let summary = service.get(first.id).await.expect("task can be queried").expect("task exists");
+            let summary = service
+                .get(first.id)
+                .await
+                .expect("task can be queried")
+                .expect("task exists");
             if matches!(summary.state, TaskState::Blocked { .. }) {
                 break;
             }
@@ -700,8 +719,14 @@ async fn typed_submit_rejection_payload_budget_keeps_service_running() {
         CancelOutcome::CancelledBeforeStart
     );
     assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Cancelled);
-    service.submit(request()).await.expect("service accepts after cancellation");
-    service.shutdown().await.expect("ordinary rejection does not fault shutdown");
+    service
+        .submit(request())
+        .await
+        .expect("service accepts after cancellation");
+    service
+        .shutdown()
+        .await
+        .expect("ordinary rejection does not fault shutdown");
 }
 
 #[tokio::test]
@@ -724,7 +749,10 @@ async fn typed_submit_rejection_idempotency_conflict_keeps_service_running() {
     let mut distinct = request();
     distinct.idempotency_key = Some("distinct-key".into());
     service.submit(distinct).await.expect("distinct key is accepted");
-    service.shutdown().await.expect("ordinary rejection does not fault shutdown");
+    service
+        .shutdown()
+        .await
+        .expect("ordinary rejection does not fault shutdown");
 }
 
 #[tokio::test]
@@ -748,10 +776,18 @@ async fn typed_submit_rejection_duplicate_id_keeps_service_running() {
         Err(qubit_task::service::TaskServiceError::DuplicateTaskId)
     ));
     assert_eq!(
-        service.get(first.id).await.expect("original can be queried").expect("original exists").state,
+        service
+            .get(first.id)
+            .await
+            .expect("original can be queried")
+            .expect("original exists")
+            .state,
         TaskState::Succeeded
     );
-    service.shutdown().await.expect("ordinary rejection does not fault shutdown");
+    service
+        .shutdown()
+        .await
+        .expect("ordinary rejection does not fault shutdown");
 }
 
 #[tokio::test]
@@ -1287,11 +1323,7 @@ async fn recovery_blocks_unsupported_schema_and_missing_codec() {
 async fn external_cancel_retries_failed_hook() {
     struct FinishOnExternalCancel(Arc<tokio::sync::Notify>);
     impl TaskHandler<u32> for FinishOnExternalCancel {
-        fn run<'a>(
-            &'a self,
-            _value: u32,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1300,8 +1332,7 @@ async fn external_cancel_retries_failed_hook() {
         }
     }
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(701))));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(701))));
     let hook_calls = Arc::new(AtomicU64::new(0));
     let hook_call_counter = Arc::clone(&hook_calls);
     let hook_finished = Arc::new(tokio::sync::Notify::new());
@@ -1311,11 +1342,11 @@ async fn external_cancel_retries_failed_hook() {
         let hook_signal = Arc::clone(&hook_signal);
         Box::pin(async move {
             if call == 0 {
-            Err(TaskRunError {
+                Err(TaskRunError {
                     category: "remote".into(),
                     message: "temporary".into(),
-                retryable: false,
-            })
+                    retryable: false,
+                })
             } else {
                 hook_signal.notify_one();
                 Ok(())
@@ -1355,10 +1386,7 @@ async fn external_cancel_retries_failed_hook() {
         CancelOutcome::CancellationRequested
     );
     assert_eq!(hook_calls.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        wait_for_terminal(&service, accepted.id).await,
-        TaskState::Cancelled
-    );
+    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
     assert_eq!(
         service.cancel(accepted.id).await.unwrap(),
         CancelOutcome::AlreadyTerminal
@@ -1370,17 +1398,11 @@ async fn external_cancel_retries_failed_hook() {
 async fn external_cancel_terminal_race_preserves_terminal_state() {
     struct FinishWhenReleased(Arc<tokio::sync::Notify>);
     impl TaskHandler<u32> for FinishWhenReleased {
-        fn run<'a>(
-            &'a self,
-            _value: u32,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let release = Arc::clone(&self.0);
             Box::pin(async move {
                 release.notified().await;
-                Ok(TaskRunOutcome::Succeeded(
-                    qubit_task::model::TaskOutput::default(),
-                ))
+                Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput::default()))
             })
         }
     }
@@ -1406,8 +1428,7 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
             })
         })
     });
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(704))));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(704))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<u32, _>(
@@ -1434,15 +1455,9 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
     let cancel = tokio::spawn(async move { cancel_service.cancel(accepted.id).await });
     hook_started.notified().await;
     handler_release.notify_one();
-    assert_eq!(
-        wait_for_terminal(&service, accepted.id).await,
-        TaskState::Succeeded
-    );
+    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
     hook_release.notify_one();
-    assert_eq!(
-        cancel.await.unwrap().unwrap(),
-        CancelOutcome::AlreadyTerminal
-    );
+    assert_eq!(cancel.await.unwrap().unwrap(), CancelOutcome::AlreadyTerminal);
     let terminal = service.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(terminal.state, TaskState::Succeeded);
     assert_eq!(terminal.cancel_error, None);
@@ -1458,11 +1473,7 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
 async fn external_cancel_concurrent_callers_share_hook() {
     struct FinishOnHook(Arc<tokio::sync::Notify>);
     impl TaskHandler<u32> for FinishOnHook {
-        fn run<'a>(
-            &'a self,
-            _value: u32,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1491,8 +1502,7 @@ async fn external_cancel_concurrent_callers_share_hook() {
             Ok(())
         })
     });
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(702))));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(702))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<u32, _>(
@@ -1523,14 +1533,8 @@ async fn external_cancel_concurrent_callers_share_hook() {
     tokio::task::yield_now().await;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     hook_release.notify_one();
-    assert_eq!(
-        first.await.unwrap().unwrap(),
-        CancelOutcome::CancellationRequested
-    );
-    assert_eq!(
-        second.await.unwrap().unwrap(),
-        CancelOutcome::CancellationRequested
-    );
+    assert_eq!(first.await.unwrap().unwrap(), CancelOutcome::CancellationRequested);
+    assert_eq!(second.await.unwrap().unwrap(), CancelOutcome::CancellationRequested);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     service.shutdown().await.unwrap();
 }
@@ -1539,11 +1543,7 @@ async fn external_cancel_concurrent_callers_share_hook() {
 async fn external_cancel_aborted_waiter_does_not_abort_hook() {
     struct FinishOnHook(Arc<tokio::sync::Notify>);
     impl TaskHandler<u32> for FinishOnHook {
-        fn run<'a>(
-            &'a self,
-            _value: u32,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1569,8 +1569,7 @@ async fn external_cancel_aborted_waiter_does_not_abort_hook() {
             Ok(())
         })
     });
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(703))));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(703))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<u32, _>(
@@ -1612,8 +1611,8 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let calls = Arc::new(AtomicU64::new(0));
     let hook_calls = Arc::clone(&calls);
-    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
-        match hook_calls.fetch_add(1, Ordering::Relaxed) {
+    let hook: qubit_task::ExternalCancellationHook =
+        Arc::new(move |_, _| match hook_calls.fetch_add(1, Ordering::Relaxed) {
             0 => panic!("hook factory failed"),
             1 => Box::pin(async {
                 panic!("hook future failed");
@@ -1621,10 +1620,8 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
                 Ok(())
             }),
             _ => Box::pin(async { Ok(()) }),
-        }
-    });
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(705))));
+        });
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(705))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<u32, _>(

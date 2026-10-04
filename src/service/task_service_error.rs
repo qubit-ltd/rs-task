@@ -36,9 +36,7 @@ pub enum TaskServiceError {
         StoreError,
     ),
     /// The submission exceeds the available payload capacity.
-    #[error(
-        "task submission capacity exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available"
-    )]
+    #[error("task submission capacity exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available")]
     SubmissionCapacityExceeded {
         /// Bytes requested by the rejected submission.
         requested_bytes: usize,

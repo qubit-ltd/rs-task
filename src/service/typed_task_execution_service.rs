@@ -12,7 +12,6 @@ use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use tokio::sync::watch;
 
 use futures::FutureExt;
 use parking_lot::Mutex;
@@ -21,6 +20,7 @@ use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_progress::AsyncReporter;
+use tokio::sync::watch;
 
 #[cfg(feature = "event-bus")]
 use super::NotificationStats;
@@ -444,15 +444,10 @@ impl TypedTaskExecutionService {
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let _admission = self.core.admission.read().await;
         self.runner().check_fault()?;
-        if self.core.shutting_down.load(Ordering::Acquire)
-            || self.core.owner_released.load(Ordering::Acquire)
-        {
+        if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
         }
-        let Some(task) = self
-            .runner()
-            .store_result(self.core.store.get_encoded_task(id).await)?
-        else {
+        let Some(task) = self.runner().store_result(self.core.store.get_encoded_task(id).await)? else {
             return Err(TaskServiceError::Store(crate::store::StoreError::NotFound));
         };
         let summary = task.summary;
@@ -549,19 +544,29 @@ impl TypedTaskExecutionService {
         }
     }
 
-    async fn wait_external_cancel(id: TaskId, attempt: u32, flight: Arc<ExternalCancelFlight>) -> Result<CancelOutcome, TaskServiceError> {
+    async fn wait_external_cancel(
+        id: TaskId,
+        attempt: u32,
+        flight: Arc<ExternalCancelFlight>,
+    ) -> Result<CancelOutcome, TaskServiceError> {
         let mut result = flight.result.subscribe();
         loop {
             if let Some(result) = result.borrow().clone() {
                 return match result {
                     ExternalCancelResult::Success => Ok(CancelOutcome::CancellationRequested),
                     ExternalCancelResult::AlreadyTerminal => Ok(CancelOutcome::AlreadyTerminal),
-                    ExternalCancelResult::HookFailed(message) => Err(TaskServiceError::ExternalCancellationFailed { task_id: id, attempt, message }),
+                    ExternalCancelResult::HookFailed(message) => Err(TaskServiceError::ExternalCancellationFailed {
+                        task_id: id,
+                        attempt,
+                        message,
+                    }),
                     ExternalCancelResult::ServiceFailed(message) => Err(TaskServiceError::StoreUnavailable(message)),
                 };
             }
             if result.changed().await.is_err() {
-                return Err(TaskServiceError::SchedulerUnavailable("external cancellation task ended without a result".into()));
+                return Err(TaskServiceError::SchedulerUnavailable(
+                    "external cancellation task ended without a result".into(),
+                ));
             }
         }
     }
@@ -569,39 +574,61 @@ impl TypedTaskExecutionService {
 
 impl ServiceRunner {
     fn external_cancel_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
-        panic
-            .downcast_ref::<&str>()
-            .map_or_else(
-                || {
-                    panic
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .unwrap_or_else(|| "external cancellation hook panicked".into())
-                },
-                |message| (*message).to_owned(),
-            )
+        panic.downcast_ref::<&str>().map_or_else(
+            || {
+                panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| "external cancellation hook panicked".into())
+            },
+            |message| (*message).to_owned(),
+        )
     }
 
-    async fn run_external_cancel(core: Arc<TypedServiceCore>, key: (TaskId, u32), kind_id: String, flight: Arc<ExternalCancelFlight>) {
+    async fn run_external_cancel(
+        core: Arc<TypedServiceCore>,
+        key: (TaskId, u32),
+        kind_id: String,
+        flight: Arc<ExternalCancelFlight>,
+    ) {
         let (id, attempt) = key;
-        let runner = Self { core: Arc::clone(&core) };
+        let runner = Self {
+            core: Arc::clone(&core),
+        };
         let result = async {
             loop {
                 let task = match core.store.get_encoded_task(id).await {
                     Ok(Some(task)) => task,
-                    Ok(None) => return ExternalCancelResult::ServiceFailed("task disappeared during external cancellation".into()),
+                    Ok(None) => {
+                        return ExternalCancelResult::ServiceFailed(
+                            "task disappeared during external cancellation".into(),
+                        );
+                    }
                     Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
                 };
                 let summary = task.summary;
-                if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running) {
+                if summary.state.is_terminal()
+                    || summary.attempt != attempt
+                    || !matches!(summary.state, TaskState::Running)
+                {
                     return ExternalCancelResult::AlreadyTerminal;
                 }
                 if !summary.cancel_requested || summary.cancel_error.is_some() {
-                    match core.store.transition_encoded(TransitionCommand {
-                        id, expected_state_version: summary.state_version, expected_attempt: attempt,
-                        retry_not_before_ms: None, state: TaskState::Running, cancel_requested: true,
-                        cancel_error: None, finished_at_ms: None, output: None,
-                    }).await {
+                    match core
+                        .store
+                        .transition_encoded(TransitionCommand {
+                            id,
+                            expected_state_version: summary.state_version,
+                            expected_attempt: attempt,
+                            retry_not_before_ms: None,
+                            state: TaskState::Running,
+                            cancel_requested: true,
+                            cancel_error: None,
+                            finished_at_ms: None,
+                            output: None,
+                        })
+                        .await
+                    {
                         Ok(_) => {}
                         Err(crate::store::StoreError::Conflict) => continue,
                         Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
@@ -614,9 +641,7 @@ impl ServiceRunner {
             })) {
                 Ok(Some(hook)) => hook,
                 Ok(None) => {
-                    return ExternalCancelResult::ServiceFailed(
-                        "external cancellation hook is unavailable".into(),
-                    );
+                    return ExternalCancelResult::ServiceFailed("external cancellation hook is unavailable".into());
                 }
                 Err(panic) => {
                     let message = Self::external_cancel_panic_message(panic);
@@ -627,19 +652,38 @@ impl ServiceRunner {
                 Ok(Ok(())) => loop {
                     let task = match core.store.get_encoded_task(id).await {
                         Ok(Some(task)) => task,
-                        Ok(None) => return ExternalCancelResult::ServiceFailed("task disappeared after external cancellation".into()),
+                        Ok(None) => {
+                            return ExternalCancelResult::ServiceFailed(
+                                "task disappeared after external cancellation".into(),
+                            );
+                        }
                         Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
                     };
                     let summary = task.summary;
-                    if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running) {
+                    if summary.state.is_terminal()
+                        || summary.attempt != attempt
+                        || !matches!(summary.state, TaskState::Running)
+                    {
                         return ExternalCancelResult::AlreadyTerminal;
                     }
-                    if summary.cancel_error.is_none() { return ExternalCancelResult::Success; }
-                    match core.store.transition_encoded(TransitionCommand {
-                        id, expected_state_version: summary.state_version, expected_attempt: attempt,
-                        retry_not_before_ms: None, state: TaskState::Running, cancel_requested: true,
-                        cancel_error: None, finished_at_ms: None, output: None,
-                    }).await {
+                    if summary.cancel_error.is_none() {
+                        return ExternalCancelResult::Success;
+                    }
+                    match core
+                        .store
+                        .transition_encoded(TransitionCommand {
+                            id,
+                            expected_state_version: summary.state_version,
+                            expected_attempt: attempt,
+                            retry_not_before_ms: None,
+                            state: TaskState::Running,
+                            cancel_requested: true,
+                            cancel_error: None,
+                            finished_at_ms: None,
+                            output: None,
+                        })
+                        .await
+                    {
                         Ok(_) => return ExternalCancelResult::Success,
                         Err(crate::store::StoreError::Conflict) => continue,
                         Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
@@ -651,32 +695,61 @@ impl ServiceRunner {
                     Self::record_external_cancel_failure(&core, id, attempt, message).await
                 }
             }
-        }.await;
-        match &result {
-            ExternalCancelResult::Success => { core.external_cancellations.lock().insert(key, ExternalCancelEntry::Succeeded); }
-            _ => { core.external_cancellations.lock().remove(&key); }
         }
-        if let ExternalCancelResult::ServiceFailed(message) = &result { runner.latch_fault(message.clone()); }
+        .await;
+        match &result {
+            ExternalCancelResult::Success => {
+                core.external_cancellations
+                    .lock()
+                    .insert(key, ExternalCancelEntry::Succeeded);
+            }
+            _ => {
+                core.external_cancellations.lock().remove(&key);
+            }
+        }
+        if let ExternalCancelResult::ServiceFailed(message) = &result {
+            runner.latch_fault(message.clone());
+        }
         flight.result.send_replace(Some(result));
         core.scheduler_changed.notify_one();
     }
 
-    async fn record_external_cancel_failure(core: &Arc<TypedServiceCore>, id: TaskId, attempt: u32, message: String) -> ExternalCancelResult {
+    async fn record_external_cancel_failure(
+        core: &Arc<TypedServiceCore>,
+        id: TaskId,
+        attempt: u32,
+        message: String,
+    ) -> ExternalCancelResult {
         loop {
             let task = match core.store.get_encoded_task(id).await {
                 Ok(Some(task)) => task,
-                Ok(None) => return ExternalCancelResult::ServiceFailed("task disappeared while recording cancellation failure".into()),
+                Ok(None) => {
+                    return ExternalCancelResult::ServiceFailed(
+                        "task disappeared while recording cancellation failure".into(),
+                    );
+                }
                 Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
             };
             let summary = task.summary;
-            if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running) {
+            if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running)
+            {
                 return ExternalCancelResult::AlreadyTerminal;
             }
-            match core.store.transition_encoded(TransitionCommand {
-                id, expected_state_version: summary.state_version, expected_attempt: attempt,
-                retry_not_before_ms: None, state: TaskState::Running, cancel_requested: true,
-                cancel_error: Some(message.clone()), finished_at_ms: None, output: None,
-            }).await {
+            match core
+                .store
+                .transition_encoded(TransitionCommand {
+                    id,
+                    expected_state_version: summary.state_version,
+                    expected_attempt: attempt,
+                    retry_not_before_ms: None,
+                    state: TaskState::Running,
+                    cancel_requested: true,
+                    cancel_error: Some(message.clone()),
+                    finished_at_ms: None,
+                    output: None,
+                })
+                .await
+            {
                 Ok(_) => return ExternalCancelResult::HookFailed(message),
                 Err(crate::store::StoreError::Conflict) => continue,
                 Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
@@ -1240,7 +1313,10 @@ impl ServiceRunner {
             }
         };
         if latest.summary.state.is_terminal() {
-            self.core.external_cancellations.lock().remove(&(started.id, started.attempt));
+            self.core
+                .external_cancellations
+                .lock()
+                .remove(&(started.id, started.attempt));
             return;
         }
         let retry = retryable && !latest.summary.cancel_requested && started.attempt < self.core.max_attempts;
@@ -1266,7 +1342,10 @@ impl ServiceRunner {
             .await
         {
             Ok(_updated) => {
-                self.core.external_cancellations.lock().remove(&(started.id, started.attempt));
+                self.core
+                    .external_cancellations
+                    .lock()
+                    .remove(&(started.id, started.attempt));
                 #[cfg(feature = "event-bus")]
                 self.notify_notifications();
             }
