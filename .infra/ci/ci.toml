@@ -1,7 +1,7 @@
 tasks = ["style", "clippy", "coverage-cfg-clippy", "verify", "strict-doc", "readme", "release-build", "feature-matrix", "project-hook", "package", "coverage", "audit"]
 
 [local]
-hook = "project-ci-check.sh"
+hook = ".infra/bin/project-ci-check.sh"
 build_toolchain = "1.94.0"
 clippy_toolchain = "nightly-2026-06-05"
 nightly_toolchain = "nightly-2026-06-05"
