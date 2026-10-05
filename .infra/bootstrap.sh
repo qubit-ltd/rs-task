@@ -57,8 +57,10 @@ else
         git init "$shared_root" >/dev/null
         git -C "$shared_root" remote add origin "$manager_repo"
     fi
-    infra_retry "fetch rs-infra-tools revision" git -C "$shared_root" fetch --force --depth 1 origin "$manager_revision"
-    git -C "$shared_root" checkout --force --detach FETCH_HEAD >/dev/null
+    if ! git -C "$shared_root" cat-file -e "$manager_revision^{commit}" 2>/dev/null; then
+        infra_retry "fetch rs-infra-tools revision" git -C "$shared_root" fetch --force --depth 1 origin "$manager_revision"
+    fi
+    git -C "$shared_root" checkout --force --detach "$manager_revision" >/dev/null
     [[ "$(git -C "$shared_root" rev-parse HEAD)" == "$manager_revision" ]] || {
         echo "error: cached rs-infra-tools checkout does not match $manager_revision" >&2; exit 1;
     }
