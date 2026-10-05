@@ -24,7 +24,7 @@ jobs:
       pull-requests: write
       pages: write
       id-token: write
-    uses: qubit-ltd/rs-infra-ci/.github/workflows/github-ci.yml@5a51d1833cb6a2646b4e004c3b51d8c71c9f4401
+    uses: qubit-ltd/rs-infra-ci/.github/workflows/github-ci.yml@main
 
   windows-sqlite:
     runs-on: windows-latest
