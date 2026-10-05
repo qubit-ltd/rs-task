@@ -55,6 +55,6 @@ Call `shutdown().await` when the caller needs to wait for active handlers and th
 
 ```bash
 cargo test --all-features
-./align-ci.sh
-./ci-check.sh
+./.infra/bin/align-ci.sh
+./.infra/bin/ci-check.sh
 ```

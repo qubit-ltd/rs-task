@@ -54,6 +54,6 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 ```bash
 cargo test --all-features
-./align-ci.sh
-./ci-check.sh
+./.infra/bin/align-ci.sh
+./.infra/bin/ci-check.sh
 ```
