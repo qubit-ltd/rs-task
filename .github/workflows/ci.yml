@@ -36,16 +36,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.94
-      - name: Test SQLite query, recovery, and ownership on Windows
+      - name: Test SQLite store and ownership on Windows
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}\rs-task-windows-sqlite-target
-        run: |
-          cargo test --locked --features sqlite --test integration_tests store::sqlite_tests
-          cargo test --locked --features sqlite \
-            --test recovery_order_tests \
-            --test sqlite_query_tests \
-            --test owner_release_barrier_tests \
-            --test owner_identity_tests \
-            --test ownership_lifecycle_tests \
-            --test recovery_bounds_tests
+        run: >-
+          cargo test --locked --features sqlite --lib
+          --test task_store_contract_tests --test owner_identity_tests

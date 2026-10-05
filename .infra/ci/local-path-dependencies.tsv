@@ -1,8 +1,8 @@
 # relative git root<TAB>repository URL<TAB>default branch
 ../rs-codec	https://github.com/qubit-ltd/rs-codec	main
 ../rs-datatype	https://github.com/qubit-ltd/rs-datatype	main
-../rs-event-bus	https://github.com/qubit-ltd/rs-event-bus	2a68b804bcf0fceae174a7707b94e53717332128
-../rs-event-bus-redis	https://github.com/qubit-ltd/rs-event-bus-redis	714f90c6f34309ee25429254eabf41c1c7a17a83
+../rs-event-bus	https://github.com/qubit-ltd/rs-event-bus	35f9442f7053173b43c100aba5d52ea2b7f33ae3
+../rs-event-bus-redis	https://github.com/qubit-ltd/rs-event-bus-redis	8eb3c5174644cff88e72d1f591e2618f6e0e4c22
 ../rs-id	https://github.com/qubit-ltd/rs-id	main
 ../rs-model-metadata	https://github.com/qubit-ltd/rs-model-metadata	main
 ../rs-progress	https://github.com/qubit-ltd/rs-progress	main
