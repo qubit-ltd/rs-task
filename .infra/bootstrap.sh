@@ -33,7 +33,7 @@ else
             delay=$((delay * 2)); attempt=$((attempt + 1))
         done
     }
-    manager_revision=$(infra_retry git ls-remote "$manager_repo" refs/heads/main | awk 'NR == 1 { print $1 }')
+    manager_revision=$(infra_retry "resolve rs-infra-tools main revision" git ls-remote "$manager_repo" refs/heads/main | awk 'NR == 1 { print $1 }')
     [[ "$manager_revision" =~ ^[0-9a-f]{40}$ ]] || {
         echo "error: unable to resolve rs-infra-tools main revision" >&2; exit 1;
     }
@@ -57,7 +57,7 @@ else
         git init "$shared_root" >/dev/null
         git -C "$shared_root" remote add origin "$manager_repo"
     fi
-    infra_retry git -C "$shared_root" fetch --force --depth 1 origin "$manager_revision"
+    infra_retry "fetch rs-infra-tools revision" git -C "$shared_root" fetch --force --depth 1 origin "$manager_revision"
     git -C "$shared_root" checkout --force --detach FETCH_HEAD >/dev/null
     [[ "$(git -C "$shared_root" rev-parse HEAD)" == "$manager_revision" ]] || {
         echo "error: cached rs-infra-tools checkout does not match $manager_revision" >&2; exit 1;
@@ -65,7 +65,7 @@ else
     if [[ ! -x "$manager_bin" ]]; then
         mkdir -p "$(dirname "$manager_bin")"
         export CARGO_TARGET_DIR="$cache_root/build/manager/$manager_revision/$(rustc -vV | awk '/^host:/ { print $2 }')/$(rustc --version | tr ' /' '__')"
-        infra_retry cargo fetch --locked --manifest-path "$shared_root/Cargo.toml"
+        infra_retry "fetch rs-infra-tools dependencies" cargo fetch --locked --manifest-path "$shared_root/Cargo.toml"
         cargo build --release --locked --offline --manifest-path "$shared_root/Cargo.toml" \
             --package qubit-infra-tools --bin rs-infra-tools
         mkdir -p "$(dirname "$manager_bin")"
