@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import stat
 import sys
@@ -30,7 +31,8 @@ def main() -> int:
             continue
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         executable = bool(path.stat().st_mode & stat.S_IXUSR)
-        if digest != expected.get("sha256") or executable != expected.get("executable"):
+        mode_matches = os.name == "nt" or executable == expected.get("executable")
+        if digest != expected.get("sha256") or not mode_matches:
             drift.append(target)
     if drift:
         print("managed bootstrap files differ from the installed upstream snapshot:")

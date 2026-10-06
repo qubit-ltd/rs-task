@@ -34,7 +34,7 @@
     },
     ".infra/bootstrap-check.py": {
       "executable": true,
-      "sha256": "3b70ef054e5ca0213d92eab8eae2e493502f9a537a2693618acf5234bf4000a0"
+      "sha256": "a7b8482264daf2cf3b0bab61e5dd2ba2fb096625673641f06f20922d00e21895"
     },
     ".infra/bootstrap.sh": {
       "executable": true,
@@ -49,8 +49,8 @@
       "sha256": "b74639b22df77f75ddc4c8439f9d6f453295a09dab6e7644915647ebe7a0a77f"
     }
   },
-  "package_sha256": "6e245ce859757dbfab39e355809ea60cf8d57abde29a09505545dcddd6c9fcc0",
+  "package_sha256": "57e103220722bd9f76393f5f66bb3a574f095f631f1078b22bc8ffa2095f3d05",
   "schema": 1,
   "source_repository": "https://github.com/qubit-ltd/rs-infra-tools",
-  "source_revision": "34b55032e54678e46ce5cd5b04d27f04849291a2"
+  "source_revision": "ade6f1c526e5dde3ecd04d8db8334a2ae06faaa8"
 }
