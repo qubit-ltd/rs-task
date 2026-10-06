@@ -29,7 +29,10 @@ def main() -> int:
         if path.is_symlink() or not path.is_file():
             drift.append(target)
             continue
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        # Git for Windows may materialize managed text files with CRLF endings.
+        # Compare canonical LF content, matching the hashes written by sync.py.
+        content = path.read_bytes().replace(b"\r\n", b"\n")
+        digest = hashlib.sha256(content).hexdigest()
         executable = bool(path.stat().st_mode & stat.S_IXUSR)
         mode_matches = os.name == "nt" or executable == expected.get("executable")
         if digest != expected.get("sha256") or not mode_matches:
