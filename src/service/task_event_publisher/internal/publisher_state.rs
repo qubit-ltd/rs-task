@@ -44,6 +44,8 @@ pub(in crate::service::task_event_publisher) struct PublisherState {
     pub(in crate::service::task_event_publisher) counters: Counters,
     /// Latest publication or storage diagnostic retained for shutdown.
     pub(in crate::service::task_event_publisher) last_error: parking_lot::Mutex<Option<String>>,
+    /// Event currently awaiting admission, retained if shutdown aborts it.
+    pub(in crate::service::task_event_publisher) in_flight_event_id: parking_lot::Mutex<Option<String>>,
 }
 
 impl PublisherState {
@@ -63,6 +65,7 @@ impl PublisherState {
             pending: AtomicUsize::new(0),
             counters: Counters::default(),
             last_error: parking_lot::Mutex::new(None),
+            in_flight_event_id: parking_lot::Mutex::new(None),
         }
     }
 
@@ -138,10 +141,13 @@ impl PublisherState {
             .event_id(event_id)
             .build()
             .map_err(|error| error.to_string())?;
-        let _receipt = self
+        *self.in_flight_event_id.lock() = Some(entry.event_id.clone());
+        let publish_result = self
             .bus
             .publish_checked(request, AdmissionRequirement::ProviderOrDestinationAccepted)
-            .await
+            .await;
+        *self.in_flight_event_id.lock() = None;
+        let _receipt = publish_result
             .map_err(|error| format!("publication for event {} failed: {error}", entry.event_id))?;
         self.store
             .mark_event_published(entry.task_id, entry.state_version)

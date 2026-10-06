@@ -104,8 +104,17 @@ impl TaskEventPublisher {
                         "shutdown deadline expired; last observed pending page contained {pending} notification(s); final backlog may differ"
                     )
                 };
+                let publication_diagnostic = self
+                    .state
+                    .in_flight_event_id
+                    .lock()
+                    .as_deref()
+                    .map_or_else(
+                        || "no publication was active at timeout".to_owned(),
+                        |event_id| format!("publication timed out for event {event_id}"),
+                    );
                 Err(TaskServiceError::NotificationClose(format!(
-                    "{diagnostic}; last error: {:?}",
+                    "{diagnostic}; {publication_diagnostic}; last error: {:?}",
                     self.state.last_error.lock().as_deref()
                 )))
             }

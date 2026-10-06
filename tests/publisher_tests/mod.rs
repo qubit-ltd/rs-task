@@ -311,18 +311,16 @@ async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
         let shutdown_error = first.shutdown().await.expect_err("failed head prevents draining");
         assert!(matches!(&shutdown_error, TaskServiceError::NotificationClose(_)));
         let diagnostic = shutdown_error.to_string();
-        if mode != HUNG_PUBLISH {
-            assert!(
-                diagnostic.contains("task:42:0"),
-                "publication diagnostic must retain the stable event ID: {diagnostic}"
-            );
-        }
+        assert!(
+            diagnostic.contains("task:42:0"),
+            "publication diagnostic must retain the stable event ID: {diagnostic}"
+        );
         let expected_category = match mode {
             NOT_ACCEPTED_ERROR => Some("NotAccepted"),
             UNCERTAIN_ERROR => Some("MayHaveBeenAccepted"),
             DROPPED => Some("dropped by an interceptor"),
             NO_DESTINATIONS | NONE_ACCEPTED => Some("no destination accepted"),
-            HUNG_PUBLISH => None,
+            HUNG_PUBLISH => Some("publication timed out"),
             _ => unreachable!("matrix contains only retained outcomes"),
         };
         if let Some(expected_category) = expected_category {
