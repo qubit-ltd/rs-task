@@ -13,7 +13,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use qubit_event_bus::AsyncEventBus;
-use qubit_event_bus::model::AdmissionOutcome;
 use qubit_event_bus::model::AdmissionRequirement;
 use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::PublishRequest;
@@ -139,12 +138,11 @@ impl PublisherState {
             .event_id(event_id)
             .build()
             .map_err(|error| error.to_string())?;
-        let receipt = self.bus.publish(request).await.map_err(|error| error.to_string())?;
-        if receipt.admission_outcome() != AdmissionOutcome::OpaqueAccepted {
-            receipt
-                .check_admission(AdmissionRequirement::AtLeastOneAccepted)
-                .map_err(|error| error.to_string())?;
-        }
+        let _receipt = self
+            .bus
+            .publish_checked(request, AdmissionRequirement::ProviderOrDestinationAccepted)
+            .await
+            .map_err(|error| format!("publication for event {} failed: {error}", entry.event_id))?;
         self.store
             .mark_event_published(entry.task_id, entry.state_version)
             .await

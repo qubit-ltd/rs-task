@@ -39,8 +39,10 @@ use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiFuture;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::SubscriptionModes;
+use qubit_event_bus::spi::TransportPayload;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::event::TaskEvent;
 use qubit_task::model::StartCommand;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
@@ -66,6 +68,7 @@ const NONE_ACCEPTED: u8 = 8;
 struct FakeSpi {
     mode: AtomicU8,
     ids: Mutex<Vec<String>>,
+    state_versions: Mutex<Vec<u64>>,
     visibility: PublishVisibility,
     durability: DurabilityCapability,
 }
@@ -123,6 +126,11 @@ impl AsyncEventBusSpi for FakeSpi {
     fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         Box::pin(async move {
             self.ids.lock().expect("ids").push(message.id().as_str().to_owned());
+            let TransportPayload::Encoded(payload) = message.payload() else {
+                panic!("task event must be encoded for the fake provider");
+            };
+            let event: TaskEvent = serde_json::from_slice(payload.bytes()).expect("decode published task event");
+            self.state_versions.lock().expect("state versions").push(event.state_version);
             let mode = self.mode.load(Ordering::Acquire);
             if mode == HUNG_PUBLISH {
                 return std::future::pending().await;
@@ -190,6 +198,7 @@ fn bus_with_durability(
     let spi = Arc::new(FakeSpi {
         mode: AtomicU8::new(mode),
         ids: Mutex::new(Vec::new()),
+        state_versions: Mutex::new(Vec::new()),
         visibility,
         durability,
     });
@@ -277,6 +286,7 @@ async fn test_startup_replay_deletes_only_confirmed_admissions() {
         assert_eq!(stats.dropped, 0);
         assert_eq!(stats.failed, 0);
         assert_eq!(*spi.ids.lock().expect("ids"), ["task:42:0", "task:42:1", "task:42:2"]);
+        assert_eq!(*spi.state_versions.lock().expect("state versions"), [0, 1, 2]);
         let owner = store.acquire_owner().await.expect("owner released");
         assert!(store.list_event_outbox(128).await.expect("empty").is_empty());
         store.release_owner(owner).await.expect("release");
@@ -298,10 +308,29 @@ async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
         let first = service_with_timeout(store.clone(), bus.clone(), Duration::from_millis(500))
             .await
             .expect("service");
-        assert!(matches!(
-            first.shutdown().await,
-            Err(TaskServiceError::NotificationClose(_))
-        ));
+        let shutdown_error = first.shutdown().await.expect_err("failed head prevents draining");
+        assert!(matches!(&shutdown_error, TaskServiceError::NotificationClose(_)));
+        let diagnostic = shutdown_error.to_string();
+        if mode != HUNG_PUBLISH {
+            assert!(
+                diagnostic.contains("task:42:0"),
+                "publication diagnostic must retain the stable event ID: {diagnostic}"
+            );
+        }
+        let expected_category = match mode {
+            NOT_ACCEPTED_ERROR => Some("NotAccepted"),
+            UNCERTAIN_ERROR => Some("MayHaveBeenAccepted"),
+            DROPPED => Some("dropped by an interceptor"),
+            NO_DESTINATIONS | NONE_ACCEPTED => Some("no destination accepted"),
+            HUNG_PUBLISH => None,
+            _ => unreachable!("matrix contains only retained outcomes"),
+        };
+        if let Some(expected_category) = expected_category {
+            assert!(
+                diagnostic.contains(expected_category),
+                "publication diagnostic must retain its failure category: {diagnostic}"
+            );
+        }
         assert!(
             matches!(first.shutdown().await, Err(TaskServiceError::NotificationClose(_))),
             "repeated shutdown retains its drain failure"
@@ -311,6 +340,10 @@ async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
         assert_eq!(
             retained.iter().map(|event| event.event_id.as_str()).collect::<Vec<_>>(),
             ["task:42:0", "task:42:1", "task:42:2"]
+        );
+        assert_eq!(
+            retained.iter().map(|event| event.state_version).collect::<Vec<_>>(),
+            [0, 1, 2]
         );
         assert!(
             spi.ids.lock().expect("ids").iter().all(|id| id == "task:42:0"),
@@ -328,6 +361,9 @@ async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
         let ids = spi.ids.lock().expect("ids");
         assert!(ids.iter().filter(|id| id.as_str() == "task:42:0").count() >= 2);
         assert_eq!(&ids[ids.len() - 3..], ["task:42:0", "task:42:1", "task:42:2"]);
+        let state_versions = spi.state_versions.lock().expect("state versions");
+        assert!(state_versions.iter().filter(|version| **version == 0).count() >= 2);
+        assert_eq!(&state_versions[state_versions.len() - 3..], [0, 1, 2]);
     }
 }
 
