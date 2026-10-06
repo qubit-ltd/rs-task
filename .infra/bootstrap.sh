@@ -11,7 +11,13 @@ case "$entrypoint" in
     *) echo "error: unsupported infrastructure entrypoint '$entrypoint'" >&2; exit 2 ;;
 esac
 
-cache_home=${RS_INFRA_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME:?HOME is not set}/.cache}/qubit}
+if [[ -n "${RS_INFRA_CACHE_DIR:-}" ]]; then
+    cache_home=$RS_INFRA_CACHE_DIR
+elif [[ "${RUNNER_OS:-}" == "Windows" && -n "${RUNNER_TEMP:-}" ]]; then
+    cache_home="$RUNNER_TEMP/qubit"
+else
+    cache_home=${XDG_CACHE_HOME:-${HOME:?HOME is not set}/.cache}/qubit
+fi
 cache_root="$cache_home/rs-infra"
 mkdir -p "$cache_root/sources" "$cache_root/tools" "$cache_root/locks" "$cache_root/build/manager"
 manager_repo=https://github.com/qubit-ltd/rs-infra-tools.git

@@ -1,0 +1,56 @@
+{
+  "files": {
+    ".infra/bin/align-ci.sh": {
+      "executable": true,
+      "sha256": "591c4848115d8d51f5fe52b5ec3f2f822f0b2024bd3c3250df8ba928120822af"
+    },
+    ".infra/bin/ci-check.sh": {
+      "executable": true,
+      "sha256": "e563cedf0ac12a9ed406850278b3ddec0b6dc27f5fedd492ac877d61843c3c84"
+    },
+    ".infra/bin/coverage.sh": {
+      "executable": true,
+      "sha256": "0e56dddddee87fd76477df4b615eab08b86b39f6a846811ce544f6469abbaf59"
+    },
+    ".infra/bin/dependency-update.sh": {
+      "executable": true,
+      "sha256": "26493d6575f669d43c685296cd743b5626a9667881d5ac9214698680f8a0dd40"
+    },
+    ".infra/bin/infra-tool.sh": {
+      "executable": true,
+      "sha256": "be0155a35a8781d0e800f03b5615652ca3e6f7ef346915709ed69c470b8a466e"
+    },
+    ".infra/bin/prepare-local-path-dependencies.sh": {
+      "executable": true,
+      "sha256": "d7a5d93c2bbda5405323d99391a34e45b49d8821d8808af3c4a25b8cfc79ff77"
+    },
+    ".infra/bin/project-ci-check.sh": {
+      "executable": true,
+      "sha256": "60643a95b295ec0c49b2bf74ea11bc8be55908adaee5d1655cd3124b325cd686"
+    },
+    ".infra/bin/style-check.sh": {
+      "executable": true,
+      "sha256": "0e322756544a21a3be83b2510b39590b008c52604fce0942ad7f1a6e563799a0"
+    },
+    ".infra/bootstrap-check.py": {
+      "executable": true,
+      "sha256": "3b70ef054e5ca0213d92eab8eae2e493502f9a537a2693618acf5234bf4000a0"
+    },
+    ".infra/bootstrap.sh": {
+      "executable": true,
+      "sha256": "bd94dd3b7fcb3c446475f2ef6cd860108bab9b887d39bbeeb27380147d6b839c"
+    },
+    ".infra/pages/pages.json": {
+      "executable": false,
+      "sha256": "0464afed8ddf2e1634e08fa67415ae75b449e5c7befb0f09f4a037800bae05d3"
+    },
+    "update-infra.sh": {
+      "executable": true,
+      "sha256": "b74639b22df77f75ddc4c8439f9d6f453295a09dab6e7644915647ebe7a0a77f"
+    }
+  },
+  "package_sha256": "6e245ce859757dbfab39e355809ea60cf8d57abde29a09505545dcddd6c9fcc0",
+  "schema": 1,
+  "source_repository": "https://github.com/qubit-ltd/rs-infra-tools",
+  "source_revision": "34b55032e54678e46ce5cd5b04d27f04849291a2"
+}
