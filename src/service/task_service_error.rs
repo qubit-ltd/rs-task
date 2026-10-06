@@ -85,6 +85,12 @@ pub enum TaskServiceError {
         /// Scheduler or engine failure retained by the service.
         String,
     ),
+    /// The notification bus cannot retain messages without active subscribers.
+    #[error("notification provider '{provider_id}' is not durable; task notifications require a durable provider")]
+    NotificationProviderNotDurable {
+        /// Identifier of the rejected event-bus provider.
+        provider_id: String,
+    },
     /// The task notification publisher failed while draining during shutdown.
     #[error("task notification publisher failed to close: {0}")]
     NotificationClose(

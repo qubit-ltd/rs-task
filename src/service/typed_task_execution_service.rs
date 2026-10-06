@@ -16,6 +16,8 @@ use std::sync::atomic::Ordering;
 use futures::FutureExt;
 use parking_lot::Mutex;
 use qubit_codec::ValueBytesCodecRegistry;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::DurabilityCapability;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
@@ -205,6 +207,12 @@ impl TypedTaskExecutionService {
         let mut owner_guard = OwnerReleaseGuard::new(Arc::clone(&store), owner, cleanup_worker);
         #[cfg(feature = "event-bus")]
         let publisher = if let Some(bus) = options.event_bus {
+            if bus.capabilities().durability() != DurabilityCapability::Durable {
+                owner_guard.release().await?;
+                return Err(TaskServiceError::NotificationProviderNotDurable {
+                    provider_id: bus.provider_id().as_str().to_owned(),
+                });
+            }
             let prepared = async {
                 store.enable_event_outbox().await?;
                 TaskEventPublisher::new(Arc::clone(&store), bus, options.notification_shutdown_timeout)

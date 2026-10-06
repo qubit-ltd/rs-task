@@ -67,6 +67,7 @@ struct FakeSpi {
     mode: AtomicU8,
     ids: Mutex<Vec<String>>,
     visibility: PublishVisibility,
+    durability: DurabilityCapability,
 }
 
 /// Creates one individual destination acknowledgement for the receipt matrix.
@@ -110,7 +111,7 @@ impl AsyncEventBusSpi for FakeSpi {
             .settlement(SettlementCapabilities::None)
             .ordering(OrderingCapability::None)
             .delayed_delivery(DelayedDeliveryCapability::None)
-            .durability(DurabilityCapability::Ephemeral)
+            .durability(self.durability)
             .subscription_modes(SubscriptionModes::EPHEMERAL)
             .consumer_groups(false)
             .replay(ReplayCapability::None)
@@ -172,6 +173,15 @@ impl qubit_id::IdGenerator for Ids {
 
 /// Builds an encoded facade that exercises codec lookup and admission checking.
 fn bus(mode: u8, codec: bool) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
+    bus_with_durability(mode, codec, DurabilityCapability::Durable)
+}
+
+/// Builds a fake with explicit durability for the rejected-provider case.
+fn bus_with_durability(
+    mode: u8,
+    codec: bool,
+    durability: DurabilityCapability,
+) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
     let visibility = if mode >= ACCEPTED {
         PublishVisibility::DestinationAdmissions
     } else {
@@ -181,6 +191,7 @@ fn bus(mode: u8, codec: bool) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
         mode: AtomicU8::new(mode),
         ids: Mutex::new(Vec::new()),
         visibility,
+        durability,
     });
     let mut registry = CodecRegistry::new();
     if codec {
@@ -385,13 +396,7 @@ async fn test_service_cancellation_persists_snapshot_before_publication() {
 
 #[tokio::test]
 async fn test_no_destination_admission_retains_notifications() {
-    let registry = qubit_event_bus::AsyncEventBusRegistry::with_local().expect("local registry");
-    let bus = Arc::new(
-        registry
-            .create(&qubit_event_bus::EventBusConfig::default())
-            .await
-            .expect("local bus"),
-    );
+    let (bus, _) = bus(NO_DESTINATIONS, true);
     let store = seed().await;
     let service = service_with_timeout(store.clone(), bus, Duration::from_millis(100))
         .await
@@ -402,5 +407,65 @@ async fn test_no_destination_admission_retains_notifications() {
     ));
     let owner = store.acquire_owner().await.expect("owner");
     assert_eq!(store.list_event_outbox(128).await.expect("retained").len(), 3);
+    store.release_owner(owner).await.expect("release");
+}
+
+/// Rejects an explicitly ephemeral SPI as well as the built-in local provider.
+#[tokio::test]
+async fn test_ephemeral_fake_provider_is_rejected() {
+    let store = Arc::new(SqliteTaskStore::open_next(super::database_path()).expect("store"));
+    let (bus, _) = bus_with_durability(OPAQUE_ACCEPTED, true, DurabilityCapability::Ephemeral);
+    let result = service(store.clone(), bus).await;
+    assert!(matches!(
+        result,
+        Err(TaskServiceError::NotificationProviderNotDurable { provider_id }) if provider_id == "fake"
+    ));
+    let owner = store.acquire_owner().await.expect("owner released");
+    store.release_owner(owner).await.expect("release");
+}
+
+/// Rejects a local provider before enabling outbox writes or draining saved rows.
+#[tokio::test]
+async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
+    let bus = Arc::new(
+        AsyncEventBus::local(qubit_event_bus::local::LocalEventBusConfig::default())
+            .await
+            .expect("local bus"),
+    );
+    let store = Arc::new(SqliteTaskStore::open_next(super::database_path()).expect("store"));
+    let result = service(store.clone(), bus.clone()).await;
+    assert!(matches!(
+        result,
+        Err(TaskServiceError::NotificationProviderNotDurable { provider_id })
+            if provider_id == bus.provider_id().as_str()
+    ));
+    let owner = store.acquire_owner().await.expect("owner released after rejection");
+    store
+        .accept_encoded(TaskId::from_id(qubit_id::Id::new(51)), super::request())
+        .await
+        .expect("accept without enabling outbox");
+    assert!(store.list_event_outbox(128).await.expect("outbox stays disabled").is_empty());
+    store.release_owner(owner).await.expect("release");
+
+    let seeded = seed().await;
+    let result = service(seeded.clone(), bus).await;
+    assert!(matches!(result, Err(TaskServiceError::NotificationProviderNotDurable { .. })));
+    let owner = seeded.acquire_owner().await.expect("seeded owner released");
+    let retained = seeded.list_event_outbox(128).await.expect("saved rows retained");
+    assert_eq!(
+        retained.iter().map(|entry| entry.event_id.as_str()).collect::<Vec<_>>(),
+        ["task:42:0", "task:42:1", "task:42:2"]
+    );
+    seeded.release_owner(owner).await.expect("release");
+}
+
+/// Accepts a provider that promises to retain undelivered messages.
+#[tokio::test]
+async fn test_durable_provider_allows_service_construction() {
+    let store = Arc::new(SqliteTaskStore::open_next(super::database_path()).expect("store"));
+    let (bus, _) = bus(OPAQUE_ACCEPTED, true);
+    let service = service(store.clone(), bus).await.expect("durable provider accepted");
+    service.shutdown().await.expect("shutdown");
+    let owner = store.acquire_owner().await.expect("owner released");
     store.release_owner(owner).await.expect("release");
 }
