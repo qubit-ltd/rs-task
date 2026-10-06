@@ -130,7 +130,10 @@ impl AsyncEventBusSpi for FakeSpi {
                 panic!("task event must be encoded for the fake provider");
             };
             let event: TaskEvent = serde_json::from_slice(payload.bytes()).expect("decode published task event");
-            self.state_versions.lock().expect("state versions").push(event.state_version);
+            self.state_versions
+                .lock()
+                .expect("state versions")
+                .push(event.state_version);
             let mode = self.mode.load(Ordering::Acquire);
             if mode == HUNG_PUBLISH {
                 return std::future::pending().await;
@@ -185,11 +188,7 @@ fn bus(mode: u8, codec: bool) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
 }
 
 /// Builds a fake with explicit durability for the rejected-provider case.
-fn bus_with_durability(
-    mode: u8,
-    codec: bool,
-    durability: DurabilityCapability,
-) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
+fn bus_with_durability(mode: u8, codec: bool, durability: DurabilityCapability) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
     let visibility = if mode >= ACCEPTED {
         PublishVisibility::DestinationAdmissions
     } else {
@@ -458,7 +457,8 @@ async fn test_ephemeral_fake_provider_is_rejected() {
     store.release_owner(owner).await.expect("release");
 }
 
-/// Rejects a local provider before enabling outbox writes or draining saved rows.
+/// Rejects a local provider before enabling outbox writes or draining saved
+/// rows.
 #[tokio::test]
 async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
     let bus = Arc::new(
@@ -478,12 +478,21 @@ async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
         .accept_encoded(TaskId::from_id(qubit_id::Id::new(51)), super::request())
         .await
         .expect("accept without enabling outbox");
-    assert!(store.list_event_outbox(128).await.expect("outbox stays disabled").is_empty());
+    assert!(
+        store
+            .list_event_outbox(128)
+            .await
+            .expect("outbox stays disabled")
+            .is_empty()
+    );
     store.release_owner(owner).await.expect("release");
 
     let seeded = seed().await;
     let result = service(seeded.clone(), bus).await;
-    assert!(matches!(result, Err(TaskServiceError::NotificationProviderNotDurable { .. })));
+    assert!(matches!(
+        result,
+        Err(TaskServiceError::NotificationProviderNotDurable { .. })
+    ));
     let owner = seeded.acquire_owner().await.expect("seeded owner released");
     let retained = seeded.list_event_outbox(128).await.expect("saved rows retained");
     assert_eq!(

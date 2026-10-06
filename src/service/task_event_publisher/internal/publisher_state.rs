@@ -147,8 +147,8 @@ impl PublisherState {
             .publish_checked(request, AdmissionRequirement::ProviderOrDestinationAccepted)
             .await;
         *self.in_flight_event_id.lock() = None;
-        let _receipt = publish_result
-            .map_err(|error| format!("publication for event {} failed: {error}", entry.event_id))?;
+        let _receipt =
+            publish_result.map_err(|error| format!("publication for event {} failed: {error}", entry.event_id))?;
         self.store
             .mark_event_published(entry.task_id, entry.state_version)
             .await
