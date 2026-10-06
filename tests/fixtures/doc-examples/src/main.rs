@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::AsyncEventBusRegistry;
+use qubit_event_bus::RequiredCapabilities;
 use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus_redis as _;
@@ -29,10 +30,11 @@ use typed_support::service_builder;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let codec = TaskEventJsonCodec::new()?;
     let mut event_codecs = CodecRegistry::new();
-    event_codecs.register::<TaskEvent>(Arc::new(codec));
+    event_codecs.register::<TaskEvent>(Arc::new(codec))?;
     let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(event_codecs));
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
+        .with_required_capabilities(RequiredCapabilities::new().durable())
         .with_provider_options([
             ("redis.url".into(), "redis://127.0.0.1/".into()),
             ("redis.namespace".into(), "task-service".into()),

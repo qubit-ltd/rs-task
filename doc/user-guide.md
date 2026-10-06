@@ -24,9 +24,29 @@ The `sqlite` feature enables durable task history and recovery. Recovery is at-l
 
 ## Publish lifecycle changes
 
-Applications that need lifecycle notifications can enable the `event-bus` feature and pass an `Arc<AsyncEventBus>` to `TaskExecutionServiceBuilder::event_bus`. Register the application's `TaskEvent` codec on that bus. The service requires a store with persistent outbox support; `SqliteTaskStore` provides it, while `MemoryTaskStore` returns `UnsupportedCapability` during service construction. Without `event_bus`, lifecycle notifications are not recorded.
+Applications that need lifecycle notifications can enable the `event-bus` feature and pass an `Arc<AsyncEventBus>` to `TaskExecutionServiceBuilder::event_bus`. Register the application's `TaskEvent` codec on that bus. The service requires both a store with persistent outbox support and a provider that declares `DurabilityCapability::Durable`. `SqliteTaskStore` provides the store capability; `MemoryTaskStore` returns `UnsupportedCapability` during service construction. The built-in local event-bus provider is ephemeral and cannot be used for this publisher. Without `event_bus`, lifecycle notifications are not recorded.
 
-With the publisher enabled, each committed lifecycle snapshot is written to SQLite in the same transaction as its task state change. A background worker sends rows in stable order to `task.lifecycle`, then deletes a row after accepted publication. Rows present at startup are replayed after task recovery; states committed before the outbox was enabled are not backfilled. Publication is at-least-once: an unknown result or a crash after the bus accepted an event but before SQLite deleted its row can produce a duplicate. Consumers should keep the highest `state_version` per `TaskId`, ignore duplicates and stale versions, and query the task service if versions are missing. The event is a notification, not an authoritative state record.
+Require durable retention when creating the bus. In this startup excerpt, `facade` already contains the `TaskEvent` codec, and the application has linked its Redis provider crate:
+
+```rust
+use std::sync::Arc;
+
+use qubit_event_bus::AsyncEventBusRegistry;
+use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::RequiredCapabilities;
+use qubit_spi::ProviderSelection;
+
+let config = EventBusConfig::default()
+    .with_selection(ProviderSelection::named("redis-streams")?)
+    .with_required_capabilities(RequiredCapabilities::new().durable())
+    .with_facade_config(facade);
+let bus = Arc::new(AsyncEventBusRegistry::discover()?.create(&config).await?);
+let service = builder.event_bus(bus.clone()).build().await?;
+```
+
+The [compilable wiring fixture](../tests/fixtures/doc-examples/src/main.rs) also supplies the provider options and task handler. The registry checks the requirement during bus creation. The task service then checks the injected facade's cached capabilities again, before enabling the outbox, so an ephemeral bus passed from elsewhere still fails service construction with `NotificationProviderNotDurable`.
+
+With the publisher enabled, each committed lifecycle snapshot is written to SQLite in the same transaction as its task state change. A background worker sends rows in stable order to `task.lifecycle`, then deletes a row after accepted publication. Rows present at startup are replayed after task recovery; states committed before the outbox was enabled are not backfilled. Publication is at-least-once: an unknown result or a crash after the bus accepted an event but before SQLite deleted its row can produce a duplicate. A successful Redis `XADD` is stream acceptance, not proof of a disk `fsync` or consumer ACK. `DurabilityCapability::Durable` means the provider retains messages without subscribers; it does not promise either of those later stages. Consumers should keep the highest `state_version` per `TaskId`, ignore duplicates and stale versions, and query the task service if versions are missing. The event is a notification, not an authoritative state record.
 
 ### Durable consumer projection
 
