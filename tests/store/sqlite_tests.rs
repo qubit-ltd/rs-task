@@ -1208,3 +1208,160 @@ async fn test_sqlite_recovery_rejects_cursor_timestamp_outside_integer_range() {
     drop(store);
     remove_database(&path);
 }
+
+/// Reuses an idempotent legacy request across IDs and rejects changed data.
+#[tokio_test]
+async fn test_sqlite_legacy_idempotency_reuses_record_without_inserting_duplicate() {
+    let path = database_path("legacy-idempotency-reuse");
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+    let first_id = TaskId::generate();
+    let second_id = TaskId::generate();
+    let request = request_with_idempotency_key("reports", b"same".to_vec(), "shared-key");
+
+    let first = match store
+        .accept(first_id, request.clone())
+        .await
+        .expect("first request is accepted")
+    {
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => panic!("the initial key has no prior record"),
+    };
+    let repeated = match store
+        .accept(second_id, request.clone())
+        .await
+        .expect("identical request reuses the prior record")
+    {
+        AcceptOutcome::Existing(record) => record,
+        AcceptOutcome::Accepted(_) => panic!("identical idempotent request must not insert"),
+    };
+    assert_eq!(repeated.id, first_id);
+    assert_eq!(repeated, first);
+
+    let changed = request_with_idempotency_key("reports", b"changed".to_vec(), "shared-key");
+    assert!(matches!(
+        store.accept(second_id, changed).await,
+        Err(StoreError::IdempotencyConflict)
+    ));
+    let connection = Connection::open(&path).expect("database opens for row count");
+    let row_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+        .expect("task count reads");
+    assert_eq!(row_count, 1);
+    drop(connection);
+    drop(store);
+    remove_database(&path);
+}
+
+/// Counts only queued and running rows and handles limits beyond SQLite range.
+#[tokio_test]
+async fn test_sqlite_legacy_unfinished_limit_counts_only_active_tasks() {
+    let path = database_path("legacy-unfinished-limit");
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+    assert!(
+        !store
+            .has_unfinished_over_limit(0)
+            .await
+            .expect("empty database has no unfinished tasks")
+    );
+    if let Some(limit) = usize::try_from(i64::MAX)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+    {
+        assert!(
+            !store
+                .has_unfinished_over_limit(limit)
+                .await
+                .expect("unrepresentable limit cannot be exceeded")
+        );
+    }
+
+    let id = TaskId::generate();
+    let accepted = match store
+        .accept(id, TaskRequest::new("unfinished-limit", "1", Vec::new()))
+        .await
+        .expect("task is accepted")
+    {
+        AcceptOutcome::Accepted(record) => record,
+        AcceptOutcome::Existing(_) => panic!("task has no idempotency key"),
+    };
+    assert!(
+        store
+            .has_unfinished_over_limit(0)
+            .await
+            .expect("one queued task exceeds zero")
+    );
+    assert!(
+        !store
+            .has_unfinished_over_limit(1)
+            .await
+            .expect("one queued task does not exceed one")
+    );
+
+    let running = store
+        .transition(TransitionCommand {
+            id,
+            expected_version: accepted.state_version,
+            expected_attempt: accepted.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .expect("queued task transitions to running");
+    assert!(
+        store
+            .has_unfinished_over_limit(0)
+            .await
+            .expect("running task remains unfinished")
+    );
+    store
+        .transition(TransitionCommand {
+            id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Succeeded,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        })
+        .await
+        .expect("running task becomes terminal");
+    assert!(
+        !store
+            .has_unfinished_over_limit(0)
+            .await
+            .expect("terminal task is not unfinished")
+    );
+
+    drop(store);
+    remove_database(&path);
+}
+
+/// Releasing and reacquiring ownership advances the durable fencing epoch.
+#[tokio_test]
+async fn test_sqlite_owner_epoch_advances_after_release_and_reacquire() {
+    let path = database_path("owner-epoch-reacquire");
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+    let first_epoch = TaskStore::acquire_owner(&store)
+        .await
+        .expect("first owner is acquired");
+    TaskStore::release_owner(&store, first_epoch)
+        .await
+        .expect("first owner releases");
+    let second_epoch = TaskStore::acquire_owner(&store)
+        .await
+        .expect("owner can be reacquired");
+    assert!(second_epoch.0 > first_epoch.0);
+    assert!(matches!(
+        TaskStore::release_owner(&store, first_epoch).await,
+        Err(StoreError::OwnerConflict)
+    ));
+    TaskStore::release_owner(&store, second_epoch)
+        .await
+        .expect("current owner releases");
+    drop(store);
+    remove_database(&path);
+}
