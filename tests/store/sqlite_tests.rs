@@ -1263,10 +1263,7 @@ async fn test_sqlite_legacy_unfinished_limit_counts_only_active_tasks() {
             .await
             .expect("empty database has no unfinished tasks")
     );
-    if let Some(limit) = usize::try_from(i64::MAX)
-        .ok()
-        .and_then(|value| value.checked_add(1))
-    {
+    if let Some(limit) = usize::try_from(i64::MAX).ok().and_then(|value| value.checked_add(1)) {
         assert!(
             !store
                 .has_unfinished_over_limit(limit)
@@ -1345,15 +1342,11 @@ async fn test_sqlite_legacy_unfinished_limit_counts_only_active_tasks() {
 async fn test_sqlite_owner_epoch_advances_after_release_and_reacquire() {
     let path = database_path("owner-epoch-reacquire");
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    let first_epoch = TaskStore::acquire_owner(&store)
-        .await
-        .expect("first owner is acquired");
+    let first_epoch = TaskStore::acquire_owner(&store).await.expect("first owner is acquired");
     TaskStore::release_owner(&store, first_epoch)
         .await
         .expect("first owner releases");
-    let second_epoch = TaskStore::acquire_owner(&store)
-        .await
-        .expect("owner can be reacquired");
+    let second_epoch = TaskStore::acquire_owner(&store).await.expect("owner can be reacquired");
     assert!(second_epoch.0 > first_epoch.0);
     assert!(matches!(
         TaskStore::release_owner(&store, first_epoch).await,
