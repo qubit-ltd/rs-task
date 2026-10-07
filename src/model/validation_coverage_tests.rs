@@ -29,8 +29,10 @@ fn assert_error(
 
 #[test]
 fn resource_validation_reports_each_entry_and_gpu_constraint() {
-    let mut request = ResourceRequest::default();
-    request.gpu_labels = vec![String::new()];
+    let mut request = ResourceRequest {
+        gpu_labels: vec![String::new()],
+        ..ResourceRequest::default()
+    };
     assert_error(
         request.validate_limits(),
         RequestValidationField::GpuLabels,

@@ -375,7 +375,7 @@ mod tests {
                     record.request.payload,
                     lifecycle
                 ],
-                |row| read_stored_task_row(row),
+                read_stored_task_row,
             )
             .expect("complete task projection reads");
         assert_eq!(decode_stored_task_row(raw).expect("task decodes"), record);
@@ -395,7 +395,7 @@ mod tests {
                     info,
                     lifecycle
                 ],
-                |row| read_stored_summary_row(row),
+                read_stored_summary_row,
             )
             .expect("payload-free summary projection reads");
         assert_eq!(
