@@ -40,6 +40,9 @@ struct GatedReleaseStore {
     resume: Semaphore,
     first_release: AtomicBool,
     fail_next_release: AtomicBool,
+    panic_next_release: AtomicBool,
+    failure_observed: AtomicBool,
+    panic_observed: AtomicBool,
 }
 
 impl GatedReleaseStore {
@@ -51,6 +54,9 @@ impl GatedReleaseStore {
             resume: Semaphore::new(0),
             first_release: AtomicBool::new(true),
             fail_next_release: AtomicBool::new(false),
+            panic_next_release: AtomicBool::new(false),
+            failure_observed: AtomicBool::new(false),
+            panic_observed: AtomicBool::new(false),
         }
     }
 }
@@ -114,7 +120,12 @@ impl TaskStore for GatedReleaseStore {
                 permit.forget();
             }
             if self.fail_next_release.swap(false, Ordering::AcqRel) {
+                self.failure_observed.store(true, Ordering::Release);
                 return Err(StoreError::Failure("transient release failure".into()));
+            }
+            if self.panic_next_release.swap(false, Ordering::AcqRel) {
+                self.panic_observed.store(true, Ordering::Release);
+                panic!("injected cleanup panic");
             }
             self.inner.release_owner(epoch).await
         })
@@ -246,4 +257,108 @@ async fn test_pending_release_does_not_block_other_cleanup() {
         other_released,
         "pending cleanup held the worker behind an unrelated owner"
     );
+}
+
+/// A failed drop cleanup is logged while the shared worker remains usable.
+#[tokio::test]
+async fn test_drop_cleanup_logs_store_failure_without_stopping_worker() {
+    let store = Arc::new(GatedReleaseStore::new());
+    store.first_release.store(false, Ordering::Release);
+    store.fail_next_release.store(true, Ordering::Release);
+    let epoch = store.acquire_owner().await.expect("owner acquired");
+    let dyn_store: Arc<dyn TaskStore> = store.clone();
+    drop(OwnerReleaseGuard::new(
+        dyn_store,
+        epoch,
+        OwnerReleaseWorker::shared().expect("cleanup worker starts"),
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !store.failure_observed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cleanup worker attempts the injected failure");
+    assert!(matches!(store.acquire_owner().await, Err(StoreError::OwnerConflict)));
+    store
+        .inner
+        .release_owner(epoch)
+        .await
+        .expect("test releases the owner left after the injected failure");
+
+    let other = Arc::new(MemoryTaskStore::new(4));
+    let other_epoch = other.acquire_owner().await.expect("worker remains available");
+    let other_store: Arc<dyn TaskStore> = other.clone();
+    drop(OwnerReleaseGuard::new(
+        other_store,
+        other_epoch,
+        OwnerReleaseWorker::shared().expect("shared cleanup worker remains available"),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match other.acquire_owner().await {
+                Ok(epoch) => {
+                    other.release_owner(epoch).await.expect("replacement owner released");
+                    break;
+                }
+                Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected owner acquisition error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("failed cleanup did not stop the worker");
+}
+
+/// A panicking drop cleanup is contained and does not terminate the worker.
+#[tokio::test]
+async fn test_drop_cleanup_contains_store_panic() {
+    let store = Arc::new(GatedReleaseStore::new());
+    store.first_release.store(false, Ordering::Release);
+    store.panic_next_release.store(true, Ordering::Release);
+    let epoch = store.acquire_owner().await.expect("owner acquired");
+    let dyn_store: Arc<dyn TaskStore> = store.clone();
+    drop(OwnerReleaseGuard::new(
+        dyn_store,
+        epoch,
+        OwnerReleaseWorker::shared().expect("cleanup worker starts"),
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !store.panic_observed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cleanup worker reaches the injected panic");
+    assert!(matches!(store.acquire_owner().await, Err(StoreError::OwnerConflict)));
+    store
+        .inner
+        .release_owner(epoch)
+        .await
+        .expect("test releases the owner left after the injected panic");
+
+    let other = Arc::new(MemoryTaskStore::new(4));
+    let other_epoch = other.acquire_owner().await.expect("worker remains available");
+    let other_store: Arc<dyn TaskStore> = other.clone();
+    drop(OwnerReleaseGuard::new(
+        other_store,
+        other_epoch,
+        OwnerReleaseWorker::shared().expect("shared cleanup worker remains available"),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match other.acquire_owner().await {
+                Ok(epoch) => {
+                    other.release_owner(epoch).await.expect("replacement owner released");
+                    break;
+                }
+                Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected owner acquisition error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("panicking cleanup did not stop the worker");
 }
