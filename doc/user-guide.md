@@ -24,9 +24,9 @@ The `sqlite` feature enables durable task history and recovery. Recovery is at-l
 
 ## Publish lifecycle changes
 
-Applications that need lifecycle notifications can enable the `event-bus` feature and pass an `Arc<AsyncEventBus>` to `TaskExecutionServiceBuilder::event_bus`. Register the application's `TaskEvent` codec on that bus. The service requires both a store with persistent outbox support and a provider that declares `DurabilityCapability::Durable`. `SqliteTaskStore` provides the store capability; `MemoryTaskStore` returns `UnsupportedCapability` during service construction. The built-in local event-bus provider is ephemeral and cannot be used for this publisher. Without `event_bus`, lifecycle notifications are not recorded.
+Applications that need lifecycle notifications can enable the `event-bus` feature and pass an `Arc<AsyncEventBus>` to `TaskExecutionServiceBuilder::event_bus`. Register the application's `TaskEvent` codec on that bus. The service requires a store with persistent outbox support and a provider that declares both `DurabilityCapability::Durable` and a successful publish guarantee of at least `PublishGuarantee::Accepted`. `SqliteTaskStore` provides the store capability; `MemoryTaskStore` returns `UnsupportedCapability` during service construction. The built-in local event-bus provider is ephemeral and cannot be used for this publisher. Without `event_bus`, lifecycle notifications are not recorded.
 
-Require durable retention when creating the bus. In this startup excerpt, `facade` already contains the `TaskEvent` codec, and the application has linked its Redis provider crate:
+Require durable retention and acceptance when creating the bus. In this startup excerpt, `facade` already contains the `TaskEvent` codec, and the application has linked its Redis provider crate:
 
 ```rust
 use std::sync::Arc;
@@ -34,19 +34,24 @@ use std::sync::Arc;
 use qubit_event_bus::AsyncEventBusRegistry;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::RequiredCapabilities;
+use qubit_event_bus::spi::PublishGuarantee;
 use qubit_spi::ProviderSelection;
 
 let config = EventBusConfig::default()
     .with_selection(ProviderSelection::named("redis-streams")?)
-    .with_required_capabilities(RequiredCapabilities::new().durable())
+    .with_required_capabilities(
+        RequiredCapabilities::new()
+            .durable()
+            .with_publish_guarantee(PublishGuarantee::Accepted),
+    )
     .with_facade_config(facade);
 let bus = Arc::new(AsyncEventBusRegistry::discover()?.create(&config).await?);
 let service = builder.event_bus(bus.clone()).build().await?;
 ```
 
-The [compilable wiring fixture](../tests/fixtures/doc-examples/src/main.rs) also supplies the provider options and task handler. The registry checks the requirement during bus creation. Before enabling the outbox, the task service checks the injected facade's cached durability capability and the `task.lifecycle` codec with the facade's `check_publish_codec` readiness check. An ephemeral provider fails service construction with `NotificationProviderNotDurable`; a missing codec fails with `NotificationCodecUnavailable`, without starting publication or changing existing outbox rows. The codec check confirms only registration in the facade configuration; it does not prove that encoding succeeds for every event or that Redis is reachable or persistent.
+The [compilable wiring fixture](../tests/fixtures/doc-examples/src/main.rs) also supplies the provider options and task handler. The registry checks the requirement during bus creation. Before enabling the outbox, the task service independently checks the injected facade's cached durability and publish guarantee, then checks the `task.lifecycle` codec with `check_publish_codec`. An ephemeral provider fails with `NotificationProviderNotDurable`; a durable provider declaring `FireAndForget` fails with `NotificationProviderInsufficientGuarantee`; a missing codec fails with `NotificationCodecUnavailable`. These failures do not start publication or enable the outbox. The codec check confirms only registration in the facade configuration; it does not prove that encoding succeeds for every event or that Redis is reachable or persistent.
 
-With the publisher enabled, each committed lifecycle snapshot is written to SQLite in the same transaction as its task state change. A background worker sends rows in stable order to `task.lifecycle`, then deletes a row after accepted publication. Rows present at startup are replayed after task recovery; states committed before the outbox was enabled are not backfilled. Publication is at-least-once: an unknown result or a crash after the bus accepted an event but before SQLite deleted its row can produce a duplicate. A successful Redis `XADD` is stream acceptance, not proof of a disk `fsync` or consumer ACK. `DurabilityCapability::Durable` means the provider retains messages without subscribers; it does not promise either of those later stages. Consumers should keep the highest `state_version` per `TaskId`, ignore duplicates and stale versions, and query the task service if versions are missing. The event is a notification, not an authoritative state record.
+With the publisher enabled, each committed lifecycle snapshot is written to SQLite in the same transaction as its task state change. A background worker sends rows in stable order to `task.lifecycle`, then deletes a row after accepted publication. Rows present at startup are replayed after task recovery; states committed before the outbox was enabled are not backfilled. Publication is at-least-once: an unknown result or a crash after the bus accepted an event but before SQLite deleted its row can produce a duplicate. A successful Redis `XADD` is stream acceptance, not proof of a disk `fsync`, replication, or consumer ACK. `DurabilityCapability::Durable` means the provider retains messages without subscribers; `PublishGuarantee::Accepted` describes the provider's acceptance boundary. Neither promises those later stages. After an acceptance reply, a Redis failure before persistence can still lose a notification whose SQLite outbox row has been deleted. Consumers should keep the highest `state_version` per `TaskId`, ignore duplicates and stale versions, and query the task service if versions are missing. The event is a notification, not an authoritative state record.
 
 ### Durable consumer projection
 

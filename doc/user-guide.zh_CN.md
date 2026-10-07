@@ -24,9 +24,9 @@
 
 ## 发布任务生命周期变化
 
-需要向外发送生命周期通知时，启用 `event-bus` feature，并将 `Arc<AsyncEventBus>` 传给 `TaskExecutionServiceBuilder::event_bus`。应用还需在 bus 上注册自己的 `TaskEvent` codec。此功能同时要求 store 支持持久 outbox、总线 provider 声明 `DurabilityCapability::Durable`。`SqliteTaskStore` 提供前一项能力，`MemoryTaskStore` 会在构建服务时返回 `UnsupportedCapability`；内置 local 总线是易失性的，不能用于此 publisher。不配置 `event_bus` 时，服务不会记录生命周期通知。
+需要向外发送生命周期通知时，启用 `event-bus` feature，并将 `Arc<AsyncEventBus>` 传给 `TaskExecutionServiceBuilder::event_bus`。应用还需在 bus 上注册自己的 `TaskEvent` codec。此功能要求 store 支持持久 outbox，并要求总线 provider 同时声明 `DurabilityCapability::Durable` 及至少 `PublishGuarantee::Accepted` 的成功发布保证。`SqliteTaskStore` 提供前一项能力，`MemoryTaskStore` 会在构建服务时返回 `UnsupportedCapability`；内置 local 总线是易失性的，不能用于此 publisher。不配置 `event_bus` 时，服务不会记录生命周期通知。
 
-创建总线时明确要求持久保留消息。下面的启动片段假设 `facade` 已注册 `TaskEvent` codec，应用也已链接 Redis provider crate：
+创建总线时明确要求持久保留消息及接纳保证。下面的启动片段假设 `facade` 已注册 `TaskEvent` codec，应用也已链接 Redis provider crate：
 
 ```rust
 use std::sync::Arc;
@@ -34,19 +34,24 @@ use std::sync::Arc;
 use qubit_event_bus::AsyncEventBusRegistry;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::RequiredCapabilities;
+use qubit_event_bus::spi::PublishGuarantee;
 use qubit_spi::ProviderSelection;
 
 let config = EventBusConfig::default()
     .with_selection(ProviderSelection::named("redis-streams")?)
-    .with_required_capabilities(RequiredCapabilities::new().durable())
+    .with_required_capabilities(
+        RequiredCapabilities::new()
+            .durable()
+            .with_publish_guarantee(PublishGuarantee::Accepted),
+    )
     .with_facade_config(facade);
 let bus = Arc::new(AsyncEventBusRegistry::discover()?.create(&config).await?);
 let service = builder.event_bus(bus.clone()).build().await?;
 ```
 
-[可编译的装配示例](../tests/fixtures/doc-examples/src/main.rs)还包含 provider 配置和任务处理器。registry 会在创建总线时检查要求；任务服务会在启用 outbox 前，通过 facade 的 `check_publish_codec` 就绪检查，核对注入 facade 中缓存的持久性能力以及 `task.lifecycle` codec。传入易失性 provider 会使服务构建返回 `NotificationProviderNotDurable`；缺少 codec 则返回 `NotificationCodecUnavailable`，且不会启动发布或改变已有 outbox 行。codec 检查只确认 facade 配置中已注册 codec，并不能证明每个事件都能成功编码，也不能证明 Redis 可连接或已持久化。
+[可编译的装配示例](../tests/fixtures/doc-examples/src/main.rs)还包含 provider 配置和任务处理器。registry 会在创建总线时检查要求；任务服务也会在启用 outbox 前独立核对注入 facade 中缓存的持久性和发布保证，然后通过 facade 的 `check_publish_codec` 检查 `task.lifecycle` codec。易失性 provider 返回 `NotificationProviderNotDurable`；声明 `FireAndForget` 的持久 provider 返回 `NotificationProviderInsufficientGuarantee`；缺少 codec 返回 `NotificationCodecUnavailable`。这些失败不会启动发布或启用 outbox。codec 检查只确认 facade 配置中已注册 codec，并不能证明每个事件都能成功编码，也不能证明 Redis 可连接或已持久化。
 
-publisher 启用后，每次生命周期状态提交都会与对应 outbox 行在同一个 SQLite 事务中写入。后台 worker 按稳定顺序将事件发往 `task.lifecycle`，确认接纳后再删除 outbox 行。服务启动时会重放已有待发事件；启用 outbox 之前提交的状态不会补发。投递语义为至少一次：发布结果不确定，或 bus 已接纳事件但进程在 SQLite 删除记录前崩溃，都可能产生重复。Redis `XADD` 成功表示 stream 已接纳记录，不能据此判断磁盘是否完成 `fsync`，更不表示消费者已 ACK。`DurabilityCapability::Durable` 仅说明无订阅者时仍保留消息，不承诺后两个阶段。消费者应为每个 `TaskId` 保存最高 `state_version`，忽略重复和旧版本；发现版本缺口时查询任务服务。事件只用于通知，任务查询才是权威状态。
+publisher 启用后，每次生命周期状态提交都会与对应 outbox 行在同一个 SQLite 事务中写入。后台 worker 按稳定顺序将事件发往 `task.lifecycle`，确认接纳后再删除 outbox 行。服务启动时会重放已有待发事件；启用 outbox 之前提交的状态不会补发。投递语义为至少一次：发布结果不确定，或 bus 已接纳事件但进程在 SQLite 删除记录前崩溃，都可能产生重复。Redis `XADD` 成功表示 stream 已接纳记录，不能据此判断磁盘是否完成 `fsync`、副本是否收到记录，更不表示消费者已 ACK。`DurabilityCapability::Durable` 仅说明无订阅者时仍保留消息；`PublishGuarantee::Accepted` 描述 provider 的接纳边界，两者都不承诺后续阶段。Redis 回复接纳后若在持久化前故障，已从 SQLite outbox 删除的通知仍可能丢失。消费者应为每个 `TaskId` 保存最高 `state_version`，忽略重复和旧版本；发现版本缺口时查询任务服务。事件只用于通知，任务查询才是权威状态。
 
 ### 持久化消费者投影
 

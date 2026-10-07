@@ -33,7 +33,7 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 `sqlite` feature 提供持久化任务历史和恢复。调度器按有界分页扫描 queued 摘要，运行中的 handler 数量不超过 `max_running_tasks`。只有 handler 错误的 `retryable` 为 true 时才会重试，重试期限会持久化；默认最多尝试三次，退避时间从 1 秒指数增长到 60 秒。修复配置后，可使用观察到的 state version 调用 `resume_blocked` 重新排队。恢复采用至少一次语义：任务若在外部副作用之后中断，恢复时可能再次运行，因此应用副作用需要幂等性或事务保护。调度仅在进程内执行；分布式调度和业务副作用恰好一次不属于本 crate 的保证。
 
-启用可选的 `event-bus` feature 后，可通过 `TaskExecutionServiceBuilder::event_bus` 从 SQLite 持久 outbox 异步发布生命周期快照。应用需要同时选用支持持久 outbox 的 store，以及声明 `DurabilityCapability::Durable` 的事件总线 provider；内置 local provider 不适用。创建总线时设置 `EventBusConfig::with_required_capabilities(RequiredCapabilities::new().durable())`。注入 facade 后，任务服务会再次检查其缓存的能力，再决定是否启用 outbox；若 provider 是易失性的，构建服务会失败。schema v6 迁移会保留已有任务记录。投递语义为至少一次；消费者应按 `(TaskId, state_version)` 去重，并通过 service 查询权威状态。`MemoryTaskStore` 不提供持久 outbox 能力。
+启用可选的 `event-bus` feature 后，可通过 `TaskExecutionServiceBuilder::event_bus` 从 SQLite 持久 outbox 异步发布生命周期快照。应用需要选用支持持久 outbox 的 store，以及同时声明 `DurabilityCapability::Durable` 和至少 `PublishGuarantee::Accepted` 的事件总线 provider；内置 local provider 不适用。创建总线时设置 `EventBusConfig::with_required_capabilities(RequiredCapabilities::new().durable().with_publish_guarantee(PublishGuarantee::Accepted))`。注入 facade 后，任务服务会再次检查其缓存的能力，再决定是否启用 outbox；易失性 provider 或仅提供 `FireAndForget` 发布保证的持久 provider 都会使构建失败。schema v6 迁移会保留已有任务记录。投递语义为至少一次；消费者应按 `(TaskId, state_version)` 去重，并通过 service 查询权威状态。`MemoryTaskStore` 不提供持久 outbox 能力。
 
 ## 文档
 
@@ -43,6 +43,8 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 - [API 文档](https://docs.rs/qubit-task)
 
 ## 任务通知投递
+
+`PublishGuarantee::Accepted` 描述 provider 的接纳边界，不证明已接纳的通知已经落盘或完成复制。Redis 若在持久化前故障，已从 SQLite outbox 删除的通知仍可能丢失。
 
 服务恢复后 publisher 会重放已提交的 outbox 行；关闭时会在 `notification_shutdown_timeout` 限时内排空。发布回执不确定，或 Redis 已接纳事件但进程在删除 outbox 行前崩溃，都可能造成重复。Redis `XADD` 成功只表示 stream 接纳记录，不能证明已经执行磁盘 `fsync`，也不表示消费者已经 ACK。`DurabilityCapability::Durable` 表示无订阅者时仍保留消息，不承诺这些更强的保证。消费者应为每个任务保留最高 `state_version`，忽略重复和旧版本事件。稳定的 `EventId` 仅用于关联，Redis provider 不会按它去重。事务化 checkpoint、版本缺口刷新及 ACK/Retry 顺序见[持久化消费者投影指南](doc/user-guide.zh_CN.md#持久化消费者投影)。启用 publisher 不会补发服务启用前已经提交的历史状态。监控 outbox 待处理行数和最老行年龄，并同时查看 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`。
 
