@@ -169,6 +169,8 @@ mod tests {
     use qubit_event_bus::model::Topic;
 
     use super::PublisherState;
+    use crate::model::next::TaskId;
+    use crate::store::EventOutboxEntry;
     use crate::store::MemoryTaskStore;
 
     #[tokio::test]
@@ -197,5 +199,36 @@ mod tests {
             poll!(second.as_mut()).is_pending(),
             "sustained errors remain rate limited after the close retry"
         );
+    }
+
+    #[tokio::test]
+    async fn test_publish_rejects_corrupt_outbox_snapshot_before_bus_admission() {
+        let registry = AsyncEventBusRegistry::with_local().expect("local registry");
+        let bus = Arc::new(
+            registry
+                .create(&EventBusConfig::default())
+                .await
+                .expect("local bus"),
+        );
+        let state = PublisherState::new(
+            Arc::new(MemoryTaskStore::new(1)),
+            bus,
+            Topic::new("task.lifecycle").expect("topic"),
+        );
+        let entry = EventOutboxEntry {
+            task_id: TaskId::from_id(qubit_id::Id::new(77)),
+            state_version: 4,
+            event_id: "task:77:4".into(),
+            event_json: "{corrupt".into(),
+        };
+
+        let error = state
+            .publish(&entry)
+            .await
+            .expect_err("corrupt snapshots cannot publish");
+
+        assert!(!error.is_empty());
+        assert_eq!(*state.in_flight_event_id.lock(), None);
+        assert_eq!(state.counters.snapshot().published, 0);
     }
 }

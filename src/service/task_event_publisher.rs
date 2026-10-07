@@ -189,4 +189,31 @@ mod tests {
         drop(publisher);
         std::fs::remove_file(database).expect("remove temporary task database");
     }
+
+    #[tokio::test]
+    async fn test_close_reports_outbox_read_failure_at_deadline() {
+        let (publisher, database) = create_publisher().await;
+        rusqlite::Connection::open(&database)
+            .expect("open database for fault injection")
+            .execute_batch("DROP TABLE task_event_outbox")
+            .expect("remove the outbox table");
+
+        publisher.start().await;
+        let error = publisher
+            .close()
+            .await
+            .expect_err("outbox read keeps failing until deadline");
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("pending count unavailable"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("no publication was active at timeout"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("task_event_outbox"), "{diagnostic}");
+        drop(publisher);
+        std::fs::remove_file(database).expect("remove temporary task database");
+    }
 }
