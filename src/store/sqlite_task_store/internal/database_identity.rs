@@ -207,3 +207,74 @@ fn file_identity(_file: &File) -> Result<((u64, u64), u64), StoreError> {
 fn failure(error: std::io::Error) -> StoreError {
     StoreError::Failure(error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::DatabaseIdentity;
+    use crate::model::legacy::TaskId;
+    use crate::store::StoreError;
+
+    fn test_directory() -> PathBuf {
+        std::env::temp_dir().join(format!("qubit-task-database-identity-{}", TaskId::generate()))
+    }
+
+    #[test]
+    fn test_database_identity_creates_parent_and_canonicalizes_relative_path() {
+        let directory = test_directory();
+        let nested = directory.join("nested");
+        let relative = nested.join("tasks.sqlite");
+        let (identity, file) = DatabaseIdentity::open(&relative).expect("database identity opens");
+        assert!(identity.path().is_absolute());
+        assert_eq!(identity.path().file_name(), Some(std::ffi::OsStr::new("tasks.sqlite")));
+        assert!(nested.exists(), "missing parent directories are created");
+        identity.verify().expect("original file identity remains valid");
+        drop(file);
+        std::fs::remove_dir_all(directory).expect("test directory is removed");
+    }
+
+    #[test]
+    fn test_database_identity_rejects_non_file_path() {
+        let directory = test_directory();
+        std::fs::create_dir_all(&directory).expect("directory is created");
+        assert!(matches!(
+            DatabaseIdentity::open(&directory),
+            Err(StoreError::Failure(_))
+        ));
+        std::fs::remove_dir_all(directory).expect("test directory is removed");
+    }
+
+    #[test]
+    fn test_database_identity_detects_file_replacement_after_open() {
+        let directory = test_directory();
+        std::fs::create_dir_all(&directory).expect("directory is created");
+        let path = directory.join("tasks.sqlite");
+        let (identity, original_file) = DatabaseIdentity::open(&path).expect("database identity opens");
+        let replacement_path = directory.join("original.sqlite");
+        std::fs::rename(&path, &replacement_path).expect("original database moves aside");
+        std::fs::write(&path, b"replacement").expect("replacement database is created");
+        assert!(
+            matches!(identity.verify(), Err(StoreError::Failure(message)) if message.contains("file was replaced"))
+        );
+        drop(original_file);
+        std::fs::remove_dir_all(directory).expect("test directory is removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_database_identity_rejects_hard_link_aliases() {
+        let directory = test_directory();
+        std::fs::create_dir_all(&directory).expect("directory is created");
+        let path = directory.join("tasks.sqlite");
+        let alias = directory.join("alias.sqlite");
+        let (_, file) = DatabaseIdentity::open(&path).expect("database identity opens");
+        std::fs::hard_link(&path, &alias).expect("hard-link alias is created");
+        assert!(matches!(
+            DatabaseIdentity::open(&alias),
+            Err(StoreError::UnsupportedDatabaseIdentity)
+        ));
+        drop(file);
+        std::fs::remove_dir_all(directory).expect("test directory is removed");
+    }
+}

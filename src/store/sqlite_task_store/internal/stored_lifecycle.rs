@@ -144,3 +144,53 @@ impl StoredLifecycle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::StoredLifecycle;
+    use crate::model::TaskState;
+    use crate::model::legacy::TaskId;
+    use crate::model::legacy::TaskRecord;
+    use crate::model::legacy::TaskRequest;
+    use crate::model::legacy::TaskRequestInfo;
+
+    fn record() -> TaskRecord {
+        TaskRecord {
+            id: TaskId::generate(),
+            request: TaskRequest::new("lifecycle-test", "v2", b"private payload".to_vec()),
+            state: TaskState::Running,
+            state_version: 4,
+            attempt: 3,
+            retry_not_before_ms: None,
+            accepted_at_ms: 120,
+            started_at_ms: Some(130),
+            finished_at_ms: None,
+            assigned_resources: vec!["worker-a".into()],
+            output: None,
+            cancel_requested: true,
+        }
+    }
+
+    #[test]
+    fn test_stored_lifecycle_record_round_trip_keeps_only_mutable_fields() {
+        let expected = record();
+        let stored = StoredLifecycle::from_record(&expected);
+        let encoded = serde_json::to_string(&stored).expect("lifecycle serializes");
+        assert!(
+            !encoded.contains("private payload"),
+            "request payload stays outside lifecycle JSON"
+        );
+        assert_eq!(stored.into_record(expected.request.clone()), expected);
+    }
+
+    #[test]
+    fn test_stored_lifecycle_summary_round_trip_preserves_payload_free_snapshot() {
+        let expected = record().summary();
+        let stored = StoredLifecycle::from_summary(&expected);
+        let decoded: StoredLifecycle =
+            serde_json::from_str(&serde_json::to_string(&stored).expect("summary lifecycle serializes"))
+                .expect("summary lifecycle deserializes");
+        let request = TaskRequestInfo::from(&record().request);
+        assert_eq!(decoded.into_summary(request), expected);
+    }
+}

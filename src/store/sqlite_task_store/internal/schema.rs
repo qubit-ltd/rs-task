@@ -583,6 +583,7 @@ mod tests {
 
     use super::ensure_indexes;
     use super::failure;
+    use super::initialize_next_schema;
     use super::initialize_schema;
     use crate::store::StoreError;
 
@@ -656,5 +657,83 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("restored user version reads");
         assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn test_typed_schema_initialization_is_idempotent_and_preserves_outbox_rows() {
+        let mut connection = Connection::open_in_memory().expect("typed schema database opens");
+        initialize_next_schema(&mut connection).expect("fresh typed schema initializes");
+        connection
+            .execute(
+                "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) VALUES ('00000000000000000001',2,'event-1','{}',17)",
+                [],
+            )
+            .expect("outbox test event inserts");
+
+        initialize_next_schema(&mut connection).expect("current typed schema reopens");
+        let event: (String, i64, String) = connection
+            .query_row(
+                "SELECT event_id,created_at_ms,event_json FROM task_event_outbox WHERE task_id='00000000000000000001' AND state_version=2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("existing outbox event remains");
+        assert_eq!(event, ("event-1".into(), 17, "{}".into()));
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version reads");
+        assert_eq!(version, super::NEXT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_typed_schema_rejects_incomplete_current_version_without_repairing_it() {
+        let mut connection = Connection::open_in_memory().expect("typed schema database opens");
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    id TEXT, state_kind TEXT, accepted_at INTEGER, kind_id TEXT, category TEXT,
+                    payload_type_id TEXT, payload_schema_version INTEGER, codec_id TEXT,
+                    correlation_key TEXT, idempotency_key TEXT, request_info_json TEXT,
+                    payload BLOB, record_format_version INTEGER, lifecycle_json TEXT,
+                    state_version INTEGER, attempt INTEGER, retry_not_before_ms INTEGER,
+                    started_at INTEGER, progress_attempt INTEGER, progress_version INTEGER,
+                    progress_json TEXT
+                ); PRAGMA user_version=6;",
+            )
+            .expect("incomplete current schema fixture is created");
+
+        assert!(
+            matches!(initialize_next_schema(&mut connection), Err(StoreError::Failure(message)) if message.contains("event outbox"))
+        );
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version remains readable");
+        assert_eq!(version, super::NEXT_SCHEMA_VERSION);
+        let outbox_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_event_outbox')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("outbox presence reads");
+        assert!(
+            !outbox_exists,
+            "an incomplete version-six database is not silently repaired"
+        );
+    }
+
+    #[test]
+    fn test_legacy_schema_initializer_rejects_unsupported_version() {
+        let mut connection = Connection::open_in_memory().expect("legacy schema database opens");
+        connection
+            .pragma_update(None, "user_version", 4)
+            .expect("future legacy version is set");
+        assert!(
+            matches!(initialize_schema(&mut connection), Err(StoreError::Failure(message)) if message.contains("unsupported SQLite task schema version 4"))
+        );
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version remains readable");
+        assert_eq!(version, 4, "rejected schema version remains untouched");
     }
 }

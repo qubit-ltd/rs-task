@@ -11,18 +11,18 @@ use rusqlite::params;
 use serde_json as json;
 use tokio::test as tokio_test;
 
-use crate::model::AcceptOutcome;
 use crate::model::MAX_TASK_QUERY_LIMIT;
-use crate::model::TaskCursor;
-use crate::model::TaskId;
-use crate::model::TaskQuery;
-use crate::model::TaskRecord;
-use crate::model::TaskRequest;
-use crate::model::TaskRequestInfo;
 use crate::model::TaskState;
 use crate::model::TaskState as LegacyTaskState;
 use crate::model::TaskStateKind;
-use crate::model::TransitionCommand;
+use crate::model::legacy::AcceptOutcome;
+use crate::model::legacy::TaskCursor;
+use crate::model::legacy::TaskId;
+use crate::model::legacy::TaskQuery;
+use crate::model::legacy::TaskRecord;
+use crate::model::legacy::TaskRequest;
+use crate::model::legacy::TaskRequestInfo;
+use crate::model::legacy::TransitionCommand;
 use crate::model::next::ProgressCommand;
 use crate::model::next::ResourceRequest;
 use crate::model::next::StartCommand;
@@ -43,12 +43,24 @@ fn database_path(label: &str) -> std::path::PathBuf {
 fn remove_database(path: &std::path::Path) {
     for candidate in [
         path.to_path_buf(),
-        crate::sqlite_paths::owner_lock_path(path),
+        owner_lock_path(path),
         path.with_extension("sqlite-wal"),
         path.with_extension("sqlite-shm"),
     ] {
         let _ = std::fs::remove_file(candidate);
     }
+}
+
+fn owner_lock_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".owner.lock");
+    lock_path.into()
+}
+
+fn request_with_idempotency_key(task_type: &str, payload: Vec<u8>, key: &str) -> TaskRequest {
+    let mut request = TaskRequest::new(task_type, "1", payload);
+    request.idempotency_key = Some(key.into());
+    request
 }
 
 async fn seed_legacy_database(path: &std::path::Path) -> (TaskId, TaskRequest) {
@@ -177,7 +189,7 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
                 expected_state_version: accepted.summary.state_version,
                 expected_attempt: accepted.summary.attempt,
                 retry_not_before_ms: None,
-                state: LegacyTaskState::Succeeded,
+                state: TaskState::Succeeded,
                 cancel_requested: false,
                 cancel_error: None,
                 finished_at_ms: Some(4),
@@ -195,7 +207,7 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
                 expected_state_version: accepted.summary.state_version,
                 expected_attempt: accepted.summary.attempt,
                 retry_not_before_ms: None,
-                state: LegacyTaskState::Failed {
+                state: TaskState::Failed {
                     category: "x".repeat(crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES + 1),
                     message: "oversized failure category".into(),
                 },
@@ -567,8 +579,7 @@ async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
     let records = [
         TaskRecord {
             id: TaskId::generate(),
-            request: TaskRequest::new("legacy-running", "1", b"running".to_vec())
-                .with_idempotency_key("legacy-running-key"),
+            request: request_with_idempotency_key("legacy-running", b"running".to_vec(), "legacy-running-key"),
             state: TaskState::Running,
             state_version: 1,
             attempt: 1,
@@ -582,8 +593,7 @@ async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
         },
         TaskRecord {
             id: TaskId::generate(),
-            request: TaskRequest::new("legacy-failed", "1", b"failure".to_vec())
-                .with_idempotency_key("legacy-failed-key"),
+            request: request_with_idempotency_key("legacy-failed", b"failure".to_vec(), "legacy-failed-key"),
             state: TaskState::Failed {
                 category: "legacy-category".into(),
                 message: "legacy diagnostic".into(),
@@ -600,7 +610,7 @@ async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
         },
         TaskRecord {
             id: TaskId::generate(),
-            request: TaskRequest::new("legacy-retry", "1", b"retry".to_vec()).with_idempotency_key("legacy-retry-key"),
+            request: request_with_idempotency_key("legacy-retry", b"retry".to_vec(), "legacy-retry-key"),
             state: TaskState::Queued,
             state_version: 2,
             attempt: 1,
@@ -774,7 +784,7 @@ async fn test_sqlite_transitions_do_not_rewrite_the_immutable_request() {
 async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle() {
     let path = database_path("schema-two-migrate");
     let store = SqliteTaskStore::open(&path).unwrap();
-    let request = TaskRequest::new("schema-two", "v1", vec![7; 1024 * 1024]).with_idempotency_key("schema-two-key");
+    let request = request_with_idempotency_key("schema-two", vec![7; 1024 * 1024], "schema-two-key");
     let accepted = match store.accept(TaskId::generate(), request.clone()).await.unwrap() {
         AcceptOutcome::Accepted(record) => record,
         AcceptOutcome::Existing(_) => unreachable!(),
@@ -918,7 +928,7 @@ async fn test_sqlite_schema_two_migration_preserves_each_lifecycle_category() {
     let path = database_path("schema-two-states");
     let store = SqliteTaskStore::open(&path).unwrap();
     let mut cases = Vec::new();
-    let queued_request = TaskRequest::new("schema-two-queued", "v1", vec![1]).with_idempotency_key("schema-two-queued");
+    let queued_request = request_with_idempotency_key("schema-two-queued", vec![1], "schema-two-queued");
     let queued = match store.accept(TaskId::generate(), queued_request.clone()).await.unwrap() {
         AcceptOutcome::Accepted(record) => record.summary(),
         _ => unreachable!(),
@@ -936,7 +946,7 @@ async fn test_sqlite_schema_two_migration_preserves_each_lifecycle_category() {
         ),
         ("succeeded", TaskState::Succeeded, "schema-two-succeeded"),
     ] {
-        let request = TaskRequest::new(format!("schema-two-{name}"), "v1", vec![2, 3]).with_idempotency_key(key);
+        let request = request_with_idempotency_key(&format!("schema-two-{name}"), vec![2, 3], key);
         let accepted = match store.accept(TaskId::generate(), request.clone()).await.unwrap() {
             AcceptOutcome::Accepted(record) => record.summary(),
             _ => unreachable!(),
