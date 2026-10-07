@@ -1385,6 +1385,79 @@ async fn queued_typed_task_can_be_cancelled_before_resource_admission() {
 }
 
 #[tokio::test]
+async fn typed_service_cancel_missing_task_returns_not_found() {
+    let service = TaskExecutionServiceBuilder::new(
+        Arc::new(MemoryTaskStore::new(16)),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(1331))),
+    )
+    .build()
+    .await
+    .expect("service starts");
+
+    assert!(matches!(
+        service.cancel(TaskId::from_id(qubit_id::Id::new(9991))).await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::NotFound
+        ))
+    ));
+    service.shutdown().await.expect("service shuts down cleanly");
+}
+
+#[tokio::test]
+async fn typed_service_resume_missing_task_returns_not_found() {
+    let service = TaskExecutionServiceBuilder::new(
+        Arc::new(MemoryTaskStore::new(16)),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(1341))),
+    )
+    .build()
+    .await
+    .expect("service starts");
+
+    assert!(matches!(
+        service
+            .resume_blocked(TaskId::from_id(qubit_id::Id::new(9992)), 0)
+            .await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::NotFound
+        ))
+    ));
+    service.shutdown().await.expect("service shuts down cleanly");
+}
+
+#[tokio::test]
+async fn typed_submit_missing_codec_does_not_write_task_or_consume_id() {
+    const FIRST_ID: u64 = 1351;
+    let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
+    let service =
+        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(FIRST_ID))))
+            .build()
+            .await
+            .expect("service starts");
+
+    let mut unsupported = request();
+    unsupported.payload.codec_id = ValueCodecId::new("qubit_task.typed_service.missing");
+    assert!(matches!(
+        service.submit(unsupported).await,
+        Err(qubit_task::service::TaskServiceError::TypedRequest(message))
+            if message.contains("qubit_task.typed_service.missing")
+    ));
+    assert!(
+        store
+            .list_encoded(TaskQuery::default())
+            .await
+            .expect("store query succeeds")
+            .records
+            .is_empty()
+    );
+
+    let accepted = service.submit(request()).await.expect("valid request is accepted");
+    assert_eq!(accepted.id, TaskId::from_id(qubit_id::Id::new(FIRST_ID)));
+    service.shutdown().await.expect("service shuts down cleanly");
+}
+
+#[tokio::test]
 async fn running_handler_without_cancel_support_reports_unsupported() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(601))));
