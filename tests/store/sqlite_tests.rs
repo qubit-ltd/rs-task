@@ -12,6 +12,7 @@ use serde_json as json;
 use tokio::test as tokio_test;
 
 use crate::model::MAX_TASK_QUERY_LIMIT;
+use crate::model::TaskOutput;
 use crate::model::TaskState;
 use crate::model::TaskState as LegacyTaskState;
 use crate::model::TaskStateKind;
@@ -220,6 +221,116 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
         .await,
         Err(StoreError::InvalidRequest(_))
     ));
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_legacy_accept_rejects_over_limit_request() {
+    let path = database_path("legacy-request-too-large");
+    let store = SqliteTaskStore::open(&path).expect("legacy SQLite store opens");
+    let request = TaskRequest::new("x".repeat(129), "1", Vec::new());
+
+    assert!(matches!(
+        TaskStore::accept(&store, TaskId::generate(), request).await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_legacy_transition_rejects_oversized_diagnostics_and_output() {
+    let path = database_path("legacy-transition-too-large");
+    let store = SqliteTaskStore::open(&path).expect("legacy SQLite store opens");
+    let id = TaskId::generate();
+
+    assert!(matches!(
+        TaskStore::transition(
+            &store,
+            TransitionCommand {
+                id,
+                expected_version: 0,
+                expected_attempt: 0,
+                state: TaskState::Failed {
+                    category: "x".repeat(crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES + 1),
+                    message: "oversized failure category".into(),
+                },
+                retry_not_before_ms: None,
+                output: None,
+                assigned_resources: Vec::new(),
+                cancel_requested: false,
+            }
+        )
+        .await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+
+    assert!(matches!(
+        TaskStore::transition(
+            &store,
+            TransitionCommand {
+                id,
+                expected_version: 0,
+                expected_attempt: 0,
+                state: TaskState::Succeeded,
+                retry_not_before_ms: None,
+                output: Some(TaskOutput {
+                    summary: vec![0; crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES + 1],
+                }),
+                assigned_resources: Vec::new(),
+                cancel_requested: false,
+            }
+        )
+        .await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_typed_schema_rejects_legacy_transition() {
+    let path = database_path("typed-legacy-transition");
+    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+
+    assert!(matches!(
+        TaskStore::transition(
+            &store,
+            TransitionCommand {
+                id: TaskId::generate(),
+                expected_version: 0,
+                expected_attempt: 0,
+                state: TaskState::Cancelled,
+                retry_not_before_ms: None,
+                output: None,
+                assigned_resources: Vec::new(),
+                cancel_requested: false,
+            }
+        )
+        .await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_typed_prune_rejects_limit_outside_sqlite_integer_range() {
+    let path = database_path("typed-prune-limit-range");
+    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let limit = std::num::NonZeroUsize::new(usize::MAX).expect("usize::MAX is nonzero");
+
+    if i64::try_from(limit.get()).is_err() {
+        assert!(matches!(
+            TypedTaskStore::prune_terminal_before(&store, 0, limit).await,
+            Err(StoreError::InvalidRequest(_))
+        ));
+    }
+
     drop(store);
     remove_database(&path);
 }
