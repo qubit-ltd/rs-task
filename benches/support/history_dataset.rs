@@ -23,7 +23,10 @@ pub struct HistoryDataset {
 /// Creates a schema-version-4 database with deterministic legal task rows.
 /// Secondary indexes are deliberately left to SqliteTaskStore::open_next so the
 /// first-open/index-build cost can be measured independently of seeding.
-pub fn create(size: usize, directory: &std::path::Path) -> Result<HistoryDataset, Box<dyn std::error::Error>> {
+pub fn create(
+    size: usize,
+    directory: &std::path::Path,
+) -> Result<HistoryDataset, Box<dyn std::error::Error>> {
     use rusqlite::Connection;
     use rusqlite::params;
     use serde_json::json;
@@ -75,7 +78,10 @@ pub fn create(size: usize, directory: &std::path::Path) -> Result<HistoryDataset
             0..=7 => ("Queued", json!("Queued")),
             8 => ("Running", json!("Running")),
             9..=48 => ("Blocked", json!({"Blocked":{"reason":"benchmark"}})),
-            49..=98 => ("Failed", json!({"Failed":{"category":"benchmark","message":"fixture"}})),
+            49..=98 => (
+                "Failed",
+                json!({"Failed":{"category":"benchmark","message":"fixture"}}),
+            ),
             99..=148 => ("Cancelled", json!("Cancelled")),
             _ => ("Succeeded", json!("Succeeded")),
         };
