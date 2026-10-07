@@ -184,6 +184,7 @@ impl TaskHandler<Counter> for GatedHandler {
 struct FailingListStore {
     inner: Arc<MemoryTaskStore>,
     fail_next_list: std::sync::atomic::AtomicBool,
+    fail_next_query: std::sync::atomic::AtomicBool,
     fail_next_get: std::sync::atomic::AtomicBool,
     fail_next_start: std::sync::atomic::AtomicBool,
     fail_next_transition: std::sync::atomic::AtomicBool,
@@ -195,6 +196,7 @@ fn failing_store() -> Arc<FailingListStore> {
     Arc::new(FailingListStore {
         inner: Arc::new(MemoryTaskStore::new(32)),
         fail_next_list: std::sync::atomic::AtomicBool::new(false),
+        fail_next_query: std::sync::atomic::AtomicBool::new(false),
         fail_next_get: std::sync::atomic::AtomicBool::new(false),
         fail_next_start: std::sync::atomic::AtomicBool::new(false),
         fail_next_transition: std::sync::atomic::AtomicBool::new(false),
@@ -274,7 +276,7 @@ impl TaskStore for FailingListStore {
         &'a self,
         query: TaskQuery,
     ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
-        if self.fail_next_list.swap(false, Ordering::AcqRel) {
+        if self.fail_next_query.swap(false, Ordering::AcqRel) {
             Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected list failure".into())) })
         } else {
             self.inner.list_encoded(query)
@@ -834,6 +836,30 @@ async fn retryable_handler_error_is_persisted_and_retried_after_deadline() {
     service.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn max_attempts_one_persists_retryable_failure_as_terminal() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1211))))
+        .max_attempts(std::num::NonZeroU32::new(1).expect("attempt limit is nonzero"));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(RetryOnceHandler(AtomicU64::new(0))),
+        )
+        .unwrap();
+    let service = builder.build().await.expect("service starts");
+    let accepted = service.submit(request()).await.expect("task is accepted");
+
+    assert!(matches!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Failed { .. }
+    ));
+    let failed = service.get(accepted.id).await.unwrap().expect("task remains persisted");
+    assert_eq!(failed.attempt, 1);
+    service.shutdown().await.expect("service shuts down cleanly");
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_retry_deadline_survives_service_restart() {
@@ -1188,6 +1214,49 @@ async fn typed_service_query_filters_and_get_handles_missing_task() {
         None
     );
     service.shutdown().await.expect("service shuts down cleanly");
+}
+
+#[tokio::test]
+async fn typed_service_get_query_and_cancel_map_store_failures() {
+    let store = failing_store();
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1331))))
+        .build()
+        .await
+        .expect("service starts");
+
+    store.fail_next_get.store(true, Ordering::Release);
+    assert!(matches!(
+        service.get(TaskId::from_id(qubit_id::Id::new(9998))).await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::Failure(message)
+        )) if message == "injected get failure"
+    ));
+    assert_eq!(
+        service.get(TaskId::from_id(qubit_id::Id::new(9998))).await.unwrap(),
+        None
+    );
+
+    store.fail_next_get.store(true, Ordering::Release);
+    assert!(matches!(
+        service.cancel(TaskId::from_id(qubit_id::Id::new(9997))).await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::Failure(message)
+        )) if message == "injected get failure"
+    ));
+
+    store.fail_next_query.store(true, Ordering::Release);
+    assert!(matches!(
+        service.query(TaskQuery::default()).await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::Failure(message)
+        )) if message == "injected list failure"
+    ));
+    assert!(service.query(TaskQuery::default()).await.is_ok());
+    assert!(matches!(
+        service.shutdown().await,
+        Err(qubit_task::service::TaskServiceError::StoreUnavailable(message))
+            if message.contains("injected get failure")
+    ));
 }
 
 #[tokio::test]
