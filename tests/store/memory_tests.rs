@@ -925,7 +925,8 @@ async fn test_memory_store_task_query_limit() {
     assert_eq!(first.records.len(), 1);
 }
 
-/// Exercises legacy request replay, duplicate-ID, validation, and byte-limit errors.
+/// Exercises legacy request replay, duplicate-ID, validation, and byte-limit
+/// errors.
 #[tokio_test]
 async fn test_memory_store_legacy_acceptance_rejects_invalid_duplicate_and_oversized_requests() {
     let store = MemoryTaskStore::with_limits(
@@ -960,10 +961,7 @@ async fn test_memory_store_legacy_acceptance_rejects_invalid_duplicate_and_overs
     ));
     assert!(matches!(
         store
-            .accept(
-                TaskId::generate(),
-                legacy_request("too-large", vec![3], None),
-            )
+            .accept(TaskId::generate(), legacy_request("too-large", vec![3], None),)
             .await,
         Err(StoreError::CapacityExceeded {
             requested_bytes: 1,
@@ -979,7 +977,8 @@ async fn test_memory_store_legacy_acceptance_rejects_invalid_duplicate_and_overs
     ));
 }
 
-/// Checks strict unfinished counts, owner epochs, and unsupported recovery scans.
+/// Checks strict unfinished counts, owner epochs, and unsupported recovery
+/// scans.
 #[tokio_test]
 async fn test_memory_store_owner_and_unfinished_queries_follow_capabilities() {
     let store = MemoryTaskStore::new(4);
@@ -988,12 +987,16 @@ async fn test_memory_store_owner_and_unfinished_queries_follow_capabilities() {
         store.accept(id, TaskRequest::new("owner", "1", Vec::new())).await,
         Ok(AcceptOutcome::Accepted(_))
     ));
-    assert!(TaskStore::has_unfinished_over_limit(&store, 0)
-        .await
-        .expect("unfinished count query succeeds"));
-    assert!(!TaskStore::has_unfinished_over_limit(&store, 1)
-        .await
-        .expect("unfinished count query succeeds at the exact limit"));
+    assert!(
+        TaskStore::has_unfinished_over_limit(&store, 0)
+            .await
+            .expect("unfinished count query succeeds")
+    );
+    assert!(
+        !TaskStore::has_unfinished_over_limit(&store, 1)
+            .await
+            .expect("unfinished count query succeeds at the exact limit")
+    );
     assert!(matches!(
         TaskStore::scan_unfinished(&store, None).await,
         Err(StoreError::UnsupportedCapability)

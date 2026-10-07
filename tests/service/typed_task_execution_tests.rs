@@ -1183,7 +1183,10 @@ async fn typed_service_query_filters_and_get_handles_missing_task() {
         .expect("correlation query succeeds");
     assert_eq!(correlation_page.records.len(), 1);
     assert_eq!(correlation_page.records[0].category.as_deref(), Some("operations"));
-    assert_eq!(service.get(TaskId::from_id(qubit_id::Id::new(9999))).await.unwrap(), None);
+    assert_eq!(
+        service.get(TaskId::from_id(qubit_id::Id::new(9999))).await.unwrap(),
+        None
+    );
     service.shutdown().await.expect("service shuts down cleanly");
 }
 
