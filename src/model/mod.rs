@@ -38,8 +38,6 @@ mod task_record;
 mod task_request;
 #[cfg(test)]
 mod task_request_info;
-#[cfg(test)]
-mod validation_coverage_tests;
 mod task_run_error;
 mod task_state;
 mod task_state_kind;
@@ -49,6 +47,8 @@ mod task_summary;
 mod transition_command;
 #[path = "next/mod.rs"]
 pub mod typed;
+#[cfg(test)]
+mod validation_coverage_tests;
 pub use owner_epoch::OwnerEpoch;
 pub use resource_capacity::ResourceCapacity;
 pub use store_capabilities::StoreCapabilities;

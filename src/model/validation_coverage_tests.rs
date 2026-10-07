@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::collections::BTreeMap;
 
 use super::legacy::RequestValidationError;
@@ -116,7 +123,11 @@ fn task_validation_reports_required_identifiers_and_byte_limits() {
         "task type and handler version must not be empty",
     );
 
-    request = TaskRequest::new("x".repeat(super::task_request::MAX_TASK_TYPE_BYTES + 1), "1", Vec::new());
+    request = TaskRequest::new(
+        "x".repeat(super::task_request::MAX_TASK_TYPE_BYTES + 1),
+        "1",
+        Vec::new(),
+    );
     assert_error(
         request.validate_limits(),
         RequestValidationField::TaskType,
@@ -124,7 +135,11 @@ fn task_validation_reports_required_identifiers_and_byte_limits() {
         "task type exceeds the 128-byte limit",
     );
 
-    request = TaskRequest::new("resize", "v".repeat(super::task_request::MAX_HANDLER_VERSION_BYTES + 1), Vec::new());
+    request = TaskRequest::new(
+        "resize",
+        "v".repeat(super::task_request::MAX_HANDLER_VERSION_BYTES + 1),
+        Vec::new(),
+    );
     assert_error(
         request.validate_limits(),
         RequestValidationField::HandlerVersion,
@@ -173,7 +188,10 @@ fn task_validation_reports_optional_key_and_metadata_limits() {
     );
 
     request.metadata.clear();
-    request.metadata.insert("k".repeat(super::task_request::MAX_TASK_METADATA_KEY_BYTES + 1), "v".into());
+    request.metadata.insert(
+        "k".repeat(super::task_request::MAX_TASK_METADATA_KEY_BYTES + 1),
+        "v".into(),
+    );
     assert_error(
         request.validate_limits(),
         RequestValidationField::Metadata,
@@ -182,7 +200,10 @@ fn task_validation_reports_optional_key_and_metadata_limits() {
     );
 
     request.metadata.clear();
-    request.metadata.insert("key".into(), "v".repeat(super::task_request::MAX_TASK_METADATA_VALUE_BYTES + 1));
+    request.metadata.insert(
+        "key".into(),
+        "v".repeat(super::task_request::MAX_TASK_METADATA_VALUE_BYTES + 1),
+    );
     assert_error(
         request.validate_limits(),
         RequestValidationField::Metadata,

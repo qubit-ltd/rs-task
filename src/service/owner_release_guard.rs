@@ -325,7 +325,8 @@ mod tests {
         store.release_owner(next_epoch).await.expect("second owner released");
     }
 
-    /// Releasing an already disarmed guard succeeds without releasing a newer owner.
+    /// Releasing an already disarmed guard succeeds without releasing a newer
+    /// owner.
     #[tokio::test]
     async fn test_successful_release_disarms_guard_for_later_calls_and_drop() {
         let store = Arc::new(GatedReleaseStore::new());
