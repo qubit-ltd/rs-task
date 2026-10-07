@@ -1067,3 +1067,129 @@ async fn test_memory_store_legacy_history_filters_and_paginates() {
     assert_ne!(last_page.records[0].id, first_page.records[0].id);
     assert!(store.get(third_id).await.expect("unmatched lookup succeeds").is_some());
 }
+
+/// Returns payload-free summaries by legacy idempotency key and reports the
+/// store's volatile capabilities.
+#[tokio_test]
+async fn test_memory_store_legacy_summary_lookup_and_capabilities() {
+    let store = MemoryTaskStore::new(4);
+    let accepted = store
+        .accept(
+            TaskId::generate(),
+            legacy_request("summary-lookup", vec![1, 2, 3], Some("summary-key")),
+        )
+        .await
+        .expect("legacy request is accepted");
+    let AcceptOutcome::Accepted(record) = accepted else {
+        panic!("summary key is new")
+    };
+
+    let summary = TaskStore::get_summary_by_idempotency_key(&store, "summary-key")
+        .await
+        .expect("summary lookup succeeds")
+        .expect("accepted summary is retained");
+    assert_eq!(summary.id, record.id);
+    assert_eq!(summary.request.task_type, "summary-lookup");
+    assert_eq!(
+        TaskStore::get_summary_by_idempotency_key(&store, "missing-summary-key")
+            .await
+            .expect("missing summary lookup succeeds"),
+        None
+    );
+
+    let capabilities = TaskStore::capabilities(&store);
+    assert!(!capabilities.persistent_history);
+    assert!(!capabilities.restart_recovery);
+}
+
+/// Filters encoded history and traverses the continuation cursor across pages.
+#[tokio_test]
+async fn test_memory_store_encoded_history_filters_and_paginates() {
+    let store = MemoryTaskStore::new(8);
+    for (id, category, correlation) in [
+        (120, "wanted", "history-correlation"),
+        (121, "wanted", "history-correlation"),
+        (122, "other", "history-correlation"),
+    ] {
+        let mut request = encoded_request(None, Vec::new());
+        request.category = Some(category.to_owned());
+        request.correlation_key = Some(correlation.to_owned());
+        TypedTaskStore::accept_encoded(&store, encoded_id(id), request)
+            .await
+            .expect("encoded task is accepted");
+    }
+
+    let first = TypedTaskStore::list_encoded(
+        &store,
+        crate::model::next::TaskQuery {
+            category: Some("wanted".to_owned()),
+            correlation_key: Some("history-correlation".to_owned()),
+            limit: 1,
+            ..crate::model::next::TaskQuery::default()
+        },
+    )
+    .await
+    .expect("first filtered page succeeds");
+    assert_eq!(first.records.len(), 1);
+    let cursor = first.next.expect("another matching record remains");
+
+    let second = TypedTaskStore::list_encoded(
+        &store,
+        crate::model::next::TaskQuery {
+            states: vec![TaskStateKind::Queued],
+            category: Some("wanted".to_owned()),
+            correlation_key: Some("history-correlation".to_owned()),
+            after: Some(cursor),
+            limit: 1,
+        },
+    )
+    .await
+    .expect("continuation page succeeds");
+    assert_eq!(second.records.len(), 1);
+    assert!(second.next.is_none());
+    assert_ne!(first.records[0].id, second.records[0].id);
+}
+
+/// Applies the ready page limit, continuation cursor, and maximum page bound.
+#[tokio_test]
+async fn test_memory_store_ready_queue_paginates_and_rejects_oversized_limit() {
+    let store = MemoryTaskStore::new(8);
+    for id in [123, 124, 125] {
+        TypedTaskStore::accept_encoded(&store, encoded_id(id), encoded_request(None, Vec::new()))
+            .await
+            .expect("queued task is accepted");
+    }
+
+    let first = TypedTaskStore::list_ready_queued(
+        &store,
+        None,
+        NonZeroUsize::new(1).expect("page limit is positive"),
+        u64::MAX,
+    )
+    .await
+    .expect("first ready page succeeds");
+    assert_eq!(first.records.len(), 1);
+    let cursor = first.next.expect("more ready tasks remain");
+    let second = TypedTaskStore::list_ready_queued(
+        &store,
+        Some(cursor),
+        NonZeroUsize::new(1).expect("page limit is positive"),
+        u64::MAX,
+    )
+    .await
+    .expect("ready continuation page succeeds");
+    assert_eq!(second.records.len(), 1);
+    assert!(second.next.is_some());
+    assert_ne!(first.records[0].id, second.records[0].id);
+
+    assert!(matches!(
+        TypedTaskStore::list_ready_queued(
+            &store,
+            None,
+            NonZeroUsize::new(MAX_TASK_QUERY_LIMIT + 1).expect("oversized page limit is positive"),
+            u64::MAX,
+        )
+        .await,
+        Err(StoreError::InvalidRequest("ready task page limit exceeds 256"))
+    ));
+}
