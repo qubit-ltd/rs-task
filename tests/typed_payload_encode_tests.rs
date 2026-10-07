@@ -129,9 +129,7 @@ fn payload_encode_reports_missing_codec_and_rust_type_mismatch() {
     let error = Payload::new(1, ValueCodecId::new("qubit_task.tests.absent"), Counter(7))
         .encode(registry)
         .unwrap_err();
-    assert!(
-        matches!(error, PayloadEncodeError::MissingCodec(id) if id == "qubit_task.tests.absent")
-    );
+    assert!(matches!(error, PayloadEncodeError::MissingCodec(id) if id == "qubit_task.tests.absent"));
 
     let error = Payload::new(
         1,
@@ -171,9 +169,7 @@ fn task_request_encode_reports_invalid_resource_and_payload_errors() {
 
     assert!(matches!(
         request(Counter(7), "qubit_task.tests.absent").encode(registry),
-        Err(TaskRequestEncodeError::Payload(
-            PayloadEncodeError::MissingCodec(_)
-        ))
+        Err(TaskRequestEncodeError::Payload(PayloadEncodeError::MissingCodec(_)))
     ));
 }
 

@@ -56,9 +56,7 @@ pub(in crate::store::sqlite_task_store) fn list_encoded(
     if has_more {
         records.truncate(page_size);
     }
-    let next = has_more
-        .then(|| records.last().map(TaskCursor::from))
-        .flatten();
+    let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
     Ok(TaskPage { records, next })
 }
 
@@ -70,14 +68,11 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     now_ms: u64,
 ) -> Result<TaskPage, StoreError> {
     if limit.get() > crate::model::next::MAX_TASK_QUERY_LIMIT {
-        return Err(StoreError::InvalidRequest(
-            "ready task page limit exceeds 256",
-        ));
+        return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
     }
-    let now = i64::try_from(now_ms)
-        .map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
-    let fetch = i64::try_from(limit.get() + 1)
-        .map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
+    let fetch =
+        i64::try_from(limit.get() + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
     let mut sql = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)".to_string();
     let mut values = vec![rusqlite::types::Value::Integer(now)];
     if let Some(cursor) = after {
@@ -91,9 +86,7 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     sql.push_str(&format!(" ORDER BY accepted_at,id LIMIT ?{limit_idx}"));
     values.push(rusqlite::types::Value::Integer(fetch));
     let mut statement = connection.prepare(&sql).map_err(failure)?;
-    let mut rows = statement
-        .query(rusqlite::params_from_iter(values))
-        .map_err(failure)?;
+    let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(failure)?;
     let mut records = Vec::new();
     while let Some(row) = rows.next().map_err(failure)? {
         records.push(decode_summary(
@@ -104,9 +97,7 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     }
     let has_more = records.len() > limit.get();
     records.truncate(limit.get());
-    let next = has_more
-        .then(|| records.last().map(TaskCursor::from))
-        .flatten();
+    let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
     Ok(TaskPage { records, next })
 }
 
@@ -115,8 +106,7 @@ pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
     connection: &Connection,
     now_ms: u64,
 ) -> Result<Option<u64>, StoreError> {
-    let now = i64::try_from(now_ms)
-        .map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
     connection.query_row(
         "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
         [now],
@@ -238,11 +228,9 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
     }
     let id_key = id.to_padded_decimal();
     let duplicate: bool = transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
-            [&id_key],
-            |row| row.get(0),
-        )
+        .query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)", [&id_key], |row| {
+            row.get(0)
+        })
         .map_err(failure)?;
     if duplicate {
         return Err(StoreError::DuplicateTask);
@@ -287,10 +275,7 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
         insert_event_outbox(&transaction, &summary)?;
     }
     transaction.commit().map_err(failure)?;
-    Ok(AcceptOutcome {
-        summary,
-        created: true,
-    })
+    Ok(AcceptOutcome { summary, created: true })
 }
 
 /// Loads a stored typed request and its lifecycle by numeric task identity.
@@ -351,8 +336,7 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
     if state_kind != "Queued" || state_version != command.expected_state_version {
         return Err(StoreError::Conflict);
     }
-    let mut lifecycle: StoredTypedLifecycle =
-        serde_json::from_str(&lifecycle_json).map_err(failure)?;
+    let mut lifecycle: StoredTypedLifecycle = serde_json::from_str(&lifecycle_json).map_err(failure)?;
     lifecycle.state = TaskState::Running;
     lifecycle.state_version = lifecycle
         .state_version
@@ -430,8 +414,7 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
         .map(i64::try_from)
         .transpose()
         .map_err(failure)?;
-    let mut lifecycle: StoredTypedLifecycle =
-        serde_json::from_str(&lifecycle_json).map_err(failure)?;
+    let mut lifecycle: StoredTypedLifecycle = serde_json::from_str(&lifecycle_json).map_err(failure)?;
     let terminal_cancel_annotation = lifecycle.state.is_terminal()
         && lifecycle.state == command.state
         && command.cancel_requested
@@ -492,9 +475,8 @@ pub(in crate::store::sqlite_task_store) fn update_progress(
     connection: &Connection,
     command: ProgressCommand,
 ) -> Result<TaskSummary, StoreError> {
-    let snapshot = TaskProgressSnapshot::from_command(command.clone()).map_err(|_| {
-        StoreError::InvalidRequest("task progress snapshot exceeds its configured limits")
-    })?;
+    let snapshot = TaskProgressSnapshot::from_command(command.clone())
+        .map_err(|_| StoreError::InvalidRequest("task progress snapshot exceeds its configured limits"))?;
     let snapshot_json = serde_json::to_string(&snapshot).map_err(failure)?;
     let id_key = command.id.to_padded_decimal();
     let transaction = connection.unchecked_transaction().map_err(failure)?;
@@ -516,8 +498,7 @@ pub(in crate::store::sqlite_task_store) fn update_progress(
         .optional()
         .map_err(failure)?
         .ok_or(StoreError::NotFound)?;
-    let (request_json, lifecycle_json, state_kind, attempt, progress_attempt, progress_version) =
-        row;
+    let (request_json, lifecycle_json, state_kind, attempt, progress_attempt, progress_version) = row;
     if state_kind != "Running" || attempt != command.expected_attempt {
         return Err(StoreError::Conflict);
     }
@@ -529,8 +510,7 @@ pub(in crate::store::sqlite_task_store) fn update_progress(
     if command.progress_version <= previous_version {
         return Err(StoreError::Conflict);
     }
-    let mut lifecycle: StoredTypedLifecycle =
-        serde_json::from_str(&lifecycle_json).map_err(failure)?;
+    let mut lifecycle: StoredTypedLifecycle = serde_json::from_str(&lifecycle_json).map_err(failure)?;
     lifecycle.progress = Some(snapshot);
     let lifecycle_json = serde_json::to_string(&lifecycle).map_err(failure)?;
     let changed = transaction
@@ -554,11 +534,7 @@ pub(in crate::store::sqlite_task_store) fn update_progress(
 }
 
 /// Builds the public summary from its independently stored request and state.
-fn decode_summary(
-    id: String,
-    request_json: &str,
-    lifecycle_json: &str,
-) -> Result<TaskSummary, StoreError> {
+fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Result<TaskSummary, StoreError> {
     let request: StoredRequestInfo = serde_json::from_str(request_json).map_err(failure)?;
     let lifecycle: StoredTypedLifecycle = serde_json::from_str(lifecycle_json).map_err(failure)?;
     let value = id.parse::<u64>().map_err(failure)?;
@@ -588,10 +564,7 @@ fn decode_summary(
     })
 }
 
-fn validate_encoded_output(
-    state: &TaskState,
-    output: Option<&TaskOutput>,
-) -> Result<(), StoreError> {
+fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Result<(), StoreError> {
     if output.is_some() && state != &TaskState::Succeeded {
         return Err(StoreError::InvalidRequest(
             "task output can only be stored with the succeeded state",
@@ -615,16 +588,11 @@ fn now_ms() -> u64 {
 /// Inserts the immutable notification before committing its lifecycle mutation.
 /// Snapshots larger than 128 KiB or SQLite failures roll back the surrounding
 /// transaction.
-fn insert_event_outbox(
-    transaction: &rusqlite::Transaction<'_>,
-    summary: &TaskSummary,
-) -> Result<(), StoreError> {
+fn insert_event_outbox(transaction: &rusqlite::Transaction<'_>, summary: &TaskSummary) -> Result<(), StoreError> {
     let event = crate::event::TaskEvent::from_typed_summary(summary);
     let json = serde_json::to_string(&event).map_err(failure)?;
     if json.len() > 128 * 1024 {
-        return Err(StoreError::InvalidRequest(
-            "task event snapshot exceeds 128 KiB",
-        ));
+        return Err(StoreError::InvalidRequest("task event snapshot exceeds 128 KiB"));
     }
     let event_id = format!("task:{}:{}", summary.id, summary.state_version);
     // A monotonic persisted ordering key also preserves lifecycle order across

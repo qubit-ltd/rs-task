@@ -14,9 +14,7 @@ pub struct TypedResourceReservation {
 impl TypedResourceReservation {
     /// Creates a reservation lease that releases its resources when dropped.
     pub(crate) fn new(release: Box<dyn FnOnce() + Send>) -> Self {
-        Self {
-            release: Some(release),
-        }
+        Self { release: Some(release) }
     }
 }
 

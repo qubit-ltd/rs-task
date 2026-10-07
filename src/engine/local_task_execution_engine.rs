@@ -57,12 +57,7 @@ impl LocalTaskExecutionEngine {
             .capacity
             .gpus
             .values()
-            .filter(|labels| {
-                request
-                    .gpu_labels
-                    .iter()
-                    .all(|label| labels.contains(label))
-            })
+            .filter(|labels| request.gpu_labels.iter().all(|label| labels.contains(label)))
             .count();
         if request.cpu_slots > self.capacity.cpu_slots
             || request.gpu_count as usize > matching_gpu_capacity
@@ -72,12 +67,10 @@ impl LocalTaskExecutionEngine {
             || request
                 .disk_bytes
                 .is_some_and(|value| value > self.capacity.disk_bytes.unwrap_or(0))
-            || request.custom.iter().any(|(name, value)| {
-                self.capacity
-                    .custom
-                    .get(name)
-                    .is_none_or(|limit| value > limit)
-            })
+            || request
+                .custom
+                .iter()
+                .any(|(name, value)| self.capacity.custom.get(name).is_none_or(|limit| value > limit))
         {
             return Err(EngineError::Unsatisfiable);
         }
@@ -87,11 +80,7 @@ impl LocalTaskExecutionEngine {
             .gpus
             .iter()
             .filter(|(id, labels)| {
-                !ledger.usage.gpus.contains(id)
-                    && request
-                        .gpu_labels
-                        .iter()
-                        .all(|label| labels.contains(label))
+                !ledger.usage.gpus.contains(id) && request.gpu_labels.iter().all(|label| labels.contains(label))
             })
             .map(|(id, _)| id.clone())
             .take(request.gpu_count as usize)
@@ -142,20 +131,13 @@ impl LocalTaskExecutionEngine {
         for (name, value) in &request.custom {
             *ledger.usage.custom.entry(name.clone()).or_default() += value;
         }
-        ledger.allocations.insert(
-            token,
-            (
-                request.cpu_slots,
-                memory,
-                disk,
-                available_gpus,
-                request.custom,
-            ),
-        );
+        ledger
+            .allocations
+            .insert(token, (request.cpu_slots, memory, disk, available_gpus, request.custom));
         drop(ledger);
         let ledger = Arc::clone(&self.ledger);
-        Ok(crate::engine::TypedResourceReservation::new(Box::new(
-            move || release_reservation(token, &ledger),
-        )))
+        Ok(crate::engine::TypedResourceReservation::new(Box::new(move || {
+            release_reservation(token, &ledger)
+        })))
     }
 }

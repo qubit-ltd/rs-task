@@ -118,10 +118,8 @@ mod tests {
                     kind_id: "test.progress".to_owned(),
                     category: Some("test".to_owned()),
                     payload: StoredPayload {
-                        type_id: qubit_model_id::ModelIdBuf::parse(
-                            "qubit_task.tests.ProgressPayload",
-                        )
-                        .expect("model ID is valid"),
+                        type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.ProgressPayload")
+                            .expect("model ID is valid"),
                         schema_version: 1,
                         codec_id: "qubit.test.bytes".to_owned(),
                         bytes: vec![1],
@@ -165,10 +163,7 @@ mod tests {
         let snapshot = initial.summary.progress.expect("started event is visible");
         assert_eq!(snapshot.attempt, 1);
         assert_eq!(snapshot.progress_version, 1);
-        assert_eq!(
-            snapshot.stage.as_ref().map(|stage| stage.id.as_str()),
-            Some("download")
-        );
+        assert_eq!(snapshot.stage.as_ref().map(|stage| stage.id.as_str()), Some("download"));
         assert_eq!(snapshot.metrics[0].id, "bytes");
         assert_eq!(initial.summary.state, TaskState::Running);
 
@@ -179,10 +174,7 @@ mod tests {
         progress
             .set_stage(Stage::new("index", "Indexing").position(2, 2))
             .expect("stage is valid");
-        progress
-            .report_async()
-            .await
-            .expect("running event is persisted");
+        progress.report_async().await.expect("running event is persisted");
 
         let running = store
             .get_encoded_task(id)
@@ -191,10 +183,7 @@ mod tests {
             .expect("task is retained");
         let snapshot = running.summary.progress.expect("running event is visible");
         assert_eq!(snapshot.progress_version, 2);
-        assert_eq!(
-            snapshot.stage.as_ref().map(|stage| stage.id.as_str()),
-            Some("index")
-        );
+        assert_eq!(snapshot.stage.as_ref().map(|stage| stage.id.as_str()), Some("index"));
         assert_eq!(snapshot.metrics[0].completed, 1);
         assert_eq!(snapshot.metrics[0].succeeded, 1);
         assert_eq!(running.summary.state, TaskState::Running);
@@ -210,10 +199,7 @@ mod tests {
             .expect("task is retained");
         assert_eq!(terminal.summary.state, TaskState::Running);
         assert_eq!(
-            terminal
-                .summary
-                .progress
-                .map(|snapshot| snapshot.progress_version),
+            terminal.summary.progress.map(|snapshot| snapshot.progress_version),
             Some(3)
         );
     }
@@ -234,10 +220,7 @@ mod tests {
         match error {
             qubit_progress::StartError::Delivery(delivery) => {
                 assert!(matches!(
-                    delivery
-                        .reporter_error()
-                        .source_error()
-                        .downcast_ref::<StoreError>(),
+                    delivery.reporter_error().source_error().downcast_ref::<StoreError>(),
                     Some(StoreError::Conflict)
                 ));
             }
@@ -267,10 +250,7 @@ mod tests {
         match error {
             qubit_progress::StartError::Delivery(delivery) => {
                 assert!(matches!(
-                    delivery
-                        .reporter_error()
-                        .source_error()
-                        .downcast_ref::<StoreError>(),
+                    delivery.reporter_error().source_error().downcast_ref::<StoreError>(),
                     Some(StoreError::InvalidRequest(_))
                 ));
             }
@@ -289,13 +269,10 @@ mod tests {
         let (store, id) = running_task().await;
         let reporter: Arc<dyn qubit_progress::AsyncReporter> =
             Arc::new(TaskProgressReporter::new(store.clone(), id, 1));
-        let first_builder =
-            AsyncProgress::builder_arc(Arc::clone(&reporter)).metric(Metric::new("first", "First"));
-        let second_builder =
-            AsyncProgress::builder_arc(reporter).metric(Metric::new("second", "Second"));
+        let first_builder = AsyncProgress::builder_arc(Arc::clone(&reporter)).metric(Metric::new("first", "First"));
+        let second_builder = AsyncProgress::builder_arc(reporter).metric(Metric::new("second", "Second"));
 
-        let (first, second) =
-            tokio::join!(first_builder.start_async(), second_builder.start_async());
+        let (first, second) = tokio::join!(first_builder.start_async(), second_builder.start_async());
         let mut first = first.expect("first operation starts");
         let mut second = second.expect("second operation starts");
         let after_start = store
@@ -304,15 +281,11 @@ mod tests {
             .expect("task lookup succeeds")
             .expect("task is retained");
         assert_eq!(
-            after_start
-                .summary
-                .progress
-                .map(|progress| progress.progress_version),
+            after_start.summary.progress.map(|progress| progress.progress_version),
             Some(2)
         );
 
-        let (first_report, second_report) =
-            tokio::join!(first.report_async(), second.report_async());
+        let (first_report, second_report) = tokio::join!(first.report_async(), second.report_async());
         first_report.expect("first running event persists");
         second_report.expect("second running event persists");
         let after_reports = store
@@ -321,10 +294,7 @@ mod tests {
             .expect("task lookup succeeds")
             .expect("task is retained");
         assert_eq!(
-            after_reports
-                .summary
-                .progress
-                .map(|progress| progress.progress_version),
+            after_reports.summary.progress.map(|progress| progress.progress_version),
             Some(4)
         );
     }

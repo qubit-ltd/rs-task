@@ -35,10 +35,7 @@ pub(in crate::engine::local_task_execution_engine) struct ResourceLedger {
 ///
 /// * `token` - Unique key of the reservation to release.
 /// * `ledger` - Shared resource totals and reservation map.
-pub(in crate::engine::local_task_execution_engine) fn release_reservation(
-    token: u64,
-    ledger: &Mutex<ResourceLedger>,
-) {
+pub(in crate::engine::local_task_execution_engine) fn release_reservation(token: u64, ledger: &Mutex<ResourceLedger>) {
     let mut ledger = ledger.lock();
     if let Some((cpu, memory, disk, gpus, custom)) = ledger.allocations.remove(&token) {
         ledger.usage.cpu = ledger.usage.cpu.saturating_sub(cpu);

@@ -73,11 +73,7 @@ impl RedisContainer {
             ])
             .output()?;
         if !output.status.success() {
-            return Err(format!(
-                "docker run failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
+            return Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into());
         }
         let container_id = String::from_utf8(output.stdout)?.trim().to_owned();
         let server = Self {
@@ -151,11 +147,7 @@ impl EventCodec<TaskEvent> for TaskEventJsonCodec {
     }
 }
 
-fn create_event_bus(
-    url: &str,
-    namespace: &str,
-    register_task_codec: bool,
-) -> Result<EventBus, Box<dyn Error>> {
+fn create_event_bus(url: &str, namespace: &str, register_task_codec: bool) -> Result<EventBus, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
     if register_task_codec {
         codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec {
@@ -177,8 +169,7 @@ fn create_event_bus(
 }
 
 #[tokio_test(flavor = "multi_thread")]
-async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result<(), Box<dyn Error>>
-{
+async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result<(), Box<dyn Error>> {
     let redis = RedisContainer::start()?;
     let bus = create_event_bus(&redis.url, "task-redis-integration", true)?;
     let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
@@ -192,11 +183,7 @@ async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result
             .build()?,
         move |delivery| {
             let payload = delivery.payload();
-            let _ = sender.send((
-                payload.task_id,
-                payload.state_version,
-                payload.state.clone(),
-            ));
+            let _ = sender.send((payload.task_id, payload.state_version, payload.state.clone()));
             Ok::<(), DeliveryError>(())
         },
     )?;
@@ -231,16 +218,15 @@ async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result
         (1, TaskState::Running),
         (2, TaskState::Succeeded),
     ] {
-        assert!(observed.iter().any(
-            |(_, actual_version, state)| *actual_version == version && state == &expected_state
-        ));
+        assert!(
+            observed
+                .iter()
+                .any(|(_, actual_version, state)| *actual_version == version && state == &expected_state)
+        );
     }
     subscription.cancel()?;
     let report = bus.shutdown(ShutdownMode::Immediate)?;
-    assert_eq!(
-        report.outcome,
-        qubit_event_bus::spi::ShutdownOutcome::Complete
-    );
+    assert_eq!(report.outcome, qubit_event_bus::spi::ShutdownOutcome::Complete);
     Ok(())
 }
 
@@ -256,15 +242,9 @@ fn test_redis_facade_rejects_task_event_subscription_without_codec() -> Result<(
             .build()?,
         |_| Ok::<(), DeliveryError>(()),
     );
-    assert!(
-        result.is_err(),
-        "typed subscription without a codec must fail"
-    );
+    assert!(result.is_err(), "typed subscription without a codec must fail");
     let report = bus.shutdown(ShutdownMode::Immediate)?;
-    assert_eq!(
-        report.outcome,
-        qubit_event_bus::spi::ShutdownOutcome::Complete
-    );
+    assert_eq!(report.outcome, qubit_event_bus::spi::ShutdownOutcome::Complete);
     Ok(())
 }
 
@@ -277,11 +257,7 @@ fn test_task_event_codec_accepts_typed_event_json() -> Result<(), Box<dyn Error>
     };
     let bytes =
         br#"{"schema_version":1,"task_id":1,"state_version":2,"state":"Succeeded","correlation_key":"typed-task"}"#;
-    let payload = EncodedPayload::new(
-        Arc::from(bytes.as_slice()),
-        codec.content_type.clone(),
-        None,
-    );
+    let payload = EncodedPayload::new(Arc::from(bytes.as_slice()), codec.content_type.clone(), None);
     codec.validate_metadata(&payload)?;
     let versioned = EncodedPayload::new(
         Arc::from(bytes.as_slice()),
@@ -350,19 +326,13 @@ impl TaskProjection {
 
 /// Sends duplicates and stale snapshots through the real facade and handler.
 /// The caller supplies the provider-supported durability and consumer group.
-fn assert_consumer_convergence(
-    bus: &EventBus,
-    request: SubscribeRequest<TaskEvent>,
-) -> Result<(), Box<dyn Error>> {
+fn assert_consumer_convergence(bus: &EventBus, request: SubscribeRequest<TaskEvent>) -> Result<(), Box<dyn Error>> {
     let topic = request.topic().clone();
     let projection = Arc::new(Mutex::new(TaskProjection::default()));
     let captured = Arc::clone(&projection);
     let (sender, received) = mpsc::channel();
     let subscription = bus.subscribe(request, move |delivery| {
-        captured
-            .lock()
-            .expect("projection lock")
-            .consume(delivery.payload());
+        captured.lock().expect("projection lock").consume(delivery.payload());
         sender.send(()).expect("consumer signal receiver");
     })?;
     let task_id = TaskId::from_id(Id::new(43));
@@ -386,14 +356,8 @@ fn assert_consumer_convergence(
         received.recv_timeout(Duration::from_secs(5))?;
     }
     let projection = projection.lock().expect("projection lock");
-    let latest = projection
-        .latest
-        .get(&task_id)
-        .expect("consumer projected task");
-    assert_eq!(
-        latest.state_version, 3,
-        "stale event cannot replace newer state"
-    );
+    let latest = projection.latest.get(&task_id).expect("consumer projected task");
+    assert_eq!(latest.state_version, 3, "stale event cannot replace newer state");
     assert_eq!(latest.state, TaskState::Succeeded);
     assert_eq!(
         projection.applied, 2,
@@ -405,26 +369,18 @@ fn assert_consumer_convergence(
 
 /// Verifies the consumer policy without external IO.
 #[test]
-fn test_task_event_consumer_duplicate_and_stale_versions_converge_locally()
--> Result<(), Box<dyn Error>> {
+fn test_task_event_consumer_duplicate_and_stale_versions_converge_locally() -> Result<(), Box<dyn Error>> {
     let bus = EventBus::local(LocalEventBusConfig::default())?;
-    let request = SubscribeRequest::new(
-        "projection-consumer",
-        Topic::<TaskEvent>::new("task.lifecycle")?,
-    )?;
+    let request = SubscribeRequest::new("projection-consumer", Topic::<TaskEvent>::new("task.lifecycle")?)?;
     assert_consumer_convergence(&bus, request)?;
     let report = bus.shutdown(ShutdownMode::Immediate)?;
-    assert_eq!(
-        report.outcome,
-        qubit_event_bus::spi::ShutdownOutcome::Complete
-    );
+    assert_eq!(report.outcome, qubit_event_bus::spi::ShutdownOutcome::Complete);
     Ok(())
 }
 
 /// Verifies the identical consumer policy through the Redis transport.
 #[test]
-fn test_task_event_consumer_duplicate_and_stale_versions_converge_via_redis()
--> Result<(), Box<dyn Error>> {
+fn test_task_event_consumer_duplicate_and_stale_versions_converge_via_redis() -> Result<(), Box<dyn Error>> {
     let redis = RedisContainer::start()?;
     let bus = create_event_bus(&redis.url, "task-consumer-convergence", true)?;
     let request = SubscribeRequest::builder()
@@ -436,9 +392,6 @@ fn test_task_event_consumer_duplicate_and_stale_versions_converge_via_redis()
         .build()?;
     assert_consumer_convergence(&bus, request)?;
     let report = bus.shutdown(ShutdownMode::Immediate)?;
-    assert_eq!(
-        report.outcome,
-        qubit_event_bus::spi::ShutdownOutcome::Complete
-    );
+    assert_eq!(report.outcome, qubit_event_bus::spi::ShutdownOutcome::Complete);
     Ok(())
 }

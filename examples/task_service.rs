@@ -65,8 +65,7 @@ impl qubit_codec::ValueDecoder<[u8]> for JsonCodec {
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
-    ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("example.echo.json"),
     &JSON_DESCRIPTOR,
@@ -76,11 +75,7 @@ static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
 struct EchoHandler;
 
 impl TaskHandler<EchoPayload> for EchoHandler {
-    fn run<'a>(
-        &'a self,
-        payload: EchoPayload,
-        _context: TaskContext,
-    ) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(&'a self, payload: EchoPayload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             println!("{}", payload.message);
             Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
@@ -97,9 +92,7 @@ impl qubit_id::IdGenerator for SequentialIds {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let codec_registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?);
         let mut builder = TaskExecutionServiceBuilder::new(
@@ -132,10 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         );
         let accepted = service.submit(request).await?;
-        let summary = service
-            .get(accepted.id)
-            .await?
-            .expect("accepted task exists");
+        let summary = service.get(accepted.id).await?.expect("accepted task exists");
         println!("task {} is {:?}", accepted.id, summary.state);
         service.shutdown().await?;
         Ok::<(), Box<dyn std::error::Error>>(())

@@ -40,38 +40,23 @@ impl TaskStore for MemoryTaskStore {
         LegacyTaskStore::accept_encoded(self, id, request)
     }
 
-    fn get_encoded_task<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+    fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         LegacyTaskStore::get_encoded_task(self, id)
     }
 
-    fn start_encoded<'a>(
-        &'a self,
-        command: StartCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         LegacyTaskStore::start_encoded(self, command)
     }
 
-    fn transition_encoded<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         LegacyTaskStore::transition_encoded(self, command)
     }
 
-    fn update_progress<'a>(
-        &'a self,
-        command: ProgressCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         LegacyTaskStore::update_progress(self, command)
     }
 
-    fn list_encoded<'a>(
-        &'a self,
-        query: TaskQuery,
-    ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+    fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         LegacyTaskStore::list_encoded(self, query)
     }
 
@@ -84,10 +69,7 @@ impl TaskStore for MemoryTaskStore {
         LegacyTaskStore::list_ready_queued(self, after, limit, now_ms)
     }
 
-    fn next_retry_deadline<'a>(
-        &'a self,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         LegacyTaskStore::next_retry_deadline(self, now_ms)
     }
 
@@ -139,38 +121,23 @@ impl TaskStore for super::SqliteTaskStore {
         LegacyTaskStore::accept_encoded(self, id, request)
     }
 
-    fn get_encoded_task<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+    fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         LegacyTaskStore::get_encoded_task(self, id)
     }
 
-    fn start_encoded<'a>(
-        &'a self,
-        command: StartCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         LegacyTaskStore::start_encoded(self, command)
     }
 
-    fn transition_encoded<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         LegacyTaskStore::transition_encoded(self, command)
     }
 
-    fn update_progress<'a>(
-        &'a self,
-        command: ProgressCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         LegacyTaskStore::update_progress(self, command)
     }
 
-    fn list_encoded<'a>(
-        &'a self,
-        query: TaskQuery,
-    ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+    fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         LegacyTaskStore::list_encoded(self, query)
     }
 
@@ -183,10 +150,7 @@ impl TaskStore for super::SqliteTaskStore {
         LegacyTaskStore::list_ready_queued(self, after, limit, now_ms)
     }
 
-    fn next_retry_deadline<'a>(
-        &'a self,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         LegacyTaskStore::next_retry_deadline(self, now_ms)
     }
 

@@ -26,8 +26,7 @@ fn request(category: &str, correlation_key: &str) -> StoredTaskRequest {
         kind_id: "query.test".to_owned(),
         category: Some(category.to_owned()),
         payload: StoredPayload {
-            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload")
-                .expect("valid model ID"),
+            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload").expect("valid model ID"),
             schema_version: 1,
             codec_id: "qubit.bytes.json".to_owned(),
             bytes: vec![1],
@@ -121,17 +120,8 @@ async fn assert_category_filter_and_exclusive_numeric_cursor(store: &dyn TaskSto
     let prior = first.records.last().expect("first page is nonempty");
     let next = second.records.first().expect("second page is nonempty");
     assert!((next.accepted_at_ms, next.id) > (prior.accepted_at_ms, prior.id));
-    assert!(
-        second
-            .records
-            .iter()
-            .any(|record| record.id == id(u64::MAX))
-    );
-    let mut combined = first
-        .records
-        .iter()
-        .chain(&second.records)
-        .collect::<Vec<_>>();
+    assert!(second.records.iter().any(|record| record.id == id(u64::MAX)));
+    let mut combined = first.records.iter().chain(&second.records).collect::<Vec<_>>();
     if combined
         .iter()
         .all(|record| record.accepted_at_ms == combined[0].accepted_at_ms)
@@ -213,9 +203,7 @@ async fn assert_ready_queue_contract(store: &dyn TaskStore) {
             expected_state_version: blocked.summary.state_version,
             expected_attempt: 0,
             retry_not_before_ms: None,
-            state: TaskState::Blocked {
-                reason: "test".into(),
-            },
+            state: TaskState::Blocked { reason: "test".into() },
             cancel_requested: false,
             cancel_error: None,
             finished_at_ms: None,
@@ -259,8 +247,7 @@ async fn ready_queue_filters_due_retries_and_pages_in_memory() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn ready_queue_filters_due_retries_and_pages_in_sqlite() {
-    let db_path =
-        std::env::temp_dir().join(format!("qubit-task-ready-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = std::env::temp_dir().join(format!("qubit-task-ready-{}.sqlite", uuid::Uuid::new_v4()));
     let store = SqliteTaskStore::open_next(&db_path).unwrap();
     assert_ready_queue_contract(&store).await;
     drop(store);
@@ -270,10 +257,7 @@ async fn ready_queue_filters_due_retries_and_pages_in_sqlite() {
 #[cfg(feature = "sqlite")]
 #[test]
 fn ready_queue_and_retry_deadline_queries_use_partial_indexes() {
-    let db_path = std::env::temp_dir().join(format!(
-        "qubit-task-ready-plan-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = std::env::temp_dir().join(format!("qubit-task-ready-plan-{}.sqlite", uuid::Uuid::new_v4()));
     let store = SqliteTaskStore::open_next(&db_path).unwrap();
     drop(store);
     let connection = rusqlite::Connection::open(&db_path).unwrap();
@@ -288,10 +272,7 @@ fn ready_queue_and_retry_deadline_queries_use_partial_indexes() {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    assert!(
-        ready_plan.contains("tasks_queued_accepted_id"),
-        "{ready_plan}"
-    );
+    assert!(ready_plan.contains("tasks_queued_accepted_id"), "{ready_plan}");
     let retry_plan = {
         let mut statement = connection.prepare(
             "EXPLAIN QUERY PLAN SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
@@ -303,10 +284,7 @@ fn ready_queue_and_retry_deadline_queries_use_partial_indexes() {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    assert!(
-        retry_plan.contains("tasks_queued_retry_deadline"),
-        "{retry_plan}"
-    );
+    assert!(retry_plan.contains("tasks_queued_retry_deadline"), "{retry_plan}");
     drop(connection);
     remove_database(&db_path);
 }
@@ -320,10 +298,7 @@ async fn typed_history_filters_category_and_uses_exclusive_numeric_cursor() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn typed_history_filters_category_and_uses_exclusive_numeric_cursor_in_sqlite() {
-    let db_path = std::env::temp_dir().join(format!(
-        "qubit-task-typed-query-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = std::env::temp_dir().join(format!("qubit-task-typed-query-{}.sqlite", uuid::Uuid::new_v4()));
     let memory = MemoryTaskStore::new(16);
     let sqlite = SqliteTaskStore::open_next(&db_path).expect("typed SQLite store opens");
     assert_category_filter_and_exclusive_numeric_cursor(&memory).await;
@@ -349,10 +324,7 @@ async fn typed_history_uses_stable_numeric_order_in_memory() {
 async fn typed_history_pages_a_queue_larger_than_the_maximum_page() {
     let memory = MemoryTaskStore::new(300);
     for value in 1..=257 {
-        memory
-            .accept_encoded(id(value), request("page", "257"))
-            .await
-            .unwrap();
+        memory.accept_encoded(id(value), request("page", "257")).await.unwrap();
     }
     let first = memory
         .list_encoded(TaskQuery {
@@ -377,10 +349,7 @@ async fn typed_history_pages_a_queue_larger_than_the_maximum_page() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn typed_history_has_the_same_order_in_memory_and_sqlite() {
-    let db_path = std::env::temp_dir().join(format!(
-        "qubit-task-typed-order-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = std::env::temp_dir().join(format!("qubit-task-typed-order-{}.sqlite", uuid::Uuid::new_v4()));
     let memory = MemoryTaskStore::new(16);
     let sqlite = SqliteTaskStore::open_next(&db_path).expect("typed SQLite store opens");
     let ids = [id(2), id(10), id(u64::MAX)];

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::AsyncEventBusRegistry;
 use qubit_event_bus::RequiredCapabilities;
+use qubit_event_bus::spi::PublishGuarantee;
 use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus_redis as _;
@@ -34,7 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(event_codecs));
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
-        .with_required_capabilities(RequiredCapabilities::new().durable())
+        .with_required_capabilities(
+            RequiredCapabilities::new()
+                .durable()
+                .with_publish_guarantee(PublishGuarantee::Accepted),
+        )
         .with_provider_options([
             ("redis.url".into(), "redis://127.0.0.1/".into()),
             ("redis.namespace".into(), "task-service".into()),

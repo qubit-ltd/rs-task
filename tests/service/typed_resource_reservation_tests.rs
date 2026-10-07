@@ -48,8 +48,7 @@ use qubit_task::store::TaskStore;
 struct Counter(u32);
 
 impl qubit_model_id::HasModelId for Counter {
-    const MODEL_ID: qubit_model_id::ModelId =
-        qubit_model_id::ModelId::new("test.ResourceReservationPayload");
+    const MODEL_ID: qubit_model_id::ModelId = qubit_model_id::ModelId::new("test.ResourceReservationPayload");
 }
 
 #[derive(Default)]
@@ -74,8 +73,7 @@ impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
     }
 }
 
-static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor =
-    ValueBytesCodecDescriptor::of::<U32Codec, Counter>();
+static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, Counter>();
 static CODEC_REGISTRATION: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("qubit_task.typed_resource_tests.u32"),
     &CODEC_DESCRIPTOR,
@@ -169,10 +167,7 @@ impl TaskStore for GatedReadyStore {
     ) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         self.inner.get_encoded_task(id)
     }
-    fn start_encoded<'a>(
-        &'a self,
-        command: StartCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             if self.trace.as_ref().is_some_and(|trace| {
                 trace
@@ -187,11 +182,7 @@ impl TaskStore for GatedReadyStore {
                 && gate.armed.swap(false, Ordering::AcqRel)
             {
                 gate.reached.notify_one();
-                gate.release
-                    .acquire()
-                    .await
-                    .expect("start gate stays open")
-                    .forget();
+                gate.release.acquire().await.expect("start gate stays open").forget();
             }
             let result = self.inner.start_encoded(command).await;
             if let (Ok(summary), Some(trace)) = (&result, &self.trace) {
@@ -205,22 +196,13 @@ impl TaskStore for GatedReadyStore {
             result
         })
     }
-    fn transition_encoded<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.transition_encoded(command)
     }
-    fn update_progress<'a>(
-        &'a self,
-        command: ProgressCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.update_progress(command)
     }
-    fn list_encoded<'a>(
-        &'a self,
-        query: TaskQuery,
-    ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+    fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.inner.list_encoded(query)
     }
     fn list_ready_queued<'a>(
@@ -249,10 +231,7 @@ impl TaskStore for GatedReadyStore {
             self.inner.list_ready_queued(after, limit, now_ms).await
         })
     }
-    fn next_retry_deadline<'a>(
-        &'a self,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
             let result = self.inner.next_retry_deadline(now_ms).await;
             self.gate.completed.notify_waiters();
@@ -266,15 +245,10 @@ impl TaskStore for GatedReadyStore {
     ) -> TaskFuture<'a, Result<usize, StoreError>> {
         self.inner.prune_terminal_before(cutoff, max_rows)
     }
-    fn acquire_owner<'a>(
-        &'a self,
-    ) -> TaskFuture<'a, Result<qubit_task::model::OwnerEpoch, StoreError>> {
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<qubit_task::model::OwnerEpoch, StoreError>> {
         self.inner.acquire_owner()
     }
-    fn release_owner<'a>(
-        &'a self,
-        epoch: qubit_task::model::OwnerEpoch,
-    ) -> TaskFuture<'a, Result<(), StoreError>> {
+    fn release_owner<'a>(&'a self, epoch: qubit_task::model::OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         self.inner.release_owner(epoch)
     }
 }
@@ -303,11 +277,7 @@ async fn wait_for_starts(trace: &StartTrace, count: usize) -> Vec<qubit_task::mo
             let changed = trace.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let ids = trace
-                .ids
-                .lock()
-                .expect("start trace lock is not poisoned")
-                .clone();
+            let ids = trace.ids.lock().expect("start trace lock is not poisoned").clone();
             if ids.len() >= count {
                 return ids;
             }
@@ -344,20 +314,17 @@ async fn bypass_fixture(
     });
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let codecs = Arc::new(
-        ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION])
-            .expect("codec registration"),
-    );
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(1000))))
-            .capacity(ResourceCapacity {
-                cpu_slots: 2,
-                gpus: [("gpu-0".to_owned(), vec!["test".to_owned()])].into(),
-                ..ResourceCapacity::default()
-            })
-            .max_running_tasks(std::num::NonZeroUsize::new(2).expect("positive run limit"))
-            .scan_page_size(std::num::NonZeroUsize::new(page_size).expect("positive page size"))
-            .max_resource_bypasses(std::num::NonZeroUsize::new(1).expect("positive bypass limit"));
+    let codecs =
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).expect("codec registration"));
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(1000))))
+        .capacity(ResourceCapacity {
+            cpu_slots: 2,
+            gpus: [("gpu-0".to_owned(), vec!["test".to_owned()])].into(),
+            ..ResourceCapacity::default()
+        })
+        .max_running_tasks(std::num::NonZeroUsize::new(2).expect("positive run limit"))
+        .scan_page_size(std::num::NonZeroUsize::new(page_size).expect("positive page size"))
+        .max_resource_bypasses(std::num::NonZeroUsize::new(1).expect("positive bypass limit"));
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -403,11 +370,7 @@ struct GatedHandler {
 }
 
 impl TaskHandler<Counter> for GatedHandler {
-    fn run<'a>(
-        &'a self,
-        _value: Counter,
-        _context: TaskContext,
-    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 self.started.notify_one();
@@ -424,8 +387,7 @@ impl TaskHandler<Counter> for GatedHandler {
 
 #[tokio::test]
 async fn typed_resource_request_above_capacity_is_blocked() {
-    let codecs =
-        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let mut builder = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(8)),
         codecs,
@@ -459,8 +421,7 @@ async fn typed_resource_request_above_capacity_is_blocked() {
 
 #[tokio::test]
 async fn typed_resource_reservation_waits_until_capacity_is_released() {
-    let codecs =
-        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -489,11 +450,7 @@ async fn typed_resource_reservation_waits_until_capacity_is_released() {
     let first = service.submit(request(1)).await.unwrap();
     started.notified().await;
     assert!(matches!(
-        wait_for(&service, first.id, |state| matches!(
-            state,
-            TaskState::Running
-        ))
-        .await,
+        wait_for(&service, first.id, |state| matches!(state, TaskState::Running)).await,
         TaskState::Running
     ));
 
@@ -518,8 +475,7 @@ async fn typed_resource_reservation_waits_until_capacity_is_released() {
 
 #[tokio::test]
 async fn scheduler_skips_resource_blocked_task_without_consuming_run_slot() {
-    let codecs =
-        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -586,18 +542,12 @@ async fn resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_task() 
     tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
         .await
         .expect("first handler did not start");
-    let anchor = service
-        .submit(request_resources(0, 1))
-        .await
-        .expect("anchor accepted");
+    let anchor = service.submit(request_resources(0, 1)).await.expect("anchor accepted");
     let first_bypass = service
         .submit(request_resources(1, 0))
         .await
         .expect("first bypass accepted");
-    assert_eq!(
-        wait_for_starts(&trace, 2).await,
-        vec![running.id, first_bypass.id]
-    );
+    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.id, first_bypass.id]);
     assert_eq!(
         wait_for(&service, first_bypass.id, TaskState::is_terminal).await,
         TaskState::Succeeded
@@ -609,14 +559,7 @@ async fn resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_task() 
         .await
         .expect("second bypass accepted");
     complete_gated_scan(&gate).await;
-    assert_eq!(
-        trace
-            .ids
-            .lock()
-            .expect("start trace lock is not poisoned")
-            .len(),
-        2
-    );
+    assert_eq!(trace.ids.lock().expect("start trace lock is not poisoned").len(), 2);
     assert!(matches!(
         service
             .get(second_bypass.id)
@@ -645,18 +588,12 @@ async fn resource_bypass_limit_clears_when_anchor_is_cancelled() {
     tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
         .await
         .expect("first handler did not start");
-    let anchor = service
-        .submit(request_resources(0, 1))
-        .await
-        .expect("anchor accepted");
+    let anchor = service.submit(request_resources(0, 1)).await.expect("anchor accepted");
     let first_bypass = service
         .submit(request_resources(1, 0))
         .await
         .expect("first bypass accepted");
-    assert_eq!(
-        wait_for_starts(&trace, 2).await,
-        vec![running.id, first_bypass.id]
-    );
+    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.id, first_bypass.id]);
     assert_eq!(
         wait_for(&service, first_bypass.id, TaskState::is_terminal).await,
         TaskState::Succeeded
@@ -679,10 +616,7 @@ async fn resource_bypass_limit_clears_when_anchor_is_cancelled() {
     ));
 
     assert_eq!(
-        service
-            .cancel(anchor.id)
-            .await
-            .expect("anchor cancellation"),
+        service.cancel(anchor.id).await.expect("anchor cancellation"),
         qubit_task::service::CancelOutcome::CancelledBeforeStart
     );
     assert_eq!(
@@ -713,19 +647,13 @@ async fn resource_bypass_limit_preserves_anchor_across_ready_pages() {
         .submit(request_resources(0, 2))
         .await
         .expect("second impossible task accepted");
-    let anchor = service
-        .submit(request_resources(0, 1))
-        .await
-        .expect("anchor accepted");
+    let anchor = service.submit(request_resources(0, 1)).await.expect("anchor accepted");
     let first_bypass = service
         .submit(request_resources(1, 0))
         .await
         .expect("first bypass accepted");
     complete_gated_scan(&gate).await;
-    assert_eq!(
-        wait_for_starts(&trace, 2).await,
-        vec![running.id, first_bypass.id]
-    );
+    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.id, first_bypass.id]);
     assert_eq!(
         wait_for(&service, first_bypass.id, TaskState::is_terminal).await,
         TaskState::Succeeded
@@ -802,10 +730,7 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
         .submit(request_resources(0, 0))
         .await
         .expect("second earlier task accepted");
-    let anchor = service
-        .submit(request_resources(0, 1))
-        .await
-        .expect("anchor accepted");
+    let anchor = service.submit(request_resources(0, 1)).await.expect("anchor accepted");
     let first_bypass = service
         .submit(request_resources(1, 0))
         .await
@@ -816,10 +741,7 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
         .expect("conflict trace lock is not poisoned")
         .extend([earlier_a.id, earlier_b.id]);
     complete_gated_scan(&gate).await;
-    assert_eq!(
-        wait_for_starts(&trace, 2).await,
-        vec![running.id, first_bypass.id]
-    );
+    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.id, first_bypass.id]);
     assert_eq!(
         wait_for(&service, first_bypass.id, TaskState::is_terminal).await,
         TaskState::Succeeded
@@ -870,24 +792,13 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
         .lock()
         .expect("ready scan trace lock is not poisoned")
         .clone();
-    assert_eq!(
-        scans.first(),
-        Some(&None),
-        "every scan must restart at the first page"
-    );
+    assert_eq!(scans.first(), Some(&None), "every scan must restart at the first page");
     assert_eq!(
         scans.get(1),
         Some(&Some(first_page_cursor)),
         "anchor must remain on a later page"
     );
-    assert_eq!(
-        trace
-            .ids
-            .lock()
-            .expect("start trace lock is not poisoned")
-            .len(),
-        2
-    );
+    assert_eq!(trace.ids.lock().expect("start trace lock is not poisoned").len(), 2);
     assert!(matches!(
         service
             .get(earlier_a.id)
@@ -935,8 +846,7 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
 
 #[tokio::test]
 async fn resource_release_during_ready_scan_is_not_lost() {
-    let codecs =
-        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let started = Arc::new(tokio::sync::Notify::new());
     let release_handler = Arc::new(tokio::sync::Semaphore::new(0));
     let gate = Arc::new(ReadyScanGate {
@@ -951,13 +861,12 @@ async fn resource_release_during_ready_scan_is_not_lost() {
         start_gate: None,
         trace: None,
     });
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(200))))
-            .capacity(ResourceCapacity {
-                cpu_slots: 1,
-                ..ResourceCapacity::default()
-            })
-            .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(200))))
+        .capacity(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        })
+        .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -996,8 +905,7 @@ async fn resource_release_during_ready_scan_is_not_lost() {
 
 #[tokio::test]
 async fn cancel_during_start_cas_releases_reservation_without_running_handler() {
-    let codecs =
-        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let ready_gate = Arc::new(ReadyScanGate {
         armed: AtomicBool::new(false),
         reached: tokio::sync::Notify::new(),
@@ -1018,12 +926,12 @@ async fn cancel_during_start_cas_releases_reservation_without_running_handler() 
     let started = Arc::new(tokio::sync::Notify::new());
     let release_handler = Arc::new(tokio::sync::Semaphore::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(900))))
-            .capacity(ResourceCapacity {
-                cpu_slots: 1,
-                ..ResourceCapacity::default()
-            });
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(900)))).capacity(
+        ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        },
+    );
     builder
         .handlers_mut()
         .register::<Counter, _>(

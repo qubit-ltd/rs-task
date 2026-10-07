@@ -20,26 +20,18 @@ use qubit_task::model::TaskState;
 use qubit_task::store::MemoryTaskStore;
 
 /// Call after repairing the handler or codec configuration and restarting.
-async fn resume_after_repair(
-    service: &TaskExecutionService,
-    id: TaskId,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn resume_after_repair(service: &TaskExecutionService, id: TaskId) -> Result<(), Box<dyn std::error::Error>> {
     let Some(summary) = service.get(id).await? else {
         return Ok(());
     };
     if matches!(summary.state, TaskState::Blocked { .. }) {
         if summary.cancel_requested {
-            eprintln!(
-                "{} still has a pending cancellation",
-                id.to_padded_decimal()
-            );
+            eprintln!("{} still has a pending cancellation", id.to_padded_decimal());
             return Ok(());
         }
         match service.resume_blocked(id, summary.state_version).await {
             Ok(_) => println!("{} queued for retry", id.to_padded_decimal()),
-            Err(qubit_task::service::TaskServiceError::Store(
-                qubit_task::store::StoreError::Conflict,
-            )) => {
+            Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::Conflict)) => {
                 eprintln!("{} changed; read its summary again", id.to_padded_decimal());
             }
             Err(error) => return Err(error.into()),
@@ -57,9 +49,7 @@ impl qubit_id::IdGenerator for SequentialIds {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let service = TaskExecutionServiceBuilder::new(
             Arc::new(MemoryTaskStore::new(256)),

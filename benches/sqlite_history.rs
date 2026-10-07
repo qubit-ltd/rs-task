@@ -104,10 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let runtime = Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()?;
+    let runtime = Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     let mut datasets = Vec::new();
     for size in options.sizes {
         datasets.push(run_dataset(&runtime, size)?);
@@ -157,9 +154,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
             }
             "--bench" => {}
             "--help" | "-h" => {
-                println!(
-                    "sqlite_history [--output <absolute-json>] [--sizes 1000,10000,20000,100000]"
-                );
+                println!("sqlite_history [--output <absolute-json>] [--sizes 1000,10000,20000,100000]");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}").into()),
@@ -168,17 +163,13 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     Ok(Options { output, sizes })
 }
 
-fn run_dataset(
-    runtime: &tokio::runtime::Runtime,
-    size: usize,
-) -> Result<DatasetReport, Box<dyn std::error::Error>> {
+fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<DatasetReport, Box<dyn std::error::Error>> {
     let directory = history_dataset::temporary_directory()?;
     let dataset = history_dataset::create(size, &directory.path)?;
     let indexless_database_bytes = file_size(&dataset.database_path)?;
 
     let mut no_index_connection = Connection::open(&dataset.database_path)?;
-    let legacy_or_no_index_baseline =
-        legacy_history_measurement(&mut no_index_connection, dataset.cursor)?;
+    let legacy_or_no_index_baseline = legacy_history_measurement(&mut no_index_connection, dataset.cursor)?;
     let legacy_or_no_index_plan = explain(
         &no_index_connection,
         "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks
@@ -353,11 +344,9 @@ fn run_dataset(
         runtime_store.next_retry_deadline(i64::MAX as u64 - 1).await
     })?;
     let count_states = measure_sync(|| {
-        sqlite.query_row(
-            "SELECT COUNT(*) FROM tasks WHERE state_kind='Queued'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
+        sqlite.query_row("SELECT COUNT(*) FROM tasks WHERE state_kind='Queued'", [], |row| {
+            row.get::<_, i64>(0)
+        })
     })?;
     drop(sqlite);
     drop(store);
@@ -408,10 +397,7 @@ fn run_dataset(
     })
 }
 
-fn measure<F, Fut, T>(
-    runtime: &tokio::runtime::Runtime,
-    mut operation: F,
-) -> Result<Timing, Box<dyn std::error::Error>>
+fn measure<F, Fut, T>(runtime: &tokio::runtime::Runtime, mut operation: F) -> Result<Timing, Box<dyn std::error::Error>>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, qubit_task::store::StoreError>>,
@@ -457,8 +443,7 @@ fn measure_shutdown(
         let store = Arc::new(SqliteTaskStore::open_next(&sample_path)?);
         let codecs = Arc::new(qubit_codec::ValueBytesCodecRegistry::empty());
         let id_generator = Arc::new(qubit_id::SnowflakeGenerator::new(0)?);
-        let service = runtime
-            .block_on(TaskExecutionServiceBuilder::new(store, codecs, id_generator).build())?;
+        let service = runtime.block_on(TaskExecutionServiceBuilder::new(store, codecs, id_generator).build())?;
         let start = Instant::now();
         runtime.block_on(service.shutdown())?;
         samples.push(start.elapsed());
@@ -499,24 +484,15 @@ fn legacy_history_measurement(
     Ok(summarize(samples))
 }
 
-fn production_plan(
-    connection: &Connection,
-    query: TaskQuery,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // The plan is read through the public store query in production; this EXPLAIN
     // uses its stable SQL shape for reproducible plan reporting.
-    let (where_sql, values): (&str, Vec<rusqlite::types::Value>) = if let Some(key) =
-        query.correlation_key
-    {
+    let (where_sql, values): (&str, Vec<rusqlite::types::Value>) = if let Some(key) = query.correlation_key {
         (
             "WHERE (accepted_at,id) > (?1,?2) AND correlation_key = ?3 ORDER BY accepted_at,id LIMIT ?4",
             vec![
-                rusqlite::types::Value::Integer(
-                    query.after.expect("cursor was set").accepted_at_ms as i64,
-                ),
-                rusqlite::types::Value::Text(
-                    query.after.expect("cursor was set").id.to_padded_decimal(),
-                ),
+                rusqlite::types::Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
+                rusqlite::types::Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
                 rusqlite::types::Value::Text(key),
                 rusqlite::types::Value::Integer((query.limit + 1) as i64),
             ],
@@ -525,12 +501,8 @@ fn production_plan(
         (
             "WHERE (accepted_at,id) > (?1,?2) ORDER BY accepted_at,id LIMIT ?3",
             vec![
-                rusqlite::types::Value::Integer(
-                    query.after.expect("cursor was set").accepted_at_ms as i64,
-                ),
-                rusqlite::types::Value::Text(
-                    query.after.expect("cursor was set").id.to_padded_decimal(),
-                ),
+                rusqlite::types::Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
+                rusqlite::types::Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
                 rusqlite::types::Value::Integer((query.limit + 1) as i64),
             ],
         )
@@ -556,8 +528,7 @@ fn explain<P: rusqlite::Params>(
 
 fn summarize(mut samples: Vec<Duration>) -> Timing {
     samples.sort_unstable();
-    let percentile =
-        |percent: usize| samples[(samples.len() - 1) * percent / 100].as_secs_f64() * 1000.0;
+    let percentile = |percent: usize| samples[(samples.len() - 1) * percent / 100].as_secs_f64() * 1000.0;
     Timing {
         p50_ms: percentile(50),
         p95_ms: percentile(95),
@@ -572,7 +543,5 @@ fn file_size(path: &Path) -> Result<u64, std::io::Error> {
 }
 fn sidecar_size(path: &Path, suffix: &str) -> u64 {
     let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
-    std::fs::metadata(sidecar)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
+    std::fs::metadata(sidecar).map(|metadata| metadata.len()).unwrap_or(0)
 }

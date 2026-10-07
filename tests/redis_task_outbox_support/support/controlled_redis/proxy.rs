@@ -119,10 +119,7 @@ impl ControlledRedis {
     /// briefly and panics if the replacement mutex is poisoned; the proxy
     /// performs the IO.
     pub fn replace_next_reply(&self, command: &str, reply: &[u8]) {
-        *self
-            .replacement
-            .lock()
-            .expect("reply replacement lock is healthy") =
+        *self.replacement.lock().expect("reply replacement lock is healthy") =
             Some((command.as_bytes().to_ascii_uppercase(), reply.to_vec()));
     }
 
@@ -165,12 +162,7 @@ impl Drop for ControlledRedis {
 /// `gate` controls applied replies and `replacement` supplies one raw response.
 /// Performs blocking socket IO and exits without a result on transport failure
 /// or a discarded reply. Panics if the replacement mutex is poisoned.
-fn forward(
-    client: TcpStream,
-    upstream: &str,
-    gate: &ReplyGate,
-    replacement: &Mutex<ReplyReplacement>,
-) {
+fn forward(client: TcpStream, upstream: &str, gate: &ReplyGate, replacement: &Mutex<ReplyReplacement>) {
     let Ok(server) = TcpStream::connect(upstream) else {
         return;
     };
@@ -197,9 +189,7 @@ fn forward(
             break;
         }
         {
-            let mut replacement = replacement
-                .lock()
-                .expect("reply replacement lock is healthy");
+            let mut replacement = replacement.lock().expect("reply replacement lock is healthy");
             if replacement
                 .as_ref()
                 .is_some_and(|(name, _)| name.eq_ignore_ascii_case(&command))

@@ -38,9 +38,7 @@ pub enum StoreError {
     IdempotencyConflict,
     /// The in-memory store cannot retain the request payload within its
     /// configured budget.
-    #[error(
-        "task payload budget exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available"
-    )]
+    #[error("task payload budget exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available")]
     CapacityExceeded {
         /// Bytes in the request that could not be retained.
         requested_bytes: usize,

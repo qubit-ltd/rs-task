@@ -92,8 +92,6 @@ mod tests {
     /// Keeps unrelated system errors on the storage-failure path.
     #[test]
     fn test_lock_contention_rejects_unrelated_error() {
-        assert!(!is_lock_contended(&std::io::Error::other(
-            "unrelated error"
-        )));
+        assert!(!is_lock_contended(&std::io::Error::other("unrelated error")));
     }
 }

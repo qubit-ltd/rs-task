@@ -95,11 +95,7 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
     /// Resolves to an error for invalid requests, duplicate IDs, idempotency
     /// conflicts, capacity limits, or persistence failures.
     #[cfg(test)]
-    fn accept<'a>(
-        &'a self,
-        id: TaskId,
-        request: TaskRequest,
-    ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>>;
+    fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>>;
 
     /// Accepts a request whose payload has already been encoded for storage.
     ///
@@ -198,10 +194,7 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
     ///
     /// Resolves to an error if the store cannot complete the lookup.
     #[cfg(test)]
-    fn get_by_idempotency_key<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
+    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>>;
 
     /// Finds lifecycle metadata by idempotency key without loading payload
     /// bytes.
@@ -242,10 +235,7 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
     /// Resolves to an error when the task is missing, the revision conflicts,
     /// the transition is invalid, or persistence fails.
     #[cfg(test)]
-    fn transition<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>>;
+    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>>;
 
     /// Writes a progress snapshot using an attempt and progress-version
     /// compare-and-set.
@@ -290,10 +280,7 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
     ///
     /// Resolves to an error if the store cannot complete the read.
     #[cfg(test)]
-    fn get_summary<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>>;
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>>;
 
     /// Loads one task record by its stable identifier.
     ///
@@ -333,10 +320,7 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
     /// The exclusive cursor is ordered by `(accepted_at_ms, numeric task ID)`.
     /// Implementations that do not support typed task storage return
     /// `UnsupportedCapability` by default.
-    fn list_encoded<'a>(
-        &'a self,
-        query: EncodedTaskQuery,
-    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
         let _ = query;
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
@@ -351,10 +335,7 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
-    fn next_retry_deadline<'a>(
-        &'a self,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         let _ = now_ms;
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
@@ -424,10 +405,7 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
     ///
     /// Resolves to an error if the store cannot perform the consistency check.
     #[cfg(test)]
-    fn has_unfinished_over_limit<'a>(
-        &'a self,
-        limit: usize,
-    ) -> TaskFuture<'a, Result<bool, StoreError>>;
+    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>>;
 
     /// Scans at most 256 Queued/Running summaries during recovery.
     ///
@@ -451,10 +429,7 @@ pub(crate) trait LegacyTaskStore: Send + Sync {
     ///
     /// Resolves to an error if recovery scanning is unsupported or fails.
     #[cfg(test)]
-    fn scan_unfinished<'a>(
-        &'a self,
-        cursor: Option<TaskCursor>,
-    ) -> TaskFuture<'a, Result<RecoveryPage, StoreError>>;
+    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>>;
 
     /// Releases ownership after the service has stopped accepting work and
     /// drained writes admitted under this ownership epoch.
@@ -530,16 +505,10 @@ pub trait TaskStore: Send + Sync {
     ) -> TaskFuture<'a, Result<TypedAcceptOutcome, StoreError>>;
 
     /// Loads a retained task and its stored request.
-    fn get_encoded_task<'a>(
-        &'a self,
-        id: TypedTaskId,
-    ) -> TaskFuture<'a, Result<Option<TypedStoredTask>, StoreError>>;
+    fn get_encoded_task<'a>(&'a self, id: TypedTaskId) -> TaskFuture<'a, Result<Option<TypedStoredTask>, StoreError>>;
 
     /// Starts one attempt if the task is queued at the supplied state version.
-    fn start_encoded<'a>(
-        &'a self,
-        command: TypedStartCommand,
-    ) -> TaskFuture<'a, Result<TypedTaskSummary, StoreError>>;
+    fn start_encoded<'a>(&'a self, command: TypedStartCommand) -> TaskFuture<'a, Result<TypedTaskSummary, StoreError>>;
 
     /// Applies a typed task lifecycle transition using optimistic concurrency.
     fn transition_encoded<'a>(
@@ -555,10 +524,7 @@ pub trait TaskStore: Send + Sync {
     ) -> TaskFuture<'a, Result<TypedTaskSummary, StoreError>>;
 
     /// Queries summaries in deterministic typed-task order.
-    fn list_encoded<'a>(
-        &'a self,
-        query: TypedTaskQuery,
-    ) -> TaskFuture<'a, Result<TypedTaskPage, StoreError>>;
+    fn list_encoded<'a>(&'a self, query: TypedTaskQuery) -> TaskFuture<'a, Result<TypedTaskPage, StoreError>>;
 
     /// Lists queued tasks that can start at `now_ms`, ordered for keyset scans.
     fn list_ready_queued<'a>(
@@ -569,10 +535,7 @@ pub trait TaskStore: Send + Sync {
     ) -> TaskFuture<'a, Result<TypedTaskPage, StoreError>>;
 
     /// Returns the earliest queued retry deadline strictly after `now_ms`.
-    fn next_retry_deadline<'a>(
-        &'a self,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<Option<u64>, StoreError>>;
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>>;
 
     /// Deletes a bounded batch of terminal tasks whose finish time is before
     /// the cutoff.

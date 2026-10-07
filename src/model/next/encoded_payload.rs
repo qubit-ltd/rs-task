@@ -28,12 +28,7 @@ pub struct EncodedPayload<T> {
 
 impl<T> EncodedPayload<T> {
     /// Creates an encoded payload from validated metadata and bytes.
-    pub(crate) fn new(
-        type_id: ModelIdBuf,
-        schema_version: u32,
-        codec_id: ValueCodecId,
-        bytes: Vec<u8>,
-    ) -> Self {
+    pub(crate) fn new(type_id: ModelIdBuf, schema_version: u32, codec_id: ValueCodecId, bytes: Vec<u8>) -> Self {
         Self {
             type_id,
             schema_version,

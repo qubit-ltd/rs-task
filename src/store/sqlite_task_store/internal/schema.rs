@@ -34,7 +34,8 @@ pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 6;
 
 /// Canonical recovery index SQL; equality makes reopen repairs idempotent.
 #[cfg(test)]
-const UNFINISHED_INDEX_SQL: &str = "CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE +state_kind IN ('Queued','Running')";
+const UNFINISHED_INDEX_SQL: &str =
+    "CREATE INDEX tasks_unfinished_accepted_id ON tasks(accepted_at, id) WHERE +state_kind IN ('Queued','Running')";
 
 /// Initializes the current SQLite schema or upgrades a supported older schema.
 ///
@@ -51,9 +52,7 @@ const UNFINISHED_INDEX_SQL: &str = "CREATE INDEX tasks_unfinished_accepted_id ON
 /// Returns a store error for unsupported versions, invalid schemas, migration
 /// failures, or SQLite operation failures.
 #[cfg(test)]
-pub(in crate::store::sqlite_task_store) fn initialize_schema(
-    connection: &mut Connection,
-) -> Result<(), StoreError> {
+pub(in crate::store::sqlite_task_store) fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(failure)?;
@@ -139,9 +138,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
         transaction
             .execute_batch("ALTER TABLE tasks ADD COLUMN retry_not_before_ms INTEGER;")
             .map_err(failure)?;
-        transaction
-            .pragma_update(None, "user_version", 5)
-            .map_err(failure)?;
+        transaction.pragma_update(None, "user_version", 5).map_err(failure)?;
     }
     if version == NEXT_SCHEMA_VERSION || version == 5 || version == 4 {
         if !table_exists {
@@ -229,9 +226,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
 /// Validates required columns for the typed request schema.
 fn validate_next_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
-        let mut statement = transaction
-            .prepare("PRAGMA table_info(tasks)")
-            .map_err(failure)?;
+        let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(failure)?;
@@ -308,9 +303,7 @@ fn ensure_unfinished_index(transaction: &Transaction<'_>) -> Result<(), StoreErr
             .execute_batch("DROP INDEX tasks_unfinished_accepted_id;")
             .map_err(failure)?;
     }
-    transaction
-        .execute_batch(UNFINISHED_INDEX_SQL)
-        .map_err(failure)
+    transaction.execute_batch(UNFINISHED_INDEX_SQL).map_err(failure)
 }
 
 /// Verifies that schema 3 has the columns expected by the current store.
@@ -329,9 +322,7 @@ fn ensure_unfinished_index(transaction: &Transaction<'_>) -> Result<(), StoreErr
 #[cfg(test)]
 fn validate_schema_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
-        let mut statement = transaction
-            .prepare("PRAGMA table_info(tasks)")
-            .map_err(failure)?;
+        let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(failure)?;
@@ -375,9 +366,7 @@ fn validate_schema_three(transaction: &Transaction<'_>) -> Result<(), StoreError
 #[cfg(test)]
 fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
-        let mut statement = transaction
-            .prepare("PRAGMA table_info(tasks)")
-            .map_err(failure)?;
+        let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(failure)?;
@@ -388,9 +377,7 @@ fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), Stor
         return Ok(());
     }
     if !columns.contains("request_json") {
-        return Err(StoreError::Failure(
-            "SQLite schema 2 is missing `request_json`".into(),
-        ));
+        return Err(StoreError::Failure("SQLite schema 2 is missing `request_json`".into()));
     }
     transaction.execute_batch("CREATE TABLE tasks_v3 (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_info_json TEXT NOT NULL, payload BLOB NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 3, lifecycle_json TEXT NOT NULL);").map_err(failure)?;
     let mut statement = transaction.prepare("SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_json,lifecycle_json FROM tasks ORDER BY id").map_err(failure)?;
@@ -453,14 +440,9 @@ fn migrate_schema_two_to_three(transaction: &Transaction<'_>) -> Result<(), Stor
 /// Returns a store error when required columns are absent, records are invalid,
 /// or a SQLite operation fails.
 #[cfg(test)]
-fn migrate_legacy_schema(
-    transaction: &Transaction<'_>,
-    schema_version: i64,
-) -> Result<(), StoreError> {
+fn migrate_legacy_schema(transaction: &Transaction<'_>, schema_version: i64) -> Result<(), StoreError> {
     let columns = {
-        let mut statement = transaction
-            .prepare("PRAGMA table_info(tasks)")
-            .map_err(failure)?;
+        let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(failure)?;
@@ -557,9 +539,10 @@ fn validate_outbox_schema(transaction: &Transaction<'_>) -> Result<(), StoreErro
         ("event_json", "TEXT", 0),
         ("created_at_ms", "INTEGER", 0),
     ] {
-        if !columns.iter().any(|(column, ty, required, pk)| {
-            column == name && ty == kind && *required == 1 && *pk == primary
-        }) {
+        if !columns
+            .iter()
+            .any(|(column, ty, required, pk)| column == name && ty == kind && *required == 1 && *pk == primary)
+        {
             return Err(StoreError::Failure(format!(
                 "SQLite event outbox has invalid required column `{name}`"
             )));

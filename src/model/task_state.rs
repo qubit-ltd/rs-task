@@ -115,9 +115,7 @@ impl TaskState {
                     | Self::Cancelled
             ),
             Self::Blocked { .. } => matches!(next, Self::Queued | Self::Cancelled),
-            Self::Succeeded | Self::Failed { .. } | Self::Panicked { .. } | Self::Cancelled => {
-                false
-            }
+            Self::Succeeded | Self::Failed { .. } | Self::Panicked { .. } | Self::Cancelled => false,
         }
     }
 

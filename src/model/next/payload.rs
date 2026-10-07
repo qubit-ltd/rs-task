@@ -48,10 +48,7 @@ impl<T: HasModelId + 'static> Payload<T> {
     /// Returns `MissingCodec` when the codec ID is absent, `TypeMismatch` when
     /// the registration targets another Rust type, or `Codec` for encoder
     /// errors.
-    pub fn encode(
-        self,
-        registry: &ValueBytesCodecRegistry,
-    ) -> Result<EncodedPayload<T>, PayloadEncodeError> {
+    pub fn encode(self, registry: &ValueBytesCodecRegistry) -> Result<EncodedPayload<T>, PayloadEncodeError> {
         let registration = registry
             .get(self.codec_id.as_str())
             .ok_or_else(|| PayloadEncodeError::MissingCodec(self.codec_id.as_str().to_owned()))?;

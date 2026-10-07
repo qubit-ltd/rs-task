@@ -31,13 +31,8 @@ impl WorkerGuard {
     ///
     /// A guard that removes this worker from the active count when dropped.
     pub(in crate::store::sqlite_task_store) fn enter(counts: Arc<WorkerCounts>) -> Self {
-        let active = counts
-            .active
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
-        counts
-            .peak
-            .fetch_max(active, std::sync::atomic::Ordering::AcqRel);
+        let active = counts.active.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        counts.peak.fetch_max(active, std::sync::atomic::Ordering::AcqRel);
         Self(counts)
     }
 }
@@ -47,8 +42,6 @@ impl Drop for WorkerGuard {
     /// Removes the exiting worker from the active count.
     fn drop(&mut self) {
         let Self(counts) = self;
-        counts
-            .active
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        counts.active.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }

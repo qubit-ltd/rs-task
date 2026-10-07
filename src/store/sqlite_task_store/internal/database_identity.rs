@@ -46,9 +46,9 @@ impl DatabaseIdentity {
         let file_name = absolute_path
             .file_name()
             .ok_or_else(|| StoreError::Failure("SQLite database path must name a file".into()))?;
-        let parent = absolute_path.parent().ok_or_else(|| {
-            StoreError::Failure("SQLite database path must have a parent directory".into())
-        })?;
+        let parent = absolute_path
+            .parent()
+            .ok_or_else(|| StoreError::Failure("SQLite database path must have a parent directory".into()))?;
         std::fs::create_dir_all(parent).map_err(failure)?;
         let canonical_parent = parent.canonicalize().map_err(failure)?;
         let unresolved_path = canonical_parent.join(file_name);
@@ -170,8 +170,7 @@ fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
     if succeeded == 0 {
         return Err(failure(std::io::Error::last_os_error()));
     }
-    let file_index =
-        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    let file_index = (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
     Ok((
         (u64::from(information.dwVolumeSerialNumber), file_index),
         u64::from(information.nNumberOfLinks),

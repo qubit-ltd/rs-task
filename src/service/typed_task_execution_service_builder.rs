@@ -51,8 +51,7 @@ impl TypedTaskExecutionServiceBuilder {
         codecs: Arc<ValueBytesCodecRegistry>,
         id_generator: Arc<dyn IdGenerator<Id, IdGenerationError>>,
     ) -> Self {
-        let cpu_slots =
-            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32;
+        let cpu_slots = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32;
         Self {
             store,
             codecs,
@@ -62,8 +61,7 @@ impl TypedTaskExecutionServiceBuilder {
                 ..ResourceCapacity::default()
             },
             handlers: TypedTaskHandlerRegistry::new(),
-            max_running_tasks: std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get),
+            max_running_tasks: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
             scan_page_size: 128,
             max_resource_bypasses: 32,
             max_attempts: 3,

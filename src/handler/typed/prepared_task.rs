@@ -31,8 +31,6 @@ impl PreparedTask {
 
 impl std::fmt::Debug for PreparedTask {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PreparedTask")
-            .finish_non_exhaustive()
+        formatter.debug_struct("PreparedTask").finish_non_exhaustive()
     }
 }

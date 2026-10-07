@@ -29,13 +29,7 @@ async fn test_outbox_requires_owner_and_valid_page_size() {
     ));
     let epoch = store.acquire_owner().await.expect("acquire owner");
     store.enable_event_outbox().await.expect("enable outbox");
-    assert!(
-        store
-            .list_event_outbox(128)
-            .await
-            .expect("read page")
-            .is_empty()
-    );
+    assert!(store.list_event_outbox(128).await.expect("read page").is_empty());
     assert!(matches!(
         store.list_event_outbox(0).await,
         Err(StoreError::InvalidRequest(_))
@@ -93,9 +87,7 @@ async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
         .expect("index");
     assert_eq!(index, 1);
     connection
-        .prepare(
-            "SELECT task_id,state_version,event_id,event_json,created_at_ms FROM task_event_outbox",
-        )
+        .prepare("SELECT task_id,state_version,event_id,event_json,created_at_ms FROM task_event_outbox")
         .expect("outbox schema");
 }
 
@@ -107,10 +99,7 @@ fn test_invalid_v6_outbox_is_rejected_without_repair() {
     connection
         .execute_batch("ALTER TABLE task_event_outbox RENAME COLUMN event_json TO corrupt_json")
         .expect("inject invalid schema");
-    assert!(matches!(
-        SqliteTaskStore::open_next(&path),
-        Err(StoreError::Failure(_))
-    ));
+    assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
     connection
         .prepare("SELECT corrupt_json FROM task_event_outbox")
         .expect("invalid schema was preserved");
@@ -149,13 +138,7 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
     store.enable_event_outbox().await.expect("enable");
     let id = TaskId::from_id(qubit_id::Id::new(42));
     store.accept_encoded(id, request()).await.expect("accept");
-    assert!(
-        !store
-            .accept_encoded(id, request())
-            .await
-            .expect("repeat")
-            .created
-    );
+    assert!(!store.accept_encoded(id, request()).await.expect("repeat").created);
     let running = store
         .start_encoded(StartCommand {
             id,
@@ -175,14 +158,7 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
         ))
         .await
         .expect("progress");
-    assert_eq!(
-        store
-            .list_event_outbox(128)
-            .await
-            .expect("after progress")
-            .len(),
-        2
-    );
+    assert_eq!(store.list_event_outbox(128).await.expect("after progress").len(), 2);
     let transition = TransitionCommand {
         id,
         expected_state_version: 1,
@@ -213,20 +189,14 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
     connection
         .execute_batch("DROP TRIGGER fail_outbox;")
         .expect("restore outbox");
-    store
-        .transition_encoded(transition.clone())
-        .await
-        .expect("finish");
+    store.transition_encoded(transition.clone()).await.expect("finish");
     assert!(matches!(
         store.transition_encoded(transition).await,
         Err(StoreError::Conflict)
     ));
     let events = store.list_event_outbox(128).await.expect("events");
     assert_eq!(
-        events
-            .iter()
-            .map(|entry| entry.state_version)
-            .collect::<Vec<_>>(),
+        events.iter().map(|entry| entry.state_version).collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
     assert_eq!(events[0].event_id, "task:42:0");
@@ -234,15 +204,9 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
     assert!(events[1].event_json.contains("Running"));
     assert!(events[2].event_json.contains("Succeeded"));
     for _ in 0..2 {
-        store
-            .mark_event_published(id, 0)
-            .await
-            .expect("idempotent deletion");
+        store.mark_event_published(id, 0).await.expect("idempotent deletion");
     }
-    assert_eq!(
-        store.list_event_outbox(128).await.expect("remaining").len(),
-        2
-    );
+    assert_eq!(store.list_event_outbox(128).await.expect("remaining").len(), 2);
     store.release_owner(epoch).await.expect("release");
     assert!(matches!(
         store.mark_event_published(id, 1).await,
@@ -258,10 +222,7 @@ fn test_v6_missing_outbox_index_is_rejected() {
     connection
         .execute_batch("DROP INDEX task_event_outbox_created")
         .expect("remove index");
-    assert!(matches!(
-        SqliteTaskStore::open_next(&path),
-        Err(StoreError::Failure(_))
-    ));
+    assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
 }
 
 #[cfg(feature = "event-bus")]
@@ -280,13 +241,7 @@ async fn test_oversized_event_rolls_back_acceptance() {
         Err(StoreError::InvalidRequest(_))
     ));
     assert!(store.get_encoded_task(id).await.expect("lookup").is_none());
-    assert!(
-        store
-            .list_event_outbox(128)
-            .await
-            .expect("outbox")
-            .is_empty()
-    );
+    assert!(store.list_event_outbox(128).await.expect("outbox").is_empty());
     store.release_owner(owner).await.expect("release");
 }
 
@@ -296,10 +251,7 @@ fn test_v6_missing_outbox_primary_key_is_rejected() {
     drop(SqliteTaskStore::open_next(&path).expect("initialize database"));
     let connection = rusqlite::Connection::open(&path).expect("open database");
     connection.execute_batch("DROP TABLE task_event_outbox; CREATE TABLE task_event_outbox(task_id TEXT NOT NULL,state_version INTEGER NOT NULL,event_id TEXT NOT NULL,event_json TEXT NOT NULL,created_at_ms INTEGER NOT NULL); CREATE INDEX task_event_outbox_created ON task_event_outbox(created_at_ms,task_id,state_version);").expect("remove primary key from fixture");
-    assert!(matches!(
-        SqliteTaskStore::open_next(&path),
-        Err(StoreError::Failure(_))
-    ));
+    assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
 }
 
 #[test]

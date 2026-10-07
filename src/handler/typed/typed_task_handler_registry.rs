@@ -55,21 +55,19 @@ where
             .accepted_schema_versions
             .contains(&payload.schema_version)
         {
-            return Err(HandlerDispatchError::UnsupportedSchemaVersion(
-                payload.schema_version,
-            ));
+            return Err(HandlerDispatchError::UnsupportedSchemaVersion(payload.schema_version));
         }
         let codec = codecs
             .get(&payload.codec_id)
             .ok_or_else(|| HandlerDispatchError::MissingCodec(payload.codec_id.clone()))?;
         let decoded = codec.descriptor().decode(&payload.bytes)?;
         let actual_type = decoded.as_ref().type_id();
-        let input = decoded.downcast::<T>().map_err(|_| {
-            HandlerDispatchError::DecodedValueTypeMismatch {
+        let input = decoded
+            .downcast::<T>()
+            .map_err(|_| HandlerDispatchError::DecodedValueTypeMismatch {
                 expected: std::any::type_name::<T>(),
                 actual: actual_type,
-            }
-        })?;
+            })?;
         let input = *input;
         let handler = Arc::clone(&self.handler);
         Ok(PreparedTask::new(Box::new(move |context| {
@@ -153,20 +151,13 @@ impl TypedTaskHandlerRegistry {
         H: TypedTaskHandler<T>,
     {
         descriptor.validate()?;
-        match (
-            descriptor.cancellation_mode,
-            external_cancellation_hook.is_some(),
-        ) {
+        match (descriptor.cancellation_mode, external_cancellation_hook.is_some()) {
             (CancellationMode::ExternalHook, false) => {
-                return Err(HandlerRegistrationError::MissingExternalHook(
-                    descriptor.kind_id,
-                ));
+                return Err(HandlerRegistrationError::MissingExternalHook(descriptor.kind_id));
             }
             (CancellationMode::ExternalHook, true) => {}
             (_, true) => {
-                return Err(HandlerRegistrationError::UnexpectedExternalHook(
-                    descriptor.kind_id,
-                ));
+                return Err(HandlerRegistrationError::UnexpectedExternalHook(descriptor.kind_id));
             }
             (_, false) => {}
         }
@@ -213,9 +204,7 @@ impl TypedTaskHandlerRegistry {
     /// Returns the registered descriptor for a handler kind.
     #[must_use]
     pub fn descriptor(&self, kind_id: &str) -> Option<&TaskHandlerDescriptor> {
-        self.handlers
-            .get(kind_id)
-            .map(|registration| &registration.descriptor)
+        self.handlers.get(kind_id).map(|registration| &registration.descriptor)
     }
 
     /// Returns whether the kind has an external cancellation hook.

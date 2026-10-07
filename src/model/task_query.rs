@@ -28,9 +28,7 @@ pub const MAX_TASK_QUERY_LIMIT: usize = 256;
 /// Returns [`StoreError::InvalidRequest`] when `limit` exceeds the maximum.
 pub(crate) fn checked_page_size(limit: usize) -> Result<usize, StoreError> {
     if limit > MAX_TASK_QUERY_LIMIT {
-        return Err(StoreError::InvalidRequest(
-            "task history page limit exceeds 256",
-        ));
+        return Err(StoreError::InvalidRequest("task history page limit exceeds 256"));
     }
     Ok(limit.max(1))
 }

@@ -54,11 +54,7 @@ impl RedisServer {
             ])
             .output()?;
         if !output.status.success() {
-            return Err(format!(
-                "docker run failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
+            return Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into());
         }
         let container_id = String::from_utf8(output.stdout)?.trim().to_owned();
         let mut server = Self {
@@ -105,9 +101,7 @@ impl RedisServer {
     /// stopped. This supplies an observed outage boundary without relying
     /// on elapsed time.
     pub fn stop(&self) -> Result<(), Box<dyn Error>> {
-        let output = Command::new("docker")
-            .args(["stop", &self.container_id])
-            .output()?;
+        let output = Command::new("docker").args(["stop", &self.container_id]).output()?;
         if !output.status.success() {
             return Err(format!(
                 "could not stop isolated Redis: {}",
@@ -124,9 +118,7 @@ impl RedisServer {
     /// Docker/Redis IO and returns process, unsuccessful restart, or
     /// readiness failure errors.
     pub fn restart(&mut self) -> Result<(), Box<dyn Error>> {
-        let output = Command::new("docker")
-            .args(["restart", &self.container_id])
-            .output()?;
+        let output = Command::new("docker").args(["restart", &self.container_id]).output()?;
         if !output.status.success() {
             return Err(format!(
                 "could not restart the isolated Redis server: {}",

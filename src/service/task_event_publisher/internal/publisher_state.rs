@@ -45,8 +45,7 @@ pub(in crate::service::task_event_publisher) struct PublisherState {
     /// Latest publication or storage diagnostic retained for shutdown.
     pub(in crate::service::task_event_publisher) last_error: parking_lot::Mutex<Option<String>>,
     /// Event currently awaiting admission, retained if shutdown aborts it.
-    pub(in crate::service::task_event_publisher) in_flight_event_id:
-        parking_lot::Mutex<Option<String>>,
+    pub(in crate::service::task_event_publisher) in_flight_event_id: parking_lot::Mutex<Option<String>>,
 }
 
 impl PublisherState {
@@ -108,11 +107,7 @@ impl PublisherState {
                     failed = true;
                 }
             }
-            let wait = if failed {
-                backoff
-            } else {
-                Duration::from_secs(1)
-            };
+            let wait = if failed { backoff } else { Duration::from_secs(1) };
             // Notifications wake idle reads. Failures retain their finite backoff even
             // under a sustained stream of new commits, avoiding an outage retry storm.
             if failed {
@@ -138,8 +133,7 @@ impl PublisherState {
     /// admission. Any decoding, publication, or deletion error leaves the
     /// row available for replay.
     async fn publish(&self, entry: &EventOutboxEntry) -> Result<(), String> {
-        let event: TaskEvent =
-            serde_json::from_str(&entry.event_json).map_err(|error| error.to_string())?;
+        let event: TaskEvent = serde_json::from_str(&entry.event_json).map_err(|error| error.to_string())?;
         let event_id = EventId::new(&entry.event_id).map_err(|error| error.to_string())?;
         let request = PublishRequest::builder()
             .topic(self.topic.clone())
@@ -153,8 +147,8 @@ impl PublisherState {
             .publish_checked(request, AdmissionRequirement::ProviderOrDestinationAccepted)
             .await;
         *self.in_flight_event_id.lock() = None;
-        let _receipt = publish_result
-            .map_err(|error| format!("publication for event {} failed: {error}", entry.event_id))?;
+        let _receipt =
+            publish_result.map_err(|error| format!("publication for event {} failed: {error}", entry.event_id))?;
         self.store
             .mark_event_published(entry.task_id, entry.state_version)
             .await
@@ -180,12 +174,7 @@ mod tests {
     #[tokio::test]
     async fn test_failure_backoff_consumes_only_one_close_signal() {
         let registry = AsyncEventBusRegistry::with_local().expect("local registry");
-        let bus = Arc::new(
-            registry
-                .create(&EventBusConfig::default())
-                .await
-                .expect("local bus"),
-        );
+        let bus = Arc::new(registry.create(&EventBusConfig::default()).await.expect("local bus"));
         let state = PublisherState::new(
             Arc::new(MemoryTaskStore::new(1)),
             bus,

@@ -105,10 +105,7 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
     symlink_file(&path, &alias).expect("database alias is created");
 
     assert!(
-        matches!(
-            SqliteTaskStore::open_next(&alias),
-            Err(StoreError::OwnerConflict)
-        ),
+        matches!(SqliteTaskStore::open_next(&alias), Err(StoreError::OwnerConflict)),
         "an alias cannot acquire a second lock"
     );
 
@@ -124,10 +121,7 @@ async fn test_repeated_owner_acquisition_is_rejected() {
     let store = SqliteTaskStore::open_next(&path).expect("database opens");
     let epoch = store.acquire_owner().await.expect("owner is acquired");
 
-    assert!(matches!(
-        store.acquire_owner().await,
-        Err(StoreError::OwnerConflict)
-    ));
+    assert!(matches!(store.acquire_owner().await, Err(StoreError::OwnerConflict)));
 
     store.release_owner(epoch).await.expect("owner is released");
     drop(store);
@@ -142,23 +136,15 @@ async fn test_stale_owner_release_keeps_the_database_locked() {
     let epoch = store.acquire_owner().await.expect("owner is acquired");
 
     assert!(matches!(
-        store
-            .release_owner(OwnerEpoch(epoch.0.saturating_add(1)))
-            .await,
+        store.release_owner(OwnerEpoch(epoch.0.saturating_add(1))).await,
         Err(StoreError::OwnerConflict)
     ));
     assert!(
-        matches!(
-            SqliteTaskStore::open_next(&path),
-            Err(StoreError::OwnerConflict)
-        ),
+        matches!(SqliteTaskStore::open_next(&path), Err(StoreError::OwnerConflict)),
         "stale release keeps the lock held"
     );
 
-    store
-        .release_owner(epoch)
-        .await
-        .expect("matching owner releases lock");
+    store.release_owner(epoch).await.expect("matching owner releases lock");
     drop(store);
     remove_database(&path);
 }

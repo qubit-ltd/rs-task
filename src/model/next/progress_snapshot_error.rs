@@ -24,8 +24,6 @@ pub enum ProgressSnapshotError {
     #[error("failed to encode progress snapshot: {0}")]
     Serialize(#[source] serde_json::Error),
     /// The encoded snapshot exceeds the documented byte limit.
-    #[error(
-        "task progress snapshot has {0} bytes; the maximum is {MAX_TASK_PROGRESS_SNAPSHOT_BYTES}"
-    )]
+    #[error("task progress snapshot has {0} bytes; the maximum is {MAX_TASK_PROGRESS_SNAPSHOT_BYTES}")]
     TooLarge(usize),
 }
