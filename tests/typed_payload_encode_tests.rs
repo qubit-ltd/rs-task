@@ -183,8 +183,12 @@ fn typed_payload_identity_comes_from_the_rust_type() {
     );
     assert_eq!(request.payload.type_id(), Counter::MODEL_ID);
     let registry = ValueBytesCodecRegistry::try_global().expect("codec registry builds");
-    let stored = request.encode(registry).expect("typed request encodes");
-    assert_eq!(stored.payload.type_id.as_str(), "qubit_task.tests.Payload");
+    let encoded = Payload::new(1, ValueCodecId::new("qubit_task.tests.typed_encode_u32"), Counter(7))
+        .encode(registry)
+        .expect("typed payload encodes");
+    assert_eq!(encoded.type_id().as_str(), "qubit_task.tests.Payload");
+    let stored = encoded.into_stored();
+    assert_eq!(stored.type_id.as_str(), "qubit_task.tests.Payload");
 }
 
 #[test]
