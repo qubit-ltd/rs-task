@@ -34,7 +34,9 @@ use crate::store::StoreError;
 ///
 /// Returns a SQLite conversion error when a selected column has the wrong
 /// type or cannot be decoded.
-pub(in crate::store::sqlite_task_store) fn read_stored_summary_row(row: &Row<'_>) -> SqliteResult<StoredSummaryRow> {
+pub(in crate::store::sqlite_task_store) fn read_stored_summary_row(
+    row: &Row<'_>,
+) -> SqliteResult<StoredSummaryRow> {
     Ok(StoredSummaryRow {
         id: row.get(0)?,
         state_kind: row.get(1)?,
@@ -61,7 +63,9 @@ pub(in crate::store::sqlite_task_store) fn read_stored_summary_row(row: &Row<'_>
 ///
 /// Returns a SQLite conversion error when a selected column has the wrong
 /// type or cannot be decoded.
-pub(in crate::store::sqlite_task_store) fn read_stored_task_row(row: &Row<'_>) -> SqliteResult<StoredTaskRow> {
+pub(in crate::store::sqlite_task_store) fn read_stored_task_row(
+    row: &Row<'_>,
+) -> SqliteResult<StoredTaskRow> {
     Ok(StoredTaskRow {
         id: row.get(0)?,
         state_kind: row.get(1)?,
@@ -98,7 +102,8 @@ pub(in crate::store::sqlite_task_store) fn decode_stored_task_row(
             row.format_version
         )));
     }
-    let request_info: TaskRequestInfo = serde_json::from_str(&row.request_info_json).map_err(failure)?;
+    let request_info: TaskRequestInfo =
+        serde_json::from_str(&row.request_info_json).map_err(failure)?;
     let request = TaskRequest {
         task_type: request_info.task_type,
         handler_version: request_info.handler_version,
@@ -177,7 +182,9 @@ pub(in crate::store::sqlite_task_store) fn decode_stored_summary_row(
 /// # Errors
 ///
 /// Returns a store error if serialization fails.
-pub(in crate::store::sqlite_task_store) fn encode_lifecycle(record: &TaskRecord) -> Result<String, StoreError> {
+pub(in crate::store::sqlite_task_store) fn encode_lifecycle(
+    record: &TaskRecord,
+) -> Result<String, StoreError> {
     serde_json::to_string(&StoredLifecycle::from_record(record)).map_err(failure)
 }
 

@@ -44,7 +44,7 @@ let bus = Arc::new(AsyncEventBusRegistry::discover()?.create(&config).await?);
 let service = builder.event_bus(bus.clone()).build().await?;
 ```
 
-[可编译的装配示例](../tests/fixtures/doc-examples/src/main.rs)还包含 provider 配置和任务处理器。registry 会在创建总线时检查要求；任务服务在启用 outbox 前，还会再次检查注入 facade 中缓存的能力。因此，即使总线由别处创建，传入易失性 provider 也会使服务构建返回 `NotificationProviderNotDurable`。
+[可编译的装配示例](../tests/fixtures/doc-examples/src/main.rs)还包含 provider 配置和任务处理器。registry 会在创建总线时检查要求；任务服务会在启用 outbox 前，通过 facade 的 `check_publish_codec` 就绪检查，核对注入 facade 中缓存的持久性能力以及 `task.lifecycle` codec。传入易失性 provider 会使服务构建返回 `NotificationProviderNotDurable`；缺少 codec 则返回 `NotificationCodecUnavailable`，且不会启动发布或改变已有 outbox 行。codec 检查只确认 facade 配置中已注册 codec，并不能证明每个事件都能成功编码，也不能证明 Redis 可连接或已持久化。
 
 publisher 启用后，每次生命周期状态提交都会与对应 outbox 行在同一个 SQLite 事务中写入。后台 worker 按稳定顺序将事件发往 `task.lifecycle`，确认接纳后再删除 outbox 行。服务启动时会重放已有待发事件；启用 outbox 之前提交的状态不会补发。投递语义为至少一次：发布结果不确定，或 bus 已接纳事件但进程在 SQLite 删除记录前崩溃，都可能产生重复。Redis `XADD` 成功表示 stream 已接纳记录，不能据此判断磁盘是否完成 `fsync`，更不表示消费者已 ACK。`DurabilityCapability::Durable` 仅说明无订阅者时仍保留消息，不承诺后两个阶段。消费者应为每个 `TaskId` 保存最高 `state_version`，忽略重复和旧版本；发现版本缺口时查询任务服务。事件只用于通知，任务查询才是权威状态。
 
@@ -55,6 +55,8 @@ publisher 启用后，每次生命周期状态提交都会与对应 outbox 行�
 只有事务提交成功后，handler 才返回成功并由 bus ACK。事务或服务查询失败时，返回配置为重新入队（`FailureDirective::Requeue`）的 handler 错误，让 Redis 消息留在 pending 状态等待 Retry。不能先 ACK 再补写 checkpoint。publisher 产生的稳定 `EventId` 仅供关联重复 wire 记录；Redis provider 不会按 `EventId` 去重。跨进程重启防止业务副作用重复依靠消费者的持久任务版本检查。
 
 关闭时 worker 会持续排空，直到 outbox 清空或 `notification_shutdown_timeout` 到期。超时会返回错误，尚未发送的行仍保留在 SQLite，供下次启动重放。运维时应监控 SQLite outbox 行数和最老行年龄，并结合 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`，区分 publisher 堵塞、stream 积压和消费者未确认等情况。
+
+上线前和 Redis 故障转移后，还应根据部署恢复目标检查 `INFO persistence` 和 `INFO replication`，并查看 `XLEN <stream-key>`、`XINFO GROUPS <stream-key>`、`XPENDING <stream-key> <group>`（必要时翻页检查 pending 记录）。这些观察项有助于区分 Redis 持久化与副本状态、stream 增长、消费组进度和 consumer 恢复；不要脱离实际负载与恢复要求套用固定阈值。`check_publish_codec` 用于检查 facade 是否已为 `task.lifecycle` 注册 codec；`NotificationCodecUnavailable` 表示尚未注册。该就绪检查只证明 facade 配置，不证明每条事件都能成功编码、Redis 可连接、已接纳的 `XADD` 已 fsync 或复制，也不证明 consumer 已提交业务事务。命令说明和 provider 的持久性边界见 [Redis 部署就绪检查表](https://github.com/qubit-ltd/rs-event-bus-redis/blob/dev-starfish/doc/user_guide.zh_CN.md)。
 
 `notification_stats()` 返回当前进程内排队、已发布和失败次数，不代表持久 backlog。可直接查询 SQLite 获取待处理行数和最老行年龄：
 

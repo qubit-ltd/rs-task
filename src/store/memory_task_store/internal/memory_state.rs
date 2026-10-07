@@ -78,7 +78,10 @@ impl MemoryState {
     }
 
     /// Removes an encoded record and updates shared retention accounting.
-    pub(in crate::store::memory_task_store) fn remove_encoded_task(&mut self, id: EncodedTaskId) -> Option<StoredTask> {
+    pub(in crate::store::memory_task_store) fn remove_encoded_task(
+        &mut self,
+        id: EncodedTaskId,
+    ) -> Option<StoredTask> {
         let task = self.encoded_tasks.remove(&id)?;
         self.retained_payload_bytes -= task.request.payload.bytes.len();
         if !task.summary.state.is_terminal() {
@@ -88,7 +91,8 @@ impl MemoryState {
         if let Some(key) = &task.request.idempotency_key {
             self.encoded_idempotency.remove(key);
         }
-        self.encoded_terminal_order.retain(|terminal_id| *terminal_id != id);
+        self.encoded_terminal_order
+            .retain(|terminal_id| *terminal_id != id);
         #[cfg(test)]
         self.terminal_order_all
             .retain(|terminal_id| *terminal_id != TerminalTaskId::Encoded(id));
@@ -106,7 +110,10 @@ impl MemoryState {
     ///
     /// The removed record, or `None` when it was not retained.
     #[cfg(test)]
-    pub(in crate::store::memory_task_store) fn remove_record(&mut self, id: TaskId) -> Option<TaskRecord> {
+    pub(in crate::store::memory_task_store) fn remove_record(
+        &mut self,
+        id: TaskId,
+    ) -> Option<TaskRecord> {
         let record = self.records.remove(&id)?;
         self.retained_payload_bytes -= record.request.payload.len();
         if !record.state.is_terminal() {

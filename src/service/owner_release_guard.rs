@@ -69,10 +69,15 @@ fn run_cleanup_worker(
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<ReleaseJob>,
     ready: mpsc::SyncSender<Result<(), String>>,
 ) {
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = ready.send(Err(format!("failed to create owner cleanup runtime: {error}")));
+            let _ = ready.send(Err(format!(
+                "failed to create owner cleanup runtime: {error}"
+            )));
             return;
         }
     };
@@ -85,7 +90,9 @@ fn run_cleanup_worker(
                 let release = async { store.release_owner(epoch).await };
                 match AssertUnwindSafe(release).catch_unwind().await {
                     Ok(result) => log_release_error(epoch, result),
-                    Err(_) => eprintln!("owner cleanup worker panicked while releasing epoch {epoch:?}"),
+                    Err(_) => {
+                        eprintln!("owner cleanup worker panicked while releasing epoch {epoch:?}")
+                    }
                 }
             });
         }
@@ -94,7 +101,11 @@ fn run_cleanup_worker(
 
 impl OwnerReleaseGuard {
     /// Arms the guard for `epoch` acquired from `store`.
-    pub(super) fn new(store: Arc<dyn TaskStore>, epoch: OwnerEpoch, cleanup: OwnerReleaseWorker) -> Self {
+    pub(super) fn new(
+        store: Arc<dyn TaskStore>,
+        epoch: OwnerEpoch,
+        cleanup: OwnerReleaseWorker,
+    ) -> Self {
         Self {
             owner: Some((store, epoch)),
             cleanup,
@@ -127,7 +138,9 @@ impl Drop for OwnerReleaseGuard {
             return;
         };
         if let Err(error) = self.cleanup.sender.send(ReleaseJob { store, epoch }) {
-            eprintln!("failed to queue owner cleanup for epoch {epoch:?}; ownership may remain held: {error}");
+            eprintln!(
+                "failed to queue owner cleanup for epoch {epoch:?}; ownership may remain held: {error}"
+            );
         }
     }
 }
@@ -202,10 +215,16 @@ mod tests {
         ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
             self.inner.accept_encoded(id, request)
         }
-        fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+        fn get_encoded_task<'a>(
+            &'a self,
+            id: TaskId,
+        ) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
             self.inner.get_encoded_task(id)
         }
-        fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+        fn start_encoded<'a>(
+            &'a self,
+            command: StartCommand,
+        ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
             self.inner.start_encoded(command)
         }
         fn transition_encoded<'a>(
@@ -214,10 +233,16 @@ mod tests {
         ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
             self.inner.transition_encoded(command)
         }
-        fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+        fn update_progress<'a>(
+            &'a self,
+            command: ProgressCommand,
+        ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
             self.inner.update_progress(command)
         }
-        fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+        fn list_encoded<'a>(
+            &'a self,
+            query: TaskQuery,
+        ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
             self.inner.list_encoded(query)
         }
         fn list_ready_queued<'a>(
@@ -228,7 +253,10 @@ mod tests {
         ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
             self.inner.list_ready_queued(after, limit, now_ms)
         }
-        fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        fn next_retry_deadline<'a>(
+            &'a self,
+            now_ms: u64,
+        ) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
             self.inner.next_retry_deadline(now_ms)
         }
         fn prune_terminal_before<'a>(
@@ -236,12 +264,16 @@ mod tests {
             finished_before_ms: u64,
             max_rows: NonZeroUsize,
         ) -> TaskFuture<'a, Result<usize, StoreError>> {
-            self.inner.prune_terminal_before(finished_before_ms, max_rows)
+            self.inner
+                .prune_terminal_before(finished_before_ms, max_rows)
         }
         fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
             self.inner.acquire_owner()
         }
-        fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+        fn release_owner<'a>(
+            &'a self,
+            epoch: OwnerEpoch,
+        ) -> TaskFuture<'a, Result<(), StoreError>> {
             Box::pin(async move {
                 if self.first_release.swap(false, Ordering::AcqRel) {
                     self.entered.notify_one();
@@ -287,7 +319,10 @@ mod tests {
             loop {
                 match store.acquire_owner().await {
                     Ok(next_epoch) => {
-                        store.release_owner(next_epoch).await.expect("second owner released");
+                        store
+                            .release_owner(next_epoch)
+                            .await
+                            .expect("second owner released");
                         break;
                     }
                     Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
@@ -317,10 +352,22 @@ mod tests {
             guard.release().await,
             Err(StoreError::Failure(message)) if message == "transient release failure"
         ));
-        assert!(matches!(store.acquire_owner().await, Err(StoreError::OwnerConflict)));
-        guard.release().await.expect("retry releases the same owner epoch");
-        let next_epoch = store.acquire_owner().await.expect("owner can be reacquired");
-        store.release_owner(next_epoch).await.expect("second owner released");
+        assert!(matches!(
+            store.acquire_owner().await,
+            Err(StoreError::OwnerConflict)
+        ));
+        guard
+            .release()
+            .await
+            .expect("retry releases the same owner epoch");
+        let next_epoch = store
+            .acquire_owner()
+            .await
+            .expect("owner can be reacquired");
+        store
+            .release_owner(next_epoch)
+            .await
+            .expect("second owner released");
     }
 
     /// A blocked cleanup must not prevent an unrelated owner from draining.
@@ -328,7 +375,10 @@ mod tests {
     async fn test_pending_release_does_not_block_other_cleanup() {
         let worker = OwnerReleaseWorker::shared().expect("cleanup worker starts");
         let blocked = Arc::new(GatedReleaseStore::new());
-        let blocked_epoch = blocked.acquire_owner().await.expect("blocked owner acquired");
+        let blocked_epoch = blocked
+            .acquire_owner()
+            .await
+            .expect("blocked owner acquired");
         let blocked_store: Arc<dyn TaskStore> = blocked.clone();
         let blocked_guard = OwnerReleaseGuard::new(blocked_store, blocked_epoch, worker.clone());
         let entered = blocked.entered.notified();
@@ -347,7 +397,10 @@ mod tests {
             loop {
                 match other.acquire_owner().await {
                     Ok(epoch) => {
-                        other.release_owner(epoch).await.expect("other owner released");
+                        other
+                            .release_owner(epoch)
+                            .await
+                            .expect("other owner released");
                         break;
                     }
                     Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,

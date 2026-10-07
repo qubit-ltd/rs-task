@@ -79,7 +79,11 @@ impl TaskRequest {
     /// A request with one CPU slot and empty correlation, idempotency, and
     /// metadata fields.
     #[must_use]
-    pub fn new(task_type: impl Into<String>, handler_version: impl Into<String>, payload: Vec<u8>) -> Self {
+    pub fn new(
+        task_type: impl Into<String>,
+        handler_version: impl Into<String>,
+        payload: Vec<u8>,
+    ) -> Self {
         Self {
             task_type: task_type.into(),
             handler_version: handler_version.into(),
@@ -194,7 +198,9 @@ impl TaskRequest {
                     "metadata value exceeds the 4096-byte limit",
                 ));
             }
-            metadata_bytes = metadata_bytes.saturating_add(key.len()).saturating_add(value.len());
+            metadata_bytes = metadata_bytes
+                .saturating_add(key.len())
+                .saturating_add(value.len());
         }
         if metadata_bytes > MAX_TASK_METADATA_BYTES {
             return Err(RequestValidationError::new(

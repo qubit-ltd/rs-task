@@ -101,7 +101,10 @@ impl StoredLifecycle {
     /// # Returns
     ///
     /// A complete record reconstructed from persisted lifecycle values.
-    pub(in crate::store::sqlite_task_store) fn into_record(self, request: TaskRequest) -> TaskRecord {
+    pub(in crate::store::sqlite_task_store) fn into_record(
+        self,
+        request: TaskRequest,
+    ) -> TaskRecord {
         TaskRecord {
             id: self.id,
             request,
@@ -127,7 +130,10 @@ impl StoredLifecycle {
     /// # Returns
     ///
     /// A summary reconstructed without loading the request payload.
-    pub(in crate::store::sqlite_task_store) fn into_summary(self, request: TaskRequestInfo) -> TaskSummary {
+    pub(in crate::store::sqlite_task_store) fn into_summary(
+        self,
+        request: TaskRequestInfo,
+    ) -> TaskSummary {
         TaskSummary {
             id: self.id,
             request,

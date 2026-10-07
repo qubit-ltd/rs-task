@@ -56,7 +56,12 @@ impl<T: HasModelId> TaskRequest<T> {
     ///     ValueCodecId::new("example.codec"), Input,
     /// );
     /// ```
-    pub fn new(kind_id: impl Into<String>, schema_version: u32, codec_id: qubit_codec::ValueCodecId, data: T) -> Self {
+    pub fn new(
+        kind_id: impl Into<String>,
+        schema_version: u32,
+        codec_id: qubit_codec::ValueCodecId,
+        data: T,
+    ) -> Self {
         Self {
             kind_id: kind_id.into(),
             category: None,
@@ -98,11 +103,18 @@ impl<T: HasModelId + 'static> TaskRequest<T> {
             .validate_limits()
             .map_err(|error| TaskRequestEncodeError::Resource(error.to_string()))?;
         if self.metadata.len() > MAX_TASK_METADATA_ENTRIES {
-            return Err(TaskRequestEncodeError::TooManyMetadataEntries(self.metadata.len()));
+            return Err(TaskRequestEncodeError::TooManyMetadataEntries(
+                self.metadata.len(),
+            ));
         }
-        let metadata_bytes = self.metadata.to_json_vec().map_err(TaskRequestEncodeError::Metadata)?;
+        let metadata_bytes = self
+            .metadata
+            .to_json_vec()
+            .map_err(TaskRequestEncodeError::Metadata)?;
         if metadata_bytes.len() > MAX_TASK_METADATA_BYTES {
-            return Err(TaskRequestEncodeError::MetadataTooLarge(metadata_bytes.len()));
+            return Err(TaskRequestEncodeError::MetadataTooLarge(
+                metadata_bytes.len(),
+            ));
         }
         let payload = self.payload.encode(registry)?.into_stored();
         if payload.bytes.len() > crate::model::MAX_TASK_PAYLOAD_BYTES {

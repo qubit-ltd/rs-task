@@ -41,7 +41,9 @@ pub(in crate::store::sqlite_task_store) fn build_history_query(
     let fetch_limit = page_size
         .checked_add(1)
         .and_then(|limit| i64::try_from(limit).ok())
-        .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
+        .ok_or(StoreError::InvalidRequest(
+            "task history page limit is too large",
+        ))?;
     let mut built = QuerySql {
         sql: format!("SELECT {SUMMARY_COLUMNS} FROM tasks"),
         params: Vec::new(),
@@ -78,7 +80,9 @@ pub(in crate::store::sqlite_task_store) fn build_history_query(
         built.sql.push(')');
     }
     let limit = bind_value(&mut built.params, Value::Integer(fetch_limit));
-    built.sql.push_str(&format!(" ORDER BY accepted_at, id LIMIT {limit}"));
+    built
+        .sql
+        .push_str(&format!(" ORDER BY accepted_at, id LIMIT {limit}"));
     Ok(built)
 }
 
@@ -90,7 +94,9 @@ pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
     let fetch_limit = page_size
         .checked_add(1)
         .and_then(|limit| i64::try_from(limit).ok())
-        .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
+        .ok_or(StoreError::InvalidRequest(
+            "task history page limit is too large",
+        ))?;
     let mut built = QuerySql {
         sql: "SELECT id,request_info_json,lifecycle_json FROM tasks".to_owned(),
         params: Vec::new(),
@@ -108,11 +114,15 @@ pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
     }
     if let Some(category) = &query.category {
         append_predicate(&mut built.sql, &mut has_predicate, "category = ");
-        built.sql.push_str(&bind_text(&mut built.params, category.clone()));
+        built
+            .sql
+            .push_str(&bind_text(&mut built.params, category.clone()));
     }
     if let Some(key) = &query.correlation_key {
         append_predicate(&mut built.sql, &mut has_predicate, "correlation_key = ");
-        built.sql.push_str(&bind_text(&mut built.params, key.clone()));
+        built
+            .sql
+            .push_str(&bind_text(&mut built.params, key.clone()));
     }
     let mut states = Vec::new();
     for state in &query.states {
@@ -126,12 +136,16 @@ pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
             if index != 0 {
                 built.sql.push(',');
             }
-            built.sql.push_str(&bind_text(&mut built.params, state.as_str().into()));
+            built
+                .sql
+                .push_str(&bind_text(&mut built.params, state.as_str().into()));
         }
         built.sql.push(')');
     }
     let limit = bind_value(&mut built.params, Value::Integer(fetch_limit));
-    built.sql.push_str(&format!(" ORDER BY accepted_at, id LIMIT {limit}"));
+    built
+        .sql
+        .push_str(&format!(" ORDER BY accepted_at, id LIMIT {limit}"));
     Ok(built)
 }
 
@@ -203,7 +217,8 @@ fn bind_timestamp(
     timestamp: u64,
     overflow_message: &'static str,
 ) -> Result<String, StoreError> {
-    let timestamp = i64::try_from(timestamp).map_err(|_| StoreError::InvalidRequest(overflow_message))?;
+    let timestamp =
+        i64::try_from(timestamp).map_err(|_| StoreError::InvalidRequest(overflow_message))?;
     Ok(bind_value(params, Value::Integer(timestamp)))
 }
 
@@ -258,7 +273,9 @@ mod tests {
         connection
             .prepare(&format!("EXPLAIN QUERY PLAN {}", built.sql))
             .expect("query plan prepares")
-            .query_map(params_from_iter(built.params), |row| row.get::<_, String>(3))
+            .query_map(params_from_iter(built.params), |row| {
+                row.get::<_, String>(3)
+            })
             .expect("query plan runs")
             .collect::<Result<Vec<_>, _>>()
             .expect("plan details read")
@@ -277,7 +294,8 @@ mod tests {
     fn deep_cursor() -> TaskCursor {
         TaskCursor {
             accepted_at_ms: 1800,
-            id: serde_json::from_str("\"ffffffff-ffff-ffff-ffff-ffffffffffff\"").expect("fixed cursor ID decodes"),
+            id: serde_json::from_str("\"ffffffff-ffff-ffff-ffff-ffffffffffff\"")
+                .expect("fixed cursor ID decodes"),
         }
     }
 
@@ -291,7 +309,10 @@ mod tests {
             ..TaskQuery::default()
         };
         assert_search(
-            &explain(&connection, build_history_query(&query, 32).expect("query builds")),
+            &explain(
+                &connection,
+                build_history_query(&query, 32).expect("query builds"),
+            ),
             "tasks_accepted_id",
         );
     }
@@ -350,7 +371,11 @@ mod tests {
         let query = TaskQuery {
             after: Some(cursor),
             correlation_key: Some(key.into()),
-            states: vec![TaskStateKind::Queued, TaskStateKind::Running, TaskStateKind::Queued],
+            states: vec![
+                TaskStateKind::Queued,
+                TaskStateKind::Running,
+                TaskStateKind::Queued,
+            ],
             limit: 32,
         };
         let built = build_history_query(&query, 32).expect("query builds");
@@ -425,11 +450,15 @@ mod tests {
                 },
                 1
             ),
-            Err(StoreError::InvalidRequest("task history cursor timestamp is too large"))
+            Err(StoreError::InvalidRequest(
+                "task history cursor timestamp is too large"
+            ))
         ));
         assert!(matches!(
             build_history_query(&TaskQuery::default(), usize::MAX),
-            Err(StoreError::InvalidRequest("task history page limit is too large"))
+            Err(StoreError::InvalidRequest(
+                "task history page limit is too large"
+            ))
         ));
         assert!(matches!(
             build_recovery_query(Some(cursor)),
@@ -465,7 +494,8 @@ mod tests {
             .expect("deterministic VM-step fixture inserts");
         let position = size * 70 / 100;
         let id = format!("00000000-0000-4000-8000-{position:012x}");
-        let id = serde_json::from_str(&format!("\"{id}\"")).expect("deterministic fixture ID decodes");
+        let id =
+            serde_json::from_str(&format!("\"{id}\"")).expect("deterministic fixture ID decodes");
         (connection, TaskCursor::new(position as u64, id))
     }
 
@@ -473,7 +503,9 @@ mod tests {
     fn history_vm_steps(connection: &Connection, built: QuerySql) -> (i32, usize) {
         let mut statement = connection.prepare(&built.sql).expect("query prepares");
         statement.reset_status(StatementStatus::VmStep);
-        let mut rows = statement.query(params_from_iter(built.params)).expect("query executes");
+        let mut rows = statement
+            .query(params_from_iter(built.params))
+            .expect("query executes");
         let mut count = 0;
         while rows.next().expect("query advances").is_some() {
             count += 1;
@@ -542,7 +574,10 @@ mod tests {
         for case_index in 0..2 {
             let small = work[0].1[case_index].1;
             let large = work[1].1[case_index].1;
-            eprintln!("{} history vm_steps 20k={small} 100k={large}", work[0].1[case_index].0);
+            eprintln!(
+                "{} history vm_steps 20k={small} 100k={large}",
+                work[0].1[case_index].0
+            );
             assert!(
                 large <= small * 3,
                 "{} VM steps must grow by at most 3x from 20k to 100k ({small} -> {large})",
@@ -587,7 +622,9 @@ mod tests {
     fn recovery_vm_steps(connection: &Connection, after: Option<TaskCursor>) -> i32 {
         let built = build_recovery_query(after).expect("recovery query builds");
         let mut statement = connection.prepare(&built.sql).expect("VM query prepares");
-        let mut rows = statement.query(params_from_iter(built.params)).expect("VM query runs");
+        let mut rows = statement
+            .query(params_from_iter(built.params))
+            .expect("VM query runs");
         let mut count = 0;
         while rows.next().expect("VM row steps").is_some() {
             count += 1;
@@ -604,10 +641,14 @@ mod tests {
         for version in [0, 2, 3] {
             let connection = recovery_database_without_statistics(2000, version);
             for after in [None, Some(deep_cursor())] {
-                let plan = explain(&connection, build_recovery_query(after).expect("query builds"));
+                let plan = explain(
+                    &connection,
+                    build_recovery_query(after).expect("query builds"),
+                );
                 eprintln!("version={version} after={after:?} plan={plan:?}");
                 assert!(
-                    plan.iter().any(|line| line.contains("tasks_unfinished_accepted_id")),
+                    plan.iter()
+                        .any(|line| line.contains("tasks_unfinished_accepted_id")),
                     "unanalysed recovery must use partial index: {plan:?}"
                 );
                 assert!(
@@ -617,10 +658,9 @@ mod tests {
                 if after.is_some() {
                     assert_search(&plan, "tasks_unfinished_accepted_id");
                 } else {
-                    assert!(
-                        plan.iter()
-                            .any(|line| { line.contains("SCAN tasks USING INDEX tasks_unfinished_accepted_id") })
-                    );
+                    assert!(plan.iter().any(|line| {
+                        line.contains("SCAN tasks USING INDEX tasks_unfinished_accepted_id")
+                    }));
                 }
             }
         }
@@ -693,12 +733,19 @@ mod tests {
             .expect("membership comparison prepares");
         for row in statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, bool>(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
             })
             .expect("membership comparison runs")
         {
             let (value, old, new) = row.expect("membership comparison reads");
-            assert_eq!(new, old, "unary plus must preserve TEXT semantics for {value:?}");
+            assert_eq!(
+                new, old,
+                "unary plus must preserve TEXT semantics for {value:?}"
+            );
             assert_eq!(new, matches!(value.as_str(), "Queued" | "Running"));
         }
     }
@@ -718,7 +765,10 @@ mod tests {
         assert!(built.sql.contains("category = ?3"));
         assert!(built.sql.contains("ORDER BY accepted_at, id LIMIT ?4"));
         assert_eq!(built.params[0], Value::Integer(123));
-        assert_eq!(built.params[1], Value::Text("00000000000000000002".to_owned()));
+        assert_eq!(
+            built.params[1],
+            Value::Text("00000000000000000002".to_owned())
+        );
         assert_eq!(built.params[2], Value::Text("image' OR 1=1 --".to_owned()));
         assert_eq!(built.params[3], Value::Integer(6));
     }

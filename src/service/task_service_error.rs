@@ -36,7 +36,9 @@ pub enum TaskServiceError {
         StoreError,
     ),
     /// The submission exceeds the available payload capacity.
-    #[error("task submission capacity exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available")]
+    #[error(
+        "task submission capacity exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available"
+    )]
     SubmissionCapacityExceeded {
         /// Bytes requested by the rejected submission.
         requested_bytes: usize,
@@ -86,10 +88,26 @@ pub enum TaskServiceError {
         String,
     ),
     /// The notification bus cannot retain messages without active subscribers.
-    #[error("notification provider '{provider_id}' is not durable; task notifications require a durable provider")]
+    #[error(
+        "notification provider '{provider_id}' is not durable; task notifications require a durable provider"
+    )]
     NotificationProviderNotDurable {
         /// Identifier of the rejected event-bus provider.
         provider_id: String,
+    },
+    /// The task notification topic requires a codec that is not registered.
+    #[cfg(feature = "event-bus")]
+    #[error(
+        "notification codec unavailable for topic '{topic}' on provider '{provider_id}': {source}"
+    )]
+    NotificationCodecUnavailable {
+        /// Identifier of the event-bus provider whose configuration failed.
+        provider_id: String,
+        /// Topic that requires an encoded payload.
+        topic: String,
+        /// Codec readiness diagnostic returned by the event bus.
+        #[source]
+        source: qubit_event_bus::CapabilityError,
     },
     /// The task notification publisher failed while draining during shutdown.
     #[error("task notification publisher failed to close: {0}")]

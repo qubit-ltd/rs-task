@@ -202,7 +202,8 @@ impl TypedTaskExecutionService {
         handlers: TypedTaskHandlerRegistry,
         options: TypedServiceOptions,
     ) -> Result<Self, TaskServiceError> {
-        let cleanup_worker = OwnerReleaseWorker::shared().map_err(TaskServiceError::SchedulerUnavailable)?;
+        let cleanup_worker =
+            OwnerReleaseWorker::shared().map_err(TaskServiceError::SchedulerUnavailable)?;
         let owner = store.acquire_owner().await?;
         let mut owner_guard = OwnerReleaseGuard::new(Arc::clone(&store), owner, cleanup_worker);
         #[cfg(feature = "event-bus")]
@@ -214,8 +215,13 @@ impl TypedTaskExecutionService {
                 });
             }
             let prepared = async {
+                let publisher = TaskEventPublisher::new(
+                    Arc::clone(&store),
+                    bus,
+                    options.notification_shutdown_timeout,
+                )?;
                 store.enable_event_outbox().await?;
-                TaskEventPublisher::new(Arc::clone(&store), bus, options.notification_shutdown_timeout)
+                Ok(publisher)
             }
             .await;
             match prepared {
@@ -292,7 +298,9 @@ impl TypedTaskExecutionService {
             {
                 scheduler.latch_fault("typed task scheduler panicked");
             }
-            scheduler_core.scheduler_stopped.store(true, Ordering::Release);
+            scheduler_core
+                .scheduler_stopped
+                .store(true, Ordering::Release);
             scheduler_core.scheduler_stopped_changed.notify_waiters();
         });
         let supervisor = service.runner();
@@ -306,7 +314,9 @@ impl TypedTaskExecutionService {
                 let armed_guard = supervisor_core.owner_guard.lock().await.take();
                 drop(armed_guard);
                 let mut progress = supervisor_core.shutdown_progress.lock();
-                let outcome = ShutdownOutcome::StoreUnavailable("typed task shutdown supervisor panicked".into());
+                let outcome = ShutdownOutcome::StoreUnavailable(
+                    "typed task shutdown supervisor panicked".into(),
+                );
                 let attempt = progress.attempt;
                 if progress.results.len() == attempt {
                     progress.results.push(outcome);
@@ -356,7 +366,12 @@ impl TypedTaskExecutionService {
 
     /// Returns a typed task's current persisted summary.
     pub async fn get(&self, id: TaskId) -> Result<Option<TaskSummary>, TaskServiceError> {
-        Ok(self.core.store.get_encoded_task(id).await?.map(|task| task.summary))
+        Ok(self
+            .core
+            .store
+            .get_encoded_task(id)
+            .await?
+            .map(|task| task.summary))
     }
 
     /// Queries typed task summaries using category filters and numeric cursors.
@@ -382,7 +397,9 @@ impl TypedTaskExecutionService {
     ) -> Result<TaskSummary, TaskServiceError> {
         let _admission = self.core.admission.read().await;
         self.runner().check_fault()?;
-        if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
+        if self.core.shutting_down.load(Ordering::Acquire)
+            || self.core.owner_released.load(Ordering::Acquire)
+        {
             return Err(TaskServiceError::ShuttingDown);
         }
         let task = self
@@ -442,7 +459,14 @@ impl TypedTaskExecutionService {
             let notified = self.core.shutdown_completed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(outcome) = self.core.shutdown_progress.lock().results.get(attempt).cloned() {
+            if let Some(outcome) = self
+                .core
+                .shutdown_progress
+                .lock()
+                .results
+                .get(attempt)
+                .cloned()
+            {
                 return outcome.into_result();
             }
             notified.await;
@@ -453,10 +477,15 @@ impl TypedTaskExecutionService {
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let _admission = self.core.admission.read().await;
         self.runner().check_fault()?;
-        if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
+        if self.core.shutting_down.load(Ordering::Acquire)
+            || self.core.owner_released.load(Ordering::Acquire)
+        {
             return Err(TaskServiceError::ShuttingDown);
         }
-        let Some(task) = self.runner().store_result(self.core.store.get_encoded_task(id).await)? else {
+        let Some(task) = self
+            .runner()
+            .store_result(self.core.store.get_encoded_task(id).await)?
+        else {
             return Err(TaskServiceError::Store(crate::store::StoreError::NotFound));
         };
         let summary = task.summary;
@@ -564,12 +593,16 @@ impl TypedTaskExecutionService {
                 return match result {
                     ExternalCancelResult::Success => Ok(CancelOutcome::CancellationRequested),
                     ExternalCancelResult::AlreadyTerminal => Ok(CancelOutcome::AlreadyTerminal),
-                    ExternalCancelResult::HookFailed(message) => Err(TaskServiceError::ExternalCancellationFailed {
-                        task_id: id,
-                        attempt,
-                        message,
-                    }),
-                    ExternalCancelResult::ServiceFailed(message) => Err(TaskServiceError::StoreUnavailable(message)),
+                    ExternalCancelResult::HookFailed(message) => {
+                        Err(TaskServiceError::ExternalCancellationFailed {
+                            task_id: id,
+                            attempt,
+                            message,
+                        })
+                    }
+                    ExternalCancelResult::ServiceFailed(message) => {
+                        Err(TaskServiceError::StoreUnavailable(message))
+                    }
                 };
             }
             if result.changed().await.is_err() {
@@ -640,7 +673,9 @@ impl ServiceRunner {
                     {
                         Ok(_) => {}
                         Err(crate::store::StoreError::Conflict) => continue,
-                        Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+                        Err(error) => {
+                            return ExternalCancelResult::ServiceFailed(error.to_string());
+                        }
                     }
                 }
                 break;
@@ -650,7 +685,9 @@ impl ServiceRunner {
             })) {
                 Ok(Some(hook)) => hook,
                 Ok(None) => {
-                    return ExternalCancelResult::ServiceFailed("external cancellation hook is unavailable".into());
+                    return ExternalCancelResult::ServiceFailed(
+                        "external cancellation hook is unavailable".into(),
+                    );
                 }
                 Err(panic) => {
                     let message = Self::external_cancel_panic_message(panic);
@@ -666,7 +703,9 @@ impl ServiceRunner {
                                 "task disappeared after external cancellation".into(),
                             );
                         }
-                        Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+                        Err(error) => {
+                            return ExternalCancelResult::ServiceFailed(error.to_string());
+                        }
                     };
                     let summary = task.summary;
                     if summary.state.is_terminal()
@@ -695,10 +734,14 @@ impl ServiceRunner {
                     {
                         Ok(_) => return ExternalCancelResult::Success,
                         Err(crate::store::StoreError::Conflict) => continue,
-                        Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
+                        Err(error) => {
+                            return ExternalCancelResult::ServiceFailed(error.to_string());
+                        }
                     }
                 },
-                Ok(Err(error)) => Self::record_external_cancel_failure(&core, id, attempt, error.message).await,
+                Ok(Err(error)) => {
+                    Self::record_external_cancel_failure(&core, id, attempt, error.message).await
+                }
                 Err(panic) => {
                     let message = Self::external_cancel_panic_message(panic);
                     Self::record_external_cancel_failure(&core, id, attempt, message).await
@@ -740,7 +783,9 @@ impl ServiceRunner {
                 Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
             };
             let summary = task.summary;
-            if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running)
+            if summary.state.is_terminal()
+                || summary.attempt != attempt
+                || !matches!(summary.state, TaskState::Running)
             {
                 return ExternalCancelResult::AlreadyTerminal;
             }
@@ -874,7 +919,10 @@ impl ServiceRunner {
     }
 
     /// Converts a store write result and wakes the optional publisher.
-    fn store_write_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
+    fn store_write_result<T>(
+        &self,
+        result: Result<T, crate::store::StoreError>,
+    ) -> Result<T, TaskServiceError> {
         let value = self.store_result(result)?;
         #[cfg(feature = "event-bus")]
         self.notify_notifications();
@@ -894,15 +942,16 @@ impl ServiceRunner {
 
     /// Returns the first latched store or scheduler fault, if any.
     fn check_fault(&self) -> Result<(), TaskServiceError> {
-        self.core
-            .fault
-            .lock()
-            .clone()
-            .map_or(Ok(()), |fault| Err(TaskServiceError::StoreUnavailable(fault)))
+        self.core.fault.lock().clone().map_or(Ok(()), |fault| {
+            Err(TaskServiceError::StoreUnavailable(fault))
+        })
     }
 
     /// Latches operational store failures while preserving conflict errors.
-    fn store_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
+    fn store_result<T>(
+        &self,
+        result: Result<T, crate::store::StoreError>,
+    ) -> Result<T, TaskServiceError> {
         result.map_err(|error| {
             if !matches!(
                 error,
@@ -917,7 +966,10 @@ impl ServiceRunner {
     /// Maps known rejection errors from a single submit store result to
     /// structured service errors without changing the service state. Other
     /// store errors retain the existing fault-latching behavior.
-    fn submission_store_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
+    fn submission_store_result<T>(
+        &self,
+        result: Result<T, crate::store::StoreError>,
+    ) -> Result<T, TaskServiceError> {
         match result {
             Err(crate::store::StoreError::CapacityExceeded {
                 requested_bytes,
@@ -929,7 +981,9 @@ impl ServiceRunner {
             Err(crate::store::StoreError::UnfinishedRecordLimitExceeded { limit }) => {
                 Err(TaskServiceError::UnfinishedTaskLimitExceeded { limit })
             }
-            Err(crate::store::StoreError::IdempotencyConflict) => Err(TaskServiceError::IdempotencyConflict),
+            Err(crate::store::StoreError::IdempotencyConflict) => {
+                Err(TaskServiceError::IdempotencyConflict)
+            }
             Err(crate::store::StoreError::DuplicateTask) => Err(TaskServiceError::DuplicateTaskId),
             other => self.store_result(other),
         }
@@ -1007,7 +1061,8 @@ impl ServiceRunner {
                 loop {
                     if self.core.shutting_down.load(Ordering::Acquire)
                         || self.core.fault.lock().is_some()
-                        || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
+                        || self.core.in_flight.load(Ordering::Acquire)
+                            >= self.core.max_running_tasks
                     {
                         break;
                     }
@@ -1016,7 +1071,8 @@ impl ServiceRunner {
                         .store
                         .list_ready_queued(
                             after,
-                            std::num::NonZeroUsize::new(self.core.scan_page_size).expect("scan size is nonzero"),
+                            std::num::NonZeroUsize::new(self.core.scan_page_size)
+                                .expect("scan size is nonzero"),
                             now,
                         )
                         .await
@@ -1029,15 +1085,18 @@ impl ServiceRunner {
                     };
                     for summary in &page.records {
                         if self.core.shutting_down.load(Ordering::Acquire)
-                            || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
+                            || self.core.in_flight.load(Ordering::Acquire)
+                                >= self.core.max_running_tasks
                         {
                             break;
                         }
                         if fairness.anchor == Some((summary.id, summary.accepted_at_ms)) {
                             saw_anchor = true;
                         }
-                        let Some(descriptor) = self.core.handlers.descriptor(&summary.kind_id) else {
-                            self.mark_blocked(summary, "handler is not registered").await;
+                        let Some(descriptor) = self.core.handlers.descriptor(&summary.kind_id)
+                        else {
+                            self.mark_blocked(summary, "handler is not registered")
+                                .await;
                             continue;
                         };
                         if summary.payload_type_id != descriptor.payload_type_id.as_str()
@@ -1071,8 +1130,11 @@ impl ServiceRunner {
                                 continue;
                             }
                             Err(EngineError::Unsatisfiable) => {
-                                self.mark_blocked(summary, "requested resources exceed configured capacity")
-                                    .await;
+                                self.mark_blocked(
+                                    summary,
+                                    "requested resources exceed configured capacity",
+                                )
+                                .await;
                                 continue;
                             }
                             Err(error) => {
@@ -1082,7 +1144,8 @@ impl ServiceRunner {
                         };
                         if let Some((anchor_id, anchor_accepted_at_ms)) = fairness.anchor
                             && fairness.bypasses >= self.core.max_resource_bypasses
-                            && (summary.accepted_at_ms, summary.id) > (anchor_accepted_at_ms, anchor_id)
+                            && (summary.accepted_at_ms, summary.id)
+                                > (anchor_accepted_at_ms, anchor_id)
                         {
                             drop(reservation);
                             continue;
@@ -1103,7 +1166,10 @@ impl ServiceRunner {
                             .await
                         {
                             Ok(running) => running,
-                            Err(crate::store::StoreError::Conflict | crate::store::StoreError::NotFound) => {
+                            Err(
+                                crate::store::StoreError::Conflict
+                                | crate::store::StoreError::NotFound,
+                            ) => {
                                 drop(admission);
                                 drop(reservation);
                                 continue;
@@ -1146,7 +1212,8 @@ impl ServiceRunner {
                         });
                     }
                     if self.core.shutting_down.load(Ordering::Acquire)
-                        || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
+                        || self.core.in_flight.load(Ordering::Acquire)
+                            >= self.core.max_running_tasks
                     {
                         break;
                     }
@@ -1177,7 +1244,12 @@ impl ServiceRunner {
         }
     }
 
-    async fn run_one(&self, id: TaskId, running: TaskSummary, reservation: TypedResourceReservation) {
+    async fn run_one(
+        &self,
+        id: TaskId,
+        running: TaskSummary,
+        reservation: TypedResourceReservation,
+    ) {
         let task = match self.core.store.get_encoded_task(id).await {
             Ok(Some(task)) => task,
             Ok(None) => return,
@@ -1225,19 +1297,24 @@ impl ServiceRunner {
         if latest_cancel_requested {
             cancelled.store(true, Ordering::Release);
         }
-        let reporter: Arc<dyn AsyncReporter> = Arc::new(super::task_progress_reporter::TaskProgressReporter::new(
-            Arc::clone(&self.core.store),
-            id,
-            running.attempt,
-        ));
+        let reporter: Arc<dyn AsyncReporter> =
+            Arc::new(super::task_progress_reporter::TaskProgressReporter::new(
+                Arc::clone(&self.core.store),
+                id,
+                running.attempt,
+            ));
         let context = TypedTaskContext::new(id, running.attempt, cancelled, reporter);
         let execution = AssertUnwindSafe(prepared.run(context)).catch_unwind().await;
-        self.core.cancellations.lock().remove(&(id, running.attempt));
+        self.core
+            .cancellations
+            .lock()
+            .remove(&(id, running.attempt));
         drop(reservation);
         match execution {
             Ok(Ok(TaskRunOutcome::Succeeded(output))) => {
                 if output.summary.len() <= MAX_TASK_OUTPUT_SUMMARY_BYTES {
-                    self.finish(&running, TaskState::Succeeded, Some(output), false).await;
+                    self.finish(&running, TaskState::Succeeded, Some(output), false)
+                        .await;
                 } else {
                     self.finish(
                         &running,
@@ -1253,7 +1330,10 @@ impl ServiceRunner {
                     .await;
                 }
             }
-            Ok(Ok(TaskRunOutcome::Cancelled)) => self.finish(&running, TaskState::Cancelled, None, false).await,
+            Ok(Ok(TaskRunOutcome::Cancelled)) => {
+                self.finish(&running, TaskState::Cancelled, None, false)
+                    .await
+            }
             Ok(Err(error)) => {
                 let retryable = error.retryable;
                 self.finish(
@@ -1290,7 +1370,9 @@ impl ServiceRunner {
                 expected_state_version: summary.state_version,
                 expected_attempt: summary.attempt,
                 retry_not_before_ms: None,
-                state: TaskState::Blocked { reason: reason.into() },
+                state: TaskState::Blocked {
+                    reason: reason.into(),
+                },
                 cancel_requested: false,
                 cancel_error: None,
                 finished_at_ms: None,
@@ -1303,13 +1385,20 @@ impl ServiceRunner {
                 self.notify_notifications();
             }
             Err(crate::store::StoreError::Conflict) => {
-                self.check_competing_transition(summary.id, summary.state_version).await
+                self.check_competing_transition(summary.id, summary.state_version)
+                    .await
             }
             Err(error) => self.latch_fault(error),
         }
     }
 
-    async fn finish(&self, started: &TaskSummary, state: TaskState, output: Option<TaskOutput>, retryable: bool) {
+    async fn finish(
+        &self,
+        started: &TaskSummary,
+        state: TaskState,
+        output: Option<TaskOutput>,
+        retryable: bool,
+    ) {
         let latest = match self.core.store.get_encoded_task(started.id).await {
             Ok(Some(latest)) => latest,
             Ok(None) => {
@@ -1328,7 +1417,9 @@ impl ServiceRunner {
                 .remove(&(started.id, started.attempt));
             return;
         }
-        let retry = retryable && !latest.summary.cancel_requested && started.attempt < self.core.max_attempts;
+        let retry = retryable
+            && !latest.summary.cancel_requested
+            && started.attempt < self.core.max_attempts;
         let retry_deadline = retry.then(|| {
             let delay = self.core.retry_policy.delay_for_attempt(started.attempt);
             now_ms().saturating_add(delay.as_millis().min(u64::MAX as u128) as u64)
@@ -1369,8 +1460,12 @@ impl ServiceRunner {
     async fn check_competing_transition(&self, id: TaskId, expected_version: u64) {
         match self.core.store.get_encoded_task(id).await {
             Ok(Some(task)) if task.summary.state_version != expected_version => {}
-            Ok(Some(_)) => self.latch_fault("task lifecycle compare-and-set conflicted without a competing revision"),
-            Ok(None) => self.latch_fault("task disappeared after lifecycle compare-and-set conflict"),
+            Ok(Some(_)) => self.latch_fault(
+                "task lifecycle compare-and-set conflicted without a competing revision",
+            ),
+            Ok(None) => {
+                self.latch_fault("task disappeared after lifecycle compare-and-set conflict")
+            }
             Err(error) => self.latch_fault(error),
         }
     }

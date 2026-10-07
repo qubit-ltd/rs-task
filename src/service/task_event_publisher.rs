@@ -34,15 +34,24 @@ pub(super) struct TaskEventPublisher {
 }
 
 impl TaskEventPublisher {
-    /// Validates the topic and prepares a worker without starting network IO.
-    /// Returns a configuration diagnostic if the topic cannot be constructed.
+    /// Validates the topic and its codec, then prepares a worker without
+    /// starting network IO. Returns a configuration diagnostic when either
+    /// check fails.
     pub(super) fn new(
         store: Arc<dyn TaskStore>,
         bus: Arc<AsyncEventBus>,
         shutdown_timeout: Duration,
     ) -> Result<Self, TaskServiceError> {
-        let topic = Topic::new("task.lifecycle")
-            .map_err(|error| TaskServiceError::InvalidRequest(format!("invalid task notification topic: {error}")))?;
+        let topic = Topic::new("task.lifecycle").map_err(|error| {
+            TaskServiceError::InvalidRequest(format!("invalid task notification topic: {error}"))
+        })?;
+        bus.check_publish_codec(&topic).map_err(|source| {
+            TaskServiceError::NotificationCodecUnavailable {
+                provider_id: bus.provider_id().as_str().to_owned(),
+                topic: topic.name().to_owned(),
+                source,
+            }
+        })?;
         Ok(Self {
             state: Arc::new(PublisherState::new(store, bus, topic)),
             worker: Mutex::new(None),
@@ -89,7 +98,9 @@ impl TaskEventPublisher {
             Ok(result) => {
                 *worker = None;
                 result.map_err(|error| {
-                    TaskServiceError::NotificationClose(format!("notification worker stopped: {error}"))
+                    TaskServiceError::NotificationClose(format!(
+                        "notification worker stopped: {error}"
+                    ))
                 })
             }
             Err(_) => {
@@ -104,10 +115,11 @@ impl TaskEventPublisher {
                         "shutdown deadline expired; last observed pending page contained {pending} notification(s); final backlog may differ"
                     )
                 };
-                let publication_diagnostic = self.state.in_flight_event_id.lock().as_deref().map_or_else(
-                    || "no publication was active at timeout".to_owned(),
-                    |event_id| format!("publication timed out for event {event_id}"),
-                );
+                let publication_diagnostic =
+                    self.state.in_flight_event_id.lock().as_deref().map_or_else(
+                        || "no publication was active at timeout".to_owned(),
+                        |event_id| format!("publication timed out for event {event_id}"),
+                    );
                 Err(TaskServiceError::NotificationClose(format!(
                     "{diagnostic}; {publication_diagnostic}; last error: {:?}",
                     self.state.last_error.lock().as_deref()

@@ -101,8 +101,7 @@ const SCHEMA_VERSION: i64 = 3;
 const RECORD_FORMAT_VERSION: i64 = 3;
 /// Ordered columns used by payload-free task summary queries.
 #[cfg(test)]
-const SUMMARY_COLUMNS: &str =
-    "id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json";
+const SUMMARY_COLUMNS: &str = "id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json";
 
 /// SQLite-backed history with an exclusive OS lock for one active service
 /// process.
@@ -187,7 +186,10 @@ impl SqliteTaskStore {
 
     /// Reads a bounded oldest-first page; rejects absent ownership and invalid
     /// limits.
-    pub(super) fn list_outbox(&self, limit: usize) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
+    pub(super) fn list_outbox(
+        &self,
+        limit: usize,
+    ) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
         self.run_outbox(move |connection| {
             if !(1..=256).contains(&limit) { return Err(StoreError::InvalidRequest("outbox page limit must be 1..=256")); }
             let mut statement = connection.prepare("SELECT task_id,state_version,event_id,event_json FROM task_event_outbox ORDER BY created_at_ms,task_id,state_version LIMIT ?1").map_err(failure)?;
@@ -336,7 +338,9 @@ impl SqliteTaskStore {
                 operation(&connection.lock())
             })
             .await
-            .map_err(|error| StoreError::Failure(format!("SQLite blocking operation stopped: {error}")))?
+            .map_err(|error| {
+                StoreError::Failure(format!("SQLite blocking operation stopped: {error}"))
+            })?
         })
     }
 
@@ -368,7 +372,9 @@ impl SqliteTaskStore {
         self.run(move |connection| {
             let owner_state = owner_state.lock();
             if owner_state.lock_file.is_none() {
-                return Err(StoreError::Failure("SQLite task store has no active owner".into()));
+                return Err(StoreError::Failure(
+                    "SQLite task store has no active owner".into(),
+                ));
             }
             operation(connection)
         })
@@ -498,7 +504,11 @@ impl LegacyTaskStore for SqliteTaskStore {
     ///
     /// Returns validation, idempotency, or SQLite persistence errors.
     #[cfg(test)]
-    fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
+    fn accept<'a>(
+        &'a self,
+        id: TaskId,
+        request: TaskRequest,
+    ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         if self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
@@ -539,7 +549,10 @@ impl LegacyTaskStore for SqliteTaskStore {
     ///
     /// Returns missing, stale, invalid, oversized, or persistence errors.
     #[cfg(test)]
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn transition<'a>(
+        &'a self,
+        command: TransitionCommand,
+    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         if self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
@@ -569,18 +582,22 @@ impl LegacyTaskStore for SqliteTaskStore {
                 .map_err(failure)?
                 .ok_or(StoreError::NotFound)?;
             let mut record = decode_stored_summary_row(stored)?;
-            if record.state_version != command.expected_version || record.attempt != command.expected_attempt {
+            if record.state_version != command.expected_version
+                || record.attempt != command.expected_attempt
+            {
                 return Err(StoreError::Conflict);
             }
             if !record.state.allows_transition_to(&command.state) {
                 return Err(StoreError::InvalidTransition);
             }
-            if command.retry_not_before_ms.is_some() && !matches!(command.state, TaskState::Queued) {
+            if command.retry_not_before_ms.is_some() && !matches!(command.state, TaskState::Queued)
+            {
                 return Err(StoreError::InvalidRequest(
                     "only queued tasks may have a retry deadline",
                 ));
             }
-            let starting = !matches!(record.state, TaskState::Running) && matches!(command.state, TaskState::Running);
+            let starting = !matches!(record.state, TaskState::Running)
+                && matches!(command.state, TaskState::Running);
             record.state = command.state;
             record.retry_not_before_ms = command.retry_not_before_ms;
             record.state_version += 1;
@@ -623,7 +640,10 @@ impl LegacyTaskStore for SqliteTaskStore {
     ///
     /// Returns an error if the query or persisted row decoding fails.
     #[cfg(test)]
-    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
+    fn get_by_idempotency_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
         if self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
@@ -733,7 +753,9 @@ impl LegacyTaskStore for SqliteTaskStore {
             let page_size = checked_page_size(query.limit)?;
             let built = build_history_query(&query, page_size)?;
             let mut statement = connection.prepare(&built.sql).map_err(failure)?;
-            let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
+            let mut rows = statement
+                .query(params_from_iter(built.params))
+                .map_err(failure)?;
             let mut records = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
                 records.push(decode_stored_summary_row(
@@ -744,12 +766,17 @@ impl LegacyTaskStore for SqliteTaskStore {
             if has_more {
                 records.truncate(page_size);
             }
-            let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
+            let next = has_more
+                .then(|| records.last().map(TaskCursor::from))
+                .flatten();
             Ok(TaskPage { records, next })
         })
     }
 
-    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+    fn list_encoded<'a>(
+        &'a self,
+        query: EncodedTaskQuery,
+    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
         if !self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
@@ -768,7 +795,10 @@ impl LegacyTaskStore for SqliteTaskStore {
         self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
     }
 
-    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+    fn next_retry_deadline<'a>(
+        &'a self,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         if !self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
@@ -837,7 +867,10 @@ impl LegacyTaskStore for SqliteTaskStore {
     ///
     /// Returns an error if the query or persisted summary decoding fails.
     #[cfg(test)]
-    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         if self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
@@ -958,7 +991,10 @@ impl LegacyTaskStore for SqliteTaskStore {
     ///
     /// Returns an error when SQLite cannot perform the probe.
     #[cfg(test)]
-    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
+    fn has_unfinished_over_limit<'a>(
+        &'a self,
+        limit: usize,
+    ) -> TaskFuture<'a, Result<bool, StoreError>> {
         if self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
@@ -991,14 +1027,19 @@ impl LegacyTaskStore for SqliteTaskStore {
     ///
     /// Returns an error if a row is malformed or SQLite access fails.
     #[cfg(test)]
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
+    fn scan_unfinished<'a>(
+        &'a self,
+        cursor: Option<TaskCursor>,
+    ) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
         if self.typed_schema {
             return Box::pin(async { Err(StoreError::UnsupportedCapability) });
         }
         self.run(move |connection| {
             let built = build_recovery_query(cursor)?;
             let mut statement = connection.prepare(&built.sql).map_err(failure)?;
-            let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
+            let mut rows = statement
+                .query(params_from_iter(built.params))
+                .map_err(failure)?;
             let mut tasks = Vec::new();
             while let Some(row) = rows.next().map_err(failure)? {
                 tasks.push(decode_stored_summary_row(
@@ -1009,7 +1050,9 @@ impl LegacyTaskStore for SqliteTaskStore {
             if has_more {
                 tasks.truncate(256);
             }
-            let next = has_more.then(|| tasks.last().map(TaskCursor::from)).flatten();
+            let next = has_more
+                .then(|| tasks.last().map(TaskCursor::from))
+                .flatten();
             Ok(RecoveryPage { tasks, next })
         })
     }
@@ -1035,7 +1078,10 @@ impl LegacyTaskStore for SqliteTaskStore {
             if owner_state.epoch != Some(epoch) {
                 return Err(StoreError::OwnerConflict);
             }
-            let file = owner_state.lock_file.take().ok_or(StoreError::OwnerConflict)?;
+            let file = owner_state
+                .lock_file
+                .take()
+                .ok_or(StoreError::OwnerConflict)?;
             owner_state.epoch = None;
             outbox_enabled.store(false, std::sync::atomic::Ordering::Release);
             file.unlock().map_err(failure)
@@ -1141,7 +1187,10 @@ mod tests {
 
     /// Creates a unique database path for one worker scheduling test.
     fn test_database_path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("qubit-task-sqlite-worker-{}.sqlite", TaskId::generate()))
+        std::env::temp_dir().join(format!(
+            "qubit-task-sqlite-worker-{}.sqlite",
+            TaskId::generate()
+        ))
     }
 
     /// Removes only disposable files created by this worker test.
@@ -1209,16 +1258,25 @@ mod tests {
         let path = test_database_path();
         let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
         let cutoff = store
-            .prune_terminal_before(u64::MAX, std::num::NonZeroUsize::new(1).expect("positive limit"))
+            .prune_terminal_before(
+                u64::MAX,
+                std::num::NonZeroUsize::new(1).expect("positive limit"),
+            )
             .await;
-        assert!(matches!(cutoff, Err(crate::store::StoreError::InvalidRequest(_))));
+        assert!(matches!(
+            cutoff,
+            Err(crate::store::StoreError::InvalidRequest(_))
+        ));
         let limit = store
             .prune_terminal_before(
                 0,
                 std::num::NonZeroUsize::new(i64::MAX as usize + 1).expect("positive limit"),
             )
             .await;
-        assert!(matches!(limit, Err(crate::store::StoreError::InvalidRequest(_))));
+        assert!(matches!(
+            limit,
+            Err(crate::store::StoreError::InvalidRequest(_))
+        ));
         drop(store);
         remove_database(&path);
     }
@@ -1234,7 +1292,9 @@ mod tests {
             running_store
                 .run(move |_| {
                     let _ = started_sender.send(());
-                    release_receiver.recv().expect("first operation is released");
+                    release_receiver
+                        .recv()
+                        .expect("first operation is released");
                     Ok(())
                 })
                 .await
@@ -1261,8 +1321,13 @@ mod tests {
                 .await
                 .expect("all waiting operations reach their permit wait");
         }
-        let peak = store.worker_counts.peak.load(std::sync::atomic::Ordering::Acquire);
-        release_sender.send(()).expect("first operation is still waiting");
+        let peak = store
+            .worker_counts
+            .peak
+            .load(std::sync::atomic::Ordering::Acquire);
+        release_sender
+            .send(())
+            .expect("first operation is still waiting");
         first
             .await
             .expect("first operation joins")
@@ -1307,7 +1372,9 @@ mod tests {
                     transaction
                         .execute("INSERT INTO barrier_probe(value) VALUES(42)", [])
                         .map_err(super::failure)?;
-                    entered_sender.send(()).expect("test observes transaction entry");
+                    entered_sender
+                        .send(())
+                        .expect("test observes transaction entry");
                     // A dropped test continuation also lets the blocking worker
                     // exit on assertion failure instead of hanging runtime teardown.
                     continue_receiver.recv().map_err(super::failure)?;
@@ -1330,7 +1397,12 @@ mod tests {
         assert_eq!(uncommitted, 0, "the entered write has not committed");
 
         caller.abort();
-        assert!(caller.await.expect_err("caller is cancelled").is_cancelled());
+        assert!(
+            caller
+                .await
+                .expect_err("caller is cancelled")
+                .is_cancelled()
+        );
         assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 1);
         {
             let release = store.release_owner(epoch);
@@ -1345,7 +1417,9 @@ mod tests {
                 "OS ownership remains fenced"
             );
 
-            continue_sender.send(()).expect("allow transaction to commit");
+            continue_sender
+                .send(())
+                .expect("allow transaction to commit");
             time::timeout(Duration::from_secs(5), committed_receiver)
                 .await
                 .expect("transaction commits after continuation")
@@ -1361,9 +1435,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM barrier_probe", [], |row| row.get(0))
             .expect("reader observes the committed write");
         assert_eq!(committed, 1);
-        let replacement = SqliteTaskStore::open(&path).expect("ownership can transfer after the completion barrier");
+        let replacement = SqliteTaskStore::open(&path)
+            .expect("ownership can transfer after the completion barrier");
         assert!(
-            matches!(store.run_write(|_| Ok(())).await, Err(StoreError::Failure(_))),
+            matches!(
+                store.run_write(|_| Ok(())).await,
+                Err(StoreError::Failure(_))
+            ),
             "old owner stays fenced from later writes"
         );
         drop(replacement);
@@ -1450,7 +1528,11 @@ mod tests {
 mod summary_query_tests {
     #[test]
     fn test_summary_projection_never_selects_payload() {
-        assert!(!super::SUMMARY_COLUMNS.split(',').any(|column| column == "payload"));
+        assert!(
+            !super::SUMMARY_COLUMNS
+                .split(',')
+                .any(|column| column == "payload")
+        );
         assert_eq!(super::SUMMARY_COLUMNS.split(',').count(), 8);
     }
 }
