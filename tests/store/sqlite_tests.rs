@@ -225,6 +225,410 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
 }
 
 #[tokio_test]
+async fn test_sqlite_event_outbox_requires_active_owner() {
+    let path = database_path("typed-outbox-owner");
+    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let id = typed_task_id(203);
+
+    assert!(matches!(
+        TypedTaskStore::enable_event_outbox(&store).await,
+        Err(StoreError::OwnerConflict)
+    ));
+    assert!(matches!(
+        TypedTaskStore::list_event_outbox(&store, 1).await,
+        Err(StoreError::OwnerConflict)
+    ));
+    assert!(matches!(
+        TypedTaskStore::mark_event_published(&store, id, 1).await,
+        Err(StoreError::OwnerConflict)
+    ));
+
+    let epoch = TypedTaskStore::acquire_owner(&store)
+        .await
+        .expect("typed service owner is acquired");
+    assert!(matches!(
+        TypedTaskStore::acquire_owner(&store).await,
+        Err(StoreError::OwnerConflict)
+    ));
+    TypedTaskStore::enable_event_outbox(&store)
+        .await
+        .expect("outbox is enabled under active ownership");
+    TypedTaskStore::accept_encoded(&store, id, typed_request(None))
+        .await
+        .expect("accepted task snapshot is committed");
+    assert_eq!(
+        TypedTaskStore::list_event_outbox(&store, 1)
+            .await
+            .expect("outbox is readable under active ownership")
+            .len(),
+        1
+    );
+
+    TypedTaskStore::release_owner(&store, epoch)
+        .await
+        .expect("owner release completes");
+    assert!(matches!(
+        TypedTaskStore::list_event_outbox(&store, 1).await,
+        Err(StoreError::OwnerConflict)
+    ));
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_event_outbox_validates_pages_and_marks_confirmed_events() {
+    let path = database_path("typed-outbox-pages");
+    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let epoch = TypedTaskStore::acquire_owner(&store)
+        .await
+        .expect("typed service owner is acquired");
+
+    assert!(matches!(
+        TypedTaskStore::list_event_outbox(&store, 0).await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        TypedTaskStore::list_event_outbox(&store, 257).await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+    TypedTaskStore::enable_event_outbox(&store)
+        .await
+        .expect("outbox is enabled");
+
+    let first_id = typed_task_id(204);
+    let second_id = typed_task_id(205);
+    TypedTaskStore::accept_encoded(&store, first_id, typed_request(None))
+        .await
+        .expect("first task is accepted");
+    TypedTaskStore::accept_encoded(&store, second_id, typed_request(None))
+        .await
+        .expect("second task is accepted");
+    let first_page = TypedTaskStore::list_event_outbox(&store, 1)
+        .await
+        .expect("bounded page is read");
+    assert_eq!(first_page.len(), 1);
+    let first_event = &first_page[0];
+    assert_eq!(first_event.task_id, first_id);
+    assert_eq!(first_event.state_version, 0);
+    assert!(!first_event.event_id.is_empty());
+    assert!(first_event.event_json.contains("Queued"));
+
+    TypedTaskStore::mark_event_published(&store, first_event.task_id, first_event.state_version)
+        .await
+        .expect("confirmed outbox event is removed");
+    TypedTaskStore::mark_event_published(&store, first_event.task_id, first_event.state_version)
+        .await
+        .expect("repeated confirmation is idempotent");
+    let remaining = TypedTaskStore::list_event_outbox(&store, 256)
+        .await
+        .expect("remaining outbox entries are read");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].task_id, second_id);
+
+    TypedTaskStore::release_owner(&store, epoch)
+        .await
+        .expect("owner is released");
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_legacy_schema_rejects_typed_store_operations() {
+    let path = database_path("legacy-reject-typed-operations");
+    let store = SqliteTaskStore::open(&path).expect("legacy SQLite store opens");
+    let id = typed_task_id(206);
+
+    assert!(TypedTaskStore::capabilities(&store).persistent_history);
+    assert!(TypedTaskStore::capabilities(&store).restart_recovery);
+    assert!(matches!(
+        TypedTaskStore::accept_encoded(&store, id, typed_request(None)).await,
+        Err(StoreError::Failure(_))
+    ));
+    assert!(matches!(
+        TypedTaskStore::get_encoded_task(&store, id).await,
+        Err(StoreError::Failure(_))
+    ));
+    assert!(matches!(
+        TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 1, 1, None, Vec::new(), 1)).await,
+        Err(StoreError::Failure(_))
+    ));
+    assert!(matches!(
+        TypedTaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id,
+                expected_state_version: 0,
+                started_at_ms: 1,
+            }
+        )
+        .await,
+        Err(StoreError::Failure(_))
+    ));
+    assert!(matches!(
+        TypedTaskStore::transition_encoded(
+            &store,
+            EncodedTransitionCommand {
+                id,
+                expected_state_version: 0,
+                expected_attempt: 0,
+                retry_not_before_ms: None,
+                state: TaskState::Cancelled,
+                cancel_requested: false,
+                cancel_error: None,
+                finished_at_ms: Some(1),
+                output: None,
+            }
+        )
+        .await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        TypedTaskStore::list_encoded(&store, crate::model::next::TaskQuery::default()).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        TypedTaskStore::list_ready_queued(&store, None, std::num::NonZeroUsize::MIN, 0).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        TypedTaskStore::next_retry_deadline(&store, 0).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        TypedTaskStore::prune_terminal_before(&store, 0, std::num::NonZeroUsize::MIN).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_legacy_summary_reads_and_terminal_pruning() {
+    let path = database_path("legacy-summary-prune");
+    let store = SqliteTaskStore::open(&path).expect("legacy SQLite store opens");
+    let id = TaskId::generate();
+    let request = request_with_idempotency_key("legacy-summary", b"payload".to_vec(), "summary-key");
+    let _accepted = TaskStore::accept(&store, id, request)
+        .await
+        .expect("legacy task is accepted");
+
+    let by_id = TaskStore::get_summary(&store, id)
+        .await
+        .expect("summary lookup succeeds")
+        .expect("accepted task summary exists");
+    assert_eq!(by_id.id, id);
+    assert_eq!(by_id.state, TaskState::Queued);
+    let by_key = TaskStore::get_summary_by_idempotency_key(&store, "summary-key")
+        .await
+        .expect("summary key lookup succeeds")
+        .expect("accepted summary is indexed by idempotency key");
+    assert_eq!(by_key.id, id);
+    assert!(
+        TaskStore::get_summary_by_idempotency_key(&store, "missing")
+            .await
+            .expect("unknown summary key lookup succeeds")
+            .is_none()
+    );
+
+    let running = TaskStore::transition(
+        &store,
+        TransitionCommand {
+            id,
+            expected_version: by_id.state_version,
+            expected_attempt: by_id.attempt,
+            state: TaskState::Running,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        },
+    )
+    .await
+    .expect("task starts running");
+    TaskStore::transition(
+        &store,
+        TransitionCommand {
+            id,
+            expected_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Succeeded,
+            retry_not_before_ms: None,
+            output: None,
+            assigned_resources: Vec::new(),
+            cancel_requested: false,
+        },
+    )
+    .await
+    .expect("task becomes terminal");
+    assert_eq!(
+        TaskStore::prune_terminal_before(&store, i64::MAX as u64, std::num::NonZeroUsize::MIN)
+            .await
+            .expect("one terminal row is pruned"),
+        1
+    );
+    assert!(
+        TaskStore::get_summary(&store, id)
+            .await
+            .expect("pruned summary lookup succeeds")
+            .is_none()
+    );
+    assert!(
+        TaskStore::get_by_idempotency_key(&store, "summary-key")
+            .await
+            .expect("pruned key lookup succeeds")
+            .is_none()
+    );
+    let epoch = TaskStore::acquire_owner(&store)
+        .await
+        .expect("service ownership is acquired");
+    TaskStore::release_owner(&store, epoch)
+        .await
+        .expect("service ownership is released");
+    assert!(matches!(
+        TaskStore::accept(
+            &store,
+            TaskId::generate(),
+            TaskRequest::new("after-release", "1", Vec::new())
+        )
+        .await,
+        Err(StoreError::Failure(_))
+    ));
+
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
+async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
+    let path = database_path("typed-history-retry-prune");
+    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let first_id = typed_task_id(207);
+    let second_id = typed_task_id(208);
+    assert!(matches!(
+        TaskStore::get_summary(&store, TaskId::generate()).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        TaskStore::prune_terminal_before(&store, 0, std::num::NonZeroUsize::MIN).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        TaskStore::has_unfinished_over_limit(&store, 0).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    assert!(matches!(
+        TaskStore::scan_unfinished(&store, None).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+    for id in [first_id, second_id] {
+        TypedTaskStore::accept_encoded(&store, id, typed_request(None))
+            .await
+            .expect("typed task is accepted");
+    }
+
+    let history = TypedTaskStore::list_encoded(
+        &store,
+        crate::model::next::TaskQuery {
+            category: Some("reports".into()),
+            limit: 1,
+            ..crate::model::next::TaskQuery::default()
+        },
+    )
+    .await
+    .expect("typed history page is read");
+    assert_eq!(history.records.len(), 1);
+    assert_eq!(history.records[0].id, first_id);
+    assert!(history.next.is_some());
+
+    let ready = TypedTaskStore::list_ready_queued(&store, None, std::num::NonZeroUsize::new(10).unwrap(), 10)
+        .await
+        .expect("ready queued page is read");
+    assert_eq!(ready.records.len(), 2);
+    assert_eq!(TypedTaskStore::next_retry_deadline(&store, 10).await.unwrap(), None);
+
+    let started = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id: first_id,
+            expected_state_version: 0,
+            started_at_ms: 11,
+        },
+    )
+    .await
+    .expect("first task starts");
+    TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id: first_id,
+            expected_state_version: started.state_version,
+            expected_attempt: started.attempt,
+            retry_not_before_ms: Some(30),
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: None,
+            output: None,
+        },
+    )
+    .await
+    .expect("first task is delayed for retry");
+    assert_eq!(TypedTaskStore::next_retry_deadline(&store, 10).await.unwrap(), Some(30));
+    let ready_before_deadline =
+        TypedTaskStore::list_ready_queued(&store, None, std::num::NonZeroUsize::new(10).unwrap(), 29)
+            .await
+            .expect("not yet due task is omitted");
+    assert_eq!(ready_before_deadline.records.len(), 1);
+    assert_eq!(ready_before_deadline.records[0].id, second_id);
+
+    let restarted = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id: first_id,
+            expected_state_version: 2,
+            started_at_ms: 30,
+        },
+    )
+    .await
+    .expect("retry becomes ready at its deadline");
+    TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id: first_id,
+            expected_state_version: restarted.state_version,
+            expected_attempt: restarted.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: Some(40),
+            output: None,
+        },
+    )
+    .await
+    .expect("retried task completes");
+    assert_eq!(
+        TypedTaskStore::prune_terminal_before(&store, 41, std::num::NonZeroUsize::MIN)
+            .await
+            .expect("terminal task is pruned by finish time"),
+        1
+    );
+    assert!(matches!(
+        TypedTaskStore::prune_terminal_before(&store, u64::MAX, std::num::NonZeroUsize::MIN).await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+    assert!(
+        TypedTaskStore::get_encoded_task(&store, first_id)
+            .await
+            .expect("pruned typed task lookup succeeds")
+            .is_none()
+    );
+
+    drop(store);
+    remove_database(&path);
+}
+
+#[tokio_test]
 async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progress() {
     let path = database_path("typed-schema");
     let id = typed_task_id(u64::MAX);
