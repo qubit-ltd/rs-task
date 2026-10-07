@@ -204,12 +204,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_rejects_corrupt_outbox_snapshot_before_bus_admission() {
         let registry = AsyncEventBusRegistry::with_local().expect("local registry");
-        let bus = Arc::new(
-            registry
-                .create(&EventBusConfig::default())
-                .await
-                .expect("local bus"),
-        );
+        let bus = Arc::new(registry.create(&EventBusConfig::default()).await.expect("local bus"));
         let state = PublisherState::new(
             Arc::new(MemoryTaskStore::new(1)),
             bus,

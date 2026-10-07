@@ -204,10 +204,7 @@ mod tests {
             .await
             .expect_err("outbox read keeps failing until deadline");
         let diagnostic = error.to_string();
-        assert!(
-            diagnostic.contains("pending count unavailable"),
-            "{diagnostic}"
-        );
+        assert!(diagnostic.contains("pending count unavailable"), "{diagnostic}");
         assert!(
             diagnostic.contains("no publication was active at timeout"),
             "{diagnostic}"
