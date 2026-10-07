@@ -30,7 +30,11 @@ struct Input(u32);
 struct Handler;
 
 impl TaskHandler<Input> for Handler {
-    fn run<'a>(&'a self, input: Input, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        input: Input,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             assert_eq!(input, Input(42));
             Ok(qubit_task::handler::TaskRunOutcome::Succeeded(
@@ -81,14 +85,18 @@ impl qubit_codec::ValueDecoder<[u8]> for U64Codec {
     type Error = std::io::Error;
 
     fn decode(&mut self, input: &[u8]) -> Result<Self::Output, Self::Error> {
-        let bytes: [u8; 8] = input
-            .try_into()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "expected 8 bytes"))?;
+        let bytes: [u8; 8] = input.try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "expected 8 bytes")
+        })?;
         Ok(u64::from_le_bytes(bytes))
     }
 }
 
-qubit_codec::register_value_bytes_codec!(id = "qubit_task.tests.handler_u64", codec = U64Codec, value = u64);
+qubit_codec::register_value_bytes_codec!(
+    id = "qubit_task.tests.handler_u64",
+    codec = U64Codec,
+    value = u64
+);
 
 #[derive(Default)]
 struct InputCodec;
@@ -107,36 +115,55 @@ impl qubit_codec::ValueDecoder<[u8]> for InputCodec {
     type Error = std::io::Error;
 
     fn decode(&mut self, input: &[u8]) -> Result<Self::Output, Self::Error> {
-        let bytes: [u8; 4] = input
-            .try_into()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "expected 4 bytes"))?;
+        let bytes: [u8; 4] = input.try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "expected 4 bytes")
+        })?;
         Ok(Input(u32::from_le_bytes(bytes)))
     }
 }
 
-qubit_codec::register_value_bytes_codec!(id = "qubit_task.tests.handler_input", codec = InputCodec, value = Input);
+qubit_codec::register_value_bytes_codec!(
+    id = "qubit_task.tests.handler_input",
+    codec = InputCodec,
+    value = Input
+);
 
 #[test]
 fn registration_rejects_a_duplicate_kind_id_even_if_versions_differ() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry
+        .register(descriptor(vec![1]), Arc::new(Handler))
+        .unwrap();
 
-    let error = registry.register(descriptor(vec![2]), Arc::new(Handler)).unwrap_err();
+    let error = registry
+        .register(descriptor(vec![2]), Arc::new(Handler))
+        .unwrap_err();
 
-    assert!(matches!(error, HandlerRegistrationError::DuplicateKindId { .. }));
+    assert!(matches!(
+        error,
+        HandlerRegistrationError::DuplicateKindId { .. }
+    ));
 }
 
 #[test]
 fn descriptor_requires_one_payload_type_and_unique_explicit_versions() {
     let mut registry = TaskHandlerRegistry::new();
 
-    let error = registry.register(descriptor(vec![]), Arc::new(Handler)).unwrap_err();
-    assert!(matches!(error, HandlerRegistrationError::NoAcceptedSchemaVersions));
+    let error = registry
+        .register(descriptor(vec![]), Arc::new(Handler))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        HandlerRegistrationError::NoAcceptedSchemaVersions
+    ));
 
     let error = registry
         .register(descriptor(vec![1, 1]), Arc::new(Handler))
         .unwrap_err();
-    assert!(matches!(error, HandlerRegistrationError::DuplicateSchemaVersion(1)));
+    assert!(matches!(
+        error,
+        HandlerRegistrationError::DuplicateSchemaVersion(1)
+    ));
 }
 
 #[test]
@@ -157,7 +184,10 @@ fn registry_rejects_empty_kind_ids_and_unexpected_external_hooks() {
             Arc::new(|_, _| Box::pin(async { Ok(()) })),
         )
         .unwrap_err();
-    assert!(matches!(error, HandlerRegistrationError::UnexpectedExternalHook(_)));
+    assert!(matches!(
+        error,
+        HandlerRegistrationError::UnexpectedExternalHook(_)
+    ));
 }
 
 #[test]
@@ -199,7 +229,9 @@ fn registry_reports_missing_handler_and_preserves_registration_source() {
 #[test]
 fn handler_accepts_only_its_declared_payload_model() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1, 2]), Arc::new(Handler)).unwrap();
+    registry
+        .register(descriptor(vec![1, 2]), Arc::new(Handler))
+        .unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
 
     let error = registry
@@ -210,20 +242,29 @@ fn handler_accepts_only_its_declared_payload_model() {
         )
         .unwrap_err();
 
-    assert!(matches!(error, HandlerDispatchError::PayloadTypeMismatch { .. }));
+    assert!(matches!(
+        error,
+        HandlerDispatchError::PayloadTypeMismatch { .. }
+    ));
 }
 
 #[test]
 fn handler_accepts_each_declared_schema_version_but_rejects_others() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1, 3]), Arc::new(Handler)).unwrap();
+    registry
+        .register(descriptor(vec![1, 3]), Arc::new(Handler))
+        .unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
 
     for version in [1, 3] {
         let _prepared = registry
             .prepare(
                 "example.image.resize",
-                payload("example.ResizeRequest", version, "qubit_task.tests.handler_input"),
+                payload(
+                    "example.ResizeRequest",
+                    version,
+                    "qubit_task.tests.handler_input",
+                ),
                 codecs,
             )
             .unwrap();
@@ -236,13 +277,18 @@ fn handler_accepts_each_declared_schema_version_but_rejects_others() {
             codecs,
         )
         .unwrap_err();
-    assert!(matches!(error, HandlerDispatchError::UnsupportedSchemaVersion(2)));
+    assert!(matches!(
+        error,
+        HandlerDispatchError::UnsupportedSchemaVersion(2)
+    ));
 }
 
 #[test]
 fn missing_codec_is_rejected_before_handler_execution() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry
+        .register(descriptor(vec![1]), Arc::new(Handler))
+        .unwrap();
 
     let error = registry
         .prepare(
@@ -258,7 +304,9 @@ fn missing_codec_is_rejected_before_handler_execution() {
 #[test]
 fn payload_codec_with_another_rust_value_type_is_rejected_before_run() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry
+        .register(descriptor(vec![1]), Arc::new(Handler))
+        .unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
 
     let error = registry
@@ -269,13 +317,18 @@ fn payload_codec_with_another_rust_value_type_is_rejected_before_run() {
         )
         .unwrap_err();
 
-    assert!(matches!(error, HandlerDispatchError::DecodedValueTypeMismatch { .. }));
+    assert!(matches!(
+        error,
+        HandlerDispatchError::DecodedValueTypeMismatch { .. }
+    ));
 }
 
 #[test]
 fn successfully_decoded_payload_is_prepared_for_execution() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry
+        .register(descriptor(vec![1]), Arc::new(Handler))
+        .unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
     let _prepared = registry
         .prepare(
@@ -294,7 +347,9 @@ fn successfully_decoded_payload_is_prepared_for_execution() {
 #[test]
 fn malformed_bytes_are_classified_as_a_codec_decode_error() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry
+        .register(descriptor(vec![1]), Arc::new(Handler))
+        .unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
 
     let error = registry
@@ -324,8 +379,13 @@ async fn external_cancellation_hook_is_required_and_invoked_with_attempt_identit
     let mut descriptor = descriptor(vec![1]);
     descriptor.cancellation_mode = CancellationMode::ExternalHook;
     let mut registry = TaskHandlerRegistry::new();
-    let error = registry.register(descriptor.clone(), Arc::new(Handler)).unwrap_err();
-    assert!(matches!(error, HandlerRegistrationError::MissingExternalHook(_)));
+    let error = registry
+        .register(descriptor.clone(), Arc::new(Handler))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        HandlerRegistrationError::MissingExternalHook(_)
+    ));
 
     let observed = Arc::new(AtomicUsize::new(0));
     let hook_observed = Arc::clone(&observed);
@@ -337,7 +397,10 @@ async fn external_cancellation_hook_is_required_and_invoked_with_attempt_identit
             Arc::new(move |task_id, attempt| {
                 let hook_observed = Arc::clone(&hook_observed);
                 Box::pin(async move {
-                    assert_eq!(task_id, qubit_task::model::TaskId::from_id(qubit_id::Id::new(42)));
+                    assert_eq!(
+                        task_id,
+                        qubit_task::model::TaskId::from_id(qubit_id::Id::new(42))
+                    );
                     assert_eq!(attempt, 7);
                     hook_observed.fetch_add(1, Ordering::AcqRel);
                     Ok(())

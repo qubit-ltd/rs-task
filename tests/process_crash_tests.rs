@@ -100,7 +100,8 @@ impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, CrashPayload>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<JsonValueCodec, CrashPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new(CODEC_ID),
     &JSON_DESCRIPTOR,
@@ -112,7 +113,10 @@ fn new_task_id() -> TaskId {
 }
 
 fn codec_registry() -> Arc<ValueBytesCodecRegistry> {
-    Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC]).expect("fixture codec registers"))
+    Arc::new(
+        ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])
+            .expect("fixture codec registers"),
+    )
 }
 
 /// Caches compiled bytes, rather than a static directory whose destructor
@@ -154,9 +158,10 @@ fn build_worker() -> WorkerInstance {
             "fixture build failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let executable = target
-            .join("debug")
-            .join(format!("rs-task-crash-worker-fixture{}", std::env::consts::EXE_SUFFIX));
+        let executable = target.join("debug").join(format!(
+            "rs-task-crash-worker-fixture{}",
+            std::env::consts::EXE_SUFFIX
+        ));
         let fixture = WorkerFixture {
             bytes: std::fs::read(&executable).expect("compiled worker bytes are retained"),
             permissions: std::fs::metadata(&executable)
@@ -172,8 +177,12 @@ fn build_worker() -> WorkerInstance {
     });
 
     let workspace = Database::new();
-    let path = workspace.0.join(format!("worker{}", std::env::consts::EXE_SUFFIX));
-    let temporary_path = workspace.0.join(format!("worker.tmp{}", std::env::consts::EXE_SUFFIX));
+    let path = workspace
+        .0
+        .join(format!("worker{}", std::env::consts::EXE_SUFFIX));
+    let temporary_path = workspace
+        .0
+        .join(format!("worker.tmp{}", std::env::consts::EXE_SUFFIX));
     let mut temporary_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -185,9 +194,12 @@ fn build_worker() -> WorkerInstance {
     temporary_file
         .set_permissions(fixture.permissions.clone())
         .expect("worker executable permissions are restored");
-    temporary_file.sync_all().expect("worker executable is flushed");
+    temporary_file
+        .sync_all()
+        .expect("worker executable is flushed");
     drop(temporary_file);
-    std::fs::rename(&temporary_path, &path).expect("complete worker executable is published atomically");
+    std::fs::rename(&temporary_path, &path)
+        .expect("complete worker executable is published atomically");
     WorkerInstance {
         path,
         _workspace: workspace,
@@ -238,7 +250,9 @@ struct Ready {
 
 /// Waits for a committed-state handshake, then kills and reaps the child.
 async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize) {
-    let worker = spawn_blocking(build_worker).await.expect("fixture build task finishes");
+    let worker = spawn_blocking(build_worker)
+        .await
+        .expect("fixture build task finishes");
     let mut command = Command::new(&worker.path);
     command
         .arg(database.path())
@@ -254,7 +268,10 @@ async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize)
             Ok(child) => break child,
             Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                 if etxtbsy_attempts >= 5 {
-                    panic!("crash worker remains busy at {}: {error}", worker.path.display());
+                    panic!(
+                        "crash worker remains busy at {}: {error}",
+                        worker.path.display()
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(1 << etxtbsy_attempts)).await;
                 etxtbsy_attempts += 1;
@@ -274,7 +291,11 @@ async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize)
         }
         panic!("worker closed stdout before committed READY");
     });
-    let deadline = if count > 1 { BULK_FIXTURE_DEADLINE } else { DEADLINE };
+    let deadline = if count > 1 {
+        BULK_FIXTURE_DEADLINE
+    } else {
+        DEADLINE
+    };
     let ready = timeout(deadline, reader)
         .await
         .expect("committed READY arrives before deadline")
@@ -326,13 +347,21 @@ struct RestartHandler {
 }
 
 impl TaskHandler<CrashPayload> for RestartHandler {
-    fn run<'a>(&'a self, _payload: CrashPayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        _payload: CrashPayload,
+        context: TaskContext,
+    ) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             self.count.fetch_add(1, Ordering::SeqCst);
             self.starts
                 .send(context.task_id())
                 .expect("restart observer remains open");
-            self.gate.acquire().await.expect("restart gate remains open").forget();
+            self.gate
+                .acquire()
+                .await
+                .expect("restart gate remains open")
+                .forget();
             Ok(TaskRunOutcome::Succeeded(TaskOutput {
                 summary: b"completed".to_vec(),
             }))
@@ -365,11 +394,16 @@ fn service_builder(
             .register::<CrashPayload, _>(
                 TaskHandlerDescriptor {
                     kind_id: "crash-worker".into(),
-                    payload_type_id: ModelIdBuf::try_from(PAYLOAD_TYPE_ID).expect("payload model ID is valid"),
+                    payload_type_id: ModelIdBuf::try_from(PAYLOAD_TYPE_ID)
+                        .expect("payload model ID is valid"),
                     accepted_schema_versions: vec![1],
                     cancellation_mode: CancellationMode::Unsupported,
                 },
-                Arc::new(RestartHandler { starts, count, gate }),
+                Arc::new(RestartHandler {
+                    starts,
+                    count,
+                    gate,
+                }),
             )
             .expect("restart handler registers");
     }
@@ -394,7 +428,10 @@ async fn wait_for_state(service: &TaskExecutionService, id: TaskId, state: TaskS
     .expect("task reaches expected state before deadline");
 }
 
-async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> qubit_task::model::TaskSummary {
+async fn wait_for_terminal(
+    service: &TaskExecutionService,
+    id: TaskId,
+) -> qubit_task::model::TaskSummary {
     timeout(DEADLINE, async {
         loop {
             let summary = service
@@ -417,7 +454,9 @@ async fn assert_recovery(mode: &str) {
     let id = new_task_id();
     crash_worker(&database, mode, id, 1).await;
 
-    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("killed owner's database reopens"));
+    let store = Arc::new(
+        SqliteTaskStore::open_next(database.path()).expect("killed owner's database reopens"),
+    );
     let before = store
         .get_encoded_task(id)
         .await
@@ -425,7 +464,9 @@ async fn assert_recovery(mode: &str) {
         .expect("committed task survives kill");
     assert_eq!(
         before.request,
-        request(id).encode(&codec_registry()).expect("fixture request encodes")
+        request(id)
+            .encode(&codec_registry())
+            .expect("fixture request encodes")
     );
     assert_eq!(before.summary.attempt, u32::from(mode != "queued"));
     let expected_state = match mode {
@@ -437,7 +478,11 @@ async fn assert_recovery(mode: &str) {
     assert_eq!(before.summary.state, expected_state);
     if mode == "terminal" {
         assert_eq!(
-            before.summary.output.as_ref().map(|output| output.summary.as_slice()),
+            before
+                .summary
+                .output
+                .as_ref()
+                .map(|output| output.summary.as_slice()),
             Some(&b"completed"[..])
         );
     }
@@ -446,11 +491,17 @@ async fn assert_recovery(mode: &str) {
     let (starts, mut observed) = mpsc::unbounded_channel();
     let count = Arc::new(AtomicUsize::new(0));
     let gate = Arc::new(Semaphore::new(0));
-    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("recovery store opens"));
-    let service = service_builder(Arc::clone(&store), Some(starts), Arc::clone(&count), Arc::clone(&gate))
-        .build()
-        .await
-        .expect("replacement service recovers");
+    let store =
+        Arc::new(SqliteTaskStore::open_next(database.path()).expect("recovery store opens"));
+    let service = service_builder(
+        Arc::clone(&store),
+        Some(starts),
+        Arc::clone(&count),
+        Arc::clone(&gate),
+    )
+    .build()
+    .await
+    .expect("replacement service recovers");
 
     if mode == "terminal" {
         let recovered = service
@@ -458,9 +509,19 @@ async fn assert_recovery(mode: &str) {
             .await
             .expect("terminal summary reads")
             .expect("terminal task remains retained");
-        assert_eq!(recovered, before.summary, "terminal lifecycle remains unchanged");
-        assert_eq!(count.load(Ordering::SeqCst), 0, "terminal work never restarts");
-        service.shutdown().await.expect("replacement service closes");
+        assert_eq!(
+            recovered, before.summary,
+            "terminal lifecycle remains unchanged"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "terminal work never restarts"
+        );
+        service
+            .shutdown()
+            .await
+            .expect("replacement service closes");
         return;
     }
 
@@ -476,7 +537,10 @@ async fn assert_recovery(mode: &str) {
         .submit(request(id))
         .await
         .expect("idempotent resubmission succeeds");
-    assert_eq!(duplicate.id, id, "restart does not accept the same work twice");
+    assert_eq!(
+        duplicate.id, id,
+        "restart does not accept the same work twice"
+    );
     let history = service
         .query(TaskQuery {
             limit: 16,
@@ -484,15 +548,25 @@ async fn assert_recovery(mode: &str) {
         })
         .await
         .expect("history reads");
-    assert_eq!(history.records.len(), 1, "idempotent resubmission adds no history row");
+    assert_eq!(
+        history.records.len(),
+        1,
+        "idempotent resubmission adds no history row"
+    );
     gate.add_permits(1);
     let finished = wait_for_terminal(&service, id).await;
     assert_eq!(finished.state, TaskState::Succeeded);
     assert_eq!(
-        finished.output.as_ref().map(|output| output.summary.as_slice()),
+        finished
+            .output
+            .as_ref()
+            .map(|output| output.summary.as_slice()),
         Some(&b"completed"[..])
     );
-    service.shutdown().await.expect("replacement service closes");
+    service
+        .shutdown()
+        .await
+        .expect("replacement service closes");
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -522,7 +596,8 @@ async fn test_killed_running_worker_blocks_without_matching_handler() {
     let database = Database::new();
     let id = new_task_id();
     crash_worker(&database, "running", id, 1).await;
-    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("recovery store opens"));
+    let store =
+        Arc::new(SqliteTaskStore::open_next(database.path()).expect("recovery store opens"));
     let service = service_builder(
         Arc::clone(&store),
         None,
@@ -545,8 +620,14 @@ async fn test_killed_running_worker_blocks_without_matching_handler() {
         .await
         .expect("blocked summary reads")
         .expect("task remains retained");
-    assert_eq!(blocked.attempt, 1, "blocked recovery does not begin another attempt");
-    service.shutdown().await.expect("replacement service closes");
+    assert_eq!(
+        blocked.attempt, 1,
+        "blocked recovery does not begin another attempt"
+    );
+    service
+        .shutdown()
+        .await
+        .expect("replacement service closes");
 }
 
 /// Crash recovery retains every committed row across the 256-row page boundary.
@@ -578,7 +659,9 @@ async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
                 .expect("committed row exists");
             assert_eq!(
                 stored.request,
-                request(summary.id).encode(&codec_registry()).expect("request encodes")
+                request(summary.id)
+                    .encode(&codec_registry())
+                    .expect("request encodes")
             );
             assert_eq!(summary.state, TaskState::Queued);
             assert_eq!(summary.attempt, 0);

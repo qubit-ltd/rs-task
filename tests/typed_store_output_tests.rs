@@ -26,7 +26,8 @@ fn request() -> StoredTaskRequest {
         kind_id: "output.test".to_owned(),
         category: None,
         payload: StoredPayload {
-            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload").expect("valid model ID"),
+            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload")
+                .expect("valid model ID"),
             schema_version: 1,
             codec_id: "qubit.bytes.json".to_owned(),
             bytes: vec![1],
@@ -82,7 +83,9 @@ async fn finish_with_output(
 async fn typed_memory_store_persists_success_output_in_summary_and_record() {
     let store = MemoryTaskStore::new(16);
     let running = start_task(&store, task_id(1)).await;
-    let expected = TaskOutput { summary: vec![4, 2] };
+    let expected = TaskOutput {
+        summary: vec![4, 2],
+    };
 
     let finished = finish_with_output(&store, &running, expected.clone())
         .await
@@ -148,11 +151,14 @@ fn remove_database(path: &std::path::Path) {
 async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_one() {
     use rusqlite::Connection;
 
-    let directory = std::env::temp_dir().join(format!("qubit-task-output-{}", uuid::Uuid::new_v4()));
+    let directory =
+        std::env::temp_dir().join(format!("qubit-task-output-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&directory).expect("test directory creates");
     let path = directory.join("tasks.sqlite");
     let id = task_id(3);
-    let expected = TaskOutput { summary: vec![9, 8, 7] };
+    let expected = TaskOutput {
+        summary: vec![9, 8, 7],
+    };
 
     let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
     let running = start_task(&store, id).await;
@@ -172,7 +178,8 @@ async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_on
     assert_eq!(loaded.summary.state, TaskState::Succeeded);
     drop(reopened);
 
-    let connection = Connection::open(&path).expect("SQLite database opens for compatibility fixture");
+    let connection =
+        Connection::open(&path).expect("SQLite database opens for compatibility fixture");
     connection
         .execute(
             "UPDATE tasks SET lifecycle_json=json_remove(lifecycle_json, '$.output') WHERE id=?1",
@@ -180,7 +187,8 @@ async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_on
         )
         .expect("remove output field from prior-format lifecycle");
     drop(connection);
-    let compatible = SqliteTaskStore::open_next(&path).expect("lifecycle without output remains readable");
+    let compatible =
+        SqliteTaskStore::open_next(&path).expect("lifecycle without output remains readable");
     let summary = compatible
         .get_encoded_task(id)
         .await
@@ -197,7 +205,8 @@ async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_on
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn typed_sqlite_store_rejects_oversized_output_without_mutating_task() {
-    let directory = std::env::temp_dir().join(format!("qubit-task-output-{}", uuid::Uuid::new_v4()));
+    let directory =
+        std::env::temp_dir().join(format!("qubit-task-output-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&directory).expect("test directory creates");
     let path = directory.join("tasks.sqlite");
     let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");

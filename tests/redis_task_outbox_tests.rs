@@ -128,8 +128,11 @@ impl DurableProjection {
             (event.state_version, event.state.clone())
         } else {
             let (version, state) = authoritative(event.task_id)?;
-            if version < event.state_version || checkpoint.is_some_and(|current| version <= current) {
-                return Err(std::io::Error::other("task service did not resolve the version gap").into());
+            if version < event.state_version || checkpoint.is_some_and(|current| version <= current)
+            {
+                return Err(
+                    std::io::Error::other("task service did not resolve the version gap").into(),
+                );
             }
             (version, state)
         };
@@ -166,7 +169,9 @@ impl DurableProjection {
             .query_map([&id], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         let checkpoint = checkpoint
-            .map(|(version, json)| Ok::<_, serde_json::Error>((version, serde_json::from_str(&json)?)))
+            .map(|(version, json)| {
+                Ok::<_, serde_json::Error>((version, serde_json::from_str(&json)?))
+            })
             .transpose()?;
         Ok((checkpoint, versions))
     }
@@ -208,7 +213,11 @@ struct Handler {
     started: tokio::sync::mpsc::UnboundedSender<TaskId>,
 }
 impl TaskHandler<typed_support::ExamplePayload> for Handler {
-    fn run<'a>(&'a self, input: typed_support::ExamplePayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        input: typed_support::ExamplePayload,
+        context: TaskContext,
+    ) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             let _ = self.started.send(context.task_id());
             if input.0["cancel"].as_bool() == Some(true) {
@@ -229,7 +238,13 @@ async fn service(
     store: Arc<dyn TaskStore>,
     bus: Arc<AsyncEventBus>,
     timeout: Duration,
-) -> Result<(TaskExecutionService, tokio::sync::mpsc::UnboundedReceiver<TaskId>), Box<dyn Error>> {
+) -> Result<
+    (
+        TaskExecutionService,
+        tokio::sync::mpsc::UnboundedReceiver<TaskId>,
+    ),
+    Box<dyn Error>,
+> {
     let (started, receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut builder = TaskExecutionServiceBuilder::new(
         store,
@@ -238,15 +253,17 @@ async fn service(
     )
     .event_bus(bus)
     .notification_shutdown_timeout(timeout);
-    builder.handlers_mut().register::<typed_support::ExamplePayload, _>(
-        TaskHandlerDescriptor {
-            kind_id: "example.process".into(),
-            payload_type_id: ModelIdBuf::try_from("example.TaskPayload")?,
-            accepted_schema_versions: vec![1],
-            cancellation_mode: CancellationMode::Cooperative,
-        },
-        Arc::new(Handler { started }),
-    )?;
+    builder
+        .handlers_mut()
+        .register::<typed_support::ExamplePayload, _>(
+            TaskHandlerDescriptor {
+                kind_id: "example.process".into(),
+                payload_type_id: ModelIdBuf::try_from("example.TaskPayload")?,
+                accepted_schema_versions: vec![1],
+                cancellation_mode: CancellationMode::Cooperative,
+            },
+            Arc::new(Handler { started }),
+        )?;
     Ok((builder.build().await?, receiver))
 }
 
@@ -278,7 +295,8 @@ fn wires(url: &str, namespace: &str) -> Result<Vec<serde_json::Value>, Box<dyn E
         .ids
         .iter()
         .map(|entry| {
-            let wire: String = redis::from_redis_value(entry.map.get("wire").expect("provider wire field"))?;
+            let wire: String =
+                redis::from_redis_value(entry.map.get("wire").expect("provider wire field"))?;
             Ok(serde_json::from_str(&wire)?)
         })
         .collect()
@@ -289,13 +307,24 @@ fn pending(url: &str, namespace: &str, group: &str) -> Result<u64, Box<dyn Error
     let mut connection = redis::Client::open(url)?.get_connection()?;
     let reply: Vec<redis::Value> = redis::cmd("XPENDING")
         .arg(stream_key(namespace, "task.lifecycle"))
-        .arg(group_name(namespace, "task.lifecycle", "outbox-consumer", Some(group)))
+        .arg(group_name(
+            namespace,
+            "task.lifecycle",
+            "outbox-consumer",
+            Some(group),
+        ))
         .query(&mut connection)?;
     Ok(redis::from_redis_value(&reply[0])?)
 }
 
 /// Runs one consumer instance and waits until every current wire is ACKed.
-fn consume_durable(url: &str, namespace: &str, group: &str, path: &Path, service: &TaskExecutionService) -> TestResult {
+fn consume_durable(
+    url: &str,
+    namespace: &str,
+    group: &str,
+    path: &Path,
+    service: &TaskExecutionService,
+) -> TestResult {
     let expected = wires(url, namespace)?.len();
     assert!(expected > 0, "durable consumer requires real Redis records");
     let projection = Arc::new(std::sync::Mutex::new(
@@ -316,12 +345,18 @@ fn consume_durable(url: &str, namespace: &str, group: &str, path: &Path, service
             .build()?,
         move |delivery| {
             let event = delivery.payload().clone();
-            let result = projection.lock().expect("projection lock").apply(&event, |id| {
-                let summary = handle
-                    .block_on(authoritative_service.get(id))?
-                    .ok_or_else(|| std::io::Error::other("task service has no task for the event"))?;
-                Ok((summary.state_version, summary.state))
-            });
+            let result = projection
+                .lock()
+                .expect("projection lock")
+                .apply(&event, |id| {
+                    let summary =
+                        handle
+                            .block_on(authoritative_service.get(id))?
+                            .ok_or_else(|| {
+                                std::io::Error::other("task service has no task for the event")
+                            })?;
+                    Ok((summary.state_version, summary.state))
+                });
             match result {
                 Ok(()) => {
                     let _ = sender.send(());
@@ -336,7 +371,10 @@ fn consume_durable(url: &str, namespace: &str, group: &str, path: &Path, service
     }
     let started = std::time::Instant::now();
     while pending(url, namespace, group)? != 0 {
-        assert!(started.elapsed() < DEADLINE, "successful transactions must be ACKed");
+        assert!(
+            started.elapsed() < DEADLINE,
+            "successful transactions must be ACKed"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     subscription.cancel()?;
@@ -345,9 +383,15 @@ fn consume_durable(url: &str, namespace: &str, group: &str, path: &Path, service
 }
 
 /// Consumes the actual durable stream and applies each task revision once.
-fn consume(url: &str, namespace: &str) -> Result<HashMap<(TaskId, u64), TaskState>, Box<dyn Error>> {
+fn consume(
+    url: &str,
+    namespace: &str,
+) -> Result<HashMap<(TaskId, u64), TaskState>, Box<dyn Error>> {
     let records = wires(url, namespace)?;
-    assert!(!records.is_empty(), "the real Redis stream must contain task events");
+    assert!(
+        !records.is_empty(),
+        "the real Redis stream must contain task events"
+    );
     let bus: EventBus = EventBusRegistry::discover()?.create(&config(url, namespace)?)?;
     let (sender, receiver) = mpsc::channel();
     let subscription = bus.subscribe(
@@ -416,24 +460,42 @@ async fn test_typed_lifecycle_and_cancellation_reach_durable_consumer() -> TestR
     let done = service
         .submit(typed_support::request(serde_json::json!({}), "success"))
         .await?;
-    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(done.id));
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, started.recv()).await?,
+        Some(done.id)
+    );
     assert_eq!(terminal(&service, done.id).await?, TaskState::Succeeded);
     let cancelled = service
-        .submit(typed_support::request(serde_json::json!({"cancel": true}), "cancel"))
+        .submit(typed_support::request(
+            serde_json::json!({"cancel": true}),
+            "cancel",
+        ))
         .await?;
     assert_eq!(
         tokio::time::timeout(DEADLINE, started.recv()).await?,
         Some(cancelled.id)
     );
     let _outcome = service.cancel(cancelled.id).await?;
-    assert_eq!(terminal(&service, cancelled.id).await?, TaskState::Cancelled);
+    assert_eq!(
+        terminal(&service, cancelled.id).await?,
+        TaskState::Cancelled
+    );
     service.shutdown().await?;
     let projection = consume(redis.url(), namespace)?;
     assert_success(&projection, done.id);
     assert_eq!(projection.get(&(cancelled.id, 0)), Some(&TaskState::Queued));
-    assert_eq!(projection.get(&(cancelled.id, 1)), Some(&TaskState::Running));
-    assert_eq!(projection.get(&(cancelled.id, 2)), Some(&TaskState::Running));
-    assert_eq!(projection.get(&(cancelled.id, 3)), Some(&TaskState::Cancelled));
+    assert_eq!(
+        projection.get(&(cancelled.id, 1)),
+        Some(&TaskState::Running)
+    );
+    assert_eq!(
+        projection.get(&(cancelled.id, 2)),
+        Some(&TaskState::Running)
+    );
+    assert_eq!(
+        projection.get(&(cancelled.id, 3)),
+        Some(&TaskState::Cancelled)
+    );
     assert_eq!(projection.len(), 7);
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
     Ok(())
@@ -529,7 +591,11 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
     );
     let projection = consume(redis.url(), namespace)?;
     assert_success(&projection, done.id);
-    assert_eq!(projection.len(), 3, "four deliveries apply only three revisions");
+    assert_eq!(
+        projection.len(),
+        3,
+        "four deliveries apply only three revisions"
+    );
     consume_durable(
         redis.url(),
         namespace,
@@ -537,7 +603,8 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
         projection_database.path(),
         &second,
     )?;
-    let first_snapshot = DurableProjection::snapshot(projection_database.path(), done.id).map_err(test_error)?;
+    let first_snapshot =
+        DurableProjection::snapshot(projection_database.path(), done.id).map_err(test_error)?;
     assert_eq!(first_snapshot.0, Some((2, TaskState::Succeeded)));
     assert_eq!(first_snapshot.1, vec![0, 1, 2]);
     consume_durable(
@@ -627,7 +694,8 @@ async fn test_process_exit_after_publish_before_delete_recovers_outbox() -> Test
         projection_database.path(),
         &service,
     )?;
-    let first_snapshot = DurableProjection::snapshot(projection_database.path(), task_id).map_err(test_error)?;
+    let first_snapshot =
+        DurableProjection::snapshot(projection_database.path(), task_id).map_err(test_error)?;
     assert_eq!(first_snapshot.0, Some((2, TaskState::Succeeded)));
     assert_eq!(first_snapshot.1, vec![0, 1, 2]);
     consume_durable(
@@ -736,7 +804,10 @@ fn test_failed_authority_query_rolls_back_projection_transaction() -> TestResult
     let failure = projection.apply(&projection_event(id, 3, TaskState::Running), |_| {
         Err(std::io::Error::other("task service query failed").into())
     });
-    assert!(failure.is_err(), "failed service lookup must fail the transaction");
+    assert!(
+        failure.is_err(),
+        "failed service lookup must fail the transaction"
+    );
     assert_eq!(
         DurableProjection::snapshot(database.path(), id).map_err(test_error)?,
         before
@@ -767,7 +838,11 @@ fn test_failed_effect_insert_rolls_back_checkpoint_and_allows_retry() -> TestRes
             panic!("contiguous version needs no service lookup")
         })
         .expect_err("effect write failure must abort projection transaction");
-    assert!(failure.to_string().contains("injected projection effect failure"));
+    assert!(
+        failure
+            .to_string()
+            .contains("injected projection effect failure")
+    );
     assert_eq!(
         DurableProjection::snapshot(database.path(), id).map_err(test_error)?,
         before,
@@ -825,7 +900,10 @@ fn test_failed_authority_query_keeps_redis_delivery_pending() -> TestResult {
         },
     )?;
     let id = TaskId::from_id(qubit_id::Id::new(305));
-    let _receipt = bus.publish(PublishRequest::new(topic, projection_event(id, 3, TaskState::Running))?)?;
+    let _receipt = bus.publish(PublishRequest::new(
+        topic,
+        projection_event(id, 3, TaskState::Running),
+    )?)?;
     receiver.recv_timeout(DEADLINE)?;
     let started = std::time::Instant::now();
     while bus.delivery_metrics().completed == 0 {

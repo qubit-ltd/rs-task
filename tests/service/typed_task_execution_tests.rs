@@ -40,7 +40,8 @@ use qubit_task::store::TaskStore;
 struct Counter(u32);
 
 impl qubit_model_id::HasModelId for Counter {
-    const MODEL_ID: qubit_model_id::ModelId = qubit_model_id::ModelId::new("test.TypedServicePayload");
+    const MODEL_ID: qubit_model_id::ModelId =
+        qubit_model_id::ModelId::new("test.TypedServicePayload");
 }
 
 #[derive(Default)]
@@ -63,7 +64,8 @@ impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
     }
 }
 
-static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, Counter>();
+static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<U32Codec, Counter>();
 static CODEC_REGISTRATION: qubit_codec::ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("qubit_task.typed_service.u32"),
     &CODEC_DESCRIPTOR,
@@ -104,7 +106,11 @@ struct Handler {
 }
 
 impl TaskHandler<Counter> for Handler {
-    fn run<'a>(&'a self, value: Counter, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        value: Counter,
+        context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         let cancel = self.cooperative_cancel;
         Box::pin(async move {
             assert_eq!(value, Counter(42));
@@ -125,7 +131,11 @@ impl TaskHandler<Counter> for Handler {
 struct PendingHandler;
 
 impl TaskHandler<Counter> for PendingHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        _value: Counter,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(std::future::pending())
     }
 }
@@ -133,7 +143,11 @@ impl TaskHandler<Counter> for PendingHandler {
 struct RetryOnceHandler(AtomicU64);
 
 impl TaskHandler<Counter> for RetryOnceHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        _value: Counter,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         let attempt = self.0.fetch_add(1, Ordering::AcqRel);
         Box::pin(async move {
             if attempt == 0 {
@@ -164,7 +178,11 @@ struct GatedHandler {
 }
 
 impl TaskHandler<Counter> for GatedHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        _value: Counter,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         let started = Arc::clone(&self.started);
         let release = Arc::clone(&self.release);
         Box::pin(async move {
@@ -227,15 +245,21 @@ impl TaskStore for FailingListStore {
         &'a self,
         id: TaskId,
         request: qubit_task::model::StoredTaskRequest,
-    ) -> TaskFuture<'a, Result<qubit_task::model::AcceptOutcome, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<qubit_task::model::AcceptOutcome, qubit_task::store::StoreError>>
+    {
         self.inner.accept_encoded(id, request)
     }
     fn get_encoded_task<'a>(
         &'a self,
         id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>>
+    {
         if self.fail_next_get.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected get failure".into())) })
+            Box::pin(async {
+                Err(qubit_task::store::StoreError::Failure(
+                    "injected get failure".into(),
+                ))
+            })
         } else {
             self.inner.get_encoded_task(id)
         }
@@ -245,7 +269,11 @@ impl TaskStore for FailingListStore {
         command: qubit_task::model::StartCommand,
     ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
         if self.fail_next_start.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected start failure".into())) })
+            Box::pin(async {
+                Err(qubit_task::store::StoreError::Failure(
+                    "injected start failure".into(),
+                ))
+            })
         } else {
             self.inner.start_encoded(command)
         }
@@ -275,7 +303,11 @@ impl TaskStore for FailingListStore {
         query: TaskQuery,
     ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
         if self.fail_next_list.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected list failure".into())) })
+            Box::pin(async {
+                Err(qubit_task::store::StoreError::Failure(
+                    "injected list failure".into(),
+                ))
+            })
         } else {
             self.inner.list_encoded(query)
         }
@@ -287,7 +319,11 @@ impl TaskStore for FailingListStore {
         now_ms: u64,
     ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
         if self.fail_next_list.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected list failure".into())) })
+            Box::pin(async {
+                Err(qubit_task::store::StoreError::Failure(
+                    "injected list failure".into(),
+                ))
+            })
         } else {
             self.inner.list_ready_queued(after, limit, now_ms)
         }
@@ -303,7 +339,8 @@ impl TaskStore for FailingListStore {
         finished_before_ms: u64,
         max_rows: std::num::NonZeroUsize,
     ) -> TaskFuture<'a, Result<usize, qubit_task::store::StoreError>> {
-        self.inner.prune_terminal_before(finished_before_ms, max_rows)
+        self.inner
+            .prune_terminal_before(finished_before_ms, max_rows)
     }
     fn acquire_owner<'a>(
         &'a self,
@@ -354,13 +391,15 @@ impl TaskStore for BuildGateStore {
         &'a self,
         id: TaskId,
         request: StoredTaskRequest,
-    ) -> TaskFuture<'a, Result<qubit_task::model::AcceptOutcome, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<qubit_task::model::AcceptOutcome, qubit_task::store::StoreError>>
+    {
         self.inner.accept_encoded(id, request)
     }
     fn get_encoded_task<'a>(
         &'a self,
         id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>>
+    {
         self.inner.get_encoded_task(id)
     }
     fn start_encoded<'a>(
@@ -388,11 +427,10 @@ impl TaskStore for BuildGateStore {
         Box::pin(async move {
             if self.first_list.swap(false, Ordering::AcqRel) {
                 self.entered.notify_one();
-                let permit = self
-                    .resume
-                    .acquire()
-                    .await
-                    .map_err(|error| qubit_task::store::StoreError::Failure(error.to_string()))?;
+                let permit =
+                    self.resume.acquire().await.map_err(|error| {
+                        qubit_task::store::StoreError::Failure(error.to_string())
+                    })?;
                 permit.forget();
             }
             self.inner.list_encoded(query).await
@@ -417,7 +455,8 @@ impl TaskStore for BuildGateStore {
         finished_before_ms: u64,
         max_rows: std::num::NonZeroUsize,
     ) -> TaskFuture<'a, Result<usize, qubit_task::store::StoreError>> {
-        self.inner.prune_terminal_before(finished_before_ms, max_rows)
+        self.inner
+            .prune_terminal_before(finished_before_ms, max_rows)
     }
     fn acquire_owner<'a>(
         &'a self,
@@ -452,17 +491,21 @@ async fn build_cancellation_releases_memory_owner() {
     let _ = build.await;
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            match TaskExecutionServiceBuilder::new(Arc::clone(&inner), registry(), Arc::new(Ids(AtomicU64::new(2))))
-                .build()
-                .await
+            match TaskExecutionServiceBuilder::new(
+                Arc::clone(&inner),
+                registry(),
+                Arc::new(Ids(AtomicU64::new(2))),
+            )
+            .build()
+            .await
             {
                 Ok(service) => {
                     service.shutdown().await.expect("second service shuts down");
                     break;
                 }
-                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
-                    tokio::task::yield_now().await
-                }
+                Err(qubit_task::service::TaskServiceError::Store(
+                    qubit_task::store::StoreError::OwnerConflict,
+                )) => tokio::task::yield_now().await,
                 Err(error) => panic!("unexpected second build error: {error}"),
             }
         }
@@ -481,8 +524,9 @@ async fn build_cancellation_releases_sqlite_file_lock() {
             .expect("time after epoch")
             .as_nanos()
     ));
-    let inner: Arc<dyn TaskStore> =
-        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).expect("first SQLite store opens"));
+    let inner: Arc<dyn TaskStore> = Arc::new(
+        qubit_task::store::SqliteTaskStore::open_next(&path).expect("first SQLite store opens"),
+    );
     let gate = Arc::new(BuildGateStore::new(Arc::clone(&inner)));
     let build = {
         let entered = gate.entered.notified();
@@ -490,9 +534,13 @@ async fn build_cancellation_releases_sqlite_file_lock() {
         entered.as_mut().enable();
         let first_store: Arc<dyn TaskStore> = gate.clone();
         let build = tokio::spawn(async move {
-            TaskExecutionServiceBuilder::new(first_store, registry(), Arc::new(Ids(AtomicU64::new(1))))
-                .build()
-                .await
+            TaskExecutionServiceBuilder::new(
+                first_store,
+                registry(),
+                Arc::new(Ids(AtomicU64::new(1))),
+            )
+            .build()
+            .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), entered)
             .await
@@ -506,12 +554,18 @@ async fn build_cancellation_releases_sqlite_file_lock() {
             match qubit_task::store::SqliteTaskStore::open_next(&path) {
                 Ok(second) => {
                     let second: Arc<dyn TaskStore> = Arc::new(second);
-                    let service =
-                        TaskExecutionServiceBuilder::new(second, registry(), Arc::new(Ids(AtomicU64::new(2))))
-                            .build()
-                            .await
-                            .expect("second SQLite service builds");
-                    service.shutdown().await.expect("second SQLite service shuts down");
+                    let service = TaskExecutionServiceBuilder::new(
+                        second,
+                        registry(),
+                        Arc::new(Ids(AtomicU64::new(2))),
+                    )
+                    .build()
+                    .await
+                    .expect("second SQLite service builds");
+                    service
+                        .shutdown()
+                        .await
+                        .expect("second SQLite service shuts down");
                     break;
                 }
                 Err(qubit_task::store::StoreError::OwnerConflict) => tokio::task::yield_now().await,
@@ -530,7 +584,11 @@ async fn build_cancellation_releases_sqlite_file_lock() {
 }
 
 impl TaskHandler<Counter> for ParallelismHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        _value: Counter,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
         self.maximum.fetch_max(active, Ordering::AcqRel);
         self.started.add_permits(1);
@@ -550,10 +608,17 @@ impl TaskHandler<Counter> for ParallelismHandler {
 struct ContextProgressHandler;
 
 impl TaskHandler<Counter> for ContextProgressHandler {
-    fn run<'a>(&'a self, value: Counter, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        value: Counter,
+        context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             assert_eq!(value, Counter(42));
-            assert_eq!(context.task_id().to_padded_decimal(), "00000000000000000301");
+            assert_eq!(
+                context.task_id().to_padded_decimal(),
+                "00000000000000000301"
+            );
             assert_eq!(context.attempt(), 1);
             assert!(!context.is_cancelled());
             assert!(!context.cancellation_signal().load(Ordering::Acquire));
@@ -597,7 +662,10 @@ fn request() -> TaskRequest<Counter> {
     request
 }
 
-async fn wait_for_terminal(service: &qubit_task::TaskExecutionService, id: qubit_task::model::TaskId) -> TaskState {
+async fn wait_for_terminal(
+    service: &qubit_task::TaskExecutionService,
+    id: qubit_task::model::TaskId,
+) -> TaskState {
     for _ in 0..1000 {
         if let Some(summary) = service.get(id).await.unwrap()
             && summary.state.is_terminal()
@@ -612,12 +680,12 @@ async fn wait_for_terminal(service: &qubit_task::TaskExecutionService, id: qubit
 #[tokio::test]
 async fn typed_submit_decodes_runs_and_persists_terminal_state() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(101)))).capacity(
-        ResourceCapacity {
-            cpu_slots: 1,
-            ..ResourceCapacity::default()
-        },
-    );
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(101))))
+            .capacity(ResourceCapacity {
+                cpu_slots: 1,
+                ..ResourceCapacity::default()
+            });
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -629,7 +697,10 @@ async fn typed_submit_decodes_runs_and_persists_terminal_state() {
         .unwrap();
     let service = builder.build().await.unwrap();
     let accepted = service.submit(request()).await.unwrap();
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Succeeded
+    );
     let completed = service.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(completed.output.unwrap().summary, b"typed-result");
 }
@@ -641,11 +712,15 @@ async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
         NonZeroUsize::new(1024).expect("payload budget is nonzero"),
         NonZeroUsize::new(1).expect("unfinished limit is nonzero"),
     ));
-    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2001))))
-        .build()
+    let service =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2001))))
+            .build()
+            .await
+            .expect("service starts");
+    let first = service
+        .submit(request())
         .await
-        .expect("service starts");
-    let first = service.submit(request()).await.expect("first task is accepted");
+        .expect("first task is accepted");
     let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let summary = service
@@ -666,10 +741,16 @@ async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
         Err(qubit_task::service::TaskServiceError::UnfinishedTaskLimitExceeded { limit: 1 })
     ));
     assert_eq!(
-        service.cancel(first.id).await.expect("blocked task can be cancelled"),
+        service
+            .cancel(first.id)
+            .await
+            .expect("blocked task can be cancelled"),
         CancelOutcome::CancelledBeforeStart
     );
-    assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, first.id).await,
+        TaskState::Cancelled
+    );
     service
         .submit(request())
         .await
@@ -692,11 +773,15 @@ async fn typed_submit_rejection_payload_budget_keeps_service_running() {
         16,
         NonZeroUsize::new(4).expect("payload budget is nonzero"),
     ));
-    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2021))))
-        .build()
+    let service =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2021))))
+            .build()
+            .await
+            .expect("service starts");
+    let first = service
+        .submit(request())
         .await
-        .expect("service starts");
-    let first = service.submit(request()).await.expect("first task is accepted");
+        .expect("first task is accepted");
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let summary = service
@@ -714,16 +799,24 @@ async fn typed_submit_rejection_payload_budget_keeps_service_running() {
     .expect("missing handler blocks first task");
     assert!(matches!(
         service.submit(request()).await,
-        Err(qubit_task::service::TaskServiceError::SubmissionCapacityExceeded {
-            requested_bytes: 4,
-            available_bytes: 0
-        })
+        Err(
+            qubit_task::service::TaskServiceError::SubmissionCapacityExceeded {
+                requested_bytes: 4,
+                available_bytes: 0
+            }
+        )
     ));
     assert_eq!(
-        service.cancel(first.id).await.expect("blocked task can be cancelled"),
+        service
+            .cancel(first.id)
+            .await
+            .expect("blocked task can be cancelled"),
         CancelOutcome::CancelledBeforeStart
     );
-    assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, first.id).await,
+        TaskState::Cancelled
+    );
     service
         .submit(request())
         .await
@@ -737,10 +830,11 @@ async fn typed_submit_rejection_payload_budget_keeps_service_running() {
 #[tokio::test]
 async fn typed_submit_rejection_idempotency_conflict_keeps_service_running() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2041))))
-        .build()
-        .await
-        .expect("service starts");
+    let service =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2041))))
+            .build()
+            .await
+            .expect("service starts");
     let mut first = request();
     first.idempotency_key = Some("shared-key".into());
     service.submit(first).await.expect("first task is accepted");
@@ -753,7 +847,10 @@ async fn typed_submit_rejection_idempotency_conflict_keeps_service_running() {
     ));
     let mut distinct = request();
     distinct.idempotency_key = Some("distinct-key".into());
-    service.submit(distinct).await.expect("distinct key is accepted");
+    service
+        .submit(distinct)
+        .await
+        .expect("distinct key is accepted");
     service
         .shutdown()
         .await
@@ -774,8 +871,14 @@ async fn typed_submit_rejection_duplicate_id_keeps_service_running() {
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
-    let first = service.submit(request()).await.expect("first task is accepted");
-    assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Succeeded);
+    let first = service
+        .submit(request())
+        .await
+        .expect("first task is accepted");
+    assert_eq!(
+        wait_for_terminal(&service, first.id).await,
+        TaskState::Succeeded
+    );
     assert!(matches!(
         service.submit(request()).await,
         Err(qubit_task::service::TaskServiceError::DuplicateTaskId)
@@ -798,14 +901,15 @@ async fn typed_submit_rejection_duplicate_id_keeps_service_running() {
 #[tokio::test]
 async fn retryable_handler_error_is_persisted_and_retried_after_deadline() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1201))))
-        .retry_policy(
-            qubit_task::service::RetryPolicy::new(
-                std::time::Duration::from_millis(80),
-                std::time::Duration::from_millis(80),
-            )
-            .unwrap(),
-        );
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1201))))
+            .retry_policy(
+                qubit_task::service::RetryPolicy::new(
+                    std::time::Duration::from_millis(80),
+                    std::time::Duration::from_millis(80),
+                )
+                .unwrap(),
+            );
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -829,7 +933,10 @@ async fn retryable_handler_error_is_persisted_and_retried_after_deadline() {
     .await
     .expect("retry transition is persisted");
     assert_eq!(queued_retry.attempt, 1);
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Succeeded
+    );
     assert_eq!(service.get(accepted.id).await.unwrap().unwrap().attempt, 2);
     service.shutdown().await.unwrap();
 }
@@ -845,10 +952,14 @@ async fn sqlite_retry_deadline_survives_service_restart() {
             .as_nanos(),
     ));
     let retry_delay = std::time::Duration::from_secs(3);
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
-    let mut first_builder =
-        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1251))))
-            .retry_policy(qubit_task::service::RetryPolicy::new(retry_delay, retry_delay).unwrap());
+    let store: Arc<dyn TaskStore> =
+        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let mut first_builder = TaskExecutionServiceBuilder::new(
+        Arc::clone(&store),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(1251))),
+    )
+    .retry_policy(qubit_task::service::RetryPolicy::new(retry_delay, retry_delay).unwrap());
     first_builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -873,9 +984,13 @@ async fn sqlite_retry_deadline_survives_service_restart() {
     drop(first);
     drop(store);
 
-    let reopened: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
-    let mut second_builder =
-        TaskExecutionServiceBuilder::new(Arc::clone(&reopened), registry(), Arc::new(Ids(AtomicU64::new(1252))));
+    let reopened: Arc<dyn TaskStore> =
+        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let mut second_builder = TaskExecutionServiceBuilder::new(
+        Arc::clone(&reopened),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(1252))),
+    );
     second_builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -892,13 +1007,19 @@ async fn sqlite_retry_deadline_survives_service_restart() {
             .unwrap()
             .as_millis() as u64,
     );
-    assert!(remaining > 100, "test must restart before the stored deadline");
+    assert!(
+        remaining > 100,
+        "test must restart before the stored deadline"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let still_waiting = second.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(still_waiting.attempt, 1);
     assert!(matches!(still_waiting.state, TaskState::Queued));
     assert_eq!(still_waiting.retry_not_before_ms, retry.retry_not_before_ms);
-    assert_eq!(wait_for_terminal(&second, accepted.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&second, accepted.id).await,
+        TaskState::Succeeded
+    );
     second.shutdown().await.unwrap();
     drop(second);
     drop(reopened);
@@ -917,8 +1038,9 @@ async fn scheduler_never_exceeds_configured_running_limit() {
         started: Arc::new(tokio::sync::Semaphore::new(0)),
         release: Arc::new(tokio::sync::Semaphore::new(0)),
     });
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1401))))
-        .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1401))))
+            .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
     builder
         .handlers_mut()
         .register::<Counter, _>(descriptor(CancellationMode::Cooperative), handler.clone())
@@ -947,7 +1069,11 @@ async fn scheduler_never_exceeds_configured_running_limit() {
 #[tokio::test]
 async fn scheduler_store_failure_is_latched_and_reported_by_shutdown() {
     let store = failing_store();
-    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1501))));
+    let mut builder = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(1501))),
+    );
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -967,10 +1093,16 @@ async fn scheduler_store_failure_is_latched_and_reported_by_shutdown() {
 
 #[tokio::test]
 async fn typed_service_latches_get_and_start_failures() {
-    for (fail_get, expected) in [(true, "injected get failure"), (false, "injected start failure")] {
+    for (fail_get, expected) in [
+        (true, "injected get failure"),
+        (false, "injected start failure"),
+    ] {
         let store = failing_store();
-        let mut builder =
-            TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1551))));
+        let mut builder = TaskExecutionServiceBuilder::new(
+            store.clone(),
+            registry(),
+            Arc::new(Ids(AtomicU64::new(1551))),
+        );
         builder
             .handlers_mut()
             .register::<Counter, _>(
@@ -998,7 +1130,11 @@ async fn typed_service_latches_get_and_start_failures() {
 #[tokio::test]
 async fn typed_service_latches_finalizer_transition_failure() {
     let store = failing_store();
-    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1581))));
+    let mut builder = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(1581))),
+    );
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1021,12 +1157,12 @@ async fn typed_service_latches_finalizer_transition_failure() {
 #[tokio::test]
 async fn typed_context_exposes_attempt_cancellation_and_persisted_progress() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(301)))).capacity(
-        ResourceCapacity {
-            cpu_slots: 1,
-            ..ResourceCapacity::default()
-        },
-    );
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(301))))
+            .capacity(ResourceCapacity {
+                cpu_slots: 1,
+                ..ResourceCapacity::default()
+            });
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1037,23 +1173,31 @@ async fn typed_context_exposes_attempt_cancellation_and_persisted_progress() {
     let service = builder.build().await.unwrap();
     let accepted = service.submit(request()).await.unwrap();
 
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Succeeded
+    );
     let summary = service.get(accepted.id).await.unwrap().unwrap();
-    let progress = summary.progress.expect("handler progress remains queryable");
+    let progress = summary
+        .progress
+        .expect("handler progress remains queryable");
     assert_eq!(progress.attempt, 1);
-    assert_eq!(progress.stage.as_ref().map(|stage| stage.id.as_str()), Some("index"));
+    assert_eq!(
+        progress.stage.as_ref().map(|stage| stage.id.as_str()),
+        Some("index")
+    );
     assert_eq!(progress.metrics[0].id, "records");
 }
 
 #[tokio::test]
 async fn typed_running_cancel_is_persisted_then_acknowledged_by_handler() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(201)))).capacity(
-        ResourceCapacity {
-            cpu_slots: 1,
-            ..ResourceCapacity::default()
-        },
-    );
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(201))))
+            .capacity(ResourceCapacity {
+                cpu_slots: 1,
+                ..ResourceCapacity::default()
+            });
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1080,16 +1224,20 @@ async fn typed_running_cancel_is_persisted_then_acknowledged_by_handler() {
         service.cancel(accepted.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Cancelled
+    );
 }
 
 #[tokio::test]
 async fn missing_handler_is_retained_as_blocked_and_can_be_cancelled() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(301))))
-        .build()
-        .await
-        .unwrap();
+    let service =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(301))))
+            .build()
+            .await
+            .unwrap();
     let accepted = service.submit(request()).await.unwrap();
     for _ in 0..1000 {
         if service
@@ -1106,16 +1254,23 @@ async fn missing_handler_is_retained_as_blocked_and_can_be_cancelled() {
         service.cancel(accepted.id).await.unwrap(),
         CancelOutcome::CancelledBeforeStart
     );
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Cancelled
+    );
 }
 
 #[tokio::test]
 async fn blocked_task_can_be_resumed_after_restarting_with_its_handler() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let first = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1301))))
-        .build()
-        .await
-        .unwrap();
+    let first = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(1301))),
+    )
+    .build()
+    .await
+    .unwrap();
     let accepted = first.submit(request()).await.unwrap();
     let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -1130,7 +1285,8 @@ async fn blocked_task_can_be_resumed_after_restarting_with_its_handler() {
     .unwrap();
     first.shutdown().await.unwrap();
 
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1302))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1302))));
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1141,9 +1297,15 @@ async fn blocked_task_can_be_resumed_after_restarting_with_its_handler() {
         )
         .unwrap();
     let second = builder.build().await.unwrap();
-    let queued = second.resume_blocked(accepted.id, blocked.state_version).await.unwrap();
+    let queued = second
+        .resume_blocked(accepted.id, blocked.state_version)
+        .await
+        .unwrap();
     assert_eq!(queued.state, TaskState::Queued);
-    assert_eq!(wait_for_terminal(&second, accepted.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&second, accepted.id).await,
+        TaskState::Succeeded
+    );
     second.shutdown().await.unwrap();
 }
 
@@ -1168,7 +1330,8 @@ async fn id_generation_failure_prevents_acceptance() {
 #[tokio::test]
 async fn unsupported_schema_is_retained_as_blocked() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(401))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(401))));
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1186,7 +1349,10 @@ async fn unsupported_schema_is_retained_as_blocked() {
     assert!(matches!(state, TaskState::Blocked { .. }));
 }
 
-async fn wait_for_terminal_or_blocked(service: &qubit_task::TaskExecutionService, id: TaskId) -> TaskState {
+async fn wait_for_terminal_or_blocked(
+    service: &qubit_task::TaskExecutionService,
+    id: TaskId,
+) -> TaskState {
     for _ in 0..1000 {
         if let Some(summary) = service.get(id).await.unwrap()
             && (summary.state.is_terminal() || matches!(summary.state, TaskState::Blocked { .. }))
@@ -1201,15 +1367,18 @@ async fn wait_for_terminal_or_blocked(service: &qubit_task::TaskExecutionService
 #[tokio::test]
 async fn queued_typed_task_can_be_cancelled_before_resource_admission() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(501)))).capacity(
-        ResourceCapacity {
-            cpu_slots: 1,
-            ..ResourceCapacity::default()
-        },
-    );
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(501))))
+            .capacity(ResourceCapacity {
+                cpu_slots: 1,
+                ..ResourceCapacity::default()
+            });
     builder
         .handlers_mut()
-        .register::<Counter, _>(descriptor(CancellationMode::Cooperative), Arc::new(PendingHandler))
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(PendingHandler),
+        )
         .unwrap();
     let service = builder.build().await.unwrap();
     let running = service.submit(request()).await.unwrap();
@@ -1229,16 +1398,23 @@ async fn queued_typed_task_can_be_cancelled_before_resource_admission() {
         service.cancel(queued.id).await.unwrap(),
         CancelOutcome::CancelledBeforeStart
     );
-    assert_eq!(wait_for_terminal(&service, queued.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, queued.id).await,
+        TaskState::Cancelled
+    );
 }
 
 #[tokio::test]
 async fn running_handler_without_cancel_support_reports_unsupported() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(601))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(601))));
     builder
         .handlers_mut()
-        .register::<Counter, _>(descriptor(CancellationMode::Unsupported), Arc::new(PendingHandler))
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Unsupported),
+            Arc::new(PendingHandler),
+        )
         .unwrap();
     let service = builder.build().await.unwrap();
     let accepted = service.submit(request()).await.unwrap();
@@ -1262,7 +1438,8 @@ async fn running_handler_without_cancel_support_reports_unsupported() {
 #[tokio::test]
 async fn repeated_idempotency_key_returns_the_existing_typed_task() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(801))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(801))));
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1285,7 +1462,10 @@ async fn repeated_idempotency_key_returns_the_existing_typed_task() {
 #[tokio::test]
 async fn recovery_blocks_unsupported_schema_and_missing_codec() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    for (value, version, codec) in [(901, 99, "qubit_task.typed_service.u32"), (902, 1, "missing.codec")] {
+    for (value, version, codec) in [
+        (901, 99, "qubit_task.typed_service.u32"),
+        (902, 1, "missing.codec"),
+    ] {
         store
             .accept_encoded(
                 TaskId::from_id(qubit_id::Id::new(value)),
@@ -1307,7 +1487,8 @@ async fn recovery_blocks_unsupported_schema_and_missing_codec() {
             .await
             .unwrap();
     }
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(903))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(903))));
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1319,7 +1500,8 @@ async fn recovery_blocks_unsupported_schema_and_missing_codec() {
         .unwrap();
     let service = builder.build().await.unwrap();
     for value in [901, 902] {
-        let state = wait_for_terminal_or_blocked(&service, TaskId::from_id(qubit_id::Id::new(value))).await;
+        let state =
+            wait_for_terminal_or_blocked(&service, TaskId::from_id(qubit_id::Id::new(value))).await;
         assert!(matches!(state, TaskState::Blocked { .. }));
     }
 }
@@ -1341,7 +1523,8 @@ async fn external_cancel_retries_failed_hook() {
         }
     }
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(701))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(701))));
     let hook_calls = Arc::new(AtomicU64::new(0));
     let hook_call_counter = Arc::clone(&hook_calls);
     let hook_finished = Arc::new(tokio::sync::Notify::new());
@@ -1395,7 +1578,10 @@ async fn external_cancel_retries_failed_hook() {
         CancelOutcome::CancellationRequested
     );
     assert_eq!(hook_calls.load(Ordering::Relaxed), 2);
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Cancelled
+    );
     assert_eq!(
         service.cancel(accepted.id).await.unwrap(),
         CancelOutcome::AlreadyTerminal
@@ -1415,7 +1601,9 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
             let release = Arc::clone(&self.0);
             Box::pin(async move {
                 release.notified().await;
-                Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput::default()))
+                Ok(TaskRunOutcome::Succeeded(
+                    qubit_task::model::TaskOutput::default(),
+                ))
             })
         }
     }
@@ -1441,7 +1629,8 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
             })
         })
     });
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(704))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(704))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<Counter, _>(
@@ -1468,9 +1657,15 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
     let cancel = tokio::spawn(async move { cancel_service.cancel(accepted.id).await });
     hook_started.notified().await;
     handler_release.notify_one();
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Succeeded
+    );
     hook_release.notify_one();
-    assert_eq!(cancel.await.unwrap().unwrap(), CancelOutcome::AlreadyTerminal);
+    assert_eq!(
+        cancel.await.unwrap().unwrap(),
+        CancelOutcome::AlreadyTerminal
+    );
     let terminal = service.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(terminal.state, TaskState::Succeeded);
     assert_eq!(terminal.cancel_error, None);
@@ -1519,7 +1714,8 @@ async fn external_cancel_concurrent_callers_share_hook() {
             Ok(())
         })
     });
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(702))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(702))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<Counter, _>(
@@ -1550,8 +1746,14 @@ async fn external_cancel_concurrent_callers_share_hook() {
     tokio::task::yield_now().await;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     hook_release.notify_one();
-    assert_eq!(first.await.unwrap().unwrap(), CancelOutcome::CancellationRequested);
-    assert_eq!(second.await.unwrap().unwrap(), CancelOutcome::CancellationRequested);
+    assert_eq!(
+        first.await.unwrap().unwrap(),
+        CancelOutcome::CancellationRequested
+    );
+    assert_eq!(
+        second.await.unwrap().unwrap(),
+        CancelOutcome::CancellationRequested
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     service.shutdown().await.unwrap();
 }
@@ -1590,7 +1792,8 @@ async fn external_cancel_aborted_waiter_does_not_abort_hook() {
             Ok(())
         })
     });
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(703))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(703))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<Counter, _>(
@@ -1633,16 +1836,19 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
     let calls = Arc::new(AtomicU64::new(0));
     let hook_calls = Arc::clone(&calls);
     let hook: qubit_task::ExternalCancellationHook =
-        Arc::new(move |_, _| match hook_calls.fetch_add(1, Ordering::Relaxed) {
-            0 => panic!("hook factory failed"),
-            1 => Box::pin(async {
-                panic!("hook future failed");
-                #[allow(unreachable_code)]
-                Ok(())
-            }),
-            _ => Box::pin(async { Ok(()) }),
-        });
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(705))));
+        Arc::new(
+            move |_, _| match hook_calls.fetch_add(1, Ordering::Relaxed) {
+                0 => panic!("hook factory failed"),
+                1 => Box::pin(async {
+                    panic!("hook future failed");
+                    #[allow(unreachable_code)]
+                    Ok(())
+                }),
+                _ => Box::pin(async { Ok(()) }),
+            },
+        );
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(705))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<Counter, _>(
@@ -1674,7 +1880,13 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
         }) if message == "hook factory failed"
     ));
     assert_eq!(
-        service.get(accepted.id).await.unwrap().unwrap().cancel_error.as_deref(),
+        service
+            .get(accepted.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .cancel_error
+            .as_deref(),
         Some("hook factory failed")
     );
     assert!(matches!(
@@ -1685,7 +1897,13 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
         }) if message == "hook future failed"
     ));
     assert_eq!(
-        service.get(accepted.id).await.unwrap().unwrap().cancel_error.as_deref(),
+        service
+            .get(accepted.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .cancel_error
+            .as_deref(),
         Some("hook future failed")
     );
     assert_eq!(
@@ -1698,7 +1916,8 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
 #[tokio::test]
 async fn shutdown_rejects_new_work_and_waits_for_running_attempts() {
     let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(751))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(751))));
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1732,14 +1951,20 @@ async fn shutdown_rejects_new_work_and_waits_for_running_attempts() {
         service.submit(request()).await,
         Err(qubit_task::service::TaskServiceError::ShuttingDown)
     ));
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Cancelled
+    );
 }
 
 async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Arc<dyn TaskStore>) {
     let started = Arc::new(tokio::sync::Semaphore::new(0));
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let mut builder =
-        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(801))));
+    let mut builder = TaskExecutionServiceBuilder::new(
+        Arc::clone(&store),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(801))),
+    );
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1759,8 +1984,13 @@ async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Ar
         .forget();
     drop(service);
 
-    let build_next =
-        || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(802))));
+    let build_next = || {
+        TaskExecutionServiceBuilder::new(
+            Arc::clone(&store),
+            registry(),
+            Arc::new(Ids(AtomicU64::new(802))),
+        )
+    };
     assert!(matches!(
         build_next().build().await,
         Err(qubit_task::service::TaskServiceError::Store(
@@ -1775,7 +2005,9 @@ async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Ar
                     next.shutdown().await.expect("second service shuts down");
                     break;
                 }
-                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                Err(qubit_task::service::TaskServiceError::Store(
+                    qubit_task::store::StoreError::OwnerConflict,
+                )) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("unexpected second build error: {error}"),
@@ -1815,7 +2047,13 @@ async fn dropping_last_service_handle_drains_and_releases_owner_sqlite() {
 #[tokio::test]
 async fn dropping_one_of_multiple_service_handles_keeps_owner() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
-    let build = || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(811))));
+    let build = || {
+        TaskExecutionServiceBuilder::new(
+            Arc::clone(&store),
+            registry(),
+            Arc::new(Ids(AtomicU64::new(811))),
+        )
+    };
     let first = build().build().await.expect("first service acquires owner");
     let remaining = first.clone();
     drop(first);
@@ -1829,7 +2067,10 @@ async fn dropping_one_of_multiple_service_handles_keeps_owner() {
             qubit_task::store::StoreError::OwnerConflict
         ))
     ));
-    remaining.shutdown().await.expect("remaining handle shuts down");
+    remaining
+        .shutdown()
+        .await
+        .expect("remaining handle shuts down");
     let next = build().build().await.expect("next owner acquires store");
     next.shutdown().await.expect("next owner shuts down");
 }
@@ -1837,10 +2078,11 @@ async fn dropping_one_of_multiple_service_handles_keeps_owner() {
 #[tokio::test]
 async fn concurrent_shutdown_calls_share_result() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
-    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(821))))
-        .build()
-        .await
-        .expect("service builds");
+    let service =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(821))))
+            .build()
+            .await
+            .expect("service builds");
     let (first, second) = tokio::join!(service.shutdown(), service.shutdown());
     assert!(first.is_ok(), "first shutdown result: {first:?}");
     assert!(second.is_ok(), "second shutdown result: {second:?}");
@@ -1851,8 +2093,11 @@ async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
     let started = Arc::new(tokio::sync::Semaphore::new(0));
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let mut builder =
-        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(831))));
+    let mut builder = TaskExecutionServiceBuilder::new(
+        Arc::clone(&store),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(831))),
+    );
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1892,15 +2137,21 @@ async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            match TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(832))))
-                .build()
-                .await
+            match TaskExecutionServiceBuilder::new(
+                Arc::clone(&store),
+                registry(),
+                Arc::new(Ids(AtomicU64::new(832))),
+            )
+            .build()
+            .await
             {
                 Ok(next) => {
                     next.shutdown().await.expect("next service shuts down");
                     break;
                 }
-                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                Err(qubit_task::service::TaskServiceError::Store(
+                    qubit_task::store::StoreError::OwnerConflict,
+                )) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("unexpected next build error: {error}"),
@@ -1918,10 +2169,14 @@ async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
 #[tokio::test]
 async fn concurrent_shutdown_calls_share_store_fault() {
     let store = failing_store();
-    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(841))))
-        .build()
-        .await
-        .expect("service builds");
+    let service = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(841))),
+    )
+    .build()
+    .await
+    .expect("service builds");
     store.fail_next_list.store(true, Ordering::Release);
     service.submit(request()).await.expect("task is accepted");
     wait_for_latched_store_fault(&service).await;
@@ -1940,10 +2195,14 @@ async fn concurrent_shutdown_calls_share_store_fault() {
 #[tokio::test]
 async fn panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worker() {
     let store = failing_store();
-    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(851))))
-        .build()
-        .await
-        .expect("first service builds");
+    let service = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(851))),
+    )
+    .build()
+    .await
+    .expect("first service builds");
     store.panic_next_release.store(true, Ordering::Release);
 
     let shutdown = tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown())
@@ -1955,15 +2214,21 @@ async fn panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worke
     ));
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            match TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(852))))
-                .build()
-                .await
+            match TaskExecutionServiceBuilder::new(
+                store.clone(),
+                registry(),
+                Arc::new(Ids(AtomicU64::new(852))),
+            )
+            .build()
+            .await
             {
                 Ok(next) => {
                     next.shutdown().await.expect("next service shuts down");
                     break;
                 }
-                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                Err(qubit_task::service::TaskServiceError::Store(
+                    qubit_task::store::StoreError::OwnerConflict,
+                )) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("unexpected next build error: {error}"),
@@ -1977,10 +2242,14 @@ async fn panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worke
 #[tokio::test]
 async fn subsequent_shutdown_retries_transient_owner_release_failure() {
     let store = failing_store();
-    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(861))))
-        .build()
-        .await
-        .expect("first service builds");
+    let service = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(861))),
+    )
+    .build()
+    .await
+    .expect("first service builds");
     store.fail_next_release.store(true, Ordering::Release);
 
     let (first, concurrent) = tokio::join!(service.shutdown(), service.shutdown());
@@ -1997,22 +2266,27 @@ async fn subsequent_shutdown_retries_transient_owner_release_failure() {
         .shutdown()
         .await
         .expect("later explicit shutdown retries owner release");
-    let next = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(862))))
-        .build()
-        .await
-        .expect("next service acquires the released owner");
+    let next =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(862))))
+            .build()
+            .await
+            .expect("next service acquires the released owner");
     next.shutdown().await.expect("next service shuts down");
 }
 
 #[tokio::test]
 async fn shutdown_fences_cancel_calls_from_previous_owner() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
-    let first_builder =
-        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(761))));
+    let first_builder = TaskExecutionServiceBuilder::new(
+        Arc::clone(&store),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(761))),
+    );
     let first = first_builder.build().await.unwrap();
     first.shutdown().await.unwrap();
 
-    let mut second_builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(762))));
+    let mut second_builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(762))));
     second_builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -2048,7 +2322,10 @@ async fn shutdown_fences_cancel_calls_from_previous_owner() {
         second.cancel(accepted.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
-    assert_eq!(wait_for_terminal(&second, accepted.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&second, accepted.id).await,
+        TaskState::Cancelled
+    );
     second.shutdown().await.unwrap();
 }
 
@@ -2065,7 +2342,9 @@ async fn shutdown_waits_for_external_cancel_hook() {
             let hook_finished = Arc::clone(&self.0);
             Box::pin(async move {
                 hook_finished.notified().await;
-                Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput::default()))
+                Ok(TaskRunOutcome::Succeeded(
+                    qubit_task::model::TaskOutput::default(),
+                ))
             })
         }
     }
@@ -2088,7 +2367,8 @@ async fn shutdown_waits_for_external_cancel_hook() {
             Ok(())
         })
     });
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(771))));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(771))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<Counter, _>(
@@ -2120,7 +2400,10 @@ async fn shutdown_waits_for_external_cancel_hook() {
     tokio::task::yield_now().await;
     assert!(!shutdown.is_finished());
     hook_release.notify_one();
-    assert_eq!(cancel.await.unwrap().unwrap(), CancelOutcome::CancellationRequested);
+    assert_eq!(
+        cancel.await.unwrap().unwrap(),
+        CancelOutcome::CancellationRequested
+    );
     shutdown.await.unwrap().unwrap();
 }
 
@@ -2134,9 +2417,13 @@ async fn typed_service_persists_sqlite_terminal_transition() {
             .unwrap()
             .as_nanos(),
     ));
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
-    let mut builder =
-        TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1001))));
+    let store: Arc<dyn TaskStore> =
+        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let mut builder = TaskExecutionServiceBuilder::new(
+        Arc::clone(&store),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(1001))),
+    );
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -2148,7 +2435,10 @@ async fn typed_service_persists_sqlite_terminal_transition() {
         .unwrap();
     let service = builder.build().await.unwrap();
     let accepted = service.submit(request()).await.unwrap();
-    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.id).await,
+        TaskState::Succeeded
+    );
     service.shutdown().await.unwrap();
     drop(service);
     drop(store);
@@ -2168,9 +2458,15 @@ async fn typed_service_fences_build_until_shutdown_releases_owner() {
             .unwrap()
             .as_nanos(),
     ));
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
-    let build =
-        || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1101))));
+    let store: Arc<dyn TaskStore> =
+        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let build = || {
+        TaskExecutionServiceBuilder::new(
+            Arc::clone(&store),
+            registry(),
+            Arc::new(Ids(AtomicU64::new(1101))),
+        )
+    };
     let first = build().build().await.unwrap();
     let second = build().build().await;
     assert!(matches!(

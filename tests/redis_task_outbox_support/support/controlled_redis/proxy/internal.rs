@@ -21,7 +21,9 @@ use std::str::from_utf8;
 /// EOF. Consumes blocking socket input. Returns an IO error for truncated
 /// frames, invalid array/bulk headers, invalid bulk lengths, or socket read
 /// failures.
-pub(super) fn read_request(reader: &mut BufReader<TcpStream>) -> IoResult<Option<(Vec<u8>, Vec<u8>)>> {
+pub(super) fn read_request(
+    reader: &mut BufReader<TcpStream>,
+) -> IoResult<Option<(Vec<u8>, Vec<u8>)>> {
     let Some((line, mut wire)) = read_line(reader)? else {
         return Ok(None);
     };
@@ -33,7 +35,10 @@ pub(super) fn read_request(reader: &mut BufReader<TcpStream>) -> IoResult<Option
     for index in 0..count {
         let (header, mut header_wire) = read_line(reader)?.ok_or_else(unexpected_eof)?;
         if header.first() != Some(&b'$') {
-            return Err(Error::new(ErrorKind::InvalidData, "expected RESP bulk string"));
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "expected RESP bulk string",
+            ));
         }
         let length = usize::try_from(parse_length(&header[1..])?)
             .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid RESP bulk length"))?;

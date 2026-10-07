@@ -71,7 +71,8 @@ async fn test_sqlite_store_obeys_core_contract() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_store_obeys_terminal_prune_contract() {
-    let path = std::env::temp_dir().join(format!("rs-task-prune-contract-{}.sqlite", Uuid::new_v4()));
+    let path =
+        std::env::temp_dir().join(format!("rs-task-prune-contract-{}.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open_next(&path).expect("typed sqlite store opens");
     support::store_contract::check_terminal_prune_contract(&store).await;
     drop(store);

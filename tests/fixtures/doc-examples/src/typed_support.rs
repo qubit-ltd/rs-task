@@ -112,12 +112,18 @@ pub fn request(data: serde_json::Value, key: &str) -> TaskRequest<ExamplePayload
 pub struct ExampleHandler;
 
 impl TaskHandler<ExamplePayload> for ExampleHandler {
-    fn run<'a>(&'a self, _input: ExamplePayload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        _input: ExamplePayload,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
 
-pub fn register_handler(builder: &mut TaskExecutionServiceBuilder) -> Result<(), Box<dyn std::error::Error>> {
+pub fn register_handler(
+    builder: &mut TaskExecutionServiceBuilder,
+) -> Result<(), Box<dyn std::error::Error>> {
     builder.handlers_mut().register::<ExamplePayload, _>(
         TaskHandlerDescriptor {
             kind_id: "example.process".into(),

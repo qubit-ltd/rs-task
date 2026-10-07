@@ -22,7 +22,8 @@ impl TemporaryDatabase {
     /// creating a database.
     pub fn new() -> Self {
         Self {
-            path: std::env::temp_dir().join(format!("redis-task-outbox-{}.sqlite", uuid::Uuid::new_v4())),
+            path: std::env::temp_dir()
+                .join(format!("redis-task-outbox-{}.sqlite", uuid::Uuid::new_v4())),
         }
     }
 
@@ -55,9 +56,15 @@ impl Drop for TemporaryDatabase {
     fn drop(&mut self) {
         if let Err(error) = self.cleanup() {
             if std::thread::panicking() {
-                eprintln!("temporary SQLite cleanup failed for {}: {error}", self.path.display());
+                eprintln!(
+                    "temporary SQLite cleanup failed for {}: {error}",
+                    self.path.display()
+                );
             } else {
-                panic!("temporary SQLite cleanup failed for {}: {error}", self.path.display());
+                panic!(
+                    "temporary SQLite cleanup failed for {}: {error}",
+                    self.path.display()
+                );
             }
         }
     }

@@ -90,10 +90,9 @@ fn acknowledgement(mode: u8) -> Option<PublishAcknowledgement> {
             provider_message_id: None,
             metadata: Default::default(),
         }),
-        ACCEPTED => Some(PublishAcknowledgement::DestinationAdmissions(vec![destination(
-            1,
-            AdmissionStatus::Accepted,
-        )])),
+        ACCEPTED => Some(PublishAcknowledgement::DestinationAdmissions(vec![
+            destination(1, AdmissionStatus::Accepted),
+        ])),
         PARTIALLY_ACCEPTED => Some(PublishAcknowledgement::DestinationAdmissions(vec![
             destination(1, AdmissionStatus::Accepted),
             destination(2, AdmissionStatus::Rejected("queue full".into())),
@@ -123,13 +122,20 @@ impl AsyncEventBusSpi for FakeSpi {
             .build()
             .expect("capabilities")
     }
-    fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
+    fn publish<'a>(
+        &'a self,
+        message: OutboundMessage,
+    ) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         Box::pin(async move {
-            self.ids.lock().expect("ids").push(message.id().as_str().to_owned());
+            self.ids
+                .lock()
+                .expect("ids")
+                .push(message.id().as_str().to_owned());
             let TransportPayload::Encoded(payload) = message.payload() else {
                 panic!("task event must be encoded for the fake provider");
             };
-            let event: TaskEvent = serde_json::from_slice(payload.bytes()).expect("decode published task event");
+            let event: TaskEvent =
+                serde_json::from_slice(payload.bytes()).expect("decode published task event");
             self.state_versions
                 .lock()
                 .expect("state versions")
@@ -188,7 +194,11 @@ fn bus(mode: u8, codec: bool) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
 }
 
 /// Builds a fake with explicit durability for the rejected-provider case.
-fn bus_with_durability(mode: u8, codec: bool, durability: DurabilityCapability) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
+fn bus_with_durability(
+    mode: u8,
+    codec: bool,
+    durability: DurabilityCapability,
+) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
     let visibility = if mode >= ACCEPTED {
         PublishVisibility::DestinationAdmissions
     } else {
@@ -204,13 +214,20 @@ fn bus_with_durability(mode: u8, codec: bool, durability: DurabilityCapability) 
     let mut registry = CodecRegistry::new();
     if codec {
         registry
-            .register(Arc::new(task_event_codec::TaskEventJsonCodec::new().expect("codec")))
+            .register(Arc::new(
+                task_event_codec::TaskEventJsonCodec::new().expect("codec"),
+            ))
             .expect("register codec");
     }
     let config = EventBusFacadeConfig::new().with_codec_registry(Arc::new(registry));
     (
         Arc::new(
-            AsyncEventBus::with_config(ProviderId::new("fake").expect("provider"), spi.clone(), config).expect("bus"),
+            AsyncEventBus::with_config(
+                ProviderId::new("fake").expect("provider"),
+                spi.clone(),
+                config,
+            )
+            .expect("bus"),
         ),
         spi,
     )
@@ -222,7 +239,10 @@ async fn seed() -> Arc<SqliteTaskStore> {
     let owner = store.acquire_owner().await.expect("owner");
     store.enable_event_outbox().await.expect("enable");
     let id = TaskId::from_id(qubit_id::Id::new(42));
-    store.accept_encoded(id, super::request()).await.expect("accept");
+    store
+        .accept_encoded(id, super::request())
+        .await
+        .expect("accept");
     store
         .start_encoded(StartCommand {
             id,
@@ -250,7 +270,10 @@ async fn seed() -> Arc<SqliteTaskStore> {
 }
 
 /// Starts the public service with a bounded publisher shutdown.
-async fn service(store: Arc<dyn TaskStore>, bus: Arc<AsyncEventBus>) -> Result<TaskExecutionService, TaskServiceError> {
+async fn service(
+    store: Arc<dyn TaskStore>,
+    bus: Arc<AsyncEventBus>,
+) -> Result<TaskExecutionService, TaskServiceError> {
     service_with_timeout(store, bus, Duration::from_secs(5)).await
 }
 
@@ -280,14 +303,29 @@ async fn test_startup_replay_deletes_only_confirmed_admissions() {
         let queued_before_shutdown = service.notification_stats().queued;
         service.shutdown().await.expect("drained");
         let stats = service.notification_stats();
-        assert_eq!(stats.queued, queued_before_shutdown, "shutdown is not an enqueue");
+        assert_eq!(
+            stats.queued, queued_before_shutdown,
+            "shutdown is not an enqueue"
+        );
         assert_eq!(stats.published, 3);
         assert_eq!(stats.dropped, 0);
         assert_eq!(stats.failed, 0);
-        assert_eq!(*spi.ids.lock().expect("ids"), ["task:42:0", "task:42:1", "task:42:2"]);
-        assert_eq!(*spi.state_versions.lock().expect("state versions"), [0, 1, 2]);
+        assert_eq!(
+            *spi.ids.lock().expect("ids"),
+            ["task:42:0", "task:42:1", "task:42:2"]
+        );
+        assert_eq!(
+            *spi.state_versions.lock().expect("state versions"),
+            [0, 1, 2]
+        );
         let owner = store.acquire_owner().await.expect("owner released");
-        assert!(store.list_event_outbox(128).await.expect("empty").is_empty());
+        assert!(
+            store
+                .list_event_outbox(128)
+                .await
+                .expect("empty")
+                .is_empty()
+        );
         store.release_owner(owner).await.expect("release");
     }
 }
@@ -307,8 +345,14 @@ async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
         let first = service_with_timeout(store.clone(), bus.clone(), Duration::from_millis(500))
             .await
             .expect("service");
-        let shutdown_error = first.shutdown().await.expect_err("failed head prevents draining");
-        assert!(matches!(&shutdown_error, TaskServiceError::NotificationClose(_)));
+        let shutdown_error = first
+            .shutdown()
+            .await
+            .expect_err("failed head prevents draining");
+        assert!(matches!(
+            &shutdown_error,
+            TaskServiceError::NotificationClose(_)
+        ));
         let diagnostic = shutdown_error.to_string();
         assert!(
             diagnostic.contains("task:42:0"),
@@ -329,21 +373,37 @@ async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
             );
         }
         assert!(
-            matches!(first.shutdown().await, Err(TaskServiceError::NotificationClose(_))),
+            matches!(
+                first.shutdown().await,
+                Err(TaskServiceError::NotificationClose(_))
+            ),
             "repeated shutdown retains its drain failure"
         );
-        let owner = store.acquire_owner().await.expect("released despite timeout");
+        let owner = store
+            .acquire_owner()
+            .await
+            .expect("released despite timeout");
         let retained = store.list_event_outbox(128).await.expect("retained");
         assert_eq!(
-            retained.iter().map(|event| event.event_id.as_str()).collect::<Vec<_>>(),
+            retained
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
             ["task:42:0", "task:42:1", "task:42:2"]
         );
         assert_eq!(
-            retained.iter().map(|event| event.state_version).collect::<Vec<_>>(),
+            retained
+                .iter()
+                .map(|event| event.state_version)
+                .collect::<Vec<_>>(),
             [0, 1, 2]
         );
         assert!(
-            spi.ids.lock().expect("ids").iter().all(|id| id == "task:42:0"),
+            spi.ids
+                .lock()
+                .expect("ids")
+                .iter()
+                .all(|id| id == "task:42:0"),
             "a failed head must retain order"
         );
         store.release_owner(owner).await.expect("release");
@@ -357,28 +417,58 @@ async fn test_rejected_and_uncertain_events_replay_with_stable_identity() {
         second.shutdown().await.expect("replayed");
         let ids = spi.ids.lock().expect("ids");
         assert!(ids.iter().filter(|id| id.as_str() == "task:42:0").count() >= 2);
-        assert_eq!(&ids[ids.len() - 3..], ["task:42:0", "task:42:1", "task:42:2"]);
+        assert_eq!(
+            &ids[ids.len() - 3..],
+            ["task:42:0", "task:42:1", "task:42:2"]
+        );
         let state_versions = spi.state_versions.lock().expect("state versions");
-        assert!(state_versions.iter().filter(|version| **version == 0).count() >= 2);
+        assert!(
+            state_versions
+                .iter()
+                .filter(|version| **version == 0)
+                .count()
+                >= 2
+        );
         assert_eq!(&state_versions[state_versions.len() - 3..], [0, 1, 2]);
     }
 }
 
 #[tokio::test]
-async fn test_missing_codec_preserves_outbox_and_memory_store_is_rejected() {
-    let (bus, spi) = bus(OPAQUE_ACCEPTED, false);
+async fn test_missing_codec_preserves_outbox_and_releases_owner_for_codec_retry() {
+    let (missing_codec_bus, spi) = bus(OPAQUE_ACCEPTED, false);
     let store = seed().await;
-    let service = service_with_timeout(store.clone(), bus.clone(), Duration::from_millis(500))
-        .await
-        .expect("service");
+    let result = service(store.clone(), missing_codec_bus).await;
     assert!(matches!(
-        service.shutdown().await,
-        Err(TaskServiceError::NotificationClose(_))
+        result,
+        Err(TaskServiceError::NotificationCodecUnavailable {
+            provider_id,
+            topic,
+            source: qubit_event_bus::CapabilityError::CodecRequired,
+        }) if provider_id == "fake" && topic == "task.lifecycle"
     ));
     assert!(spi.ids.lock().expect("ids").is_empty());
     let owner = store.acquire_owner().await.expect("owner");
-    assert_eq!(store.list_event_outbox(128).await.expect("retained").len(), 3);
+    assert_eq!(
+        store.list_event_outbox(128).await.expect("retained").len(),
+        3
+    );
     store.release_owner(owner).await.expect("release");
+
+    let (bus, spi) = bus(OPAQUE_ACCEPTED, true);
+    let service = service(store, bus)
+        .await
+        .expect("restart succeeds after registering the codec");
+    service.shutdown().await.expect("replay");
+    let ids = spi.ids.lock().expect("ids");
+    assert_eq!(
+        ids.as_slice(),
+        ["task:42:0", "task:42:1", "task:42:2"].map(str::to_owned)
+    );
+}
+
+#[tokio::test]
+async fn test_memory_store_is_rejected_for_event_outbox() {
+    let (bus, _) = bus(OPAQUE_ACCEPTED, true);
     let result = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(10)),
         Arc::new(qubit_codec::ValueBytesCodecRegistry::empty()),
@@ -399,7 +489,10 @@ async fn test_missing_codec_preserves_outbox_and_memory_store_is_rejected() {
 async fn test_service_cancellation_persists_snapshot_before_publication() {
     let store = Arc::new(SqliteTaskStore::open_next(super::database_path()).expect("store"));
     let id = TaskId::from_id(qubit_id::Id::new(42));
-    store.accept_encoded(id, super::request()).await.expect("existing task");
+    store
+        .accept_encoded(id, super::request())
+        .await
+        .expect("existing task");
     store
         .transition_encoded(TransitionCommand {
             id,
@@ -419,8 +512,15 @@ async fn test_service_cancellation_persists_snapshot_before_publication() {
     let (bus, spi) = bus(NOT_ACCEPTED_ERROR, true);
     let service = service(store.clone(), bus).await.expect("service");
     let _outcome = service.cancel(id).await.expect("cancel blocked task");
-    let events = store.list_event_outbox(128).await.expect("committed snapshot");
-    assert_eq!(events.len(), 1, "enabling notifications does not backfill old history");
+    let events = store
+        .list_event_outbox(128)
+        .await
+        .expect("committed snapshot");
+    assert_eq!(
+        events.len(),
+        1,
+        "enabling notifications does not backfill old history"
+    );
     assert_eq!(events[0].state_version, 2);
     assert!(events[0].event_json.contains("Cancelled"));
     spi.mode.store(OPAQUE_ACCEPTED, Ordering::Release);
@@ -439,7 +539,10 @@ async fn test_no_destination_admission_retains_notifications() {
         Err(TaskServiceError::NotificationClose(_))
     ));
     let owner = store.acquire_owner().await.expect("owner");
-    assert_eq!(store.list_event_outbox(128).await.expect("retained").len(), 3);
+    assert_eq!(
+        store.list_event_outbox(128).await.expect("retained").len(),
+        3
+    );
     store.release_owner(owner).await.expect("release");
 }
 
@@ -473,7 +576,10 @@ async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
         Err(TaskServiceError::NotificationProviderNotDurable { provider_id })
             if provider_id == bus.provider_id().as_str()
     ));
-    let owner = store.acquire_owner().await.expect("owner released after rejection");
+    let owner = store
+        .acquire_owner()
+        .await
+        .expect("owner released after rejection");
     store
         .accept_encoded(TaskId::from_id(qubit_id::Id::new(51)), super::request())
         .await
@@ -494,9 +600,15 @@ async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
         Err(TaskServiceError::NotificationProviderNotDurable { .. })
     ));
     let owner = seeded.acquire_owner().await.expect("seeded owner released");
-    let retained = seeded.list_event_outbox(128).await.expect("saved rows retained");
+    let retained = seeded
+        .list_event_outbox(128)
+        .await
+        .expect("saved rows retained");
     assert_eq!(
-        retained.iter().map(|entry| entry.event_id.as_str()).collect::<Vec<_>>(),
+        retained
+            .iter()
+            .map(|entry| entry.event_id.as_str())
+            .collect::<Vec<_>>(),
         ["task:42:0", "task:42:1", "task:42:2"]
     );
     seeded.release_owner(owner).await.expect("release");
@@ -507,7 +619,9 @@ async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
 async fn test_durable_provider_allows_service_construction() {
     let store = Arc::new(SqliteTaskStore::open_next(super::database_path()).expect("store"));
     let (bus, _) = bus(OPAQUE_ACCEPTED, true);
-    let service = service(store.clone(), bus).await.expect("durable provider accepted");
+    let service = service(store.clone(), bus)
+        .await
+        .expect("durable provider accepted");
     service.shutdown().await.expect("shutdown");
     let owner = store.acquire_owner().await.expect("owner released");
     store.release_owner(owner).await.expect("release");
