@@ -1148,6 +1148,86 @@ async fn blocked_task_can_be_resumed_after_restarting_with_its_handler() {
 }
 
 #[tokio::test]
+async fn typed_service_query_filters_and_get_handles_missing_task() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1311))))
+        .build()
+        .await
+        .expect("service starts");
+
+    let mut billing = request();
+    billing.category = Some("billing".into());
+    billing.correlation_key = Some("invoice-17".into());
+    let billing = service.submit(billing).await.expect("billing task is accepted");
+    let mut operations = request();
+    operations.category = Some("operations".into());
+    operations.correlation_key = Some("deploy-9".into());
+    service.submit(operations).await.expect("operations task is accepted");
+
+    let billing_page = service
+        .query(TaskQuery {
+            category: Some("billing".into()),
+            ..TaskQuery::default()
+        })
+        .await
+        .expect("category query succeeds");
+    assert_eq!(billing_page.records.len(), 1);
+    assert_eq!(billing_page.records[0].id, billing.id);
+
+    let correlation_page = service
+        .query(TaskQuery {
+            correlation_key: Some("deploy-9".into()),
+            ..TaskQuery::default()
+        })
+        .await
+        .expect("correlation query succeeds");
+    assert_eq!(correlation_page.records.len(), 1);
+    assert_eq!(correlation_page.records[0].category.as_deref(), Some("operations"));
+    assert_eq!(service.get(TaskId::from_id(qubit_id::Id::new(9999))).await.unwrap(), None);
+    service.shutdown().await.expect("service shuts down cleanly");
+}
+
+#[tokio::test]
+async fn resume_blocked_rejects_stale_revision_and_terminal_task() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1321))))
+        .build()
+        .await
+        .expect("service starts");
+    let accepted = service.submit(request()).await.expect("task is accepted");
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let summary = service.get(accepted.id).await.unwrap().unwrap();
+            if matches!(summary.state, TaskState::Blocked { .. }) {
+                break summary;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unhandled task reaches blocked state");
+
+    assert!(matches!(
+        service.resume_blocked(accepted.id, blocked.state_version + 1).await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::Conflict
+        ))
+    ));
+    assert_eq!(
+        service.cancel(accepted.id).await.unwrap(),
+        CancelOutcome::CancelledBeforeStart
+    );
+    let cancelled = service.get(accepted.id).await.unwrap().unwrap();
+    assert!(matches!(
+        service.resume_blocked(accepted.id, cancelled.state_version).await,
+        Err(qubit_task::service::TaskServiceError::NotBlocked {
+            actual: qubit_task::model::TaskStateKind::Cancelled
+        })
+    ));
+    service.shutdown().await.expect("service shuts down cleanly");
+}
+
+#[tokio::test]
 async fn id_generation_failure_prevents_acceptance() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(FailingIds))
