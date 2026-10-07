@@ -8,3 +8,4 @@
 mod memory_tests;
 #[cfg(feature = "sqlite")]
 mod sqlite_tests;
+mod task_store_defaults_tests;
