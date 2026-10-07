@@ -325,6 +325,28 @@ mod tests {
         store.release_owner(next_epoch).await.expect("second owner released");
     }
 
+    /// Releasing an already disarmed guard succeeds without releasing a newer owner.
+    #[tokio::test]
+    async fn test_successful_release_disarms_guard_for_later_calls_and_drop() {
+        let store = Arc::new(GatedReleaseStore::new());
+        store.first_release.store(false, Ordering::Release);
+        let epoch = store.acquire_owner().await.expect("first owner acquired");
+        let dyn_store: Arc<dyn TaskStore> = store.clone();
+        let mut guard = OwnerReleaseGuard::new(
+            dyn_store,
+            epoch,
+            OwnerReleaseWorker::shared().expect("cleanup worker starts"),
+        );
+
+        guard.release().await.expect("first owner released");
+        guard.release().await.expect("disarmed release is idempotent");
+        let next_epoch = store.acquire_owner().await.expect("new owner acquired");
+        drop(guard);
+
+        assert!(matches!(store.acquire_owner().await, Err(StoreError::OwnerConflict)));
+        store.release_owner(next_epoch).await.expect("new owner remains valid");
+    }
+
     /// A blocked cleanup must not prevent an unrelated owner from draining.
     #[tokio::test]
     async fn test_pending_release_does_not_block_other_cleanup() {
