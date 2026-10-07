@@ -924,3 +924,143 @@ async fn test_memory_store_task_query_limit() {
         .expect("zero limit selects the default one-row page");
     assert_eq!(first.records.len(), 1);
 }
+
+/// Exercises legacy request replay, duplicate-ID, validation, and byte-limit errors.
+#[tokio_test]
+async fn test_memory_store_legacy_acceptance_rejects_invalid_duplicate_and_oversized_requests() {
+    let store = MemoryTaskStore::with_limits(
+        4,
+        NonZeroUsize::new(2).expect("payload budget is positive"),
+        NonZeroUsize::new(4).expect("record limit is positive"),
+    );
+    let id = TaskId::generate();
+    let request = legacy_request("legacy", vec![1, 2], Some("legacy-replay"));
+    let accepted = store
+        .accept(id, request.clone())
+        .await
+        .expect("initial request fits configured limits");
+    assert!(matches!(accepted, AcceptOutcome::Accepted(_)));
+    assert!(matches!(
+        store.accept(TaskId::generate(), request.clone()).await,
+        Ok(AcceptOutcome::Existing(record)) if record.id == id
+    ));
+
+    assert!(matches!(
+        store.accept(id, legacy_request("duplicate", Vec::new(), None)).await,
+        Err(StoreError::DuplicateTask)
+    ));
+    assert!(matches!(
+        store
+            .accept(
+                TaskId::generate(),
+                legacy_request("legacy", vec![3], Some("legacy-replay")),
+            )
+            .await,
+        Err(StoreError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        store
+            .accept(
+                TaskId::generate(),
+                legacy_request("too-large", vec![3], None),
+            )
+            .await,
+        Err(StoreError::CapacityExceeded {
+            requested_bytes: 1,
+            available_bytes: 0
+        })
+    ));
+
+    let mut invalid = TaskRequest::new("", "1", Vec::new());
+    invalid.task_type.clear();
+    assert!(matches!(
+        store.accept(TaskId::generate(), invalid).await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+}
+
+/// Checks strict unfinished counts, owner epochs, and unsupported recovery scans.
+#[tokio_test]
+async fn test_memory_store_owner_and_unfinished_queries_follow_capabilities() {
+    let store = MemoryTaskStore::new(4);
+    let id = TaskId::generate();
+    assert!(matches!(
+        store.accept(id, TaskRequest::new("owner", "1", Vec::new())).await,
+        Ok(AcceptOutcome::Accepted(_))
+    ));
+    assert!(TaskStore::has_unfinished_over_limit(&store, 0)
+        .await
+        .expect("unfinished count query succeeds"));
+    assert!(!TaskStore::has_unfinished_over_limit(&store, 1)
+        .await
+        .expect("unfinished count query succeeds at the exact limit"));
+    assert!(matches!(
+        TaskStore::scan_unfinished(&store, None).await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+
+    let first = TypedTaskStore::acquire_owner(&store)
+        .await
+        .expect("first owner acquires the volatile store");
+    assert_eq!(first.0, 1);
+    assert!(matches!(
+        TypedTaskStore::acquire_owner(&store).await,
+        Err(StoreError::OwnerConflict)
+    ));
+    assert!(matches!(
+        TypedTaskStore::release_owner(&store, crate::model::OwnerEpoch(first.0 + 1)).await,
+        Err(StoreError::OwnerConflict)
+    ));
+    TypedTaskStore::release_owner(&store, first)
+        .await
+        .expect("current owner releases the store");
+    let second = TypedTaskStore::acquire_owner(&store)
+        .await
+        .expect("released store can be acquired again");
+    assert_eq!(second.0, first.0 + 1);
+}
+
+/// Filters legacy history and follows its cursor through the final page.
+#[tokio_test]
+async fn test_memory_store_legacy_history_filters_and_paginates() {
+    let store = MemoryTaskStore::new(8);
+    let first_id = TaskId::generate();
+    let second_id = TaskId::generate();
+    let third_id = TaskId::generate();
+    for (id, kind, correlation) in [
+        (first_id, "history-a", Some("wanted")),
+        (second_id, "history-b", Some("wanted")),
+        (third_id, "history-c", Some("other")),
+    ] {
+        let mut request = TaskRequest::new(kind, "1", Vec::new());
+        request.correlation_key = correlation.map(str::to_owned);
+        assert!(matches!(
+            store.accept(id, request).await,
+            Ok(AcceptOutcome::Accepted(_))
+        ));
+    }
+
+    let first_page = store
+        .list(TaskQuery {
+            correlation_key: Some("wanted".to_owned()),
+            limit: 1,
+            ..TaskQuery::default()
+        })
+        .await
+        .expect("filtered first page is available");
+    assert_eq!(first_page.records.len(), 1);
+    let cursor = first_page.next.expect("another matching record remains");
+    let last_page = store
+        .list(TaskQuery {
+            states: vec![TaskStateKind::Queued],
+            correlation_key: Some("wanted".to_owned()),
+            after: Some(cursor),
+            limit: 1,
+        })
+        .await
+        .expect("filtered final page is available");
+    assert_eq!(last_page.records.len(), 1);
+    assert!(last_page.next.is_none());
+    assert_ne!(last_page.records[0].id, first_page.records[0].id);
+    assert!(store.get(third_id).await.expect("unmatched lookup succeeds").is_some());
+}
