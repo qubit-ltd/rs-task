@@ -9,13 +9,15 @@ use std::num::NonZeroUsize;
 
 use tokio::test as tokio_test;
 
-use crate::model::AcceptOutcome;
 use crate::model::MAX_TASK_QUERY_LIMIT;
-use crate::model::TaskId;
-use crate::model::TaskQuery;
-use crate::model::TaskRequest;
+use crate::model::TaskOutput;
 use crate::model::TaskState;
-use crate::model::TransitionCommand;
+use crate::model::TaskStateKind;
+use crate::model::legacy::AcceptOutcome;
+use crate::model::legacy::TaskId;
+use crate::model::legacy::TaskQuery;
+use crate::model::legacy::TaskRequest;
+use crate::model::legacy::TransitionCommand;
 use crate::model::next::ProgressCommand;
 use crate::model::next::ResourceRequest as EncodedResourceRequest;
 use crate::model::next::StartCommand;
@@ -36,8 +38,7 @@ fn encoded_request(key: Option<&str>, bytes: Vec<u8>) -> StoredTaskRequest {
         kind_id: "memory.encoded".to_owned(),
         category: Some("integration".to_owned()),
         payload: StoredPayload {
-            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload")
-                .expect("model ID is valid"),
+            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload").expect("model ID is valid"),
             schema_version: 2,
             codec_id: "qubit.bytes.json".to_owned(),
             bytes,
@@ -51,6 +52,12 @@ fn encoded_request(key: Option<&str>, bytes: Vec<u8>) -> StoredTaskRequest {
 
 fn encoded_id(value: u64) -> EncodedTaskId {
     EncodedTaskId::from_id(qubit_id::Id::new(value))
+}
+
+fn legacy_request(task_type: &str, payload: Vec<u8>, idempotency_key: Option<&str>) -> TaskRequest {
+    let mut request = TaskRequest::new(task_type, "1", payload);
+    request.idempotency_key = idempotency_key.map(str::to_owned);
+    request
 }
 
 #[tokio_test]
@@ -182,7 +189,7 @@ async fn test_memory_store_idempotency_keys_are_global_across_request_apis() {
         store
             .accept(
                 TaskId::generate(),
-                TaskRequest::new("legacy", "1", Vec::new()).with_idempotency_key("global-key"),
+                legacy_request("legacy", Vec::new(), Some("global-key")),
             )
             .await,
         Err(StoreError::IdempotencyConflict)
@@ -321,12 +328,385 @@ async fn test_memory_store_start_and_progress_versions_are_independent() {
     );
 }
 
+/// Prunes only old typed terminal tasks and releases their payload and key.
+#[tokio_test]
+async fn test_memory_store_prunes_typed_terminal_records_and_releases_capacity() {
+    let store = MemoryTaskStore::with_limits(
+        8,
+        NonZeroUsize::new(3).expect("payload budget is positive"),
+        NonZeroUsize::new(2).expect("record limit is positive"),
+    );
+    let old = TypedTaskStore::accept_encoded(&store, encoded_id(110), encoded_request(Some("pruned-key"), vec![1, 2]))
+        .await
+        .expect("old task is accepted");
+    let kept = TypedTaskStore::accept_encoded(&store, encoded_id(111), encoded_request(None, vec![3]))
+        .await
+        .expect("second task fits the payload budget");
+    let running = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id: old.summary.id,
+            expected_state_version: old.summary.state_version,
+            started_at_ms: 1,
+        },
+    )
+    .await
+    .expect("old task starts");
+    TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id: running.id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            output: Some(TaskOutput {
+                summary: b"done".to_vec(),
+            }),
+            finished_at_ms: Some(10),
+        },
+    )
+    .await
+    .expect("old task becomes terminal");
+    let kept_running = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id: kept.summary.id,
+            expected_state_version: kept.summary.state_version,
+            started_at_ms: 2,
+        },
+    )
+    .await
+    .expect("kept task starts");
+    TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id: kept_running.id,
+            expected_state_version: kept_running.state_version,
+            expected_attempt: kept_running.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Cancelled,
+            cancel_requested: false,
+            cancel_error: None,
+            output: None,
+            finished_at_ms: Some(20),
+        },
+    )
+    .await
+    .expect("kept task becomes terminal");
+
+    assert_eq!(
+        TypedTaskStore::prune_terminal_before(&store, 10, NonZeroUsize::new(1).expect("prune batch size is positive"),)
+            .await
+            .expect("prune before the exact finish time succeeds"),
+        0,
+        "the cutoff is exclusive"
+    );
+    assert_eq!(
+        TypedTaskStore::prune_terminal_before(&store, 11, NonZeroUsize::new(1).expect("prune batch size is positive"),)
+            .await
+            .expect("old terminal task is pruned"),
+        1
+    );
+    assert!(
+        TypedTaskStore::get_encoded_task(&store, old.summary.id)
+            .await
+            .expect("pruned task lookup succeeds")
+            .is_none()
+    );
+    assert!(
+        TypedTaskStore::get_encoded_task(&store, kept.summary.id)
+            .await
+            .expect("kept task lookup succeeds")
+            .is_some()
+    );
+    let replacement = TypedTaskStore::accept_encoded(
+        &store,
+        encoded_id(112),
+        encoded_request(Some("pruned-key"), vec![4, 5, 6]),
+    )
+    .await
+    .expect("pruning releases both the idempotency key and payload budget");
+    assert!(replacement.created);
+}
+
+/// Keeps ready scans and retry deadlines consistent with queued task state.
+#[tokio_test]
+async fn test_memory_store_ready_scan_and_retry_deadline_respect_retry_time() {
+    let store = MemoryTaskStore::new(8);
+    let accepted = TypedTaskStore::accept_encoded(&store, encoded_id(113), encoded_request(None, Vec::new()))
+        .await
+        .expect("typed task is accepted");
+    let running = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id: accepted.summary.id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: 1,
+        },
+    )
+    .await
+    .expect("typed task starts");
+    let queued = TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id: running.id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            retry_not_before_ms: Some(50),
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            output: None,
+            finished_at_ms: None,
+        },
+    )
+    .await
+    .expect("retry is queued with a deadline");
+
+    assert_eq!(
+        TypedTaskStore::next_retry_deadline(&store, 49)
+            .await
+            .expect("next retry deadline is read"),
+        Some(50)
+    );
+    assert_eq!(
+        TypedTaskStore::next_retry_deadline(&store, 50)
+            .await
+            .expect("due deadline is excluded"),
+        None
+    );
+    let waiting =
+        TypedTaskStore::list_ready_queued(&store, None, NonZeroUsize::new(1).expect("page size is positive"), 49)
+            .await
+            .expect("ready scan succeeds before the deadline");
+    assert!(waiting.records.is_empty());
+    let ready =
+        TypedTaskStore::list_ready_queued(&store, None, NonZeroUsize::new(1).expect("page size is positive"), 50)
+            .await
+            .expect("ready scan includes the task at the deadline");
+    assert_eq!(ready.records.len(), 1);
+    assert_eq!(ready.records[0].id, queued.id);
+    let history = TypedTaskStore::list_encoded(
+        &store,
+        crate::model::next::TaskQuery {
+            states: vec![TaskStateKind::Queued],
+            category: Some("integration".to_owned()),
+            correlation_key: Some("correlation-1".to_owned()),
+            limit: 1,
+            ..crate::model::next::TaskQuery::default()
+        },
+    )
+    .await
+    .expect("typed history filters by state, category, and correlation key");
+    assert_eq!(history.records.len(), 1);
+    assert_eq!(history.records[0].id, queued.id);
+}
+
+/// Rejects invalid typed transitions without mutating lifecycle state.
+#[tokio_test]
+async fn test_memory_store_rejects_invalid_typed_output_and_retry_deadline() {
+    let store = MemoryTaskStore::new(8);
+    let accepted = TypedTaskStore::accept_encoded(&store, encoded_id(114), encoded_request(None, Vec::new()))
+        .await
+        .expect("typed task is accepted");
+    let output_error = TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id: accepted.summary.id,
+            expected_state_version: 0,
+            expected_attempt: 0,
+            retry_not_before_ms: None,
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            output: Some(TaskOutput { summary: Vec::new() }),
+            finished_at_ms: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        output_error,
+        Err(StoreError::InvalidRequest(
+            "task output can only be stored with the succeeded state"
+        ))
+    ));
+
+    let deadline_error = TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id: accepted.summary.id,
+            expected_state_version: 0,
+            expected_attempt: 0,
+            retry_not_before_ms: Some(5),
+            state: TaskState::Running,
+            cancel_requested: false,
+            cancel_error: None,
+            output: None,
+            finished_at_ms: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        deadline_error,
+        Err(StoreError::InvalidRequest(
+            "retry deadline is only valid for queued tasks"
+        ))
+    ));
+    let current = TypedTaskStore::get_encoded_task(&store, accepted.summary.id)
+        .await
+        .expect("task lookup succeeds")
+        .expect("invalid transitions leave task retained");
+    assert_eq!(current.summary.state, TaskState::Queued);
+    assert_eq!(current.summary.state_version, 0);
+}
+
+/// Makes legacy history eviction remove oldest terminal rows across both APIs.
+#[tokio_test]
+async fn test_memory_store_terminal_history_evicts_oldest_across_apis() {
+    let store = MemoryTaskStore::new(1);
+    let legacy_id = TaskId::generate();
+    let legacy = store
+        .accept(legacy_id, TaskRequest::new("legacy-history", "1", vec![1]))
+        .await
+        .expect("legacy task is accepted");
+    assert!(matches!(legacy, AcceptOutcome::Accepted(_)));
+    transition(&store, legacy_id, TaskState::Running)
+        .await
+        .expect("legacy task starts");
+    transition(&store, legacy_id, TaskState::Succeeded)
+        .await
+        .expect("legacy task succeeds");
+
+    let typed = TypedTaskStore::accept_encoded(&store, encoded_id(115), encoded_request(None, vec![2]))
+        .await
+        .expect("typed task is accepted");
+    let running = TypedTaskStore::start_encoded(
+        &store,
+        StartCommand {
+            id: typed.summary.id,
+            expected_state_version: typed.summary.state_version,
+            started_at_ms: 1,
+        },
+    )
+    .await
+    .expect("typed task starts");
+    TypedTaskStore::transition_encoded(
+        &store,
+        EncodedTransitionCommand {
+            id: running.id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            output: None,
+            finished_at_ms: Some(2),
+        },
+    )
+    .await
+    .expect("typed task succeeds");
+
+    let newest_legacy_id = TaskId::generate();
+    let newest = store
+        .accept(
+            newest_legacy_id,
+            TaskRequest::new("new-legacy-history", "1", Vec::new()),
+        )
+        .await
+        .expect("new legacy task is accepted");
+    assert!(matches!(newest, AcceptOutcome::Accepted(_)));
+    transition(&store, newest_legacy_id, TaskState::Running)
+        .await
+        .expect("new legacy task starts");
+    transition(&store, newest_legacy_id, TaskState::Succeeded)
+        .await
+        .expect("new legacy task succeeds and enforces shared history capacity");
+
+    assert!(store.get(legacy_id).await.expect("legacy lookup succeeds").is_none());
+    assert!(
+        TypedTaskStore::get_encoded_task(&store, typed.summary.id)
+            .await
+            .expect("typed lookup succeeds")
+            .is_none()
+    );
+    assert!(
+        store
+            .get(newest_legacy_id)
+            .await
+            .expect("newest legacy lookup succeeds")
+            .is_some()
+    );
+}
+
+/// Verifies legacy pruning uses an exclusive acceptance cutoff and cleans keys.
+#[tokio_test]
+async fn test_memory_store_prunes_legacy_terminal_records_and_releases_keys() {
+    let store = MemoryTaskStore::new(8);
+    let id = TaskId::generate();
+    let accepted = store
+        .accept(
+            id,
+            legacy_request("legacy-prune", Vec::new(), Some("legacy-pruned-key")),
+        )
+        .await
+        .expect("legacy task is accepted");
+    let AcceptOutcome::Accepted(accepted) = accepted else {
+        panic!("task id is new")
+    };
+    transition(&store, id, TaskState::Running)
+        .await
+        .expect("legacy task starts");
+    transition(&store, id, TaskState::Succeeded)
+        .await
+        .expect("legacy task succeeds");
+    assert_eq!(
+        TaskStore::prune_terminal_before(
+            &store,
+            accepted.accepted_at_ms,
+            NonZeroUsize::new(1).expect("batch size is positive"),
+        )
+        .await
+        .expect("exclusive cutoff leaves same-time records"),
+        0
+    );
+    assert_eq!(
+        TaskStore::prune_terminal_before(
+            &store,
+            accepted.accepted_at_ms + 1,
+            NonZeroUsize::new(1).expect("batch size is positive"),
+        )
+        .await
+        .expect("old terminal record is removed"),
+        1
+    );
+    assert!(
+        store
+            .get_by_idempotency_key("legacy-pruned-key")
+            .await
+            .expect("key lookup succeeds")
+            .is_none()
+    );
+    assert!(matches!(
+        store
+            .accept(
+                TaskId::generate(),
+                legacy_request("legacy-prune", Vec::new(), Some("legacy-pruned-key")),
+            )
+            .await,
+        Ok(AcceptOutcome::Accepted(_))
+    ));
+}
+
 /// Accepts a keyed zero-payload record in the supplied store.
 async fn accept(store: &MemoryTaskStore, key: &str) -> Result<AcceptOutcome, StoreError> {
     store
         .accept(
             TaskId::generate(),
-            TaskRequest::new("memory-capacity", "1", Vec::new()).with_idempotency_key(key),
+            legacy_request("memory-capacity", Vec::new(), Some(key)),
         )
         .await
 }
@@ -428,8 +808,7 @@ async fn test_memory_store_unfinished_limit_tracks_blocked_transitions() {
 #[tokio_test]
 async fn test_memory_summary_reads_preserve_large_payload_and_lifecycle_metadata() {
     let store = MemoryTaskStore::new(8);
-    let request =
-        TaskRequest::new("large-summary", "v1", vec![9; 1024 * 1024]).with_idempotency_key("large-summary-key");
+    let request = legacy_request("large-summary", vec![9; 1024 * 1024], Some("large-summary-key"));
     let accepted = match store
         .accept(TaskId::generate(), request)
         .await

@@ -16,6 +16,10 @@ pub mod store;
 
 pub mod event;
 
+#[cfg(test)]
+#[path = "../tests/store/mod.rs"]
+mod store_tests;
+
 pub use handler::CancellationMode;
 pub use handler::ExternalCancellationHook;
 pub use handler::HandlerDispatchError;
