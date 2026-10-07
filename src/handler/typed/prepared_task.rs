@@ -34,3 +34,20 @@ impl std::fmt::Debug for PreparedTask {
         formatter.debug_struct("PreparedTask").finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PreparedTask;
+
+    #[test]
+    fn debug_shows_the_prepared_task_type_without_exposing_handler_state() {
+        let task = PreparedTask::new(Box::new(|_| {
+            Box::pin(async { Ok(crate::handler::TaskRunOutcome::Cancelled) })
+        }));
+
+        let formatted = format!("{task:?}");
+
+        assert!(formatted.starts_with("PreparedTask"));
+        assert!(formatted.contains(".."));
+    }
+}

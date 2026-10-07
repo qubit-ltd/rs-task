@@ -69,4 +69,39 @@ mod tests {
         assert_eq!(decoded.state_version, 3);
         assert_eq!(decoded.correlation_key.as_deref(), Some("batch-a"));
     }
+
+    #[test]
+    fn typed_task_event_captures_committed_summary_fields() {
+        let summary = crate::model::next::TaskSummary {
+            id: TaskId::from_id(qubit_id::Id::new(43)),
+            kind_id: "invoice.generate".into(),
+            category: Some("billing".into()),
+            payload_type_id: "example.Invoice".into(),
+            payload_schema_version: 2,
+            payload_codec_id: "example.json".into(),
+            metadata: qubit_metadata::Metadata::default(),
+            resource_limit: crate::model::next::ResourceRequest::default(),
+            correlation_key: Some("trace-2".into()),
+            idempotency_key: None,
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            state_version: 5,
+            attempt: 1,
+            retry_not_before_ms: None,
+            accepted_at_ms: 10,
+            started_at_ms: None,
+            finished_at_ms: None,
+            progress: None,
+            output: None,
+        };
+
+        let event = TaskEvent::from(&summary);
+
+        assert_eq!(event.schema_version, 1);
+        assert_eq!(event.task_id, summary.id);
+        assert_eq!(event.state_version, 5);
+        assert_eq!(event.state, TaskState::Queued);
+        assert_eq!(event.correlation_key.as_deref(), Some("trace-2"));
+    }
 }

@@ -106,3 +106,51 @@ impl TaskRecord {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TaskRecord;
+    use crate::model::TaskState;
+    use crate::model::legacy::TaskCursor;
+    use crate::model::legacy::TaskId;
+    use crate::model::legacy::TaskRequest;
+
+    fn record() -> TaskRecord {
+        let mut request = TaskRequest::new("history", "v1", Vec::new());
+        request.resources.cpu_slots = 3;
+        TaskRecord {
+            id: TaskId::generate(),
+            request,
+            state: TaskState::Succeeded,
+            state_version: 2,
+            attempt: 1,
+            retry_not_before_ms: None,
+            accepted_at_ms: 31,
+            started_at_ms: Some(32),
+            finished_at_ms: Some(33),
+            assigned_resources: Vec::new(),
+            output: None,
+            cancel_requested: false,
+        }
+    }
+
+    #[test]
+    fn record_exposes_resources_and_converts_to_legacy_history_cursor() {
+        let record = record();
+
+        assert_eq!(record.resource_request().cpu_slots, 3);
+        let cursor = TaskCursor::from(&record);
+        assert_eq!(cursor.accepted_at_ms, record.accepted_at_ms);
+        assert_eq!(cursor.id, record.id);
+    }
+
+    #[test]
+    fn summary_converts_to_legacy_history_cursor() {
+        let summary = record().summary();
+
+        let cursor = TaskCursor::from(&summary);
+
+        assert_eq!(cursor.accepted_at_ms, summary.accepted_at_ms);
+        assert_eq!(cursor.id, summary.id);
+    }
+}

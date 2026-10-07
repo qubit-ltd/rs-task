@@ -36,3 +36,45 @@ impl From<&TaskSummary> for TaskCursor {
         Self::new(summary.accepted_at_ms, summary.id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TaskCursor;
+    use crate::model::TaskState;
+    use crate::model::next::ResourceRequest;
+    use crate::model::next::TaskId;
+    use crate::model::next::TaskSummary;
+
+    #[test]
+    fn cursor_from_summary_preserves_acceptance_position() {
+        let id = TaskId::from_id(qubit_id::Id::new(91));
+        let summary = TaskSummary {
+            id,
+            kind_id: "counter.add".into(),
+            category: None,
+            payload_type_id: "qubit_task.tests.Counter".into(),
+            payload_schema_version: 1,
+            payload_codec_id: "qubit_task.tests.u32_le".into(),
+            metadata: qubit_metadata::Metadata::default(),
+            resource_limit: ResourceRequest::default(),
+            correlation_key: None,
+            idempotency_key: None,
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            state_version: 0,
+            attempt: 0,
+            retry_not_before_ms: None,
+            accepted_at_ms: 123,
+            started_at_ms: None,
+            finished_at_ms: None,
+            progress: None,
+            output: None,
+        };
+
+        let cursor = TaskCursor::from(&summary);
+
+        assert_eq!(cursor.accepted_at_ms, summary.accepted_at_ms);
+        assert_eq!(cursor.id, id);
+    }
+}
