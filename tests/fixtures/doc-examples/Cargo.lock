@@ -904,9 +904,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-executor"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d508c4d5b2ec51dc5be37267fc6c0ecb66f83423ccc1373110cee43e05d2dfa"
+checksum = "bdd570aac02516990873f6d72975c03ba3e99e2dfcf33dc53d7017d2f6d5891f"
 dependencies = [
  "log",
  "oneshot",
@@ -1010,9 +1010,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-retry"
-version = "0.25.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7acfc4f391287be40f219bb578901904ebbe6e6eb33bef8d6809622afdd3f5f7"
+checksum = "84286aee1cde9a49e1d050eb1792c76919a522081b83c76167a1299ea8a46d23"
 dependencies = [
  "fastrand",
  "qubit-budget",
@@ -1034,9 +1034,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-state-machine"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94a5faf8ecee502c4f1a70d315c784e1513b3559d373ce1c41d9050281c214da"
+checksum = "a93fa6ba94ead18e1a6498095d3f1a69ff3a4d0d4235eb406cd5e6892d8c087a"
 dependencies = [
  "qubit-fast-cas",
  "thiserror",
