@@ -13,20 +13,13 @@ use crate::model::MAX_TASK_QUERY_LIMIT;
 use crate::model::TaskOutput;
 use crate::model::TaskState;
 use crate::model::TaskStateKind;
-use crate::model::legacy::AcceptOutcome;
-use crate::model::legacy::TaskId;
-use crate::model::legacy::TaskQuery;
-use crate::model::legacy::TaskRequest;
-use crate::model::legacy::TransitionCommand;
-use crate::model::next::ProgressCommand;
-use crate::model::next::ResourceRequest as EncodedResourceRequest;
-use crate::model::next::StartCommand;
-use crate::model::next::StoredPayload;
-use crate::model::next::StoredTaskRequest;
-use crate::model::next::TaskId as EncodedTaskId;
-use crate::model::next::TransitionCommand as EncodedTransitionCommand;
-use crate::store::DEFAULT_MAX_UNFINISHED_RECORDS;
-use crate::store::LegacyTaskStore as TaskStore;
+use crate::model::typed::ProgressCommand;
+use crate::model::typed::ResourceRequest as EncodedResourceRequest;
+use crate::model::typed::StartCommand;
+use crate::model::typed::StoredPayload;
+use crate::model::typed::StoredTaskRequest;
+use crate::model::typed::TaskId as EncodedTaskId;
+use crate::model::typed::TransitionCommand as EncodedTransitionCommand;
 use crate::store::MemoryTaskStore;
 use crate::store::StoreError;
 use crate::store::TaskStore as TypedTaskStore;
@@ -52,12 +45,6 @@ fn encoded_request(key: Option<&str>, bytes: Vec<u8>) -> StoredTaskRequest {
 
 fn encoded_id(value: u64) -> EncodedTaskId {
     EncodedTaskId::from_id(qubit_id::Id::new(value))
-}
-
-fn legacy_request(task_type: &str, payload: Vec<u8>, idempotency_key: Option<&str>) -> TaskRequest {
-    let mut request = TaskRequest::new(task_type, "1", payload);
-    request.idempotency_key = idempotency_key.map(str::to_owned);
-    request
 }
 
 #[tokio_test]
@@ -177,23 +164,6 @@ async fn test_memory_store_encoded_acceptance_evicts_terminal_legacy_payloads() 
             .expect("typed lookup succeeds")
             .is_none()
     );
-}
-
-#[tokio_test]
-async fn test_memory_store_idempotency_keys_are_global_across_request_apis() {
-    let store = MemoryTaskStore::new(8);
-    TypedTaskStore::accept_encoded(&store, encoded_id(100), encoded_request(Some("global-key"), Vec::new()))
-        .await
-        .expect("encoded request is accepted");
-    assert!(matches!(
-        store
-            .accept(
-                TaskId::generate(),
-                legacy_request("legacy", Vec::new(), Some("global-key")),
-            )
-            .await,
-        Err(StoreError::IdempotencyConflict)
-    ));
 }
 
 #[tokio_test]
@@ -491,12 +461,12 @@ async fn test_memory_store_ready_scan_and_retry_deadline_respect_retry_time() {
     assert_eq!(ready.records[0].id, queued.id);
     let history = TypedTaskStore::list_encoded(
         &store,
-        crate::model::next::TaskQuery {
+        crate::model::typed::TaskQuery {
             states: vec![TaskStateKind::Queued],
             category: Some("integration".to_owned()),
             correlation_key: Some("correlation-1".to_owned()),
             limit: 1,
-            ..crate::model::next::TaskQuery::default()
+            ..crate::model::typed::TaskQuery::default()
         },
     )
     .await
@@ -563,545 +533,6 @@ async fn test_memory_store_rejects_invalid_typed_output_and_retry_deadline() {
     assert_eq!(current.summary.state_version, 0);
 }
 
-/// Makes legacy history eviction remove oldest terminal rows across both APIs.
-#[tokio_test]
-async fn test_memory_store_terminal_history_evicts_oldest_across_apis() {
-    let store = MemoryTaskStore::new(1);
-    let legacy_id = TaskId::generate();
-    let legacy = store
-        .accept(legacy_id, TaskRequest::new("legacy-history", "1", vec![1]))
-        .await
-        .expect("legacy task is accepted");
-    assert!(matches!(legacy, AcceptOutcome::Accepted(_)));
-    transition(&store, legacy_id, TaskState::Running)
-        .await
-        .expect("legacy task starts");
-    transition(&store, legacy_id, TaskState::Succeeded)
-        .await
-        .expect("legacy task succeeds");
-
-    let typed = TypedTaskStore::accept_encoded(&store, encoded_id(115), encoded_request(None, vec![2]))
-        .await
-        .expect("typed task is accepted");
-    let running = TypedTaskStore::start_encoded(
-        &store,
-        StartCommand {
-            id: typed.summary.id,
-            expected_state_version: typed.summary.state_version,
-            started_at_ms: 1,
-        },
-    )
-    .await
-    .expect("typed task starts");
-    TypedTaskStore::transition_encoded(
-        &store,
-        EncodedTransitionCommand {
-            id: running.id,
-            expected_state_version: running.state_version,
-            expected_attempt: running.attempt,
-            retry_not_before_ms: None,
-            state: TaskState::Succeeded,
-            cancel_requested: false,
-            cancel_error: None,
-            output: None,
-            finished_at_ms: Some(2),
-        },
-    )
-    .await
-    .expect("typed task succeeds");
-
-    let newest_legacy_id = TaskId::generate();
-    let newest = store
-        .accept(
-            newest_legacy_id,
-            TaskRequest::new("new-legacy-history", "1", Vec::new()),
-        )
-        .await
-        .expect("new legacy task is accepted");
-    assert!(matches!(newest, AcceptOutcome::Accepted(_)));
-    transition(&store, newest_legacy_id, TaskState::Running)
-        .await
-        .expect("new legacy task starts");
-    transition(&store, newest_legacy_id, TaskState::Succeeded)
-        .await
-        .expect("new legacy task succeeds and enforces shared history capacity");
-
-    assert!(store.get(legacy_id).await.expect("legacy lookup succeeds").is_none());
-    assert!(
-        TypedTaskStore::get_encoded_task(&store, typed.summary.id)
-            .await
-            .expect("typed lookup succeeds")
-            .is_none()
-    );
-    assert!(
-        store
-            .get(newest_legacy_id)
-            .await
-            .expect("newest legacy lookup succeeds")
-            .is_some()
-    );
-}
-
-/// Verifies legacy pruning uses an exclusive acceptance cutoff and cleans keys.
-#[tokio_test]
-async fn test_memory_store_prunes_legacy_terminal_records_and_releases_keys() {
-    let store = MemoryTaskStore::new(8);
-    let id = TaskId::generate();
-    let accepted = store
-        .accept(
-            id,
-            legacy_request("legacy-prune", Vec::new(), Some("legacy-pruned-key")),
-        )
-        .await
-        .expect("legacy task is accepted");
-    let AcceptOutcome::Accepted(accepted) = accepted else {
-        panic!("task id is new")
-    };
-    transition(&store, id, TaskState::Running)
-        .await
-        .expect("legacy task starts");
-    transition(&store, id, TaskState::Succeeded)
-        .await
-        .expect("legacy task succeeds");
-    assert_eq!(
-        TaskStore::prune_terminal_before(
-            &store,
-            accepted.accepted_at_ms,
-            NonZeroUsize::new(1).expect("batch size is positive"),
-        )
-        .await
-        .expect("exclusive cutoff leaves same-time records"),
-        0
-    );
-    assert_eq!(
-        TaskStore::prune_terminal_before(
-            &store,
-            accepted.accepted_at_ms + 1,
-            NonZeroUsize::new(1).expect("batch size is positive"),
-        )
-        .await
-        .expect("old terminal record is removed"),
-        1
-    );
-    assert!(
-        store
-            .get_by_idempotency_key("legacy-pruned-key")
-            .await
-            .expect("key lookup succeeds")
-            .is_none()
-    );
-    assert!(matches!(
-        store
-            .accept(
-                TaskId::generate(),
-                legacy_request("legacy-prune", Vec::new(), Some("legacy-pruned-key")),
-            )
-            .await,
-        Ok(AcceptOutcome::Accepted(_))
-    ));
-}
-
-/// Accepts a keyed zero-payload record in the supplied store.
-async fn accept(store: &MemoryTaskStore, key: &str) -> Result<AcceptOutcome, StoreError> {
-    store
-        .accept(
-            TaskId::generate(),
-            legacy_request("memory-capacity", Vec::new(), Some(key)),
-        )
-        .await
-}
-
-/// Moves one record to the requested state using its current revision.
-async fn transition(store: &MemoryTaskStore, id: TaskId, state: TaskState) -> Result<(), StoreError> {
-    let record = store.get(id).await?.ok_or(StoreError::NotFound)?;
-    store
-        .transition(TransitionCommand {
-            id,
-            expected_version: record.state_version,
-            expected_attempt: record.attempt,
-            state,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await?;
-    Ok(())
-}
-
-/// Rejects distinct zero-payload records at the configured nonterminal limit.
-#[tokio_test]
-async fn test_memory_store_unfinished_limit_rejects_zero_payload_records() {
-    let store = MemoryTaskStore::with_limits(
-        4,
-        NonZeroUsize::new(64).expect("payload budget is positive"),
-        NonZeroUsize::new(2).expect("record limit is positive"),
-    );
-
-    let first = match accept(&store, "memory-first").await.expect("first record is accepted") {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => panic!("first key is new"),
-    };
-    match accept(&store, "memory-second")
-        .await
-        .expect("second record is accepted")
-    {
-        AcceptOutcome::Accepted(_) => {}
-        AcceptOutcome::Existing(_) => panic!("second key is new"),
-    }
-
-    assert!(matches!(
-        accept(&store, "memory-third").await,
-        Err(StoreError::UnfinishedRecordLimitExceeded { limit: 2 })
-    ));
-
-    let replay = accept(&store, "memory-first")
-        .await
-        .expect("an idempotent replay remains available at capacity");
-    assert!(matches!(replay, AcceptOutcome::Existing(record) if record.id == first.id));
-}
-
-/// Keeps blocked and requeued records charged until they become terminal.
-#[tokio_test]
-async fn test_memory_store_unfinished_limit_tracks_blocked_transitions() {
-    let store = MemoryTaskStore::with_limits(
-        0,
-        NonZeroUsize::new(64).expect("payload budget is positive"),
-        NonZeroUsize::new(1).expect("record limit is positive"),
-    );
-    let first = match accept(&store, "memory-blocked").await.expect("record is accepted") {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => panic!("key is new"),
-    };
-
-    transition(
-        &store,
-        first.id,
-        TaskState::Blocked {
-            reason: "handler missing".into(),
-        },
-    )
-    .await
-    .expect("queued record becomes blocked");
-    assert!(matches!(
-        accept(&store, "memory-while-blocked").await,
-        Err(StoreError::UnfinishedRecordLimitExceeded { limit: 1 })
-    ));
-
-    transition(&store, first.id, TaskState::Queued)
-        .await
-        .expect("blocked record is requeued");
-    assert!(matches!(
-        accept(&store, "memory-while-requeued").await,
-        Err(StoreError::UnfinishedRecordLimitExceeded { limit: 1 })
-    ));
-
-    transition(&store, first.id, TaskState::Cancelled)
-        .await
-        .expect("queued record becomes terminal");
-    assert!(matches!(
-        accept(&store, "memory-after-terminal").await,
-        Ok(AcceptOutcome::Accepted(_))
-    ));
-}
-
-#[tokio_test]
-async fn test_memory_summary_reads_preserve_large_payload_and_lifecycle_metadata() {
-    let store = MemoryTaskStore::new(8);
-    let request = legacy_request("large-summary", vec![9; 1024 * 1024], Some("large-summary-key"));
-    let accepted = match store
-        .accept(TaskId::generate(), request)
-        .await
-        .expect("large record is accepted")
-    {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => panic!("summary key is new"),
-    };
-    let summary = store
-        .get_summary(accepted.id)
-        .await
-        .expect("summary lookup succeeds")
-        .expect("accepted summary is retained");
-    assert_eq!(summary.request.task_type, "large-summary");
-    assert_eq!(
-        store
-            .list(TaskQuery {
-                limit: 1,
-                ..TaskQuery::default()
-            })
-            .await
-            .expect("summary page lookup succeeds")
-            .records[0],
-        summary
-    );
-    let running = store
-        .transition(TransitionCommand {
-            id: accepted.id,
-            expected_version: summary.state_version,
-            expected_attempt: summary.attempt,
-            state: TaskState::Running,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: vec!["cpu-0".into()],
-            cancel_requested: false,
-        })
-        .await
-        .expect("record transitions to running");
-    assert!(matches!(running.state, TaskState::Running));
-    assert_eq!(running.state_version, summary.state_version + 1);
-    assert_eq!(
-        store
-            .get(accepted.id)
-            .await
-            .expect("record lookup succeeds")
-            .expect("record is retained")
-            .request
-            .payload,
-        vec![9; 1024 * 1024]
-    );
-}
-
-/// Applies the documented default cap to zero-payload nonterminal records.
-#[tokio_test]
-async fn test_memory_store_default_unfinished_limit() {
-    let store = MemoryTaskStore::new(0);
-    for _ in 0..DEFAULT_MAX_UNFINISHED_RECORDS {
-        assert!(matches!(
-            store
-                .accept(TaskId::generate(), TaskRequest::new("default-cap", "1", Vec::new()))
-                .await,
-            Ok(AcceptOutcome::Accepted(_))
-        ));
-    }
-    assert!(matches!(
-        store
-            .accept(TaskId::generate(), TaskRequest::new("default-cap", "1", Vec::new()))
-            .await,
-        Err(StoreError::UnfinishedRecordLimitExceeded {
-            limit: DEFAULT_MAX_UNFINISHED_RECORDS
-        })
-    ));
-}
-
-/// Enforces the common history page cap while retaining cursor order.
-#[tokio_test]
-async fn test_memory_store_task_query_limit() {
-    let store = MemoryTaskStore::new(300);
-    for index in 0..=MAX_TASK_QUERY_LIMIT {
-        let accepted = store
-            .accept(
-                TaskId::generate(),
-                TaskRequest::new("page", "1", index.to_le_bytes().to_vec()),
-            )
-            .await
-            .expect("record is accepted");
-        assert!(matches!(accepted, AcceptOutcome::Accepted(_)));
-    }
-    assert!(matches!(
-        store
-            .list(TaskQuery {
-                limit: MAX_TASK_QUERY_LIMIT + 1,
-                ..TaskQuery::default()
-            })
-            .await,
-        Err(StoreError::InvalidRequest("task history page limit exceeds 256"))
-    ));
-    let page = store
-        .list(TaskQuery {
-            limit: MAX_TASK_QUERY_LIMIT,
-            ..TaskQuery::default()
-        })
-        .await
-        .expect("maximum page is accepted");
-    assert_eq!(page.records.len(), MAX_TASK_QUERY_LIMIT);
-    assert!(page.next.is_some());
-    let first = store
-        .list(TaskQuery {
-            limit: 0,
-            ..TaskQuery::default()
-        })
-        .await
-        .expect("zero limit selects the default one-row page");
-    assert_eq!(first.records.len(), 1);
-}
-
-/// Exercises legacy request replay, duplicate-ID, validation, and byte-limit
-/// errors.
-#[tokio_test]
-async fn test_memory_store_legacy_acceptance_rejects_invalid_duplicate_and_oversized_requests() {
-    let store = MemoryTaskStore::with_limits(
-        4,
-        NonZeroUsize::new(2).expect("payload budget is positive"),
-        NonZeroUsize::new(4).expect("record limit is positive"),
-    );
-    let id = TaskId::generate();
-    let request = legacy_request("legacy", vec![1, 2], Some("legacy-replay"));
-    let accepted = store
-        .accept(id, request.clone())
-        .await
-        .expect("initial request fits configured limits");
-    assert!(matches!(accepted, AcceptOutcome::Accepted(_)));
-    assert!(matches!(
-        store.accept(TaskId::generate(), request.clone()).await,
-        Ok(AcceptOutcome::Existing(record)) if record.id == id
-    ));
-
-    assert!(matches!(
-        store.accept(id, legacy_request("duplicate", Vec::new(), None)).await,
-        Err(StoreError::DuplicateTask)
-    ));
-    assert!(matches!(
-        store
-            .accept(
-                TaskId::generate(),
-                legacy_request("legacy", vec![3], Some("legacy-replay")),
-            )
-            .await,
-        Err(StoreError::IdempotencyConflict)
-    ));
-    assert!(matches!(
-        store
-            .accept(TaskId::generate(), legacy_request("too-large", vec![3], None),)
-            .await,
-        Err(StoreError::CapacityExceeded {
-            requested_bytes: 1,
-            available_bytes: 0
-        })
-    ));
-
-    let mut invalid = TaskRequest::new("", "1", Vec::new());
-    invalid.task_type.clear();
-    assert!(matches!(
-        store.accept(TaskId::generate(), invalid).await,
-        Err(StoreError::InvalidRequest(_))
-    ));
-}
-
-/// Checks strict unfinished counts, owner epochs, and unsupported recovery
-/// scans.
-#[tokio_test]
-async fn test_memory_store_owner_and_unfinished_queries_follow_capabilities() {
-    let store = MemoryTaskStore::new(4);
-    let id = TaskId::generate();
-    assert!(matches!(
-        store.accept(id, TaskRequest::new("owner", "1", Vec::new())).await,
-        Ok(AcceptOutcome::Accepted(_))
-    ));
-    assert!(
-        TaskStore::has_unfinished_over_limit(&store, 0)
-            .await
-            .expect("unfinished count query succeeds")
-    );
-    assert!(
-        !TaskStore::has_unfinished_over_limit(&store, 1)
-            .await
-            .expect("unfinished count query succeeds at the exact limit")
-    );
-    assert!(matches!(
-        TaskStore::scan_unfinished(&store, None).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-
-    let first = TypedTaskStore::acquire_owner(&store)
-        .await
-        .expect("first owner acquires the volatile store");
-    assert_eq!(first.0, 1);
-    assert!(matches!(
-        TypedTaskStore::acquire_owner(&store).await,
-        Err(StoreError::OwnerConflict)
-    ));
-    assert!(matches!(
-        TypedTaskStore::release_owner(&store, crate::model::OwnerEpoch(first.0 + 1)).await,
-        Err(StoreError::OwnerConflict)
-    ));
-    TypedTaskStore::release_owner(&store, first)
-        .await
-        .expect("current owner releases the store");
-    let second = TypedTaskStore::acquire_owner(&store)
-        .await
-        .expect("released store can be acquired again");
-    assert_eq!(second.0, first.0 + 1);
-}
-
-/// Filters legacy history and follows its cursor through the final page.
-#[tokio_test]
-async fn test_memory_store_legacy_history_filters_and_paginates() {
-    let store = MemoryTaskStore::new(8);
-    let first_id = TaskId::generate();
-    let second_id = TaskId::generate();
-    let third_id = TaskId::generate();
-    for (id, kind, correlation) in [
-        (first_id, "history-a", Some("wanted")),
-        (second_id, "history-b", Some("wanted")),
-        (third_id, "history-c", Some("other")),
-    ] {
-        let mut request = TaskRequest::new(kind, "1", Vec::new());
-        request.correlation_key = correlation.map(str::to_owned);
-        assert!(matches!(
-            store.accept(id, request).await,
-            Ok(AcceptOutcome::Accepted(_))
-        ));
-    }
-
-    let first_page = store
-        .list(TaskQuery {
-            correlation_key: Some("wanted".to_owned()),
-            limit: 1,
-            ..TaskQuery::default()
-        })
-        .await
-        .expect("filtered first page is available");
-    assert_eq!(first_page.records.len(), 1);
-    let cursor = first_page.next.expect("another matching record remains");
-    let last_page = store
-        .list(TaskQuery {
-            states: vec![TaskStateKind::Queued],
-            correlation_key: Some("wanted".to_owned()),
-            after: Some(cursor),
-            limit: 1,
-        })
-        .await
-        .expect("filtered final page is available");
-    assert_eq!(last_page.records.len(), 1);
-    assert!(last_page.next.is_none());
-    assert_ne!(last_page.records[0].id, first_page.records[0].id);
-    assert!(store.get(third_id).await.expect("unmatched lookup succeeds").is_some());
-}
-
-/// Returns payload-free summaries by legacy idempotency key and reports the
-/// store's volatile capabilities.
-#[tokio_test]
-async fn test_memory_store_legacy_summary_lookup_and_capabilities() {
-    let store = MemoryTaskStore::new(4);
-    let accepted = store
-        .accept(
-            TaskId::generate(),
-            legacy_request("summary-lookup", vec![1, 2, 3], Some("summary-key")),
-        )
-        .await
-        .expect("legacy request is accepted");
-    let AcceptOutcome::Accepted(record) = accepted else {
-        panic!("summary key is new")
-    };
-
-    let summary = TaskStore::get_summary_by_idempotency_key(&store, "summary-key")
-        .await
-        .expect("summary lookup succeeds")
-        .expect("accepted summary is retained");
-    assert_eq!(summary.id, record.id);
-    assert_eq!(summary.request.task_type, "summary-lookup");
-    assert_eq!(
-        TaskStore::get_summary_by_idempotency_key(&store, "missing-summary-key")
-            .await
-            .expect("missing summary lookup succeeds"),
-        None
-    );
-
-    let capabilities = TaskStore::capabilities(&store);
-    assert!(!capabilities.persistent_history);
-    assert!(!capabilities.restart_recovery);
-}
-
 /// Filters encoded history and traverses the continuation cursor across pages.
 #[tokio_test]
 async fn test_memory_store_encoded_history_filters_and_paginates() {
@@ -1121,11 +552,11 @@ async fn test_memory_store_encoded_history_filters_and_paginates() {
 
     let first = TypedTaskStore::list_encoded(
         &store,
-        crate::model::next::TaskQuery {
+        crate::model::typed::TaskQuery {
             category: Some("wanted".to_owned()),
             correlation_key: Some("history-correlation".to_owned()),
             limit: 1,
-            ..crate::model::next::TaskQuery::default()
+            ..crate::model::typed::TaskQuery::default()
         },
     )
     .await
@@ -1135,7 +566,7 @@ async fn test_memory_store_encoded_history_filters_and_paginates() {
 
     let second = TypedTaskStore::list_encoded(
         &store,
-        crate::model::next::TaskQuery {
+        crate::model::typed::TaskQuery {
             states: vec![TaskStateKind::Queued],
             category: Some("wanted".to_owned()),
             correlation_key: Some("history-correlation".to_owned()),

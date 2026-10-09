@@ -410,7 +410,7 @@ async fn test_typed_lifecycle_and_cancellation_reach_durable_consumer() -> TestR
     let redis = RedisServer::start()?;
     let namespace = "typed-outbox-lifecycle";
     let database = TemporaryDatabase::new();
-    let store = Arc::new(SqliteTaskStore::open_next(database.path())?);
+    let store = Arc::new(SqliteTaskStore::open(database.path())?);
     let bus = producer(redis.url(), namespace).await?;
     let (service, mut started) = service(store, bus.clone(), Duration::from_secs(5)).await?;
     let done = service
@@ -446,7 +446,7 @@ async fn test_redis_outage_retains_committed_events_until_restart() -> TestResul
     redis.stop()?;
     let database = TemporaryDatabase::new();
     let path = database.path();
-    let store = Arc::new(SqliteTaskStore::open_next(path)?);
+    let store = Arc::new(SqliteTaskStore::open(path)?);
     let bus = producer(redis.url(), namespace).await?;
     let (first, _) = service(store.clone(), bus.clone(), Duration::from_millis(100)).await?;
     let done = first
@@ -467,7 +467,7 @@ async fn test_redis_outage_retains_committed_events_until_restart() -> TestResul
     drop(first);
     drop(store);
     redis.restart()?;
-    let reopened = Arc::new(SqliteTaskStore::open_next(path)?);
+    let reopened = Arc::new(SqliteTaskStore::open(path)?);
     let fresh_bus = producer(redis.url(), namespace).await?;
     let (second, _) = service(reopened, fresh_bus.clone(), Duration::from_secs(5)).await?;
     second.shutdown().await?;
@@ -487,7 +487,7 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
     let namespace = "typed-outbox-lost-reply";
     let database = TemporaryDatabase::new();
     let projection_database = TemporaryDatabase::new();
-    let store = Arc::new(SqliteTaskStore::open_next(database.path())?);
+    let store = Arc::new(SqliteTaskStore::open(database.path())?);
     let bus = producer(&proxy.url(), namespace).await?;
     let (first, _) = service(store.clone(), bus.clone(), Duration::from_millis(100)).await?;
     let done = first
@@ -565,7 +565,7 @@ async fn test_outbox_crash_child() -> TestResult {
     };
     let url = std::env::var("TASK_OUTBOX_CRASH_REDIS")?;
     let namespace = std::env::var("TASK_OUTBOX_CRASH_NAMESPACE")?;
-    let inner = Arc::new(SqliteTaskStore::open_next(path)?);
+    let inner = Arc::new(SqliteTaskStore::open(path)?);
     let store = Arc::new(InterruptBeforeMark {
         inner: inner.clone(),
         reached: tokio::sync::Notify::new(),
@@ -602,7 +602,7 @@ async fn test_process_exit_after_publish_before_delete_recovers_outbox() -> Test
         String::from_utf8_lossy(&child.stderr)
     );
     assert_eq!(wires(redis.url(), namespace)?.len(), 1);
-    let store = Arc::new(SqliteTaskStore::open_next(path)?);
+    let store = Arc::new(SqliteTaskStore::open(path)?);
     let owner = store.acquire_owner().await?;
     assert_eq!(store.list_event_outbox(128).await?.len(), 3);
     store.release_owner(owner).await?;

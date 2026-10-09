@@ -18,91 +18,28 @@ use internal::WorkerCounts;
 use internal::WorkerGuard;
 use internal::accept_encoded;
 use internal::acquire_owner_lock;
-#[cfg(test)]
-use internal::build_history_query;
-#[cfg(test)]
-use internal::build_recovery_query;
-#[cfg(test)]
-use internal::decode_stored_summary_row;
-#[cfg(test)]
-use internal::decode_stored_task_row;
-#[cfg(test)]
-use internal::encode_lifecycle;
-#[cfg(test)]
-use internal::encode_summary_lifecycle;
 use internal::get_encoded_task;
 use internal::initialize_next_schema;
-#[cfg(test)]
-use internal::initialize_schema;
 use internal::list_encoded;
 use internal::list_ready_queued;
 use internal::next_retry_deadline;
-#[cfg(test)]
-use internal::read_stored_summary_row;
-#[cfg(test)]
-use internal::read_stored_task_row;
 use internal::start_encoded;
 use internal::transition_encoded;
 use internal::update_progress;
 use parking_lot::Mutex;
 use rusqlite::Connection;
-#[cfg(test)]
-use rusqlite::OptionalExtension;
 use rusqlite::params;
-#[cfg(test)]
-use rusqlite::params_from_iter;
 use tokio::sync;
 use tokio::task;
 
-use super::LegacyTaskStore;
 use super::StoreError;
 use super::TaskFuture;
-#[cfg(test)]
-use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
-#[cfg(test)]
-use crate::model::TaskState;
-#[cfg(test)]
-use crate::model::legacy::AcceptOutcome;
-#[cfg(test)]
-use crate::model::legacy::RecoveryPage;
-#[cfg(test)]
-use crate::model::legacy::TaskCursor;
-#[cfg(test)]
-use crate::model::legacy::TaskId;
-#[cfg(test)]
-use crate::model::legacy::TaskPage;
-#[cfg(test)]
-use crate::model::legacy::TaskQuery;
-#[cfg(test)]
-use crate::model::legacy::TaskRecord;
-#[cfg(test)]
-use crate::model::legacy::TaskRequest;
-#[cfg(test)]
-use crate::model::legacy::TaskRequestInfo;
-#[cfg(test)]
-#[cfg(test)]
-use crate::model::legacy::TaskSummary;
-#[cfg(test)]
-use crate::model::legacy::TransitionCommand;
-#[cfg(test)]
-use crate::model::legacy::checked_page_size;
-use crate::model::next::TaskPage as EncodedTaskPage;
-use crate::model::next::TaskQuery as EncodedTaskQuery;
+use crate::model::typed::TaskPage as EncodedTaskPage;
+use crate::model::typed::TaskQuery as EncodedTaskQuery;
 
 mod internal;
-
-/// Current SQLite schema version written after successful migration.
-#[cfg(test)]
-const SCHEMA_VERSION: i64 = 3;
-/// Current serialized record version required by row decoders.
-#[cfg(test)]
-const RECORD_FORMAT_VERSION: i64 = 3;
-/// Ordered columns used by payload-free task summary queries.
-#[cfg(test)]
-const SUMMARY_COLUMNS: &str =
-    "id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json";
 
 /// SQLite-backed history with an exclusive OS lock for one active service
 /// process.
@@ -128,7 +65,7 @@ const SUMMARY_COLUMNS: &str =
 ///     Err(error) => return Err(error.into()),
 /// }
 /// let path = directory.join("tasks.sqlite");
-/// let store = SqliteTaskStore::open_next(&path)?;
+/// let store = SqliteTaskStore::open(&path)?;
 /// assert!(store.capabilities().restart_recovery);
 /// drop(store);
 /// fs::remove_file(&path)?;
@@ -148,8 +85,6 @@ pub struct SqliteTaskStore {
     owner_state: Arc<Mutex<SqliteOwnerState>>,
     /// Bounds connection operations to one blocking worker at a time.
     operation_slot: Arc<sync::Semaphore>,
-    /// Selects the in-progress typed numeric-ID schema path.
-    typed_schema: bool,
     outbox_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Tracks blocking worker overlap in unit tests.
     #[cfg(test)]
@@ -194,7 +129,7 @@ impl SqliteTaskStore {
             let rows = statement.query_map([limit as i64], |row| Ok((row.get::<_, String>(0)?,row.get::<_, u64>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?))).map_err(failure)?;
             rows.map(|row| {
                 let (id, state_version, event_id, event_json) = row.map_err(failure)?;
-                let task_id = crate::model::next::TaskId::from_id(qubit_id::Id::new(id.parse::<u64>().map_err(failure)?));
+                let task_id = crate::model::typed::TaskId::from_id(qubit_id::Id::new(id.parse::<u64>().map_err(failure)?));
                 Ok(super::EventOutboxEntry { task_id, state_version, event_id, event_json })
             }).collect()
         })
@@ -203,7 +138,7 @@ impl SqliteTaskStore {
     /// Deletes a confirmed event idempotently while ownership remains fenced.
     pub(super) fn mark_outbox_published(
         &self,
-        id: crate::model::next::TaskId,
+        id: crate::model::typed::TaskId,
         version: u64,
     ) -> TaskFuture<'_, Result<(), StoreError>> {
         self.run_outbox(move |connection| {
@@ -217,50 +152,7 @@ impl SqliteTaskStore {
         })
     }
 
-    /// Opens a database, applies its schema, and locks its physical file.
-    ///
-    /// # Parameters
-    ///
-    /// * `path` - Database path; parent directories are created when needed.
-    ///
-    /// # Returns
-    ///
-    /// An initialized store holding the database file lock. The service owner
-    /// epoch is acquired separately through
-    /// [`crate::store::TaskStore::acquire_owner`].
-    ///
-    /// # Errors
-    ///
-    /// Returns a store error when opening, locking, initializing, or migrating
-    /// the database fails.
-    #[cfg(test)]
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let (identity, _database_file) = DatabaseIdentity::open(path.as_ref())?;
-        let lock = acquire_owner_lock(identity.path())?;
-        identity.verify()?;
-        let mut connection = Connection::open(identity.path()).map_err(failure)?;
-        identity.verify()?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(failure)?;
-        connection
-            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(failure)?;
-        initialize_schema(&mut connection)?;
-        Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
-            database_path: identity.path().to_path_buf(),
-            owner_state: Arc::new(Mutex::new(SqliteOwnerState {
-                lock_file: Some(lock),
-                epoch: None,
-            })),
-            operation_slot: Arc::new(sync::Semaphore::new(1)),
-            typed_schema: false,
-            outbox_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            worker_counts: Arc::new(WorkerCounts::default()),
-        })
-    }
+
 
     /// Opens a database using the typed numeric-ID task schema.
     ///
@@ -268,7 +160,7 @@ impl SqliteTaskStore {
     /// typed schema. Legacy UUID databases are rejected with a migration
     /// diagnostic and left unchanged; converting their IDs requires an
     /// explicit mapping migration.
-    pub fn open_next(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let (identity, _database_file) = DatabaseIdentity::open(path.as_ref())?;
         let lock = acquire_owner_lock(identity.path())?;
         identity.verify()?;
@@ -289,7 +181,6 @@ impl SqliteTaskStore {
                 epoch: None,
             })),
             operation_slot: Arc::new(sync::Semaphore::new(1)),
-            typed_schema: true,
             outbox_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             worker_counts: Arc::new(WorkerCounts::default()),
@@ -375,674 +266,6 @@ impl SqliteTaskStore {
     }
 }
 
-impl LegacyTaskStore for SqliteTaskStore {
-    /// Reports that history is persistent and unfinished records can recover.
-    ///
-    /// # Returns
-    ///
-    /// Both persistent-history and restart-recovery capabilities.
-    fn capabilities(&self) -> StoreCapabilities {
-        StoreCapabilities {
-            persistent_history: true,
-            restart_recovery: true,
-        }
-    }
-
-    /// Atomically accepts an encoded typed request on a store opened with
-    /// [`SqliteTaskStore::open_next`].
-    fn accept_encoded<'a>(
-        &'a self,
-        id: crate::model::next::TaskId,
-        request: crate::model::next::StoredTaskRequest,
-    ) -> TaskFuture<'a, Result<crate::model::next::AcceptOutcome, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async {
-                Err(StoreError::Failure(
-                    "typed task operations require SqliteTaskStore::open_next".into(),
-                ))
-            });
-        }
-        let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| {
-            accept_encoded(
-                connection,
-                id,
-                request,
-                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
-            )
-        })
-    }
-
-    /// Loads an encoded typed task without decoding its application payload.
-    fn get_encoded_task<'a>(
-        &'a self,
-        id: crate::model::next::TaskId,
-    ) -> TaskFuture<'a, Result<Option<crate::model::next::StoredTask>, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async {
-                Err(StoreError::Failure(
-                    "typed task operations require SqliteTaskStore::open_next".into(),
-                ))
-            });
-        }
-        self.run(move |connection| get_encoded_task(connection, id))
-    }
-
-    /// Persists a progress snapshot for the matching running attempt.
-    fn update_progress<'a>(
-        &'a self,
-        command: crate::model::next::ProgressCommand,
-    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async {
-                Err(StoreError::Failure(
-                    "typed task operations require SqliteTaskStore::open_next".into(),
-                ))
-            });
-        }
-        self.run_write(move |connection| update_progress(connection, command))
-    }
-
-    /// Starts one queued typed task attempt with a revision compare-and-set.
-    fn start_encoded<'a>(
-        &'a self,
-        command: crate::model::next::StartCommand,
-    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async {
-                Err(StoreError::Failure(
-                    "typed task operations require SqliteTaskStore::open_next".into(),
-                ))
-            });
-        }
-        let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| {
-            start_encoded(
-                connection,
-                command,
-                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
-            )
-        })
-    }
-
-    /// Applies a typed lifecycle transition atomically.
-    fn transition_encoded<'a>(
-        &'a self,
-        command: crate::model::next::TransitionCommand,
-    ) -> TaskFuture<'a, Result<crate::model::next::TaskSummary, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| {
-            transition_encoded(
-                connection,
-                command,
-                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
-            )
-        })
-    }
-
-    /// Acceptance and idempotency lookup share one SQLite transaction.
-    ///
-    /// # Parameters
-    ///
-    /// * `id` - Service-generated identity for a new request.
-    /// * `request` - Bounded immutable request to retain.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to a newly accepted or identical existing task.
-    ///
-    /// # Errors
-    ///
-    /// Returns validation, idempotency, or SQLite persistence errors.
-    #[cfg(test)]
-    fn accept<'a>(&'a self, id: TaskId, request: TaskRequest) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        if let Err(error) = request.validate_limits() {
-            return Box::pin(async move { Err(StoreError::InvalidRequest(error.message())) });
-        }
-        let initial = initial_record(id, request.clone());
-        self.run_write(move |connection| {
-            let transaction = connection.unchecked_transaction().map_err(failure)?;
-            if let Some(key) = &request.idempotency_key {
-                let stored = transaction.query_row("SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,payload,lifecycle_json FROM tasks WHERE idempotency_key=?1", [key], read_stored_task_row).optional().map_err(failure)?;
-                if let Some(row) = stored {
-                    let record = decode_stored_task_row(row)?;
-                    if record.request != request { return Err(StoreError::IdempotencyConflict); }
-                    transaction.commit().map_err(failure)?;
-                    return Ok(AcceptOutcome::Existing(record));
-                }
-            }
-            let request_info_json = serde_json::to_string(&TaskRequestInfo::from(&request)).map_err(failure)?;
-            let lifecycle_json = encode_lifecycle(&initial)?;
-            transaction.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json) VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7,?8)", params![id.to_string(), initial.accepted_at_ms, request.correlation_key, request.idempotency_key, request_info_json, request.payload, RECORD_FORMAT_VERSION, lifecycle_json]).map_err(failure)?;
-            transaction.commit().map_err(failure)?;
-            Ok(AcceptOutcome::Accepted(initial))
-        })
-    }
-
-    /// Commits a version-checked lifecycle update without loading payload.
-    ///
-    /// # Parameters
-    ///
-    /// * `command` - Expected revision, state, resources, and result data.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the committed payload-free summary.
-    ///
-    /// # Errors
-    ///
-    /// Returns missing, stale, invalid, oversized, or persistence errors.
-    #[cfg(test)]
-    fn transition<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        if let Err(error) = command.state.validate_diagnostics() {
-            return Box::pin(async move { Err(StoreError::InvalidRequest(error)) });
-        }
-        if command
-            .output
-            .as_ref()
-            .is_some_and(|output| output.summary.len() > MAX_TASK_OUTPUT_SUMMARY_BYTES)
-        {
-            return Box::pin(async {
-                Err(StoreError::InvalidRequest(
-                    "task output summary exceeds the 65536-byte limit",
-                ))
-            });
-        }
-        self.run_write(move |connection| {
-            let transaction = connection.unchecked_transaction().map_err(failure)?;
-            let stored = transaction
-                .query_row(
-                    &format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE id=?1"),
-                    [command.id.to_string()],
-                    read_stored_summary_row,
-                )
-                .optional()
-                .map_err(failure)?
-                .ok_or(StoreError::NotFound)?;
-            let mut record = decode_stored_summary_row(stored)?;
-            if record.state_version != command.expected_version || record.attempt != command.expected_attempt {
-                return Err(StoreError::Conflict);
-            }
-            if !record.state.allows_transition_to(&command.state) {
-                return Err(StoreError::InvalidTransition);
-            }
-            if command.retry_not_before_ms.is_some() && !matches!(command.state, TaskState::Queued) {
-                return Err(StoreError::InvalidRequest(
-                    "only queued tasks may have a retry deadline",
-                ));
-            }
-            let starting = !matches!(record.state, TaskState::Running) && matches!(command.state, TaskState::Running);
-            record.state = command.state;
-            record.retry_not_before_ms = command.retry_not_before_ms;
-            record.state_version += 1;
-            if starting {
-                record.attempt += 1;
-                record.started_at_ms = Some(now_ms());
-            }
-            if record.state.is_terminal() {
-                record.finished_at_ms = Some(now_ms());
-            }
-            record.cancel_requested = command.cancel_requested;
-            record.assigned_resources = command.assigned_resources;
-            record.output = command.output;
-            transaction
-                .execute(
-                    "UPDATE tasks SET state_kind=?2, lifecycle_json=?3 WHERE id=?1",
-                    params![
-                        record.id.to_string(),
-                        state_kind(&record.state),
-                        encode_summary_lifecycle(&record)?
-                    ],
-                )
-                .map_err(failure)?;
-            transaction.commit().map_err(failure)?;
-            Ok(record)
-        })
-    }
-
-    /// Loads the matching complete record, including its payload.
-    ///
-    /// # Parameters
-    ///
-    /// * `key` - Exact persisted idempotency key.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the matching retained record, if present.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query or persisted row decoding fails.
-    #[cfg(test)]
-    fn get_by_idempotency_key<'a>(&'a self, key: &'a str) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        let key = key.to_owned();
-        self.run(move |connection| {
-            let stored = connection
-                .query_row(
-                    "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,payload,lifecycle_json FROM tasks WHERE idempotency_key=?1",
-                    [key],
-                    read_stored_task_row,
-                )
-                .optional()
-                .map_err(failure)?;
-            stored.map(decode_stored_task_row).transpose()
-        })
-    }
-
-    /// Reads lifecycle metadata using the payload-free summary projection.
-    ///
-    /// # Parameters
-    ///
-    /// * `key` - Exact persisted idempotency key to look up.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the matching payload-free summary, if present.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query or persisted summary decoding fails.
-    #[cfg(test)]
-    fn get_summary_by_idempotency_key<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        let key = key.to_owned();
-        self.run(move |connection| {
-            let stored = connection
-                .query_row(
-                    &format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE idempotency_key=?1"),
-                    [key],
-                    read_stored_summary_row,
-                )
-                .optional()
-                .map_err(failure)?;
-            stored.map(decode_stored_summary_row).transpose()
-        })
-    }
-
-    /// Loads one complete task record, including its payload bytes.
-    ///
-    /// # Parameters
-    ///
-    /// * `id` - Stable task identity.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the retained record, if present.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query or persisted row decoding fails.
-    #[cfg(test)]
-    fn get<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskRecord>, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        Box::pin(async move {
-            let stored = self
-                .run(move |connection| {
-                    connection
-                        .query_row(
-                            "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,payload,lifecycle_json FROM tasks WHERE id=?1",
-                            [id.to_string()],
-                            read_stored_task_row,
-                        )
-                        .optional()
-                        .map_err(failure)
-                })
-                .await?;
-            stored.map(decode_stored_task_row).transpose()
-        })
-    }
-
-    /// Reads one ordered history page using metadata-only row projection.
-    ///
-    /// # Parameters
-    ///
-    /// * `query` - State, correlation, cursor, and page-size filters.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to payload-free summaries and a continuation.
-    ///
-    /// # Errors
-    ///
-    /// Returns invalid query or SQLite decoding errors.
-    #[cfg(test)]
-    fn list<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        self.run(move |connection| {
-            let page_size = checked_page_size(query.limit)?;
-            let built = build_history_query(&query, page_size)?;
-            let mut statement = connection.prepare(&built.sql).map_err(failure)?;
-            let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
-            let mut records = Vec::new();
-            while let Some(row) = rows.next().map_err(failure)? {
-                records.push(decode_stored_summary_row(
-                    read_stored_summary_row(row).map_err(failure)?,
-                )?);
-            }
-            let has_more = records.len() > page_size;
-            if has_more {
-                records.truncate(page_size);
-            }
-            let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
-            Ok(TaskPage { records, next })
-        })
-    }
-
-    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        self.run(move |connection| list_encoded(connection, query))
-    }
-
-    fn list_ready_queued<'a>(
-        &'a self,
-        after: Option<crate::model::next::TaskCursor>,
-        limit: NonZeroUsize,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
-    }
-
-    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        self.run(move |connection| next_retry_deadline(connection, now_ms))
-    }
-
-    fn prune_typed_terminal_before<'a>(
-        &'a self,
-        finished_before_ms: u64,
-        max_rows: NonZeroUsize,
-    ) -> TaskFuture<'a, Result<usize, StoreError>> {
-        if !self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        let finished_before_ms = match i64::try_from(finished_before_ms) {
-            Ok(value) => value,
-            Err(_) => {
-                return Box::pin(async {
-                    Err(StoreError::InvalidRequest(
-                        "task finish cutoff exceeds the SQLite integer range",
-                    ))
-                });
-            }
-        };
-        let max_rows = match i64::try_from(max_rows.get()) {
-            Ok(value) => value,
-            Err(_) => {
-                return Box::pin(async {
-                    Err(StoreError::InvalidRequest(
-                        "task history prune limit exceeds the SQLite integer range",
-                    ))
-                });
-            }
-        };
-        self.run_write(move |connection| {
-            let transaction = connection.unchecked_transaction().map_err(failure)?;
-            let mut statement = transaction
-                .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER) < ?1 ORDER BY CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id LIMIT ?2")
-                .map_err(failure)?;
-            let rows = statement
-                .query_map(params![finished_before_ms, max_rows], |row| row.get::<_, String>(0))
-                .map_err(failure)?;
-            let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
-            drop(statement);
-            for id in &ids {
-                transaction
-                    .execute("DELETE FROM tasks WHERE id=?1", [id])
-                    .map_err(failure)?;
-            }
-            transaction.commit().map_err(failure)?;
-            Ok(ids.len())
-        })
-    }
-
-    /// Loads task lifecycle and immutable metadata without the payload.
-    ///
-    /// # Parameters
-    ///
-    /// * `id` - Stable task identity.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the retained summary, if present.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query or persisted summary decoding fails.
-    #[cfg(test)]
-    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        self.run(move |connection| {
-            let stored = connection
-                .query_row(
-                    &format!("SELECT {SUMMARY_COLUMNS} FROM tasks WHERE id=?1"),
-                    [id.to_string()],
-                    read_stored_summary_row,
-                )
-                .optional()
-                .map_err(failure)?;
-            stored.map(decode_stored_summary_row).transpose()
-        })
-    }
-
-    /// Deletes a bounded batch of old terminal rows and their idempotency keys.
-    ///
-    /// # Parameters
-    ///
-    /// * `accepted_before_ms` - Exclusive acceptance-time cutoff.
-    /// * `max_rows` - Maximum rows removed by this call.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the number of deleted records.
-    ///
-    /// # Errors
-    ///
-    /// Returns range, transaction, or SQLite errors.
-    #[cfg(test)]
-    fn prune_terminal_before<'a>(
-        &'a self,
-        accepted_before_ms: u64,
-        max_rows: NonZeroUsize,
-    ) -> TaskFuture<'a, Result<usize, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        let accepted_before_ms = match i64::try_from(accepted_before_ms) {
-            Ok(value) => value,
-            Err(_) => {
-                return Box::pin(async {
-                    Err(StoreError::InvalidRequest(
-                        "task history cutoff exceeds the SQLite integer range",
-                    ))
-                });
-            }
-        };
-        let max_rows = match i64::try_from(max_rows.get()) {
-            Ok(value) => value,
-            Err(_) => {
-                return Box::pin(async {
-                    Err(StoreError::InvalidRequest(
-                        "task history prune limit exceeds the SQLite integer range",
-                    ))
-                });
-            }
-        };
-        self.run_write(move |connection| {
-            let transaction = connection.unchecked_transaction().map_err(failure)?;
-            let mut statement = transaction
-                .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND accepted_at < ?1 ORDER BY accepted_at, id LIMIT ?2")
-                .map_err(failure)?;
-            let rows = statement
-                .query_map(params![accepted_before_ms, max_rows], |row| row.get::<_, String>(0))
-                .map_err(failure)?;
-            let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
-            drop(statement);
-            for id in &ids {
-                transaction
-                    .execute("DELETE FROM tasks WHERE id=?1", [id])
-                    .map_err(failure)?;
-            }
-            transaction.commit().map_err(failure)?;
-            Ok(ids.len())
-        })
-    }
-
-    /// Increments and records the exclusive service ownership epoch.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the new owner epoch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the owner lock is absent or metadata access fails.
-    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
-        let owner_state = Arc::clone(&self.owner_state);
-        let database_path = self.database_path.clone();
-        self.run(move |connection| {
-            let mut owner_state = owner_state.lock();
-            if owner_state.epoch.is_some() {
-                return Err(StoreError::OwnerConflict);
-            }
-            if owner_state.lock_file.is_none() {
-                owner_state.lock_file = Some(acquire_owner_lock(&database_path)?);
-            }
-            connection.execute("INSERT INTO metadata(key,value) VALUES('owner_epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1", []).map_err(failure)?;
-            let epoch = connection.query_row("SELECT value FROM metadata WHERE key='owner_epoch'", [], |row| row.get::<_, u64>(0)).map(OwnerEpoch).map_err(failure)?;
-            owner_state.epoch = Some(epoch);
-            Ok(epoch)
-        })
-    }
-
-    /// Checks queued and running rows through a payload-free SQL probe.
-    ///
-    /// # Parameters
-    ///
-    /// * `limit` - Maximum allowed unfinished record count.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to whether the count strictly exceeds the limit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when SQLite cannot perform the probe.
-    #[cfg(test)]
-    fn has_unfinished_over_limit<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<bool, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        if limit > i64::MAX as usize {
-            return Box::pin(async { Ok(false) });
-        }
-        self.run(move |connection| {
-            let mut statement = connection
-                .prepare("SELECT 1 FROM tasks WHERE state_kind IN ('Queued','Running') LIMIT 1 OFFSET ?1")
-                .map_err(failure)?;
-            let mut rows = statement.query([limit as i64]).map_err(failure)?;
-            Ok(rows.next().map_err(failure)?.is_some())
-        })
-    }
-
-    /// Loads at most 256 unfinished summaries after an exclusive time/ID key.
-    ///
-    /// # Parameters
-    ///
-    /// * `cursor` - Exclusive acceptance-time/ID lower bound, or `None` for the
-    ///   first page.
-    ///
-    /// # Returns
-    ///
-    /// A payload-free page strictly ordered by `(accepted_at_ms, id)`.
-    /// Its next cursor equals the last row key only when more rows exist;
-    /// full terminal pages and empty pages return `None`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a row is malformed or SQLite access fails.
-    #[cfg(test)]
-    fn scan_unfinished<'a>(&'a self, cursor: Option<TaskCursor>) -> TaskFuture<'a, Result<RecoveryPage, StoreError>> {
-        if self.typed_schema {
-            return Box::pin(async { Err(StoreError::UnsupportedCapability) });
-        }
-        self.run(move |connection| {
-            let built = build_recovery_query(cursor)?;
-            let mut statement = connection.prepare(&built.sql).map_err(failure)?;
-            let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
-            let mut tasks = Vec::new();
-            while let Some(row) = rows.next().map_err(failure)? {
-                tasks.push(decode_stored_summary_row(
-                    read_stored_summary_row(row).map_err(failure)?,
-                )?);
-            }
-            let has_more = tasks.len() > 256;
-            if has_more {
-                tasks.truncate(256);
-            }
-            let next = has_more.then(|| tasks.last().map(TaskCursor::from)).flatten();
-            Ok(RecoveryPage { tasks, next })
-        })
-    }
-
-    /// Releases the process lock only when the supplied epoch still matches.
-    ///
-    /// # Parameters
-    ///
-    /// * `epoch` - Ownership generation previously issued by this store.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving after the lock file is released.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a stale epoch, absent owner, or lock failure.
-    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
-        let owner_state = Arc::clone(&self.owner_state);
-        let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run(move |_| {
-            let mut owner_state = owner_state.lock();
-            if owner_state.epoch != Some(epoch) {
-                return Err(StoreError::OwnerConflict);
-            }
-            let file = owner_state.lock_file.take().ok_or(StoreError::OwnerConflict)?;
-            owner_state.epoch = None;
-            outbox_enabled.store(false, std::sync::atomic::Ordering::Release);
-            file.unlock().map_err(failure)
-        })
-    }
-}
-
 /// Builds the initial queued record before the SQLite acceptance transaction.
 ///
 /// # Parameters
@@ -1050,67 +273,6 @@ impl LegacyTaskStore for SqliteTaskStore {
 /// * `id` - Service-assigned identity for the new task.
 /// * `request` - Validated reconstructable request to accept.
 ///
-/// # Returns
-///
-/// A queued record with initial lifecycle timestamps and revision.
-#[cfg(test)]
-fn initial_record(id: TaskId, request: TaskRequest) -> TaskRecord {
-    TaskRecord {
-        id,
-        request,
-        state: TaskState::Queued,
-        state_version: 0,
-        attempt: 0,
-        retry_not_before_ms: None,
-        accepted_at_ms: now_ms(),
-        started_at_ms: None,
-        finished_at_ms: None,
-        assigned_resources: Vec::new(),
-        output: None,
-        cancel_requested: false,
-    }
-}
-
-/// Maps a lifecycle state to its stable SQLite index key.
-///
-/// # Parameters
-///
-/// * `state` - Lifecycle value to map.
-///
-/// # Returns
-///
-/// The case-sensitive variant name used in the indexed state column.
-#[cfg(test)]
-fn state_kind(state: &TaskState) -> &'static str {
-    state.kind().as_str()
-}
-
-/// Reads the current Unix epoch time in milliseconds, defaulting on clock
-/// error.
-///
-/// # Returns
-///
-/// Current epoch milliseconds, or zero if the system clock predates the epoch.
-#[cfg(test)]
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-/// Converts a SQLite, filesystem, or serialization diagnostic to store failure.
-///
-/// # Type Parameters
-///
-/// * `E` - Diagnostic value implementing `Display`.
-///
-/// # Parameters
-///
-/// * `error` - Underlying operation failure.
-///
-/// # Returns
-///
-/// A store failure preserving the diagnostic text.
 fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }
@@ -1132,16 +294,12 @@ mod tests {
     use tokio::time;
 
     use super::SqliteTaskStore;
-    use super::TaskId;
-    use crate::model::legacy::AcceptOutcome;
-    use crate::model::legacy::TaskQuery;
-    use crate::model::legacy::TaskRequest;
-    use crate::store::LegacyTaskStore;
     use crate::store::StoreError;
+    use crate::store::TaskStore;
 
     /// Creates a unique database path for one worker scheduling test.
     fn test_database_path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("qubit-task-sqlite-worker-{}.sqlite", TaskId::generate()))
+        std::env::temp_dir().join(format!("qubit-task-sqlite-worker-{}-{}.sqlite", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after epoch").as_nanos()))
     }
 
     /// Removes only disposable files created by this worker test.
@@ -1152,56 +310,6 @@ mod tests {
         let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
-    }
-
-    #[tokio_crate::test]
-    async fn test_same_millisecond_pages_use_task_id_as_tie_breaker() {
-        let path = test_database_path();
-        let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-        let ids = [TaskId::generate(), TaskId::generate()];
-        for id in ids {
-            assert!(matches!(
-                store
-                    .accept(id, TaskRequest::new("cursor-test", "1", Vec::new()))
-                    .await
-                    .expect("task accepted"),
-                AcceptOutcome::Accepted(_)
-            ));
-        }
-        store
-            .run(move |connection| {
-                for id in ids {
-                    connection
-                        .execute(
-                            "UPDATE tasks SET accepted_at=42, lifecycle_json=json_set(lifecycle_json, '$.accepted_at_ms', 42) WHERE id=?1",
-                            [id.to_string()],
-                        )
-                        .map_err(super::failure)?;
-                }
-                Ok(())
-            })
-            .await
-            .expect("timestamps are aligned in the test database");
-
-        let first = store
-            .list(TaskQuery {
-                limit: 1,
-                ..TaskQuery::default()
-            })
-            .await
-            .expect("first page succeeds");
-        let second = store
-            .list(TaskQuery {
-                after: first.next,
-                limit: 1,
-                ..TaskQuery::default()
-            })
-            .await
-            .expect("second page succeeds");
-        assert_eq!(first.records[0].id, ids[0].min(ids[1]));
-        assert_eq!(second.records[0].id, ids[0].max(ids[1]));
-        drop(store);
-        remove_database(&path);
     }
 
     #[tokio_crate::test]
@@ -1446,11 +554,212 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod summary_query_tests {
-    #[test]
-    fn test_summary_projection_never_selects_payload() {
-        assert!(!super::SUMMARY_COLUMNS.split(',').any(|column| column == "payload"));
-        assert_eq!(super::SUMMARY_COLUMNS.split(',').count(), 8);
+impl super::TaskStore for SqliteTaskStore {
+    /// Reports that history is persistent and unfinished records can recover.
+    ///
+    /// # Returns
+    ///
+    /// Both persistent-history and restart-recovery capabilities.
+    fn capabilities(&self) -> StoreCapabilities {
+        StoreCapabilities {
+            persistent_history: true,
+            restart_recovery: true,
+        }
     }
+
+
+    /// Atomically accepts an encoded typed request on a store opened with
+    /// [`SqliteTaskStore::open`].
+    fn accept_encoded<'a>(
+        &'a self,
+        id: crate::model::typed::TaskId,
+        request: crate::model::typed::StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<crate::model::typed::AcceptOutcome, StoreError>> {
+                let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| {
+            accept_encoded(
+                connection,
+                id,
+                request,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
+    }
+
+
+    /// Loads an encoded typed task without decoding its application payload.
+    fn get_encoded_task<'a>(
+        &'a self,
+        id: crate::model::typed::TaskId,
+    ) -> TaskFuture<'a, Result<Option<crate::model::typed::StoredTask>, StoreError>> {
+                self.run(move |connection| get_encoded_task(connection, id))
+    }
+
+
+    /// Starts one queued typed task attempt with a revision compare-and-set.
+    fn start_encoded<'a>(
+        &'a self,
+        command: crate::model::typed::StartCommand,
+    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+                let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| {
+            start_encoded(
+                connection,
+                command,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
+    }
+
+
+    /// Applies a typed lifecycle transition atomically.
+    fn transition_encoded<'a>(
+        &'a self,
+        command: crate::model::typed::TransitionCommand,
+    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+                let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| {
+            transition_encoded(
+                connection,
+                command,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
+    }
+
+
+    /// Persists a progress snapshot for the matching running attempt.
+    fn update_progress<'a>(
+        &'a self,
+        command: crate::model::typed::ProgressCommand,
+    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+                self.run_write(move |connection| update_progress(connection, command))
+    }
+
+
+    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+                self.run(move |connection| list_encoded(connection, query))
+    }
+
+
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<crate::model::typed::TaskCursor>,
+        limit: NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+                self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
+    }
+
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+                self.run(move |connection| next_retry_deadline(connection, now_ms))
+    }
+
+
+    fn prune_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+                let finished_before_ms = match i64::try_from(finished_before_ms) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async {
+                    Err(StoreError::InvalidRequest(
+                        "task finish cutoff exceeds the SQLite integer range",
+                    ))
+                });
+            }
+        };
+        let max_rows = match i64::try_from(max_rows.get()) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async {
+                    Err(StoreError::InvalidRequest(
+                        "task history prune limit exceeds the SQLite integer range",
+                    ))
+                });
+            }
+        };
+        self.run_write(move |connection| {
+            let transaction = connection.unchecked_transaction().map_err(failure)?;
+            let mut statement = transaction
+                .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER) < ?1 ORDER BY CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id LIMIT ?2")
+                .map_err(failure)?;
+            let rows = statement
+                .query_map(params![finished_before_ms, max_rows], |row| row.get::<_, String>(0))
+                .map_err(failure)?;
+            let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
+            drop(statement);
+            for id in &ids {
+                transaction
+                    .execute("DELETE FROM tasks WHERE id=?1", [id])
+                    .map_err(failure)?;
+            }
+            transaction.commit().map_err(failure)?;
+            Ok(ids.len())
+        })
+    }
+
+
+    /// Increments and records the exclusive service ownership epoch.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the new owner epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the owner lock is absent or metadata access fails.
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
+        let owner_state = Arc::clone(&self.owner_state);
+        let database_path = self.database_path.clone();
+        self.run(move |connection| {
+            let mut owner_state = owner_state.lock();
+            if owner_state.epoch.is_some() {
+                return Err(StoreError::OwnerConflict);
+            }
+            if owner_state.lock_file.is_none() {
+                owner_state.lock_file = Some(acquire_owner_lock(&database_path)?);
+            }
+            connection.execute("INSERT INTO metadata(key,value) VALUES('owner_epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1", []).map_err(failure)?;
+            let epoch = connection.query_row("SELECT value FROM metadata WHERE key='owner_epoch'", [], |row| row.get::<_, u64>(0)).map(OwnerEpoch).map_err(failure)?;
+            owner_state.epoch = Some(epoch);
+            Ok(epoch)
+        })
+    }
+
+
+    /// Releases the process lock only when the supplied epoch still matches.
+    ///
+    /// # Parameters
+    ///
+    /// * `epoch` - Ownership generation previously issued by this store.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after the lock file is released.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale epoch, absent owner, or lock failure.
+    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+        let owner_state = Arc::clone(&self.owner_state);
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run(move |_| {
+            let mut owner_state = owner_state.lock();
+            if owner_state.epoch != Some(epoch) {
+                return Err(StoreError::OwnerConflict);
+            }
+            let file = owner_state.lock_file.take().ok_or(StoreError::OwnerConflict)?;
+            owner_state.epoch = None;
+            outbox_enabled.store(false, std::sync::atomic::Ordering::Release);
+            file.unlock().map_err(failure)
+        })
+    }
+
+    fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), StoreError>> { self.enable_outbox() }
+    fn list_event_outbox<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> { self.list_outbox(limit) }
+    fn mark_event_published<'a>(&'a self, task_id: crate::model::typed::TaskId, state_version: u64) -> TaskFuture<'a, Result<(), StoreError>> { self.mark_outbox_published(task_id, state_version) }
 }

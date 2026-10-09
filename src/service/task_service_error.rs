@@ -6,7 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use crate::model::TaskStateKind;
-use crate::model::next::TaskId;
+use crate::model::typed::TaskId;
 use crate::store::StoreError;
 
 /// Failure reported by a service operation.

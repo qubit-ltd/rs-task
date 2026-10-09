@@ -169,7 +169,7 @@ mod tests {
     use qubit_event_bus::model::Topic;
 
     use super::PublisherState;
-    use crate::model::next::TaskId;
+    use crate::model::typed::TaskId;
     use crate::store::EventOutboxEntry;
     use crate::store::MemoryTaskStore;
 

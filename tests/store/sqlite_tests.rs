@@ -8,37 +8,22 @@
 use qubit_id::Id;
 use rusqlite::Connection;
 use rusqlite::params;
-use serde_json as json;
 use tokio::test as tokio_test;
 
-use crate::model::MAX_TASK_QUERY_LIMIT;
-use crate::model::TaskOutput;
 use crate::model::TaskState;
-use crate::model::TaskState as LegacyTaskState;
-use crate::model::TaskStateKind;
-use crate::model::legacy::AcceptOutcome;
-use crate::model::legacy::TaskCursor;
-use crate::model::legacy::TaskId;
-use crate::model::legacy::TaskQuery;
-use crate::model::legacy::TaskRecord;
-use crate::model::legacy::TaskRequest;
-use crate::model::legacy::TaskRequestInfo;
-use crate::model::legacy::TransitionCommand;
-use crate::model::next::ProgressCommand;
-use crate::model::next::ResourceRequest;
-use crate::model::next::StartCommand;
-use crate::model::next::StoredPayload;
-use crate::model::next::StoredTaskRequest;
-use crate::model::next::TaskId as NumericTaskId;
-use crate::model::next::TransitionCommand as EncodedTransitionCommand;
-use crate::store::LegacyTaskStore as TaskStore;
-use crate::store::MemoryTaskStore;
+use crate::model::typed::ProgressCommand;
+use crate::model::typed::ResourceRequest;
+use crate::model::typed::StartCommand;
+use crate::model::typed::StoredPayload;
+use crate::model::typed::StoredTaskRequest;
+use crate::model::typed::TaskId as NumericTaskId;
+use crate::model::typed::TransitionCommand as EncodedTransitionCommand;
 use crate::store::SqliteTaskStore;
 use crate::store::StoreError;
 use crate::store::TaskStore as TypedTaskStore;
 
 fn database_path(label: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("qubit-task-{label}-{}.sqlite", TaskId::generate()))
+    std::env::temp_dir().join(format!("qubit-task-{label}-{}-{}.sqlite", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after epoch").as_nanos()))
 }
 
 fn remove_database(path: &std::path::Path) {
@@ -58,70 +43,21 @@ fn owner_lock_path(path: &std::path::Path) -> std::path::PathBuf {
     lock_path.into()
 }
 
-fn request_with_idempotency_key(task_type: &str, payload: Vec<u8>, key: &str) -> TaskRequest {
-    let mut request = TaskRequest::new(task_type, "1", payload);
-    request.idempotency_key = Some(key.into());
-    request
-}
-
-async fn seed_legacy_database(path: &std::path::Path) -> (TaskId, TaskRequest) {
-    let id = TaskId::generate();
-    let mut request = TaskRequest::new("legacy", "1", b"payload".to_vec());
-    request.idempotency_key = Some("legacy-key".into());
-    let memory = MemoryTaskStore::new(10);
-    let record = match memory.accept(id, request.clone()).await.expect("memory record seeds") {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => panic!("new task ID cannot already exist"),
-    };
+fn seed_legacy_database(path: &std::path::Path) -> String {
+    let id = "550e8400-e29b-41d4-a716-446655440000".to_owned();
     let connection = Connection::open(path).expect("legacy database opens");
     connection
         .execute_batch(
-            "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_json TEXT NOT NULL); CREATE INDEX tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);",
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_json TEXT NOT NULL); CREATE INDEX tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL); PRAGMA user_version=3;",
         )
         .expect("legacy schema is created");
     connection
         .execute(
-            "INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_json) VALUES (?1,'Queued',?2,NULL,?3,?4,?5)",
-            params![
-                id.to_string(),
-                i64::try_from(record.accepted_at_ms).expect("timestamp fits SQLite"),
-                request.idempotency_key,
-                json::to_string(&request).expect("request serializes"),
-                {
-                    let mut value = json::to_value(&record).expect("record serializes");
-                    value.as_object_mut().unwrap().remove("retry_not_before_ms");
-                    json::to_string(&value).expect("legacy record serializes")
-                },
-            ],
+            "INSERT INTO tasks (id,state_kind,accepted_at,request_json,record_json) VALUES (?1,'Queued',1,'legacy-request','legacy-record')",
+            [&id],
         )
         .expect("legacy task is inserted");
-    (id, request)
-}
-
-#[tokio_test]
-async fn test_sqlite_open_creates_version_three_schema() {
-    let path = database_path("schema-fresh");
-    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    drop(store);
-    let connection = Connection::open(&path).expect("database opens for schema inspection");
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("schema version is readable");
-    assert_eq!(version, 3);
-    let columns = connection
-        .prepare("PRAGMA table_info(tasks)")
-        .expect("table columns are readable")
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("column query succeeds")
-        .map(|name| name.expect("column name reads"))
-        .collect::<Vec<_>>();
-    assert!(columns.iter().any(|name| name == "record_format_version"));
-    assert!(columns.iter().any(|name| name == "lifecycle_json"));
-    assert!(columns.iter().any(|name| name == "request_info_json"));
-    assert!(columns.iter().any(|name| name == "payload"));
-    assert!(!columns.iter().any(|name| name == "record_json"));
-    drop(connection);
-    remove_database(&path);
+    id
 }
 
 fn typed_task_id(value: u64) -> NumericTaskId {
@@ -148,7 +84,7 @@ fn typed_request(key: Option<&str>) -> StoredTaskRequest {
 #[tokio_test]
 async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operations() {
     let path = database_path("typed-boundary-errors");
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     let missing_id = typed_task_id(201);
 
     assert!(
@@ -226,102 +162,9 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
 }
 
 #[tokio_test]
-async fn test_sqlite_legacy_accept_rejects_over_limit_request() {
-    let path = database_path("legacy-request-too-large");
-    let store = SqliteTaskStore::open(&path).expect("legacy SQLite store opens");
-    let request = TaskRequest::new("x".repeat(129), "1", Vec::new());
-
-    assert!(matches!(
-        TaskStore::accept(&store, TaskId::generate(), request).await,
-        Err(StoreError::InvalidRequest(_))
-    ));
-
-    drop(store);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_legacy_transition_rejects_oversized_diagnostics_and_output() {
-    let path = database_path("legacy-transition-too-large");
-    let store = SqliteTaskStore::open(&path).expect("legacy SQLite store opens");
-    let id = TaskId::generate();
-
-    assert!(matches!(
-        TaskStore::transition(
-            &store,
-            TransitionCommand {
-                id,
-                expected_version: 0,
-                expected_attempt: 0,
-                state: TaskState::Failed {
-                    category: "x".repeat(crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES + 1),
-                    message: "oversized failure category".into(),
-                },
-                retry_not_before_ms: None,
-                output: None,
-                assigned_resources: Vec::new(),
-                cancel_requested: false,
-            }
-        )
-        .await,
-        Err(StoreError::InvalidRequest(_))
-    ));
-
-    assert!(matches!(
-        TaskStore::transition(
-            &store,
-            TransitionCommand {
-                id,
-                expected_version: 0,
-                expected_attempt: 0,
-                state: TaskState::Succeeded,
-                retry_not_before_ms: None,
-                output: Some(TaskOutput {
-                    summary: vec![0; crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES + 1],
-                }),
-                assigned_resources: Vec::new(),
-                cancel_requested: false,
-            }
-        )
-        .await,
-        Err(StoreError::InvalidRequest(_))
-    ));
-
-    drop(store);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_typed_schema_rejects_legacy_transition() {
-    let path = database_path("typed-legacy-transition");
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
-
-    assert!(matches!(
-        TaskStore::transition(
-            &store,
-            TransitionCommand {
-                id: TaskId::generate(),
-                expected_version: 0,
-                expected_attempt: 0,
-                state: TaskState::Cancelled,
-                retry_not_before_ms: None,
-                output: None,
-                assigned_resources: Vec::new(),
-                cancel_requested: false,
-            }
-        )
-        .await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-
-    drop(store);
-    remove_database(&path);
-}
-
-#[tokio_test]
 async fn test_sqlite_typed_prune_rejects_limit_outside_sqlite_integer_range() {
     let path = database_path("typed-prune-limit-range");
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     let limit = std::num::NonZeroUsize::new(usize::MAX).expect("usize::MAX is nonzero");
 
     if i64::try_from(limit.get()).is_err() {
@@ -338,7 +181,7 @@ async fn test_sqlite_typed_prune_rejects_limit_outside_sqlite_integer_range() {
 #[tokio_test]
 async fn test_sqlite_event_outbox_requires_active_owner() {
     let path = database_path("typed-outbox-owner");
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     let id = typed_task_id(203);
 
     assert!(matches!(
@@ -389,7 +232,7 @@ async fn test_sqlite_event_outbox_requires_active_owner() {
 #[tokio_test]
 async fn test_sqlite_event_outbox_validates_pages_and_marks_confirmed_events() {
     let path = database_path("typed-outbox-pages");
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     let epoch = TypedTaskStore::acquire_owner(&store)
         .await
         .expect("typed service owner is acquired");
@@ -444,194 +287,11 @@ async fn test_sqlite_event_outbox_validates_pages_and_marks_confirmed_events() {
 }
 
 #[tokio_test]
-async fn test_sqlite_legacy_schema_rejects_typed_store_operations() {
-    let path = database_path("legacy-reject-typed-operations");
-    let store = SqliteTaskStore::open(&path).expect("legacy SQLite store opens");
-    let id = typed_task_id(206);
-
-    assert!(TypedTaskStore::capabilities(&store).persistent_history);
-    assert!(TypedTaskStore::capabilities(&store).restart_recovery);
-    assert!(matches!(
-        TypedTaskStore::accept_encoded(&store, id, typed_request(None)).await,
-        Err(StoreError::Failure(_))
-    ));
-    assert!(matches!(
-        TypedTaskStore::get_encoded_task(&store, id).await,
-        Err(StoreError::Failure(_))
-    ));
-    assert!(matches!(
-        TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 1, 1, None, Vec::new(), 1)).await,
-        Err(StoreError::Failure(_))
-    ));
-    assert!(matches!(
-        TypedTaskStore::start_encoded(
-            &store,
-            StartCommand {
-                id,
-                expected_state_version: 0,
-                started_at_ms: 1,
-            }
-        )
-        .await,
-        Err(StoreError::Failure(_))
-    ));
-    assert!(matches!(
-        TypedTaskStore::transition_encoded(
-            &store,
-            EncodedTransitionCommand {
-                id,
-                expected_state_version: 0,
-                expected_attempt: 0,
-                retry_not_before_ms: None,
-                state: TaskState::Cancelled,
-                cancel_requested: false,
-                cancel_error: None,
-                finished_at_ms: Some(1),
-                output: None,
-            }
-        )
-        .await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        TypedTaskStore::list_encoded(&store, crate::model::next::TaskQuery::default()).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        TypedTaskStore::list_ready_queued(&store, None, std::num::NonZeroUsize::MIN, 0).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        TypedTaskStore::next_retry_deadline(&store, 0).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        TypedTaskStore::prune_terminal_before(&store, 0, std::num::NonZeroUsize::MIN).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-
-    drop(store);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_legacy_summary_reads_and_terminal_pruning() {
-    let path = database_path("legacy-summary-prune");
-    let store = SqliteTaskStore::open(&path).expect("legacy SQLite store opens");
-    let id = TaskId::generate();
-    let request = request_with_idempotency_key("legacy-summary", b"payload".to_vec(), "summary-key");
-    let _accepted = TaskStore::accept(&store, id, request)
-        .await
-        .expect("legacy task is accepted");
-
-    let by_id = TaskStore::get_summary(&store, id)
-        .await
-        .expect("summary lookup succeeds")
-        .expect("accepted task summary exists");
-    assert_eq!(by_id.id, id);
-    assert_eq!(by_id.state, TaskState::Queued);
-    let by_key = TaskStore::get_summary_by_idempotency_key(&store, "summary-key")
-        .await
-        .expect("summary key lookup succeeds")
-        .expect("accepted summary is indexed by idempotency key");
-    assert_eq!(by_key.id, id);
-    assert!(
-        TaskStore::get_summary_by_idempotency_key(&store, "missing")
-            .await
-            .expect("unknown summary key lookup succeeds")
-            .is_none()
-    );
-
-    let running = TaskStore::transition(
-        &store,
-        TransitionCommand {
-            id,
-            expected_version: by_id.state_version,
-            expected_attempt: by_id.attempt,
-            state: TaskState::Running,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        },
-    )
-    .await
-    .expect("task starts running");
-    TaskStore::transition(
-        &store,
-        TransitionCommand {
-            id,
-            expected_version: running.state_version,
-            expected_attempt: running.attempt,
-            state: TaskState::Succeeded,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        },
-    )
-    .await
-    .expect("task becomes terminal");
-    assert_eq!(
-        TaskStore::prune_terminal_before(&store, i64::MAX as u64, std::num::NonZeroUsize::MIN)
-            .await
-            .expect("one terminal row is pruned"),
-        1
-    );
-    assert!(
-        TaskStore::get_summary(&store, id)
-            .await
-            .expect("pruned summary lookup succeeds")
-            .is_none()
-    );
-    assert!(
-        TaskStore::get_by_idempotency_key(&store, "summary-key")
-            .await
-            .expect("pruned key lookup succeeds")
-            .is_none()
-    );
-    let epoch = TaskStore::acquire_owner(&store)
-        .await
-        .expect("service ownership is acquired");
-    TaskStore::release_owner(&store, epoch)
-        .await
-        .expect("service ownership is released");
-    assert!(matches!(
-        TaskStore::accept(
-            &store,
-            TaskId::generate(),
-            TaskRequest::new("after-release", "1", Vec::new())
-        )
-        .await,
-        Err(StoreError::Failure(_))
-    ));
-
-    drop(store);
-    remove_database(&path);
-}
-
-#[tokio_test]
 async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
     let path = database_path("typed-history-retry-prune");
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     let first_id = typed_task_id(207);
     let second_id = typed_task_id(208);
-    assert!(matches!(
-        TaskStore::get_summary(&store, TaskId::generate()).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        TaskStore::prune_terminal_before(&store, 0, std::num::NonZeroUsize::MIN).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        TaskStore::has_unfinished_over_limit(&store, 0).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        TaskStore::scan_unfinished(&store, None).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
     for id in [first_id, second_id] {
         TypedTaskStore::accept_encoded(&store, id, typed_request(None))
             .await
@@ -640,10 +300,10 @@ async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
 
     let history = TypedTaskStore::list_encoded(
         &store,
-        crate::model::next::TaskQuery {
+        crate::model::typed::TaskQuery {
             category: Some("reports".into()),
             limit: 1,
-            ..crate::model::next::TaskQuery::default()
+            ..crate::model::typed::TaskQuery::default()
         },
     )
     .await
@@ -743,29 +403,7 @@ async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
 async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progress() {
     let path = database_path("typed-schema");
     let id = typed_task_id(u64::MAX);
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
-    assert!(matches!(
-        store
-            .accept(TaskId::generate(), TaskRequest::new("legacy", "1", Vec::new()))
-            .await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        store.get(TaskId::generate()).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        store.list(TaskQuery::default()).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    assert!(matches!(
-        store.scan_unfinished(None).await,
-        Err(StoreError::UnsupportedCapability)
-    ));
-    let low_id = typed_task_id(1);
-    TypedTaskStore::accept_encoded(&store, low_id, typed_request(None))
-        .await
-        .expect("low typed task is accepted");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     let accepted = TypedTaskStore::accept_encoded(&store, id, typed_request(Some("typed-idempotency")))
         .await
         .expect("typed request is accepted");
@@ -799,7 +437,7 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
     )
     .await
     .expect("queued typed task starts");
-    assert_eq!(started.state, LegacyTaskState::Running);
+    assert_eq!(started.state, TaskState::Running);
     assert_eq!(started.attempt, 1);
     assert_eq!(started.state_version, 1);
     assert!(matches!(
@@ -818,11 +456,11 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
     let stored_id: String = connection
         .query_row("SELECT id FROM tasks ORDER BY id LIMIT 1", [], |row| row.get(0))
         .expect("fixed width ID reads");
-    assert_eq!(stored_id, "00000000000000000001");
+    assert_eq!(stored_id, id.to_padded_decimal());
     drop(connection);
     drop(store);
 
-    let store = SqliteTaskStore::open_next(&path).expect("typed database reopens");
+    let store = SqliteTaskStore::open(&path).expect("typed database reopens");
     let progress = TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 1, 1, None, Vec::new(), 11))
         .await
         .expect("current attempt progress commits");
@@ -844,7 +482,7 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
         )
         .expect("lifecycle is stored");
     let mut lifecycle: serde_json::Value = serde_json::from_str(&lifecycle_json).expect("lifecycle JSON decodes");
-    lifecycle["state"] = serde_json::to_value(LegacyTaskState::Succeeded).expect("success state serializes");
+    lifecycle["state"] = serde_json::to_value(TaskState::Succeeded).expect("success state serializes");
     connection
         .execute(
             "UPDATE tasks SET state_kind='Succeeded',lifecycle_json=?2 WHERE id=?1",
@@ -861,7 +499,7 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
     ));
     drop(store);
 
-    let reopened = SqliteTaskStore::open_next(&path).expect("typed database remains readable");
+    let reopened = SqliteTaskStore::open(&path).expect("typed database remains readable");
     let recovered = TypedTaskStore::get_encoded_task(&reopened, id)
         .await
         .expect("typed task reopens")
@@ -897,7 +535,7 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
 async fn test_sqlite_new_attempt_clears_progress_and_restarts_progress_version() {
     let path = database_path("typed-progress-retry");
     let id = typed_task_id(120);
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     let accepted = TypedTaskStore::accept_encoded(&store, id, typed_request(None))
         .await
         .expect("typed task is accepted");
@@ -924,7 +562,7 @@ async fn test_sqlite_new_attempt_clears_progress_and_restarts_progress_version()
             expected_state_version: first_attempt.state_version,
             expected_attempt: first_attempt.attempt,
             retry_not_before_ms: None,
-            state: LegacyTaskState::Queued,
+            state: TaskState::Queued,
             cancel_requested: false,
             cancel_error: None,
             finished_at_ms: None,
@@ -970,7 +608,7 @@ async fn test_sqlite_new_attempt_clears_progress_and_restarts_progress_version()
             expected_state_version: second_attempt.state_version,
             expected_attempt: second_attempt.attempt,
             retry_not_before_ms: None,
-            state: LegacyTaskState::Succeeded,
+            state: TaskState::Succeeded,
             cancel_requested: false,
             cancel_error: None,
             finished_at_ms: Some(5),
@@ -979,7 +617,7 @@ async fn test_sqlite_new_attempt_clears_progress_and_restarts_progress_version()
     )
     .await
     .expect("terminal state persists in lifecycle JSON");
-    assert_eq!(terminal.state, LegacyTaskState::Succeeded);
+    assert_eq!(terminal.state, TaskState::Succeeded);
     assert_eq!(terminal.finished_at_ms, Some(5));
     assert_eq!(terminal.progress.as_ref().map(|progress| progress.attempt), Some(2));
 
@@ -988,23 +626,23 @@ async fn test_sqlite_new_attempt_clears_progress_and_restarts_progress_version()
 }
 
 #[tokio_test]
-async fn test_sqlite_open_next_rejects_legacy_schema_without_rewriting_it() {
+async fn test_sqlite_open_rejects_legacy_schema_without_rewriting_it() {
     let path = database_path("typed-legacy-reject");
-    let (id, _) = seed_legacy_database(&path).await;
+    let id = seed_legacy_database(&path);
     let before = Connection::open(&path)
         .expect("legacy database opens")
-        .query_row("SELECT record_json FROM tasks WHERE id=?1", [id.to_string()], |row| {
+        .query_row("SELECT record_json FROM tasks WHERE id=?1", [&id], |row| {
             row.get::<_, String>(0)
         })
         .expect("legacy record is readable before open");
-    let error = match SqliteTaskStore::open_next(&path) {
+    let error = match SqliteTaskStore::open(&path) {
         Ok(_) => panic!("typed API must reject a legacy UUID database"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("explicit task ID mapping"));
     let connection = Connection::open(&path).expect("legacy database remains readable");
     let after: String = connection
-        .query_row("SELECT record_json FROM tasks WHERE id=?1", [id.to_string()], |row| {
+        .query_row("SELECT record_json FROM tasks WHERE id=?1", [&id], |row| {
             row.get(0)
         })
         .expect("legacy record remains present");
@@ -1012,862 +650,26 @@ async fn test_sqlite_open_next_rejects_legacy_schema_without_rewriting_it() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("legacy schema version remains readable");
-    assert_eq!(version, 0);
-    drop(connection);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_open_migrates_legacy_records_without_loss() {
-    let path = database_path("schema-migrate");
-    let (id, request) = seed_legacy_database(&path).await;
-    let store = SqliteTaskStore::open(&path).expect("legacy database migrates");
-    let record = store
-        .get(id)
-        .await
-        .expect("legacy record reads")
-        .expect("record exists");
-    assert_eq!(record.request, request);
-    assert_eq!(record.id, id);
-    assert_eq!(record.retry_not_before_ms, None);
-    assert_eq!(
-        store
-            .get_by_idempotency_key("legacy-key")
-            .await
-            .expect("idempotency lookup succeeds")
-            .unwrap()
-            .id,
-        id
-    );
-    drop(store);
-    let reopened = SqliteTaskStore::open(&path).expect("migrated database reopens idempotently");
-    assert_eq!(
-        reopened
-            .get(id)
-            .await
-            .expect("migrated row remains readable")
-            .unwrap()
-            .retry_not_before_ms,
-        None
-    );
-    assert_eq!(
-        reopened.get_by_idempotency_key("legacy-key").await.unwrap().unwrap().id,
-        id
-    );
-    drop(reopened);
-    remove_database(&path);
-}
-
-/// Migrates schema 1 while retaining its original task request.
-#[tokio_test]
-async fn test_sqlite_open_migrates_schema_one_records_without_loss() {
-    let path = database_path("schema-one-migrate");
-    let (id, request) = seed_legacy_database(&path).await;
-    let connection = Connection::open(&path).expect("legacy database opens");
-    connection
-        .execute_batch(
-            "ALTER TABLE tasks ADD COLUMN record_format_version INTEGER NOT NULL DEFAULT 1; PRAGMA user_version=1;",
-        )
-        .expect("schema one format is seeded");
-    drop(connection);
-
-    let store = SqliteTaskStore::open(&path).expect("schema one database migrates");
-    let record = store.get(id).await.expect("record reads").expect("record exists");
-    assert_eq!(record.request, request);
-    assert_eq!(record.id, id);
-    assert_eq!(record.state_version, 0);
-    drop(store);
-    let connection = Connection::open(&path).expect("migrated database opens");
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
     assert_eq!(version, 3);
     drop(connection);
     remove_database(&path);
 }
 
-/// Preserves queued retry, running, and diagnostic terminal lifecycle fields.
-#[tokio_test]
-async fn test_sqlite_schema_migration_preserves_lifecycle_variants() {
-    let path = database_path("schema-lifecycle");
-    let (queued_id, _) = seed_legacy_database(&path).await;
-    let records = [
-        TaskRecord {
-            id: TaskId::generate(),
-            request: request_with_idempotency_key("legacy-running", b"running".to_vec(), "legacy-running-key"),
-            state: TaskState::Running,
-            state_version: 1,
-            attempt: 1,
-            retry_not_before_ms: None,
-            accepted_at_ms: 101,
-            started_at_ms: Some(102),
-            finished_at_ms: None,
-            assigned_resources: vec!["cpu:0".into()],
-            output: None,
-            cancel_requested: false,
-        },
-        TaskRecord {
-            id: TaskId::generate(),
-            request: request_with_idempotency_key("legacy-failed", b"failure".to_vec(), "legacy-failed-key"),
-            state: TaskState::Failed {
-                category: "legacy-category".into(),
-                message: "legacy diagnostic".into(),
-            },
-            state_version: 2,
-            attempt: 1,
-            retry_not_before_ms: None,
-            accepted_at_ms: 103,
-            started_at_ms: Some(104),
-            finished_at_ms: Some(105),
-            assigned_resources: Vec::new(),
-            output: None,
-            cancel_requested: false,
-        },
-        TaskRecord {
-            id: TaskId::generate(),
-            request: request_with_idempotency_key("legacy-retry", b"retry".to_vec(), "legacy-retry-key"),
-            state: TaskState::Queued,
-            state_version: 2,
-            attempt: 1,
-            retry_not_before_ms: Some(1234),
-            accepted_at_ms: 106,
-            started_at_ms: Some(107),
-            finished_at_ms: None,
-            assigned_resources: Vec::new(),
-            output: None,
-            cancel_requested: false,
-        },
-    ];
-    let connection = Connection::open(&path).expect("legacy database opens");
-    for record in &records {
-        connection
-            .execute(
-                "INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![
-                    record.id.to_string(),
-                    match record.state.kind() {
-                        TaskStateKind::Queued => "Queued",
-                        TaskStateKind::Running => "Running",
-                        TaskStateKind::Blocked => "Blocked",
-                        TaskStateKind::Succeeded => "Succeeded",
-                        TaskStateKind::Failed => "Failed",
-                        TaskStateKind::Panicked => "Panicked",
-                        TaskStateKind::Cancelled => "Cancelled",
-                    },
-                    i64::try_from(record.accepted_at_ms).unwrap(),
-                    record.request.correlation_key,
-                    record.request.idempotency_key,
-                    json::to_string(&record.request).unwrap(),
-                    json::to_string(record).unwrap(),
-                ],
-            )
-            .expect("legacy lifecycle row is inserted");
-    }
-    drop(connection);
-
-    let store = SqliteTaskStore::open(&path).expect("legacy lifecycle rows migrate");
-    let queued = store.get(queued_id).await.unwrap().unwrap();
-    assert!(matches!(queued.state, TaskState::Queued));
-    for expected in &records {
-        assert_eq!(store.get(expected.id).await.unwrap().as_ref(), Some(expected));
-    }
-    assert_eq!(
-        store
-            .get_by_idempotency_key("legacy-failed-key")
-            .await
-            .unwrap()
-            .unwrap()
-            .id,
-        records[1].id
-    );
-    drop(store);
-    remove_database(&path);
-}
-
-/// Rolls back schema and version changes when a legacy record cannot decode.
-#[tokio_test]
-async fn test_sqlite_schema_migration_rolls_back_when_legacy_record_is_corrupt() {
-    let path = database_path("schema-corrupt");
-    let (id, _) = seed_legacy_database(&path).await;
-    let connection = Connection::open(&path).expect("legacy database opens");
-    connection
-        .execute("UPDATE tasks SET record_json='not-json' WHERE id=?1", [id.to_string()])
-        .expect("corruption is seeded");
-    drop(connection);
-
-    assert!(SqliteTaskStore::open(&path).is_err());
-    let connection = Connection::open(&path).expect("database remains readable");
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    let legacy_value: String = connection
-        .query_row("SELECT record_json FROM tasks WHERE id=?1", [id.to_string()], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(version, 0);
-    assert_eq!(legacy_value, "not-json");
-    drop(connection);
-    remove_database(&path);
-}
-
-/// Leaves immutable request bytes unchanged across lifecycle transitions.
-#[tokio_test]
-async fn test_sqlite_transitions_do_not_rewrite_the_immutable_request() {
-    let path = database_path("immutable-request");
-    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    let payload = vec![b'x'; 1024 * 1024];
-    let accepted = match store
-        .accept(TaskId::generate(), TaskRequest::new("large", "1", payload))
-        .await
-        .expect("task is accepted")
-    {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => panic!("task is new"),
-    };
-    let connection = Connection::open(&path).expect("database opens for inspection");
-    let before: Vec<u8> = connection
-        .query_row(
-            "SELECT payload FROM tasks WHERE id=?1",
-            [accepted.id.to_string()],
-            |row| row.get(0),
-        )
-        .expect("request is read");
-    drop(connection);
-    let summary = store.get_summary(accepted.id).await.unwrap().unwrap();
-    assert_eq!(summary.request.task_type, "large");
-    assert_eq!(
-        store
-            .list(TaskQuery {
-                limit: 1,
-                ..TaskQuery::default()
-            })
-            .await
-            .unwrap()
-            .records[0],
-        summary
-    );
-    let running = store
-        .transition(TransitionCommand {
-            id: accepted.id,
-            expected_version: accepted.state_version,
-            expected_attempt: accepted.attempt,
-            state: TaskState::Running,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await
-        .expect("task starts");
-    store
-        .transition(TransitionCommand {
-            id: running.id,
-            expected_version: running.state_version,
-            expected_attempt: running.attempt,
-            state: TaskState::Succeeded,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await
-        .expect("task completes");
-    let summary_sql = [
-        "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks WHERE id=?1",
-        "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks ORDER BY accepted_at,id",
-    ];
-    assert!(summary_sql.iter().all(|sql| !sql.contains("payload")));
-    let connection = Connection::open(&path).expect("database opens for inspection");
-    let (after, lifecycle): (Vec<u8>, String) = connection
-        .query_row(
-            "SELECT payload,lifecycle_json FROM tasks WHERE id=?1",
-            [accepted.id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("stored fields are read");
-    drop(connection);
-    assert_eq!(before, after);
-    assert_eq!(after, vec![b'x'; 1024 * 1024]);
-    assert!(lifecycle.len() < 1024);
-    assert!(!lifecycle.contains("payload"));
-    drop(store);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_migrates_schema_two_without_changing_payload_or_lifecycle() {
-    let path = database_path("schema-two-migrate");
-    let store = SqliteTaskStore::open(&path).unwrap();
-    let request = request_with_idempotency_key("schema-two", vec![7; 1024 * 1024], "schema-two-key");
-    let accepted = match store.accept(TaskId::generate(), request.clone()).await.unwrap() {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => unreachable!(),
-    };
-    let running = store
-        .transition(TransitionCommand {
-            id: accepted.id,
-            expected_version: accepted.state_version,
-            expected_attempt: accepted.attempt,
-            state: TaskState::Running,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: vec!["cpu-0".into()],
-            cancel_requested: false,
-        })
-        .await
-        .unwrap();
-    let blocked = store
-        .transition(TransitionCommand {
-            id: running.id,
-            expected_version: running.state_version,
-            expected_attempt: running.attempt,
-            state: TaskState::Blocked {
-                reason: "operator".into(),
-            },
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await
-        .unwrap();
-    drop(store);
-
-    let connection = Connection::open(&path).unwrap();
-    let info_json: String = connection
-        .query_row(
-            "SELECT request_info_json FROM tasks WHERE id=?1",
-            [accepted.id.to_string()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let payload: Vec<u8> = connection
-        .query_row(
-            "SELECT payload FROM tasks WHERE id=?1",
-            [accepted.id.to_string()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let lifecycle: String = connection
-        .query_row(
-            "SELECT lifecycle_json FROM tasks WHERE id=?1",
-            [accepted.id.to_string()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let info: TaskRequestInfo = json::from_str(&info_json).unwrap();
-    let full = TaskRequest {
-        payload,
-        ..TaskRequest::new(info.task_type, info.handler_version, vec![])
-    };
-    let full = TaskRequest {
-        resources: info.resources,
-        correlation_key: info.correlation_key,
-        idempotency_key: info.idempotency_key,
-        metadata: info.metadata,
-        ..full
-    };
-    let request_json = json::to_string(&full).unwrap();
-    connection.execute_batch("DROP TABLE tasks; CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 2, lifecycle_json TEXT NOT NULL); CREATE INDEX tasks_state_accepted ON tasks(state_kind,accepted_at); CREATE INDEX tasks_accepted_id ON tasks(accepted_at,id); PRAGMA user_version=2;").unwrap();
-    connection.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,'Blocked',?2,NULL,?3,?4,2,?5)", params![accepted.id.to_string(), i64::try_from(blocked.accepted_at_ms).unwrap(), "schema-two-key", request_json, lifecycle]).unwrap();
-    drop(connection);
-
-    let migrated = SqliteTaskStore::open(&path).unwrap();
-    let restored = migrated.get(accepted.id).await.unwrap().unwrap();
-    assert_eq!(restored.request, request);
-    assert_eq!(restored.state, blocked.state);
-    assert_eq!(restored.state_version, blocked.state_version);
-    assert_eq!(
-        migrated
-            .get_by_idempotency_key("schema-two-key")
-            .await
-            .unwrap()
-            .unwrap()
-            .id,
-        accepted.id
-    );
-    drop(migrated);
-    let connection = Connection::open(&path).unwrap();
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 3);
-    let bytes: Vec<u8> = connection
-        .query_row(
-            "SELECT payload FROM tasks WHERE id=?1",
-            [accepted.id.to_string()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(bytes, vec![7; 1024 * 1024]);
-    drop(connection);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_schema_two_corruption_rolls_back_migration() {
-    let path = database_path("schema-two-corrupt");
-    let id = TaskId::generate();
-    let connection = Connection::open(&path).unwrap();
-    connection.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 2, lifecycle_json TEXT NOT NULL); PRAGMA user_version=2;").unwrap();
-    connection.execute("INSERT INTO tasks (id,state_kind,accepted_at,request_json,record_format_version,lifecycle_json) VALUES (?1,'Queued',0,'broken',2,'{}')", [id.to_string()]).unwrap();
-    drop(connection);
-
-    assert!(SqliteTaskStore::open(&path).is_err());
-    let connection = Connection::open(&path).unwrap();
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    let request: String = connection
-        .query_row("SELECT request_json FROM tasks WHERE id=?1", [id.to_string()], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(version, 2);
-    assert_eq!(request, "broken");
-    let table_exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks_v3')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!table_exists);
-    drop(connection);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_schema_two_migration_preserves_each_lifecycle_category() {
-    let path = database_path("schema-two-states");
-    let store = SqliteTaskStore::open(&path).unwrap();
-    let mut cases = Vec::new();
-    let queued_request = request_with_idempotency_key("schema-two-queued", vec![1], "schema-two-queued");
-    let queued = match store.accept(TaskId::generate(), queued_request.clone()).await.unwrap() {
-        AcceptOutcome::Accepted(record) => record.summary(),
-        _ => unreachable!(),
-    };
-    cases.push((queued_request, queued, "Queued"));
-
-    for (name, target, key) in [
-        ("running", TaskState::Running, "schema-two-running"),
-        (
-            "blocked",
-            TaskState::Blocked {
-                reason: "operator".into(),
-            },
-            "schema-two-blocked",
-        ),
-        ("succeeded", TaskState::Succeeded, "schema-two-succeeded"),
-    ] {
-        let request = request_with_idempotency_key(&format!("schema-two-{name}"), vec![2, 3], key);
-        let accepted = match store.accept(TaskId::generate(), request.clone()).await.unwrap() {
-            AcceptOutcome::Accepted(record) => record.summary(),
-            _ => unreachable!(),
-        };
-        let running = store
-            .transition(TransitionCommand {
-                id: accepted.id,
-                expected_version: accepted.state_version,
-                expected_attempt: accepted.attempt,
-                state: TaskState::Running,
-                retry_not_before_ms: None,
-                output: None,
-                assigned_resources: vec!["cpu-0".into()],
-                cancel_requested: false,
-            })
-            .await
-            .unwrap();
-        let final_summary = if matches!(&target, TaskState::Running) {
-            running
-        } else {
-            store
-                .transition(TransitionCommand {
-                    id: running.id,
-                    expected_version: running.state_version,
-                    expected_attempt: running.attempt,
-                    state: target.clone(),
-                    retry_not_before_ms: None,
-                    output: None,
-                    assigned_resources: Vec::new(),
-                    cancel_requested: false,
-                })
-                .await
-                .unwrap()
-        };
-        let state = match &target {
-            TaskState::Running => "Running",
-            TaskState::Blocked { .. } => "Blocked",
-            TaskState::Succeeded => "Succeeded",
-            _ => unreachable!(),
-        };
-        cases.push((request, final_summary, state));
-    }
-    drop(store);
-
-    let connection = Connection::open(&path).unwrap();
-    let mut rows = Vec::new();
-    for (request, summary, state) in &cases {
-        let lifecycle: String = connection
-            .query_row(
-                "SELECT lifecycle_json FROM tasks WHERE id=?1",
-                [summary.id.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        rows.push((request.clone(), summary.clone(), *state, lifecycle));
-    }
-    connection.execute_batch("DROP TABLE tasks; CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_format_version INTEGER NOT NULL DEFAULT 2, lifecycle_json TEXT NOT NULL); PRAGMA user_version=2;").unwrap();
-    for (request, summary, state, lifecycle) in &rows {
-        connection.execute("INSERT INTO tasks (id,state_kind,accepted_at,correlation_key,idempotency_key,request_json,record_format_version,lifecycle_json) VALUES (?1,?2,?3,?4,?5,?6,2,?7)", params![summary.id.to_string(), state, i64::try_from(summary.accepted_at_ms).unwrap(), request.correlation_key, request.idempotency_key, json::to_string(request).unwrap(), lifecycle]).unwrap();
-    }
-    drop(connection);
-
-    let migrated = SqliteTaskStore::open(&path).unwrap();
-    for (request, expected, _, _) in rows {
-        let restored = migrated.get(expected.id).await.unwrap().unwrap();
-        assert_eq!(restored.request, request);
-        assert_eq!(restored.state, expected.state);
-        assert_eq!(restored.state_version, expected.state_version);
-        assert_eq!(restored.attempt, expected.attempt);
-        assert_eq!(restored.assigned_resources, expected.assigned_resources);
-    }
-    drop(migrated);
-    remove_database(&path);
-}
-
-/// Rejects SQLite history pages larger than the shared query limit.
-#[tokio_test]
-async fn test_sqlite_task_query_limit() {
-    let path = database_path("query-limit");
-    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    assert!(matches!(
-        store
-            .list(TaskQuery {
-                limit: MAX_TASK_QUERY_LIMIT + 1,
-                ..TaskQuery::default()
-            })
-            .await,
-        Err(StoreError::InvalidRequest("task history page limit exceeds 256"))
-    ));
-    let page = store
-        .list(TaskQuery {
-            limit: MAX_TASK_QUERY_LIMIT,
-            ..TaskQuery::default()
-        })
-        .await
-        .expect("maximum page is accepted");
-    assert!(page.records.is_empty());
-    let zero = store
-        .list(TaskQuery {
-            limit: 0,
-            ..TaskQuery::default()
-        })
-        .await
-        .unwrap();
-    assert!(zero.records.is_empty());
-    drop(store);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_open_rejects_future_schema_without_changing_records() {
-    let path = database_path("schema-future");
-    let (id, _) = seed_legacy_database(&path).await;
-    let connection = Connection::open(&path).expect("legacy database opens");
-    connection
-        .pragma_update(None, "user_version", 4)
-        .expect("future version is set");
-    drop(connection);
-
-    let error = match SqliteTaskStore::open(&path) {
-        Ok(store) => {
-            drop(store);
-            panic!("future schema is rejected")
-        }
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("4"));
-    let connection = Connection::open(&path).expect("database remains readable");
-    let rows: i64 = connection
-        .query_row("SELECT COUNT(*) FROM tasks WHERE id=?1", [id.to_string()], |row| {
-            row.get(0)
-        })
-        .expect("legacy row remains intact");
-    assert_eq!(rows, 1);
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("schema version remains readable");
-    assert_eq!(version, 4);
-    drop(connection);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_reads_reject_unknown_row_format_everywhere() {
-    let path = database_path("row-format");
-    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    let mut request = TaskRequest::new("unknown-format", "1", Vec::new());
-    request.idempotency_key = Some("unknown-format-key".into());
-    let accepted = store
-        .accept(TaskId::generate(), request.clone())
-        .await
-        .expect("record is accepted");
-    let id = match accepted {
-        AcceptOutcome::Accepted(record) => record.id,
-        AcceptOutcome::Existing(_) => panic!("new request is accepted"),
-    };
-    drop(store);
-
-    let connection = Connection::open(&path).expect("database opens");
-    connection
-        .execute("UPDATE tasks SET record_format_version=4 WHERE id=?1", [id.to_string()])
-        .expect("unknown format is seeded");
-    drop(connection);
-
-    let store = SqliteTaskStore::open(&path).expect("schema version remains supported");
-    assert!(store.get(id).await.is_err());
-    assert!(store.list(TaskQuery::default()).await.is_err());
-    assert!(store.scan_unfinished(None).await.is_err());
-    assert!(store.get_by_idempotency_key("unknown-format-key").await.is_err());
-    drop(store);
-    remove_database(&path);
-}
-
-#[tokio_test]
-async fn test_sqlite_store_accepts_retry_deadlines_only_while_queued() {
-    let path = database_path("retry-deadline");
-    let store = SqliteTaskStore::open(&path).unwrap();
-    let accepted = match store
-        .accept(TaskId::generate(), TaskRequest::new("echo", "1", Vec::new()))
-        .await
-        .unwrap()
-    {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => panic!("new task cannot already exist"),
-    };
-    let running = store
-        .transition(TransitionCommand {
-            id: accepted.id,
-            expected_version: accepted.state_version,
-            expected_attempt: accepted.attempt,
-            state: TaskState::Running,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await
-        .unwrap();
-    let queued = store
-        .transition(TransitionCommand {
-            id: running.id,
-            expected_version: running.state_version,
-            expected_attempt: running.attempt,
-            state: TaskState::Queued,
-            retry_not_before_ms: Some(123),
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await
-        .unwrap();
-    assert_eq!(queued.retry_not_before_ms, Some(123));
-    assert!(
-        store
-            .transition(TransitionCommand {
-                id: queued.id,
-                expected_version: queued.state_version,
-                expected_attempt: queued.attempt,
-                state: TaskState::Running,
-                retry_not_before_ms: Some(123),
-                output: None,
-                assigned_resources: Vec::new(),
-                cancel_requested: false,
-            })
-            .await
-            .is_err()
-    );
-    let running = store
-        .transition(TransitionCommand {
-            id: queued.id,
-            expected_version: queued.state_version,
-            expected_attempt: queued.attempt,
-            state: TaskState::Running,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await
-        .unwrap();
-    assert_eq!(running.retry_not_before_ms, None);
-    drop(store);
-    remove_database(&path);
-}
-
-/// Recovery rejects cursors that cannot be represented by SQLite timestamps.
-#[tokio_test]
-async fn test_sqlite_recovery_rejects_cursor_timestamp_outside_integer_range() {
-    let path = database_path("recovery-cursor-range");
-    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    assert!(matches!(
-        store
-            .scan_unfinished(Some(TaskCursor::new(u64::MAX, TaskId::generate())))
-            .await,
-        Err(StoreError::InvalidRequest(
-            "recovery cursor timestamp exceeds the SQLite integer range"
-        ))
-    ));
-    drop(store);
-    remove_database(&path);
-}
-
-/// Reuses an idempotent legacy request across IDs and rejects changed data.
-#[tokio_test]
-async fn test_sqlite_legacy_idempotency_reuses_record_without_inserting_duplicate() {
-    let path = database_path("legacy-idempotency-reuse");
-    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    let first_id = TaskId::generate();
-    let second_id = TaskId::generate();
-    let request = request_with_idempotency_key("reports", b"same".to_vec(), "shared-key");
-
-    let first = match store
-        .accept(first_id, request.clone())
-        .await
-        .expect("first request is accepted")
-    {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => panic!("the initial key has no prior record"),
-    };
-    let repeated = match store
-        .accept(second_id, request.clone())
-        .await
-        .expect("identical request reuses the prior record")
-    {
-        AcceptOutcome::Existing(record) => record,
-        AcceptOutcome::Accepted(_) => panic!("identical idempotent request must not insert"),
-    };
-    assert_eq!(repeated.id, first_id);
-    assert_eq!(repeated, first);
-
-    let changed = request_with_idempotency_key("reports", b"changed".to_vec(), "shared-key");
-    assert!(matches!(
-        store.accept(second_id, changed).await,
-        Err(StoreError::IdempotencyConflict)
-    ));
-    let connection = Connection::open(&path).expect("database opens for row count");
-    let row_count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
-        .expect("task count reads");
-    assert_eq!(row_count, 1);
-    drop(connection);
-    drop(store);
-    remove_database(&path);
-}
-
-/// Counts only queued and running rows and handles limits beyond SQLite range.
-#[tokio_test]
-async fn test_sqlite_legacy_unfinished_limit_counts_only_active_tasks() {
-    let path = database_path("legacy-unfinished-limit");
-    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    assert!(
-        !store
-            .has_unfinished_over_limit(0)
-            .await
-            .expect("empty database has no unfinished tasks")
-    );
-    if let Some(limit) = usize::try_from(i64::MAX).ok().and_then(|value| value.checked_add(1)) {
-        assert!(
-            !store
-                .has_unfinished_over_limit(limit)
-                .await
-                .expect("unrepresentable limit cannot be exceeded")
-        );
-    }
-
-    let id = TaskId::generate();
-    let accepted = match store
-        .accept(id, TaskRequest::new("unfinished-limit", "1", Vec::new()))
-        .await
-        .expect("task is accepted")
-    {
-        AcceptOutcome::Accepted(record) => record,
-        AcceptOutcome::Existing(_) => panic!("task has no idempotency key"),
-    };
-    assert!(
-        store
-            .has_unfinished_over_limit(0)
-            .await
-            .expect("one queued task exceeds zero")
-    );
-    assert!(
-        !store
-            .has_unfinished_over_limit(1)
-            .await
-            .expect("one queued task does not exceed one")
-    );
-
-    let running = store
-        .transition(TransitionCommand {
-            id,
-            expected_version: accepted.state_version,
-            expected_attempt: accepted.attempt,
-            state: TaskState::Running,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await
-        .expect("queued task transitions to running");
-    assert!(
-        store
-            .has_unfinished_over_limit(0)
-            .await
-            .expect("running task remains unfinished")
-    );
-    store
-        .transition(TransitionCommand {
-            id,
-            expected_version: running.state_version,
-            expected_attempt: running.attempt,
-            state: TaskState::Succeeded,
-            retry_not_before_ms: None,
-            output: None,
-            assigned_resources: Vec::new(),
-            cancel_requested: false,
-        })
-        .await
-        .expect("running task becomes terminal");
-    assert!(
-        !store
-            .has_unfinished_over_limit(0)
-            .await
-            .expect("terminal task is not unfinished")
-    );
-
-    drop(store);
-    remove_database(&path);
-}
-
-/// Releasing and reacquiring ownership advances the durable fencing epoch.
 #[tokio_test]
 async fn test_sqlite_owner_epoch_advances_after_release_and_reacquire() {
     let path = database_path("owner-epoch-reacquire");
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    let first_epoch = TaskStore::acquire_owner(&store).await.expect("first owner is acquired");
-    TaskStore::release_owner(&store, first_epoch)
+    let first_epoch = TypedTaskStore::acquire_owner(&store).await.expect("first owner is acquired");
+    TypedTaskStore::release_owner(&store, first_epoch)
         .await
         .expect("first owner releases");
-    let second_epoch = TaskStore::acquire_owner(&store).await.expect("owner can be reacquired");
+    let second_epoch = TypedTaskStore::acquire_owner(&store).await.expect("owner can be reacquired");
     assert!(second_epoch.0 > first_epoch.0);
     assert!(matches!(
-        TaskStore::release_owner(&store, first_epoch).await,
+        TypedTaskStore::release_owner(&store, first_epoch).await,
         Err(StoreError::OwnerConflict)
     ));
-    TaskStore::release_owner(&store, second_epoch)
+    TypedTaskStore::release_owner(&store, second_epoch)
         .await
         .expect("current owner releases");
     drop(store);

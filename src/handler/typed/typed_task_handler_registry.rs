@@ -17,7 +17,7 @@ use super::handler_registration_error::HandlerRegistrationError;
 use super::prepared_task::PreparedTask;
 use super::task_handler_descriptor::TaskHandlerDescriptor;
 use super::typed_task_handler::TypedTaskHandler;
-use crate::model::next::StoredPayload;
+use crate::model::typed::StoredPayload;
 use crate::store::TaskFuture;
 
 trait ErasedHandler: Send + Sync {
@@ -220,7 +220,7 @@ impl TypedTaskHandlerRegistry {
     pub fn cancel_externally(
         &self,
         kind_id: &str,
-        task_id: crate::model::next::TaskId,
+        task_id: crate::model::typed::TaskId,
         attempt: u32,
     ) -> Option<TaskFuture<'static, Result<(), crate::model::TaskRunError>>> {
         self.handlers

@@ -154,7 +154,7 @@ async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_on
     let id = task_id(3);
     let expected = TaskOutput { summary: vec![9, 8, 7] };
 
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     let running = start_task(&store, id).await;
     let finished = finish_with_output(&store, &running, expected.clone())
         .await
@@ -162,7 +162,7 @@ async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_on
     assert_eq!(finished.output, Some(expected.clone()));
     drop(store);
 
-    let reopened = SqliteTaskStore::open_next(&path).expect("typed SQLite store reopens");
+    let reopened = SqliteTaskStore::open(&path).expect("typed SQLite store reopens");
     let loaded = reopened
         .get_encoded_task(id)
         .await
@@ -180,7 +180,7 @@ async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_on
         )
         .expect("remove output field from prior-format lifecycle");
     drop(connection);
-    let compatible = SqliteTaskStore::open_next(&path).expect("lifecycle without output remains readable");
+    let compatible = SqliteTaskStore::open(&path).expect("lifecycle without output remains readable");
     let summary = compatible
         .get_encoded_task(id)
         .await
@@ -200,7 +200,7 @@ async fn typed_sqlite_store_rejects_oversized_output_without_mutating_task() {
     let directory = std::env::temp_dir().join(format!("qubit-task-output-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&directory).expect("test directory creates");
     let path = directory.join("tasks.sqlite");
-    let store = SqliteTaskStore::open_next(&path).expect("typed SQLite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     assert_oversized_output_is_atomic(&store, task_id(4)).await;
     drop(store);
     remove_database(&path);

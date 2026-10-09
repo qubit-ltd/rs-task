@@ -248,7 +248,7 @@ async fn ready_queue_filters_due_retries_and_pages_in_memory() {
 #[tokio::test]
 async fn ready_queue_filters_due_retries_and_pages_in_sqlite() {
     let db_path = std::env::temp_dir().join(format!("qubit-task-ready-{}.sqlite", uuid::Uuid::new_v4()));
-    let store = SqliteTaskStore::open_next(&db_path).unwrap();
+    let store = SqliteTaskStore::open(&db_path).unwrap();
     assert_ready_queue_contract(&store).await;
     drop(store);
     remove_database(&db_path);
@@ -258,7 +258,7 @@ async fn ready_queue_filters_due_retries_and_pages_in_sqlite() {
 #[test]
 fn ready_queue_and_retry_deadline_queries_use_partial_indexes() {
     let db_path = std::env::temp_dir().join(format!("qubit-task-ready-plan-{}.sqlite", uuid::Uuid::new_v4()));
-    let store = SqliteTaskStore::open_next(&db_path).unwrap();
+    let store = SqliteTaskStore::open(&db_path).unwrap();
     drop(store);
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     let ready_plan = {
@@ -300,7 +300,7 @@ async fn typed_history_filters_category_and_uses_exclusive_numeric_cursor() {
 async fn typed_history_filters_category_and_uses_exclusive_numeric_cursor_in_sqlite() {
     let db_path = std::env::temp_dir().join(format!("qubit-task-typed-query-{}.sqlite", uuid::Uuid::new_v4()));
     let memory = MemoryTaskStore::new(16);
-    let sqlite = SqliteTaskStore::open_next(&db_path).expect("typed SQLite store opens");
+    let sqlite = SqliteTaskStore::open(&db_path).expect("typed SQLite store opens");
     assert_category_filter_and_exclusive_numeric_cursor(&memory).await;
     assert_category_filter_and_exclusive_numeric_cursor(&sqlite).await;
 
@@ -351,7 +351,7 @@ async fn typed_history_pages_a_queue_larger_than_the_maximum_page() {
 async fn typed_history_has_the_same_order_in_memory_and_sqlite() {
     let db_path = std::env::temp_dir().join(format!("qubit-task-typed-order-{}.sqlite", uuid::Uuid::new_v4()));
     let memory = MemoryTaskStore::new(16);
-    let sqlite = SqliteTaskStore::open_next(&db_path).expect("typed SQLite store opens");
+    let sqlite = SqliteTaskStore::open(&db_path).expect("typed SQLite store opens");
     let ids = [id(2), id(10), id(u64::MAX)];
     for store in [&memory as &dyn TaskStore, &sqlite] {
         for task_id in ids {
@@ -377,7 +377,7 @@ async fn typed_schema_four_migrates_retry_deadline_column_without_losing_rows() 
         "qubit-task-typed-schema-migration-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
-    let sqlite = SqliteTaskStore::open_next(&db_path).expect("schema 6 opens");
+    let sqlite = SqliteTaskStore::open(&db_path).expect("schema 6 opens");
     let stored_id = id(801);
     sqlite
         .accept_encoded(stored_id, request("migration", "preserve"))
@@ -391,7 +391,7 @@ async fn typed_schema_four_migrates_retry_deadline_column_without_losing_rows() 
         .unwrap();
     drop(connection);
 
-    let migrated = SqliteTaskStore::open_next(&db_path).expect("typed schema 4 migrates to 6");
+    let migrated = SqliteTaskStore::open(&db_path).expect("typed schema 4 migrates to 6");
     let loaded = migrated.get_encoded_task(stored_id).await.unwrap().unwrap();
     assert_eq!(loaded.summary.id, stored_id);
     assert_eq!(loaded.summary.category.as_deref(), Some("migration"));

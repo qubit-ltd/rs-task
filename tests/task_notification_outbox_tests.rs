@@ -22,7 +22,7 @@ fn database_path() -> std::path::PathBuf {
 #[tokio::test]
 async fn test_outbox_requires_owner_and_valid_page_size() {
     let path = database_path();
-    let store = SqliteTaskStore::open_next(&path).expect("open database");
+    let store = SqliteTaskStore::open(&path).expect("open database");
     assert!(matches!(
         store.enable_event_outbox().await,
         Err(StoreError::OwnerConflict)
@@ -44,7 +44,7 @@ async fn test_outbox_requires_owner_and_valid_page_size() {
 #[tokio::test]
 async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
     let path = database_path();
-    let store = SqliteTaskStore::open_next(&path).expect("initialize database");
+    let store = SqliteTaskStore::open(&path).expect("initialize database");
     let id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(41));
     store
         .accept_encoded(id, request())
@@ -63,8 +63,8 @@ async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
         .execute_batch("DROP TABLE IF EXISTS task_event_outbox; PRAGMA user_version=5;")
         .expect("simulate v5");
     drop(connection);
-    drop(SqliteTaskStore::open_next(&path).expect("migrate v5"));
-    drop(SqliteTaskStore::open_next(&path).expect("reopen v6"));
+    drop(SqliteTaskStore::open(&path).expect("migrate v5"));
+    drop(SqliteTaskStore::open(&path).expect("reopen v6"));
     let connection = rusqlite::Connection::open(&path).expect("inspect schema");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -94,12 +94,12 @@ async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
 #[test]
 fn test_invalid_v6_outbox_is_rejected_without_repair() {
     let path = database_path();
-    drop(SqliteTaskStore::open_next(&path).expect("initialize database"));
+    drop(SqliteTaskStore::open(&path).expect("initialize database"));
     let connection = rusqlite::Connection::open(&path).expect("open database");
     connection
         .execute_batch("ALTER TABLE task_event_outbox RENAME COLUMN event_json TO corrupt_json")
         .expect("inject invalid schema");
-    assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
+    assert!(matches!(SqliteTaskStore::open(&path), Err(StoreError::Failure(_))));
     connection
         .prepare("SELECT corrupt_json FROM task_event_outbox")
         .expect("invalid schema was preserved");
@@ -133,7 +133,7 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
     use qubit_task::model::TaskState;
     use qubit_task::model::TransitionCommand;
     let path = database_path();
-    let store = SqliteTaskStore::open_next(&path).expect("open database");
+    let store = SqliteTaskStore::open(&path).expect("open database");
     let epoch = store.acquire_owner().await.expect("owner");
     store.enable_event_outbox().await.expect("enable");
     let id = TaskId::from_id(qubit_id::Id::new(42));
@@ -217,12 +217,12 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
 #[test]
 fn test_v6_missing_outbox_index_is_rejected() {
     let path = database_path();
-    drop(SqliteTaskStore::open_next(&path).expect("initialize database"));
+    drop(SqliteTaskStore::open(&path).expect("initialize database"));
     let connection = rusqlite::Connection::open(&path).expect("open database");
     connection
         .execute_batch("DROP INDEX task_event_outbox_created")
         .expect("remove index");
-    assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
+    assert!(matches!(SqliteTaskStore::open(&path), Err(StoreError::Failure(_))));
 }
 
 #[cfg(feature = "event-bus")]
@@ -230,7 +230,7 @@ mod publisher_tests;
 
 #[tokio::test]
 async fn test_oversized_event_rolls_back_acceptance() {
-    let store = SqliteTaskStore::open_next(database_path()).expect("store");
+    let store = SqliteTaskStore::open(database_path()).expect("store");
     let owner = store.acquire_owner().await.expect("owner");
     store.enable_event_outbox().await.expect("enable");
     let id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(43));
@@ -248,16 +248,16 @@ async fn test_oversized_event_rolls_back_acceptance() {
 #[test]
 fn test_v6_missing_outbox_primary_key_is_rejected() {
     let path = database_path();
-    drop(SqliteTaskStore::open_next(&path).expect("initialize database"));
+    drop(SqliteTaskStore::open(&path).expect("initialize database"));
     let connection = rusqlite::Connection::open(&path).expect("open database");
     connection.execute_batch("DROP TABLE task_event_outbox; CREATE TABLE task_event_outbox(task_id TEXT NOT NULL,state_version INTEGER NOT NULL,event_id TEXT NOT NULL,event_json TEXT NOT NULL,created_at_ms INTEGER NOT NULL); CREATE INDEX task_event_outbox_created ON task_event_outbox(created_at_ms,task_id,state_version);").expect("remove primary key from fixture");
-    assert!(matches!(SqliteTaskStore::open_next(&path), Err(StoreError::Failure(_))));
+    assert!(matches!(SqliteTaskStore::open(&path), Err(StoreError::Failure(_))));
 }
 
 #[test]
 fn test_v6_outbox_index_on_another_table_is_rejected() {
     let path = database_path();
-    drop(SqliteTaskStore::open_next(&path).expect("initialize database"));
+    drop(SqliteTaskStore::open(&path).expect("initialize database"));
     let connection = rusqlite::Connection::open(&path).expect("open database");
     connection
         .execute_batch(
@@ -266,7 +266,7 @@ fn test_v6_outbox_index_on_another_table_is_rejected() {
          CREATE INDEX task_event_outbox_created ON unrelated_events(created_at_ms,task_id,state_version);",
         )
         .expect("install a same-named index on another table");
-    let error = match SqliteTaskStore::open_next(&path) {
+    let error = match SqliteTaskStore::open(&path) {
         Ok(_) => panic!("an index on another table cannot satisfy the outbox schema"),
         Err(error) => error,
     };

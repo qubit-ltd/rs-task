@@ -6,7 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Immutable lifecycle snapshot awaiting confirmed event-bus admission.
-use crate::model::next::TaskId;
+use crate::model::typed::TaskId;
 
 /// A durable notification. Consumers deduplicate by task ID and state version.
 #[derive(Debug, Clone)]

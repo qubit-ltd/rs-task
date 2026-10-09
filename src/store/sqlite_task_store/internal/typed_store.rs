@@ -17,19 +17,19 @@ use super::super::failure;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::TaskOutput;
 use crate::model::TaskState;
-use crate::model::next::AcceptOutcome;
-use crate::model::next::ProgressCommand;
-use crate::model::next::ResourceRequest;
-use crate::model::next::StartCommand;
-use crate::model::next::StoredPayload;
-use crate::model::next::StoredTask;
-use crate::model::next::StoredTaskRequest;
-use crate::model::next::TaskCursor;
-use crate::model::next::TaskId;
-use crate::model::next::TaskPage;
-use crate::model::next::TaskProgressSnapshot;
-use crate::model::next::TaskQuery;
-use crate::model::next::TaskSummary;
+use crate::model::typed::AcceptOutcome;
+use crate::model::typed::ProgressCommand;
+use crate::model::typed::ResourceRequest;
+use crate::model::typed::StartCommand;
+use crate::model::typed::StoredPayload;
+use crate::model::typed::StoredTask;
+use crate::model::typed::StoredTaskRequest;
+use crate::model::typed::TaskCursor;
+use crate::model::typed::TaskId;
+use crate::model::typed::TaskPage;
+use crate::model::typed::TaskProgressSnapshot;
+use crate::model::typed::TaskQuery;
+use crate::model::typed::TaskSummary;
 use crate::store::StoreError;
 
 const RECORD_FORMAT_VERSION: i64 = 4;
@@ -67,7 +67,7 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     limit: std::num::NonZeroUsize,
     now_ms: u64,
 ) -> Result<TaskPage, StoreError> {
-    if limit.get() > crate::model::next::MAX_TASK_QUERY_LIMIT {
+    if limit.get() > crate::model::typed::MAX_TASK_QUERY_LIMIT {
         return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
     }
     let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
@@ -378,7 +378,7 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
 /// Applies a compare-and-set lifecycle transition to an encoded task.
 pub(in crate::store::sqlite_task_store) fn transition_encoded(
     connection: &Connection,
-    command: crate::model::next::TransitionCommand,
+    command: crate::model::typed::TransitionCommand,
     outbox_enabled: bool,
 ) -> Result<TaskSummary, StoreError> {
     command

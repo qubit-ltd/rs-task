@@ -484,7 +484,7 @@ async fn build_cancellation_releases_sqlite_file_lock() {
             .as_nanos()
     ));
     let inner: Arc<dyn TaskStore> =
-        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).expect("first SQLite store opens"));
+        Arc::new(qubit_task::store::SqliteTaskStore::open(&path).expect("first SQLite store opens"));
     let gate = Arc::new(BuildGateStore::new(Arc::clone(&inner)));
     let build = {
         let entered = gate.entered.notified();
@@ -505,7 +505,7 @@ async fn build_cancellation_releases_sqlite_file_lock() {
     let _ = build.await;
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            match qubit_task::store::SqliteTaskStore::open_next(&path) {
+            match qubit_task::store::SqliteTaskStore::open(&path) {
                 Ok(second) => {
                     let second: Arc<dyn TaskStore> = Arc::new(second);
                     let service =
@@ -871,7 +871,7 @@ async fn sqlite_retry_deadline_survives_service_restart() {
             .as_nanos(),
     ));
     let retry_delay = std::time::Duration::from_secs(3);
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
     let mut first_builder =
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1251))))
             .retry_policy(qubit_task::service::RetryPolicy::new(retry_delay, retry_delay).unwrap());
@@ -899,7 +899,7 @@ async fn sqlite_retry_deadline_survives_service_restart() {
     drop(first);
     drop(store);
 
-    let reopened: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let reopened: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
     let mut second_builder =
         TaskExecutionServiceBuilder::new(Arc::clone(&reopened), registry(), Arc::new(Ids(AtomicU64::new(1252))));
     second_builder
@@ -2028,7 +2028,7 @@ async fn dropping_last_service_handle_drains_and_releases_owner_sqlite() {
             .as_nanos(),
     ));
     let store: Arc<dyn TaskStore> =
-        Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).expect("SQLite store opens"));
+        Arc::new(qubit_task::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
     assert_dropping_last_service_handle_drains_and_releases_owner(Arc::clone(&store)).await;
     drop(store);
     let mut lock_path = path.as_os_str().to_owned();
@@ -2359,7 +2359,7 @@ async fn typed_service_persists_sqlite_terminal_transition() {
             .unwrap()
             .as_nanos(),
     ));
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
     let mut builder =
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1001))));
     builder
@@ -2393,7 +2393,7 @@ async fn typed_service_fences_build_until_shutdown_releases_owner() {
             .unwrap()
             .as_nanos(),
     ));
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open_next(&path).unwrap());
+    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
     let build =
         || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1101))));
     let first = build().build().await.unwrap();

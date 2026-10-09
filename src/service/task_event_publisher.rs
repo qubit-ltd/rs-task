@@ -147,7 +147,7 @@ mod tests {
 
     async fn create_publisher() -> (TaskEventPublisher, std::path::PathBuf) {
         let database = std::env::temp_dir().join(format!("task-publisher-{}.sqlite", uuid::Uuid::new_v4()));
-        let store = Arc::new(SqliteTaskStore::open_next(&database).expect("open temporary task store"));
+        let store = Arc::new(SqliteTaskStore::open(&database).expect("open temporary task store"));
         store.acquire_owner().await.expect("acquire store owner");
         store.enable_event_outbox().await.expect("enable durable outbox");
         let registry = AsyncEventBusRegistry::with_local().expect("local bus registry");

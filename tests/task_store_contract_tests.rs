@@ -55,7 +55,7 @@ async fn test_memory_terminal_prune_releases_payload_budget() {
 #[tokio_test]
 async fn test_sqlite_store_obeys_core_contract() {
     let path = std::env::temp_dir().join(format!("rs-task-contract-{}.sqlite", Uuid::new_v4()));
-    let store = SqliteTaskStore::open_next(&path).expect("typed sqlite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
     support::store_contract::check_core_contract(&store).await;
     drop(store);
     for file in [
@@ -72,7 +72,7 @@ async fn test_sqlite_store_obeys_core_contract() {
 #[tokio_test]
 async fn test_sqlite_store_obeys_terminal_prune_contract() {
     let path = std::env::temp_dir().join(format!("rs-task-prune-contract-{}.sqlite", Uuid::new_v4()));
-    let store = SqliteTaskStore::open_next(&path).expect("typed sqlite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
     support::store_contract::check_terminal_prune_contract(&store).await;
     drop(store);
     for file in [
@@ -98,7 +98,7 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
     use qubit_task::model::TransitionCommand;
 
     let path = std::env::temp_dir().join(format!("rs-task-prune-atomic-{}.sqlite", Uuid::new_v4()));
-    let store = SqliteTaskStore::open_next(&path).expect("typed sqlite store opens");
+    let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
     let ids = [
         TaskId::from_id(qubit_id::Id::new(881)),
         TaskId::from_id(qubit_id::Id::new(882)),

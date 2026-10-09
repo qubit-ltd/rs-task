@@ -50,8 +50,8 @@ impl LocalTaskExecutionEngine {
     /// Reserves a typed task's resources in the same ledger as legacy tasks.
     pub fn try_prepare_typed(
         &self,
-        _id: crate::model::next::TaskId,
-        request: crate::model::next::ResourceRequest,
+        _id: crate::model::typed::TaskId,
+        request: crate::model::typed::ResourceRequest,
     ) -> Result<crate::engine::TypedResourceReservation, EngineError> {
         let matching_gpu_capacity = self
             .capacity
@@ -149,8 +149,8 @@ mod tests {
     use super::LocalTaskExecutionEngine;
     use crate::engine::EngineError;
     use crate::model::ResourceCapacity;
-    use crate::model::next::ResourceRequest;
-    use crate::model::next::TaskId;
+    use crate::model::typed::ResourceRequest;
+    use crate::model::typed::TaskId;
 
     fn task_id(value: u64) -> TaskId {
         TaskId::from_id(qubit_id::Id::new(value))

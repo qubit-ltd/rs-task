@@ -16,8 +16,8 @@ use qubit_progress::Event;
 use qubit_progress::ReportFuture;
 use qubit_progress::ReporterError;
 
-use crate::model::next::ProgressCommand;
-use crate::model::next::TaskId;
+use crate::model::typed::ProgressCommand;
+use crate::model::typed::TaskId;
 use crate::store::TaskStore;
 
 /// Asynchronous reporter that writes progress snapshots to a task store.
@@ -93,11 +93,11 @@ mod tests {
 
     use super::TaskProgressReporter;
     use crate::model::TaskState;
-    use crate::model::next::ResourceRequest;
-    use crate::model::next::StartCommand;
-    use crate::model::next::StoredPayload;
-    use crate::model::next::StoredTaskRequest;
-    use crate::model::next::TaskId;
+    use crate::model::typed::ResourceRequest;
+    use crate::model::typed::StartCommand;
+    use crate::model::typed::StoredPayload;
+    use crate::model::typed::StoredTaskRequest;
+    use crate::model::typed::TaskId;
     use crate::store::MemoryTaskStore;
     use crate::store::StoreError;
     use crate::store::TaskStore;
@@ -240,7 +240,7 @@ mod tests {
         let (store, id) = running_task().await;
         let reporter = Arc::new(TaskProgressReporter::new(store.clone(), id, 1));
         let mut builder = AsyncProgress::builder_arc(reporter);
-        for index in 0..=crate::model::next::MAX_TASK_PROGRESS_METRICS {
+        for index in 0..=crate::model::typed::MAX_TASK_PROGRESS_METRICS {
             builder = builder.metric(Metric::new(&format!("metric-{index}"), "Metric"));
         }
         let error = match builder.start_async().await {

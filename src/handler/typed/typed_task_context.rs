@@ -13,7 +13,7 @@ use qubit_progress::AsyncProgress;
 use qubit_progress::AsyncProgressBuilder;
 use qubit_progress::AsyncReporter;
 
-use crate::model::next::TaskId;
+use crate::model::typed::TaskId;
 
 /// Per-attempt identity and cooperative cancellation state for typed handlers.
 #[derive(Clone)]

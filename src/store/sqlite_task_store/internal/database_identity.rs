@@ -213,11 +213,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::DatabaseIdentity;
-    use crate::model::legacy::TaskId;
     use crate::store::StoreError;
 
     fn test_directory() -> PathBuf {
-        std::env::temp_dir().join(format!("qubit-task-database-identity-{}", TaskId::generate()))
+        std::env::temp_dir().join(format!("qubit-task-database-identity-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after epoch").as_nanos()))
     }
 
     #[test]

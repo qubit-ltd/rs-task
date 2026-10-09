@@ -417,7 +417,7 @@ async fn assert_recovery(mode: &str) {
     let id = new_task_id();
     crash_worker(&database, mode, id, 1).await;
 
-    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("killed owner's database reopens"));
+    let store = Arc::new(SqliteTaskStore::open(database.path()).expect("killed owner's database reopens"));
     let before = store
         .get_encoded_task(id)
         .await
@@ -446,7 +446,7 @@ async fn assert_recovery(mode: &str) {
     let (starts, mut observed) = mpsc::unbounded_channel();
     let count = Arc::new(AtomicUsize::new(0));
     let gate = Arc::new(Semaphore::new(0));
-    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("recovery store opens"));
+    let store = Arc::new(SqliteTaskStore::open(database.path()).expect("recovery store opens"));
     let service = service_builder(Arc::clone(&store), Some(starts), Arc::clone(&count), Arc::clone(&gate))
         .build()
         .await
@@ -522,7 +522,7 @@ async fn test_killed_running_worker_blocks_without_matching_handler() {
     let database = Database::new();
     let id = new_task_id();
     crash_worker(&database, "running", id, 1).await;
-    let store = Arc::new(SqliteTaskStore::open_next(database.path()).expect("recovery store opens"));
+    let store = Arc::new(SqliteTaskStore::open(database.path()).expect("recovery store opens"));
     let service = service_builder(
         Arc::clone(&store),
         None,
@@ -555,7 +555,7 @@ async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
     let database = Database::new();
     let id = new_task_id();
     crash_worker(&database, "queued", id, 513).await;
-    let store = SqliteTaskStore::open_next(database.path()).expect("multi-page database reopens");
+    let store = SqliteTaskStore::open(database.path()).expect("multi-page database reopens");
     let mut cursor = None;
     let mut ids = std::collections::BTreeSet::new();
     for expected in [256, 256, 1] {

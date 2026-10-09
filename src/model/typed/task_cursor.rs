@@ -41,9 +41,9 @@ impl From<&TaskSummary> for TaskCursor {
 mod tests {
     use super::TaskCursor;
     use crate::model::TaskState;
-    use crate::model::next::ResourceRequest;
-    use crate::model::next::TaskId;
-    use crate::model::next::TaskSummary;
+    use crate::model::typed::ResourceRequest;
+    use crate::model::typed::TaskId;
+    use crate::model::typed::TaskSummary;
 
     #[test]
     fn cursor_from_summary_preserves_acceptance_position() {

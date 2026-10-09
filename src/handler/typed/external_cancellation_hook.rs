@@ -6,7 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use crate::model::TaskRunError;
-use crate::model::next::TaskId;
+use crate::model::typed::TaskId;
 use crate::store::TaskFuture;
 
 /// Optional external cancellation action registered for a handler kind.

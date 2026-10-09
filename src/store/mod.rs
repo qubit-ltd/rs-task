@@ -15,7 +15,6 @@ mod sqlite_task_store;
 mod store_error;
 mod task_future;
 mod task_store;
-mod typed_store_impl;
 
 pub use memory_task_store::DEFAULT_MAX_UNFINISHED_RECORDS;
 pub use memory_task_store::MemoryTaskStore;
@@ -23,5 +22,4 @@ pub use memory_task_store::MemoryTaskStore;
 pub use sqlite_task_store::SqliteTaskStore;
 pub use store_error::StoreError;
 pub use task_future::TaskFuture;
-pub(crate) use task_store::LegacyTaskStore;
 pub use task_store::TaskStore;

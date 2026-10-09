@@ -43,12 +43,12 @@ use crate::handler::typed::TypedTaskHandlerRegistry;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::TaskOutput;
 use crate::model::TaskState;
-use crate::model::next::TaskId;
-use crate::model::next::TaskPage;
-use crate::model::next::TaskQuery;
-use crate::model::next::TaskRequest;
-use crate::model::next::TaskSummary;
-use crate::model::next::TransitionCommand;
+use crate::model::typed::TaskId;
+use crate::model::typed::TaskPage;
+use crate::model::typed::TaskQuery;
+use crate::model::typed::TaskRequest;
+use crate::model::typed::TaskSummary;
+use crate::model::typed::TransitionCommand;
 use crate::service::CancelOutcome;
 use crate::service::RetryPolicy;
 use crate::service::TaskServiceError;
@@ -962,7 +962,7 @@ impl ServiceRunner {
             let page = self
                 .core
                 .store
-                .list_encoded(crate::model::next::TaskQuery {
+                .list_encoded(crate::model::typed::TaskQuery {
                     states: vec![
                         crate::model::TaskStateKind::Queued,
                         crate::model::TaskStateKind::Running,
@@ -1116,7 +1116,7 @@ impl ServiceRunner {
                         let running = match self
                             .core
                             .store
-                            .start_encoded(crate::model::next::StartCommand {
+                            .start_encoded(crate::model::typed::StartCommand {
                                 id: summary.id,
                                 expected_state_version: summary.state_version,
                                 started_at_ms: now_ms(),
@@ -1408,7 +1408,7 @@ fn prepare_handler(
     handlers: &TypedTaskHandlerRegistry,
     codecs: &ValueBytesCodecRegistry,
     kind_id: &str,
-    payload: crate::model::next::StoredPayload,
+    payload: crate::model::typed::StoredPayload,
 ) -> Result<crate::handler::typed::PreparedTask, String> {
     handlers
         .prepare(kind_id, payload, codecs)
