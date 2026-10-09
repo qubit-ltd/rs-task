@@ -40,7 +40,7 @@ With the optional `event-bus` feature, configure `TaskExecutionServiceBuilder::e
 
 - [User guide](doc/user-guide.md)
 - [Detailed design](doc/task_execution_service_design.en.md)
-- [Migration guide](doc/migration-0.8.en.md)
+- [Migration guide to 0.10](doc/migration.md)
 - [API reference](https://docs.rs/qubit-task)
 
 ## Task notification delivery

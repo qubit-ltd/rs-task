@@ -1,6 +1,10 @@
 # User guide
 
+[简体中文](user-guide.zh_CN.md) · [Migration to 0.10](migration.md) · [Typed task API](typed-task-api.md)
+
 `qubit-task` accepts typed, versioned payloads and runs them through registered handlers. This guide is now centered on the typed API; the former byte-oriented `TaskRequest`, `(task_type, handler_version)` routing, cursor-free query examples, and closure-oriented service API are no longer the public contract.
+
+For durable task history, open the SQLite backend with `SqliteTaskStore::open(path)`. It preserves typed schema v4/v5 data while migrating to v6; legacy UUID schemas are rejected without being rewritten. See the [0.10 migration guide](migration.md) before upgrading an existing database.
 
 ## Start here
 

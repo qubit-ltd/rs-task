@@ -2,6 +2,8 @@
 
 [English design document](task_execution_service_design.en.md)
 
+本文面向 `qubit-task` 0.10。带类型 SQLite 存储使用 `SqliteTaskStore::open` 打开，typed schema v4/v5 会在事务中迁移到 v6；旧 UUID schema 会被拒绝且不作修改。升级步骤见[迁移指南](migration.zh_CN.md)。
+
 本文描述当前的 typed task API。旧的字节数组 request、精确 `(task_type, handler_version)` 路由、本地闭包提交和旧服务 builder 属于历史实现细节，不再构成公开契约。
 
 ## 模型与路由

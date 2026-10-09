@@ -1,5 +1,7 @@
 # 带类型的任务 API
 
+[English](typed-task-api.md) · [用户指南](user-guide.zh_CN.md) · [0.10 迁移指南](migration.zh_CN.md)
+
 带类型 API 会在接纳请求前保留应用值的类型。Payload 身份分成三个独立字段：`type_id` 标识模型，`schema_version` 标识 schema 版本，`codec_id` 标识字节编码。处理器按 `kind_id` 注册，只接受一个 payload `type_id`，并声明所支持的 schema 版本集合。一个 codec 可以支持多个 schema 版本；兼容范围属于处理器描述符。
 
 `Payload<T>` 持有业务值。`TaskRequest<T>::encode` 从 `ValueBytesCodecRegistry` 查找 `ValueBytesCodecDescriptor` 并生成 `EncodedPayload<T>`；存储层接收类型擦除后的 `StoredPayload`。bytes 注册表使用 `ValueEncoder<T>` 和 `ValueDecoder<[u8]>`。任务 metadata 使用 `rs-metadata::Metadata`，任务请求限制最多 32 个条目、序列化后 16 KiB；同时遵守 `rs-metadata` 自身 wire 配额。
@@ -108,6 +110,8 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ## 运行契约
+
+`TaskStore` 是公开的带类型持久化契约，由 `MemoryTaskStore` 和 `SqliteTaskStore` 直接实现。旧 UUID 适配层 `LegacyTaskStore` 及其 `RecoveryPage`/`scan_unfinished` API 不属于 0.10。使用 `SqliteTaskStore::open(path)` 打开 SQLite；typed schema v4/v5 会在事务中迁移到 v6，旧 UUID schema 则会被拒绝且不作修改。
 
 - `TaskId` 包装 `rs-id::Id`；service 要求显式注入 `IdGenerator`。Snowflake 跨进程唯一性依赖节点 ID 不重复和时钟条件。`to_padded_decimal()` 输出定长十进制字符串，用于数据库字典序稳定排序。
 - CPU slot、GPU 设备和标签、可选 memory/disk 字节数、自定义整数单位都是每次执行的接纳配额。它们限制并发预留量，不会绑核、在 OS 层发现或隔离 GPU，也不会限制进程实际内存或磁盘使用。超过配置容量的请求不可满足；暂时拿不到资源的任务会保留在队列中，调度器继续检查后续资源匹配的任务，因此不保证严格 FIFO。

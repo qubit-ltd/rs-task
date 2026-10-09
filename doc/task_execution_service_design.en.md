@@ -2,6 +2,8 @@
 
 [中文设计文档](task_execution_service_design.md)
 
+This design targets `qubit-task` 0.10. Open the typed SQLite store with `SqliteTaskStore::open`; typed schema versions 4 and 5 migrate transactionally to version 6. Legacy UUID schemas are rejected without modification. See the [migration guide](migration.md) for upgrade steps.
+
 This document describes the current typed task API. The former byte-oriented request, exact `(task_type, handler_version)` routing, local-closure submission, and legacy service builder are historical implementation details and are not the public contract.
 
 ## Model and routing

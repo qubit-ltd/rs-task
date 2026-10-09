@@ -1,5 +1,7 @@
 # Typed task API
 
+[简体中文](typed-task-api.zh_CN.md) · [User guide](user-guide.md) · [Migration to 0.10](migration.md)
+
 The typed API keeps application values typed until acceptance. Payload identity has three independent parts: `type_id` identifies the model, `schema_version` identifies its schema, and `codec_id` identifies the bytes encoding. A handler is registered by `kind_id`, accepts exactly one payload `type_id`, and declares the schema versions it supports. A codec can support many schema versions; schema compatibility belongs to the handler descriptor.
 
 `Payload<T>` derives its stable model identity from `T: HasModelId`; callers supply only schema version, codec ID, and value. `TaskRequest<T>::encode` resolves a `ValueBytesCodecDescriptor` from `ValueBytesCodecRegistry` and creates an `EncodedPayload<T>`; storage receives its type-erased `StoredPayload`. The bytes registry uses `ValueEncoder<T>` and `ValueDecoder<[u8]>`. Task metadata uses `rs-metadata::Metadata` and is limited to 32 entries and 16 KiB serialized bytes by the task request, in addition to `rs-metadata`'s wire budgets.
@@ -108,6 +110,8 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ## Runtime contracts
+
+`TaskStore` is the public typed persistence contract. `MemoryTaskStore` and `SqliteTaskStore` implement it directly; the former UUID `LegacyTaskStore` adapter and its `RecoveryPage`/`scan_unfinished` API are not part of 0.10. Open SQLite with `SqliteTaskStore::open(path)`. Typed schema v4/v5 migrate transactionally to v6, while legacy UUID schemas are rejected without modification.
 
 - `TaskId` wraps `rs-id::Id`; the service requires an injected `IdGenerator`. Snowflake cross-process uniqueness depends on distinct node IDs and clock conditions. `to_padded_decimal()` produces a fixed-width decimal key for stable lexical database ordering.
 - CPU slots, GPU devices and labels, optional memory/disk bytes, and custom integer units are admission quotas reserved for each attempt. They account for concurrent reservations; they do not pin CPUs, discover or isolate GPUs at the OS level, or enforce actual process memory/disk usage. A request above configured capacity is unsatisfiable. A temporarily unavailable request stays queued while the scheduler considers later resource-compatible work, so ordering is not strict FIFO.

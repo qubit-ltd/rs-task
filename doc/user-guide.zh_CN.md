@@ -1,6 +1,10 @@
 # 用户指南
 
+[English](user-guide.md) · [0.10 迁移指南](migration.zh_CN.md) · [带类型任务 API](typed-task-api.zh_CN.md)
+
 `qubit-task` 接受带类型和版本的 payload，并将任务交给已注册的处理器执行。本指南以 typed API 为准；旧的字节数组 `TaskRequest`、按 `(task_type, handler_version)` 路由、旧查询示例和闭包式服务 API 已不再是公开契约。
+
+需要持久化任务历史时，使用 `SqliteTaskStore::open(path)` 打开 SQLite 后端。它会将 typed schema v4/v5 迁移到 v6 并保留现有任务记录；旧 UUID schema 会被拒绝且不会被改写。升级已有数据库前请先阅读[0.10 迁移指南](migration.zh_CN.md)。
 
 ## 从这里开始
 

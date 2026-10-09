@@ -1,4 +1,6 @@
-# Migrating to qubit-task 0.8
+# Historical: migrating to qubit-task 0.8
+
+> This page records the 0.8 migration only. Its API names and code examples are historical and are not a guide for the current 0.10 API. Use the [current migration guide](migration.md) for supported types and constructors.
 
 Version 0.8 contains intentional breaking changes to store pagination, typed scheduling queries, terminal pruning, and task notifications. Update downstream `TaskStore` implementations and callers together; no compatibility overloads are retained.
 

@@ -39,7 +39,7 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 - [用户指南](doc/user-guide.zh_CN.md)
 - [详细设计](doc/task_execution_service_design.md)
-- [迁移指南](doc/migration-0.8.zh_CN.md)
+- [0.10 迁移指南](doc/migration.zh_CN.md)
 - [API 文档](https://docs.rs/qubit-task)
 
 ## 任务通知投递
