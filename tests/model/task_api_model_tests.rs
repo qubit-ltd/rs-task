@@ -12,12 +12,12 @@ use qubit_codec::ValueEncoder;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 
-use crate::model::typed::EncodedPayload;
-use crate::model::typed::Payload;
-use crate::model::typed::ResourceRequest;
-use crate::model::typed::TaskId;
-use crate::model::typed::TaskRequest;
-use crate::model::typed::TaskRequestEncodeError;
+use qubit_task::model::typed::EncodedPayload;
+use qubit_task::model::typed::Payload;
+use qubit_task::model::typed::ResourceRequest;
+use qubit_task::model::typed::TaskId;
+use qubit_task::model::typed::TaskRequest;
+use qubit_task::model::typed::TaskRequestEncodeError;
 
 struct Counter(u32);
 
@@ -109,7 +109,7 @@ fn test_task_request_rejects_metadata_over_entry_budget() {
         ValueCodecId::new("qubit_task.tests.u32_le"),
         Counter(1),
     );
-    for index in 0..=crate::model::typed::MAX_TASK_METADATA_ENTRIES {
+    for index in 0..=qubit_task::model::typed::MAX_TASK_METADATA_ENTRIES {
         request.metadata.insert(&format!("key_{index}"), "value");
     }
 
@@ -164,8 +164,8 @@ fn test_progress_snapshot_projects_stage_and_metrics_and_round_trips() {
     use qubit_progress::Progress;
     use qubit_progress::Stage;
 
-    use crate::model::typed::ProgressCommand;
-    use crate::model::typed::TaskProgressSnapshot;
+    use qubit_task::model::typed::ProgressCommand;
+    use qubit_task::model::typed::TaskProgressSnapshot;
 
     let reporter = NoopReporter;
     let progress = Progress::builder(&reporter)
@@ -209,13 +209,13 @@ fn test_progress_snapshot_rejects_metric_count_stage_size_and_encoded_size() {
     use qubit_progress::Progress;
     use qubit_progress::Stage;
 
-    use crate::model::typed::ProgressCommand;
-    use crate::model::typed::ProgressSnapshotError;
-    use crate::model::typed::TaskProgressSnapshot;
+    use qubit_task::model::typed::ProgressCommand;
+    use qubit_task::model::typed::ProgressSnapshotError;
+    use qubit_task::model::typed::TaskProgressSnapshot;
 
     let id = TaskId::from_id(qubit_id::Id::new(1));
     let reporter = NoopReporter;
-    let metric_names: Vec<_> = (0..=crate::model::typed::MAX_TASK_PROGRESS_METRICS)
+    let metric_names: Vec<_> = (0..=qubit_task::model::typed::MAX_TASK_PROGRESS_METRICS)
         .map(|index| format!("metric-{index}"))
         .collect();
     let mut builder = Progress::builder(&reporter);
