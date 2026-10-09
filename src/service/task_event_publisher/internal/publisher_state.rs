@@ -172,6 +172,10 @@ mod tests {
     use crate::model::typed::TaskId;
     use crate::store::EventOutboxEntry;
     use crate::store::MemoryTaskStore;
+    #[cfg(feature = "sqlite")]
+    use crate::store::SqliteTaskStore;
+    #[cfg(feature = "sqlite")]
+    use crate::store::TaskStore;
 
     #[tokio::test]
     async fn test_failure_backoff_consumes_only_one_close_signal() {
@@ -225,5 +229,33 @@ mod tests {
         assert!(!error.is_empty());
         assert_eq!(*state.in_flight_event_id.lock(), None);
         assert_eq!(state.counters.snapshot().published, 0);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_run_exits_after_close_when_the_outbox_is_empty() {
+        let database = std::env::temp_dir().join(format!("task-publisher-state-{}.sqlite", uuid::Uuid::new_v4()));
+        let store = Arc::new(SqliteTaskStore::open(&database).expect("SQLite store opens"));
+        let owner = store.acquire_owner().await.expect("store owner is acquired");
+        store.enable_event_outbox().await.expect("durable outbox is enabled");
+        let registry = AsyncEventBusRegistry::with_local().expect("local registry");
+        let bus = Arc::new(registry.create(&EventBusConfig::default()).await.expect("local bus"));
+        let state = PublisherState::new(store.clone(), bus, Topic::new("task.lifecycle").expect("topic"));
+        state.closing.store(true, std::sync::atomic::Ordering::Release);
+
+        tokio::time::timeout(Duration::from_secs(1), state.run())
+            .await
+            .expect("closed empty publisher exits promptly");
+
+        assert_eq!(state.pending.load(std::sync::atomic::Ordering::Acquire), 0);
+        store.release_owner(owner).await.expect("store owner is released");
+        drop(state);
+        drop(store);
+        std::fs::remove_file(database.with_file_name(format!(
+            "{}.owner.lock",
+            database.file_name().expect("database has a filename").to_string_lossy()
+        )))
+        .expect("owner lock file is removed");
+        std::fs::remove_file(database).expect("database file is removed");
     }
 }

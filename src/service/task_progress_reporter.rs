@@ -298,4 +298,38 @@ mod tests {
             Some(4)
         );
     }
+
+    #[tokio::test]
+    async fn async_reporter_rejects_progress_version_overflow() {
+        let (store, id) = running_task().await;
+        let reporter = Arc::new(TaskProgressReporter::new(store.clone(), id, 1));
+        *reporter.progress_version.lock().await = u64::MAX;
+
+        let error = match AsyncProgress::builder_arc(reporter)
+            .stage(Stage::new("work", "Work"))
+            .metric(Metric::new("items", "Items"))
+            .start_async()
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an overflowing progress version must be rejected"),
+        };
+        match error {
+            qubit_progress::StartError::Delivery(delivery) => assert!(
+                delivery
+                    .reporter_error()
+                    .source_error()
+                    .to_string()
+                    .contains("progress version overflowed")
+            ),
+            other => panic!("expected progress delivery failure, got: {other:?}"),
+        }
+
+        let task = store
+            .get_encoded_task(id)
+            .await
+            .expect("task lookup succeeds")
+            .expect("task is retained");
+        assert_eq!(task.summary.progress, None);
+    }
 }

@@ -81,7 +81,22 @@ fn failure(error: std::io::Error) -> StoreError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use super::acquire_owner_lock;
     use super::is_lock_contended;
+    use crate::store::StoreError;
+
+    fn unique_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "qubit-task-owner-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock is after epoch")
+                .as_nanos()
+        ))
+    }
 
     /// Recognizes the lock-contention error code exported by `fs2`.
     #[test]
@@ -93,5 +108,15 @@ mod tests {
     #[test]
     fn test_lock_contention_rejects_unrelated_error() {
         assert!(!is_lock_contended(&std::io::Error::other("unrelated error")));
+    }
+
+    #[test]
+    fn test_owner_lock_reports_filesystem_open_failures() {
+        let missing_parent = unique_path().join("missing").join("tasks.sqlite");
+
+        assert!(matches!(
+            acquire_owner_lock(&missing_parent),
+            Err(StoreError::Failure(_))
+        ));
     }
 }

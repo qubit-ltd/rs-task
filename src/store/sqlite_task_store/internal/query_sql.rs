@@ -96,3 +96,47 @@ fn bind_timestamp(
 fn bind_text(params: &mut Vec<Value>, value: String) -> String {
     bind_value(params, Value::Text(value))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_encoded_history_query;
+    use crate::model::TaskStateKind;
+    use crate::model::typed::TaskCursor;
+    use crate::model::typed::TaskId;
+    use crate::model::typed::TaskQuery;
+    use crate::store::StoreError;
+
+    #[test]
+    fn history_query_binds_filters_and_rejects_an_overflowing_cursor() {
+        let query = TaskQuery {
+            states: vec![TaskStateKind::Queued, TaskStateKind::Queued],
+            category: Some("billing".into()),
+            correlation_key: Some("batch-17".into()),
+            after: Some(TaskCursor {
+                accepted_at_ms: 42,
+                id: TaskId::from_id(qubit_id::Id::new(7)),
+            }),
+            limit: 10,
+        };
+
+        let built = build_encoded_history_query(&query, 10).expect("valid query builds");
+        assert!(built.sql.contains("(accepted_at, id) > (?1, ?2)"));
+        assert!(built.sql.contains("category = ?3"));
+        assert!(built.sql.contains("correlation_key = ?4"));
+        assert!(built.sql.contains("state_kind IN (?5)"));
+        assert!(built.sql.ends_with("LIMIT ?6"));
+        assert_eq!(built.params.len(), 6);
+
+        let overflowing = TaskQuery {
+            after: Some(TaskCursor {
+                accepted_at_ms: u64::MAX,
+                id: TaskId::from_id(qubit_id::Id::new(7)),
+            }),
+            ..TaskQuery::default()
+        };
+        assert!(matches!(
+            build_encoded_history_query(&overflowing, 10),
+            Err(StoreError::InvalidRequest("task history cursor timestamp is too large"))
+        ));
+    }
+}
