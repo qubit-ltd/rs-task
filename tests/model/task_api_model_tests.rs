@@ -102,6 +102,121 @@ fn test_resource_request_exposes_optional_memory_and_disk_quotas() {
 }
 
 #[test]
+fn test_task_request_rejects_invalid_resource_descriptions() {
+    use std::collections::BTreeMap;
+
+    let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
+    let invalid_requests = [
+        ResourceRequest {
+            gpu_labels: vec![String::new()],
+            gpu_count: 1,
+            ..ResourceRequest::default()
+        },
+        ResourceRequest {
+            gpu_labels: vec!["x".repeat(129)],
+            gpu_count: 1,
+            ..ResourceRequest::default()
+        },
+        ResourceRequest {
+            gpu_labels: vec!["same".into(), "same".into()],
+            gpu_count: 2,
+            ..ResourceRequest::default()
+        },
+        ResourceRequest {
+            gpu_labels: vec!["gpu".into()],
+            ..ResourceRequest::default()
+        },
+        ResourceRequest {
+            gpu_labels: (0..=32).map(|index| format!("gpu-{index}")).collect(),
+            gpu_count: 33,
+            ..ResourceRequest::default()
+        },
+        ResourceRequest {
+            custom: BTreeMap::from([(String::new(), 1)]),
+            ..ResourceRequest::default()
+        },
+        ResourceRequest {
+            custom: BTreeMap::from([("x".repeat(129), 1)]),
+            ..ResourceRequest::default()
+        },
+        ResourceRequest {
+            custom: (0..=32)
+                .map(|index| (format!("license-{index}"), 1))
+                .collect(),
+            ..ResourceRequest::default()
+        },
+    ];
+
+    for resource_limit in invalid_requests {
+        let mut request = TaskRequest::new(
+            "example.count",
+            1,
+            ValueCodecId::new("qubit_task.tests.u32_le"),
+            Counter(1),
+        );
+        request.resource_limit = resource_limit;
+        assert!(matches!(
+            request.encode(registry),
+            Err(TaskRequestEncodeError::Resource(_))
+        ));
+    }
+}
+
+#[test]
+fn test_task_state_covers_lifecycle_kinds_and_transitions() {
+    use qubit_task::model::TaskState;
+
+    let states = [
+        TaskState::Queued,
+        TaskState::Running,
+        TaskState::Blocked {
+            reason: "held".into(),
+        },
+        TaskState::Succeeded,
+        TaskState::Failed {
+            category: "io".into(),
+            message: "failed".into(),
+        },
+        TaskState::Panicked {
+            message: "panic".into(),
+        },
+        TaskState::Cancelled,
+    ];
+    for state in &states {
+        assert_eq!(
+            state.is_terminal(),
+            matches!(
+                state,
+                TaskState::Succeeded
+                    | TaskState::Failed { .. }
+                    | TaskState::Panicked { .. }
+                    | TaskState::Cancelled
+            )
+        );
+        let _ = state.kind();
+    }
+
+    let allowed = [
+        [false, true, true, false, false, false, true],
+        [true, true, true, true, true, true, true],
+        [true, false, false, false, false, false, true],
+        [false; 7],
+        [false; 7],
+        [false; 7],
+        [false; 7],
+    ];
+    for (current_index, current) in states.iter().enumerate() {
+        for (next_index, next) in states.iter().enumerate() {
+            assert_eq!(
+                current.allows_transition_to(next),
+                allowed[current_index][next_index],
+                "unexpected transition from {current:?} to {next:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_task_request_rejects_metadata_over_entry_budget() {
     let mut request = TaskRequest::new(
         "example.count",
