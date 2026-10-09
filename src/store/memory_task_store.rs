@@ -180,7 +180,6 @@ impl super::TaskStore for MemoryTaskStore {
         }
     }
 
-
     /// Atomically retains a typed request after its payload has been encoded.
     fn accept_encoded<'a>(
         &'a self,
@@ -279,12 +278,10 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
-
     /// Loads one encoded request together with its current summary.
     fn get_encoded_task<'a>(&'a self, id: EncodedTaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().encoded_tasks.get(&id).cloned()) })
     }
-
 
     /// Starts a queued encoded task attempt using a lifecycle revision CAS.
     fn start_encoded<'a>(
@@ -317,7 +314,6 @@ impl super::TaskStore for MemoryTaskStore {
             Ok(task.summary.clone())
         })
     }
-
 
     /// Applies a typed lifecycle transition with revision and attempt checks.
     fn transition_encoded<'a>(
@@ -385,7 +381,6 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
-
     /// Persists a bounded progress snapshot using an attempt/version CAS.
     fn update_progress<'a>(
         &'a self,
@@ -410,7 +405,6 @@ impl super::TaskStore for MemoryTaskStore {
             Ok(task.summary.clone())
         })
     }
-
 
     /// Lists typed summaries using `(accepted_at_ms, numeric task ID)` order.
     fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
@@ -465,7 +459,6 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
-
     fn list_ready_queued<'a>(
         &'a self,
         after: Option<crate::model::typed::TaskCursor>,
@@ -500,7 +493,6 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
-
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
             Ok(self
@@ -514,7 +506,6 @@ impl super::TaskStore for MemoryTaskStore {
                 .min())
         })
     }
-
 
     fn prune_terminal_before<'a>(
         &'a self,
@@ -551,7 +542,6 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
-
     /// Acquires exclusive ownership within this in-process store instance.
     ///
     /// The epoch is local to this `MemoryTaskStore`; it does not imply restart
@@ -572,7 +562,6 @@ impl super::TaskStore for MemoryTaskStore {
             Ok(epoch)
         })
     }
-
 
     /// Releases the current in-process owner when its epoch matches.
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {

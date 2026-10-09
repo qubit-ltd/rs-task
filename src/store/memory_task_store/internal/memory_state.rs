@@ -54,6 +54,4 @@ impl MemoryState {
         self.encoded_terminal_order.retain(|terminal_id| *terminal_id != id);
         Some(task)
     }
-
-
 }

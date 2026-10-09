@@ -8,6 +8,8 @@
 mod default_method_tests {
     use std::num::NonZeroUsize;
 
+    use crate::model::OwnerEpoch;
+    use crate::model::StoreCapabilities;
     use crate::model::typed::ProgressCommand;
     use crate::model::typed::StartCommand;
     use crate::model::typed::StoredTask;
@@ -18,8 +20,6 @@ mod default_method_tests {
     use crate::model::typed::TaskQuery;
     use crate::model::typed::TaskSummary;
     use crate::model::typed::TransitionCommand;
-    use crate::model::OwnerEpoch;
-    use crate::model::StoreCapabilities;
     use crate::store::StoreError;
     use crate::store::TaskFuture;
     use crate::store::TaskStore;

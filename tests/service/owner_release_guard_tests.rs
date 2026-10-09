@@ -163,10 +163,7 @@ async fn test_cancelled_release_future_still_releases_owner() {
         .await
         .expect("Drop cleanup finishes after release future cancellation");
     let next_epoch = store.acquire_owner().await.expect("second owner acquired");
-    store
-        .release_owner(next_epoch)
-        .await
-        .expect("second owner released");
+    store.release_owner(next_epoch).await.expect("second owner released");
 }
 
 /// A failed release leaves the same epoch available for a later retry.
@@ -237,12 +234,9 @@ async fn test_pending_release_does_not_block_other_cleanup() {
     let other_epoch = other.acquire_owner().await.expect("other owner acquired");
     let other_store: Arc<dyn TaskStore> = other.clone();
     drop(OwnerReleaseGuard::new(other_store, other_epoch, worker));
-    let other_released = tokio::time::timeout(
-        Duration::from_secs(2),
-        other.release_finished.notified(),
-    )
-    .await
-    .is_ok();
+    let other_released = tokio::time::timeout(Duration::from_secs(2), other.release_finished.notified())
+        .await
+        .is_ok();
     blocked.resume.add_permits(1);
     assert!(
         other_released,
@@ -283,10 +277,7 @@ async fn test_drop_cleanup_logs_store_failure_without_stopping_worker() {
 
     let other = Arc::new(GatedReleaseStore::new());
     other.first_release.store(false, Ordering::Release);
-    let other_epoch = other
-        .acquire_owner()
-        .await
-        .expect("worker remains available");
+    let other_epoch = other.acquire_owner().await.expect("worker remains available");
     let other_store: Arc<dyn TaskStore> = other.clone();
     drop(OwnerReleaseGuard::new(
         other_store,
@@ -296,10 +287,7 @@ async fn test_drop_cleanup_logs_store_failure_without_stopping_worker() {
     tokio::time::timeout(Duration::from_secs(2), other.release_finished.notified())
         .await
         .expect("failed cleanup did not stop the worker");
-    let next_epoch = other
-        .acquire_owner()
-        .await
-        .expect("replacement owner acquired");
+    let next_epoch = other.acquire_owner().await.expect("replacement owner acquired");
     other
         .release_owner(next_epoch)
         .await
@@ -334,10 +322,7 @@ async fn test_drop_cleanup_contains_store_panic() {
 
     let other = Arc::new(GatedReleaseStore::new());
     other.first_release.store(false, Ordering::Release);
-    let other_epoch = other
-        .acquire_owner()
-        .await
-        .expect("worker remains available");
+    let other_epoch = other.acquire_owner().await.expect("worker remains available");
     let other_store: Arc<dyn TaskStore> = other.clone();
     drop(OwnerReleaseGuard::new(
         other_store,
@@ -347,10 +332,7 @@ async fn test_drop_cleanup_contains_store_panic() {
     tokio::time::timeout(Duration::from_secs(2), other.release_finished.notified())
         .await
         .expect("panicking cleanup did not stop the worker");
-    let next_epoch = other
-        .acquire_owner()
-        .await
-        .expect("replacement owner acquired");
+    let next_epoch = other.acquire_owner().await.expect("replacement owner acquired");
     other
         .release_owner(next_epoch)
         .await

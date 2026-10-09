@@ -152,8 +152,6 @@ impl SqliteTaskStore {
         })
     }
 
-
-
     /// Opens a database using the typed numeric-ID task schema.
     ///
     /// This cutover entry point creates a fresh schema or reopens the same
@@ -272,7 +270,6 @@ impl SqliteTaskStore {
 ///
 /// * `id` - Service-assigned identity for the new task.
 /// * `request` - Validated reconstructable request to accept.
-///
 fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }
@@ -299,7 +296,14 @@ mod tests {
 
     /// Creates a unique database path for one worker scheduling test.
     fn test_database_path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("qubit-task-sqlite-worker-{}-{}.sqlite", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after epoch").as_nanos()))
+        std::env::temp_dir().join(format!(
+            "qubit-task-sqlite-worker-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock is after epoch")
+                .as_nanos()
+        ))
     }
 
     /// Removes only disposable files created by this worker test.
@@ -567,7 +571,6 @@ impl super::TaskStore for SqliteTaskStore {
         }
     }
 
-
     /// Atomically accepts an encoded typed request on a store opened with
     /// [`SqliteTaskStore::open`].
     fn accept_encoded<'a>(
@@ -575,7 +578,7 @@ impl super::TaskStore for SqliteTaskStore {
         id: crate::model::typed::TaskId,
         request: crate::model::typed::StoredTaskRequest,
     ) -> TaskFuture<'a, Result<crate::model::typed::AcceptOutcome, StoreError>> {
-                let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
         self.run_write(move |connection| {
             accept_encoded(
                 connection,
@@ -586,22 +589,20 @@ impl super::TaskStore for SqliteTaskStore {
         })
     }
 
-
     /// Loads an encoded typed task without decoding its application payload.
     fn get_encoded_task<'a>(
         &'a self,
         id: crate::model::typed::TaskId,
     ) -> TaskFuture<'a, Result<Option<crate::model::typed::StoredTask>, StoreError>> {
-                self.run(move |connection| get_encoded_task(connection, id))
+        self.run(move |connection| get_encoded_task(connection, id))
     }
-
 
     /// Starts one queued typed task attempt with a revision compare-and-set.
     fn start_encoded<'a>(
         &'a self,
         command: crate::model::typed::StartCommand,
     ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
-                let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
         self.run_write(move |connection| {
             start_encoded(
                 connection,
@@ -611,13 +612,12 @@ impl super::TaskStore for SqliteTaskStore {
         })
     }
 
-
     /// Applies a typed lifecycle transition atomically.
     fn transition_encoded<'a>(
         &'a self,
         command: crate::model::typed::TransitionCommand,
     ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
-                let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
         self.run_write(move |connection| {
             transition_encoded(
                 connection,
@@ -627,20 +627,17 @@ impl super::TaskStore for SqliteTaskStore {
         })
     }
 
-
     /// Persists a progress snapshot for the matching running attempt.
     fn update_progress<'a>(
         &'a self,
         command: crate::model::typed::ProgressCommand,
     ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
-                self.run_write(move |connection| update_progress(connection, command))
+        self.run_write(move |connection| update_progress(connection, command))
     }
-
 
     fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
-                self.run(move |connection| list_encoded(connection, query))
+        self.run(move |connection| list_encoded(connection, query))
     }
-
 
     fn list_ready_queued<'a>(
         &'a self,
@@ -648,21 +645,19 @@ impl super::TaskStore for SqliteTaskStore {
         limit: NonZeroUsize,
         now_ms: u64,
     ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
-                self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
+        self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
     }
-
 
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
-                self.run(move |connection| next_retry_deadline(connection, now_ms))
+        self.run(move |connection| next_retry_deadline(connection, now_ms))
     }
-
 
     fn prune_terminal_before<'a>(
         &'a self,
         finished_before_ms: u64,
         max_rows: NonZeroUsize,
     ) -> TaskFuture<'a, Result<usize, StoreError>> {
-                let finished_before_ms = match i64::try_from(finished_before_ms) {
+        let finished_before_ms = match i64::try_from(finished_before_ms) {
             Ok(value) => value,
             Err(_) => {
                 return Box::pin(async {
@@ -702,7 +697,6 @@ impl super::TaskStore for SqliteTaskStore {
         })
     }
 
-
     /// Increments and records the exclusive service ownership epoch.
     ///
     /// # Returns
@@ -729,7 +723,6 @@ impl super::TaskStore for SqliteTaskStore {
             Ok(epoch)
         })
     }
-
 
     /// Releases the process lock only when the supplied epoch still matches.
     ///
@@ -759,7 +752,20 @@ impl super::TaskStore for SqliteTaskStore {
         })
     }
 
-    fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), StoreError>> { self.enable_outbox() }
-    fn list_event_outbox<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> { self.list_outbox(limit) }
-    fn mark_event_published<'a>(&'a self, task_id: crate::model::typed::TaskId, state_version: u64) -> TaskFuture<'a, Result<(), StoreError>> { self.mark_outbox_published(task_id, state_version) }
+    fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.enable_outbox()
+    }
+    fn list_event_outbox<'a>(
+        &'a self,
+        limit: usize,
+    ) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> {
+        self.list_outbox(limit)
+    }
+    fn mark_event_published<'a>(
+        &'a self,
+        task_id: crate::model::typed::TaskId,
+        state_version: u64,
+    ) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.mark_outbox_published(task_id, state_version)
+    }
 }

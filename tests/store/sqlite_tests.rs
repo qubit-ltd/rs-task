@@ -23,7 +23,14 @@ use crate::store::StoreError;
 use crate::store::TaskStore as TypedTaskStore;
 
 fn database_path(label: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("qubit-task-{label}-{}-{}.sqlite", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after epoch").as_nanos()))
+    std::env::temp_dir().join(format!(
+        "qubit-task-{label}-{}-{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos()
+    ))
 }
 
 fn remove_database(path: &std::path::Path) {
@@ -642,9 +649,7 @@ async fn test_sqlite_open_rejects_legacy_schema_without_rewriting_it() {
     assert!(error.to_string().contains("explicit task ID mapping"));
     let connection = Connection::open(&path).expect("legacy database remains readable");
     let after: String = connection
-        .query_row("SELECT record_json FROM tasks WHERE id=?1", [&id], |row| {
-            row.get(0)
-        })
+        .query_row("SELECT record_json FROM tasks WHERE id=?1", [&id], |row| row.get(0))
         .expect("legacy record remains present");
     assert_eq!(after, before);
     let version: i64 = connection
@@ -659,11 +664,15 @@ async fn test_sqlite_open_rejects_legacy_schema_without_rewriting_it() {
 async fn test_sqlite_owner_epoch_advances_after_release_and_reacquire() {
     let path = database_path("owner-epoch-reacquire");
     let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-    let first_epoch = TypedTaskStore::acquire_owner(&store).await.expect("first owner is acquired");
+    let first_epoch = TypedTaskStore::acquire_owner(&store)
+        .await
+        .expect("first owner is acquired");
     TypedTaskStore::release_owner(&store, first_epoch)
         .await
         .expect("first owner releases");
-    let second_epoch = TypedTaskStore::acquire_owner(&store).await.expect("owner can be reacquired");
+    let second_epoch = TypedTaskStore::acquire_owner(&store)
+        .await
+        .expect("owner can be reacquired");
     assert!(second_epoch.0 > first_epoch.0);
     assert!(matches!(
         TypedTaskStore::release_owner(&store, first_epoch).await,

@@ -5,7 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! File identity, typed schema, and process ownership helpers for SQLite storage.
+//! File identity, typed schema, and process ownership helpers for SQLite
+//! storage.
 
 mod database_identity;
 mod owner_lock;

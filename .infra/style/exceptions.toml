@@ -19,8 +19,3 @@ reason = "This module groups the handler contract and its context and registry i
 rule = "aggregation-files"
 path = "src/store/mod.rs"
 reason = "This module groups the store contract, shared errors, and async future alias used by all backends."
-
-[[exceptions]]
-rule = "public-type-layout"
-path = "src/model/task_record.rs"
-reason = "Legacy lifecycle records and their summaries remain grouped as a test-only persistence contract."
