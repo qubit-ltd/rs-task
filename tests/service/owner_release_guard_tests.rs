@@ -16,17 +16,17 @@ use tokio::sync::Semaphore;
 
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
-use crate::model::next::AcceptOutcome;
-use crate::model::next::ProgressCommand;
-use crate::model::next::StartCommand;
-use crate::model::next::StoredTask;
-use crate::model::next::StoredTaskRequest;
-use crate::model::next::TaskCursor;
-use crate::model::next::TaskId;
-use crate::model::next::TaskPage;
-use crate::model::next::TaskQuery;
-use crate::model::next::TaskSummary;
-use crate::model::next::TransitionCommand;
+use crate::model::typed::AcceptOutcome;
+use crate::model::typed::ProgressCommand;
+use crate::model::typed::StartCommand;
+use crate::model::typed::StoredTask;
+use crate::model::typed::StoredTaskRequest;
+use crate::model::typed::TaskCursor;
+use crate::model::typed::TaskId;
+use crate::model::typed::TaskPage;
+use crate::model::typed::TaskQuery;
+use crate::model::typed::TaskSummary;
+use crate::model::typed::TransitionCommand;
 use crate::service::owner_release_guard::OwnerReleaseGuard;
 use crate::service::owner_release_guard::OwnerReleaseWorker;
 use crate::store::MemoryTaskStore;
@@ -37,12 +37,13 @@ use crate::store::TaskStore;
 struct GatedReleaseStore {
     inner: MemoryTaskStore,
     entered: Notify,
+    release_finished: Notify,
     resume: Semaphore,
     first_release: AtomicBool,
     fail_next_release: AtomicBool,
     panic_next_release: AtomicBool,
-    failure_observed: AtomicBool,
-    panic_observed: AtomicBool,
+    failure_observed: Notify,
+    panic_observed: Notify,
 }
 
 impl GatedReleaseStore {
@@ -51,12 +52,13 @@ impl GatedReleaseStore {
         Self {
             inner: MemoryTaskStore::new(32),
             entered: Notify::new(),
+            release_finished: Notify::new(),
             resume: Semaphore::new(0),
             first_release: AtomicBool::new(true),
             fail_next_release: AtomicBool::new(false),
             panic_next_release: AtomicBool::new(false),
-            failure_observed: AtomicBool::new(false),
-            panic_observed: AtomicBool::new(false),
+            failure_observed: Notify::new(),
+            panic_observed: Notify::new(),
         }
     }
 }
@@ -120,14 +122,16 @@ impl TaskStore for GatedReleaseStore {
                 permit.forget();
             }
             if self.fail_next_release.swap(false, Ordering::AcqRel) {
-                self.failure_observed.store(true, Ordering::Release);
+                self.failure_observed.notify_one();
                 return Err(StoreError::Failure("transient release failure".into()));
             }
             if self.panic_next_release.swap(false, Ordering::AcqRel) {
-                self.panic_observed.store(true, Ordering::Release);
+                self.panic_observed.notify_one();
                 panic!("injected cleanup panic");
             }
-            self.inner.release_owner(epoch).await
+            let result = self.inner.release_owner(epoch).await;
+            self.release_finished.notify_one();
+            result
         })
     }
 }
@@ -155,20 +159,14 @@ async fn test_cancelled_release_future_still_releases_owner() {
         }
     }
     drop(guard);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match store.acquire_owner().await {
-                Ok(next_epoch) => {
-                    store.release_owner(next_epoch).await.expect("second owner released");
-                    break;
-                }
-                Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
-                Err(error) => panic!("unexpected owner acquisition error: {error}"),
-            }
-        }
-    })
-    .await
-    .expect("Drop eventually releases owner after release future cancellation");
+    tokio::time::timeout(Duration::from_secs(2), store.release_finished.notified())
+        .await
+        .expect("Drop cleanup finishes after release future cancellation");
+    let next_epoch = store.acquire_owner().await.expect("second owner acquired");
+    store
+        .release_owner(next_epoch)
+        .await
+        .expect("second owner released");
 }
 
 /// A failed release leaves the same epoch available for a later retry.
@@ -234,22 +232,15 @@ async fn test_pending_release_does_not_block_other_cleanup() {
         .await
         .expect("first release enters its gate");
 
-    let other = Arc::new(MemoryTaskStore::new(16));
+    let other = Arc::new(GatedReleaseStore::new());
+    other.first_release.store(false, Ordering::Release);
     let other_epoch = other.acquire_owner().await.expect("other owner acquired");
     let other_store: Arc<dyn TaskStore> = other.clone();
     drop(OwnerReleaseGuard::new(other_store, other_epoch, worker));
-    let other_released = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match other.acquire_owner().await {
-                Ok(epoch) => {
-                    other.release_owner(epoch).await.expect("other owner released");
-                    break;
-                }
-                Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
-                Err(error) => panic!("unexpected owner acquisition error: {error}"),
-            }
-        }
-    })
+    let other_released = tokio::time::timeout(
+        Duration::from_secs(2),
+        other.release_finished.notified(),
+    )
     .await
     .is_ok();
     blocked.resume.add_permits(1);
@@ -257,6 +248,11 @@ async fn test_pending_release_does_not_block_other_cleanup() {
         other_released,
         "pending cleanup held the worker behind an unrelated owner"
     );
+    let next_epoch = other.acquire_owner().await.expect("other owner released");
+    other
+        .release_owner(next_epoch)
+        .await
+        .expect("replacement owner released");
 }
 
 /// A failed drop cleanup is logged while the shared worker remains usable.
@@ -274,9 +270,7 @@ async fn test_drop_cleanup_logs_store_failure_without_stopping_worker() {
     ));
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !store.failure_observed.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
+        store.failure_observed.notified().await;
     })
     .await
     .expect("cleanup worker attempts the injected failure");
@@ -287,28 +281,29 @@ async fn test_drop_cleanup_logs_store_failure_without_stopping_worker() {
         .await
         .expect("test releases the owner left after the injected failure");
 
-    let other = Arc::new(MemoryTaskStore::new(4));
-    let other_epoch = other.acquire_owner().await.expect("worker remains available");
+    let other = Arc::new(GatedReleaseStore::new());
+    other.first_release.store(false, Ordering::Release);
+    let other_epoch = other
+        .acquire_owner()
+        .await
+        .expect("worker remains available");
     let other_store: Arc<dyn TaskStore> = other.clone();
     drop(OwnerReleaseGuard::new(
         other_store,
         other_epoch,
         OwnerReleaseWorker::shared().expect("shared cleanup worker remains available"),
     ));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match other.acquire_owner().await {
-                Ok(epoch) => {
-                    other.release_owner(epoch).await.expect("replacement owner released");
-                    break;
-                }
-                Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
-                Err(error) => panic!("unexpected owner acquisition error: {error}"),
-            }
-        }
-    })
-    .await
-    .expect("failed cleanup did not stop the worker");
+    tokio::time::timeout(Duration::from_secs(2), other.release_finished.notified())
+        .await
+        .expect("failed cleanup did not stop the worker");
+    let next_epoch = other
+        .acquire_owner()
+        .await
+        .expect("replacement owner acquired");
+    other
+        .release_owner(next_epoch)
+        .await
+        .expect("replacement owner released");
 }
 
 /// A panicking drop cleanup is contained and does not terminate the worker.
@@ -326,9 +321,7 @@ async fn test_drop_cleanup_contains_store_panic() {
     ));
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !store.panic_observed.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
+        store.panic_observed.notified().await;
     })
     .await
     .expect("cleanup worker reaches the injected panic");
@@ -339,26 +332,27 @@ async fn test_drop_cleanup_contains_store_panic() {
         .await
         .expect("test releases the owner left after the injected panic");
 
-    let other = Arc::new(MemoryTaskStore::new(4));
-    let other_epoch = other.acquire_owner().await.expect("worker remains available");
+    let other = Arc::new(GatedReleaseStore::new());
+    other.first_release.store(false, Ordering::Release);
+    let other_epoch = other
+        .acquire_owner()
+        .await
+        .expect("worker remains available");
     let other_store: Arc<dyn TaskStore> = other.clone();
     drop(OwnerReleaseGuard::new(
         other_store,
         other_epoch,
         OwnerReleaseWorker::shared().expect("shared cleanup worker remains available"),
     ));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match other.acquire_owner().await {
-                Ok(epoch) => {
-                    other.release_owner(epoch).await.expect("replacement owner released");
-                    break;
-                }
-                Err(StoreError::OwnerConflict) => tokio::task::yield_now().await,
-                Err(error) => panic!("unexpected owner acquisition error: {error}"),
-            }
-        }
-    })
-    .await
-    .expect("panicking cleanup did not stop the worker");
+    tokio::time::timeout(Duration::from_secs(2), other.release_finished.notified())
+        .await
+        .expect("panicking cleanup did not stop the worker");
+    let next_epoch = other
+        .acquire_owner()
+        .await
+        .expect("replacement owner acquired");
+    other
+        .release_owner(next_epoch)
+        .await
+        .expect("replacement owner released");
 }
