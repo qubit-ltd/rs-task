@@ -21,7 +21,7 @@ pub struct HistoryDataset {
 }
 
 /// Creates a schema-version-4 database with deterministic legal task rows.
-/// Secondary indexes are deliberately left to SqliteTaskStore::open_next so the
+/// Secondary indexes are deliberately left to SqliteTaskStore::open so the
 /// first-open/index-build cost can be measured independently of seeding.
 pub fn create(size: usize, directory: &std::path::Path) -> Result<HistoryDataset, Box<dyn std::error::Error>> {
     use rusqlite::Connection;

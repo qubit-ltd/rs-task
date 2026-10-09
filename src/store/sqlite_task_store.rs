@@ -274,6 +274,218 @@ fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }
 
+impl super::TaskStore for SqliteTaskStore {
+    /// Reports that history is persistent and unfinished records can recover.
+    ///
+    /// # Returns
+    ///
+    /// Both persistent-history and restart-recovery capabilities.
+    fn capabilities(&self) -> StoreCapabilities {
+        StoreCapabilities {
+            persistent_history: true,
+            restart_recovery: true,
+        }
+    }
+
+    /// Atomically accepts an encoded typed request on a store opened with
+    /// [`SqliteTaskStore::open`].
+    fn accept_encoded<'a>(
+        &'a self,
+        id: crate::model::typed::TaskId,
+        request: crate::model::typed::StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<crate::model::typed::AcceptOutcome, StoreError>> {
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| {
+            accept_encoded(
+                connection,
+                id,
+                request,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
+    }
+
+    /// Loads an encoded typed task without decoding its application payload.
+    fn get_encoded_task<'a>(
+        &'a self,
+        id: crate::model::typed::TaskId,
+    ) -> TaskFuture<'a, Result<Option<crate::model::typed::StoredTask>, StoreError>> {
+        self.run(move |connection| get_encoded_task(connection, id))
+    }
+
+    /// Starts one queued typed task attempt with a revision compare-and-set.
+    fn start_encoded<'a>(
+        &'a self,
+        command: crate::model::typed::StartCommand,
+    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| {
+            start_encoded(
+                connection,
+                command,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
+    }
+
+    /// Applies a typed lifecycle transition atomically.
+    fn transition_encoded<'a>(
+        &'a self,
+        command: crate::model::typed::TransitionCommand,
+    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run_write(move |connection| {
+            transition_encoded(
+                connection,
+                command,
+                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
+    }
+
+    /// Persists a progress snapshot for the matching running attempt.
+    fn update_progress<'a>(
+        &'a self,
+        command: crate::model::typed::ProgressCommand,
+    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+        self.run_write(move |connection| update_progress(connection, command))
+    }
+
+    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        self.run(move |connection| list_encoded(connection, query))
+    }
+
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<crate::model::typed::TaskCursor>,
+        limit: NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
+        self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
+    }
+
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+        self.run(move |connection| next_retry_deadline(connection, now_ms))
+    }
+
+    fn prune_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, StoreError>> {
+        let finished_before_ms = match i64::try_from(finished_before_ms) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async {
+                    Err(StoreError::InvalidRequest(
+                        "task finish cutoff exceeds the SQLite integer range",
+                    ))
+                });
+            }
+        };
+        let max_rows = match i64::try_from(max_rows.get()) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async {
+                    Err(StoreError::InvalidRequest(
+                        "task history prune limit exceeds the SQLite integer range",
+                    ))
+                });
+            }
+        };
+        self.run_write(move |connection| {
+            let transaction = connection.unchecked_transaction().map_err(failure)?;
+            let mut statement = transaction
+                .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER) < ?1 ORDER BY CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id LIMIT ?2")
+                .map_err(failure)?;
+            let rows = statement
+                .query_map(params![finished_before_ms, max_rows], |row| row.get::<_, String>(0))
+                .map_err(failure)?;
+            let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
+            drop(statement);
+            for id in &ids {
+                transaction
+                    .execute("DELETE FROM tasks WHERE id=?1", [id])
+                    .map_err(failure)?;
+            }
+            transaction.commit().map_err(failure)?;
+            Ok(ids.len())
+        })
+    }
+
+    /// Increments and records the exclusive service ownership epoch.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the new owner epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the owner lock is absent or metadata access fails.
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
+        let owner_state = Arc::clone(&self.owner_state);
+        let database_path = self.database_path.clone();
+        self.run(move |connection| {
+            let mut owner_state = owner_state.lock();
+            if owner_state.epoch.is_some() {
+                return Err(StoreError::OwnerConflict);
+            }
+            if owner_state.lock_file.is_none() {
+                owner_state.lock_file = Some(acquire_owner_lock(&database_path)?);
+            }
+            connection.execute("INSERT INTO metadata(key,value) VALUES('owner_epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1", []).map_err(failure)?;
+            let epoch = connection.query_row("SELECT value FROM metadata WHERE key='owner_epoch'", [], |row| row.get::<_, u64>(0)).map(OwnerEpoch).map_err(failure)?;
+            owner_state.epoch = Some(epoch);
+            Ok(epoch)
+        })
+    }
+
+    /// Releases the process lock only when the supplied epoch still matches.
+    ///
+    /// # Parameters
+    ///
+    /// * `epoch` - Ownership generation previously issued by this store.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after the lock file is released.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale epoch, absent owner, or lock failure.
+    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+        let owner_state = Arc::clone(&self.owner_state);
+        let outbox_enabled = Arc::clone(&self.outbox_enabled);
+        self.run(move |_| {
+            let mut owner_state = owner_state.lock();
+            if owner_state.epoch != Some(epoch) {
+                return Err(StoreError::OwnerConflict);
+            }
+            let file = owner_state.lock_file.take().ok_or(StoreError::OwnerConflict)?;
+            owner_state.epoch = None;
+            outbox_enabled.store(false, std::sync::atomic::Ordering::Release);
+            file.unlock().map_err(failure)
+        })
+    }
+
+    fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.enable_outbox()
+    }
+    fn list_event_outbox<'a>(
+        &'a self,
+        limit: usize,
+    ) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> {
+        self.list_outbox(limit)
+    }
+    fn mark_event_published<'a>(
+        &'a self,
+        task_id: crate::model::typed::TaskId,
+        state_version: u64,
+    ) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.mark_outbox_published(task_id, state_version)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -555,217 +767,5 @@ mod tests {
 
         drop(store);
         remove_database(&path);
-    }
-}
-
-impl super::TaskStore for SqliteTaskStore {
-    /// Reports that history is persistent and unfinished records can recover.
-    ///
-    /// # Returns
-    ///
-    /// Both persistent-history and restart-recovery capabilities.
-    fn capabilities(&self) -> StoreCapabilities {
-        StoreCapabilities {
-            persistent_history: true,
-            restart_recovery: true,
-        }
-    }
-
-    /// Atomically accepts an encoded typed request on a store opened with
-    /// [`SqliteTaskStore::open`].
-    fn accept_encoded<'a>(
-        &'a self,
-        id: crate::model::typed::TaskId,
-        request: crate::model::typed::StoredTaskRequest,
-    ) -> TaskFuture<'a, Result<crate::model::typed::AcceptOutcome, StoreError>> {
-        let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| {
-            accept_encoded(
-                connection,
-                id,
-                request,
-                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
-            )
-        })
-    }
-
-    /// Loads an encoded typed task without decoding its application payload.
-    fn get_encoded_task<'a>(
-        &'a self,
-        id: crate::model::typed::TaskId,
-    ) -> TaskFuture<'a, Result<Option<crate::model::typed::StoredTask>, StoreError>> {
-        self.run(move |connection| get_encoded_task(connection, id))
-    }
-
-    /// Starts one queued typed task attempt with a revision compare-and-set.
-    fn start_encoded<'a>(
-        &'a self,
-        command: crate::model::typed::StartCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
-        let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| {
-            start_encoded(
-                connection,
-                command,
-                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
-            )
-        })
-    }
-
-    /// Applies a typed lifecycle transition atomically.
-    fn transition_encoded<'a>(
-        &'a self,
-        command: crate::model::typed::TransitionCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
-        let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run_write(move |connection| {
-            transition_encoded(
-                connection,
-                command,
-                outbox_enabled.load(std::sync::atomic::Ordering::Acquire),
-            )
-        })
-    }
-
-    /// Persists a progress snapshot for the matching running attempt.
-    fn update_progress<'a>(
-        &'a self,
-        command: crate::model::typed::ProgressCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
-        self.run_write(move |connection| update_progress(connection, command))
-    }
-
-    fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
-        self.run(move |connection| list_encoded(connection, query))
-    }
-
-    fn list_ready_queued<'a>(
-        &'a self,
-        after: Option<crate::model::typed::TaskCursor>,
-        limit: NonZeroUsize,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
-        self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
-    }
-
-    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
-        self.run(move |connection| next_retry_deadline(connection, now_ms))
-    }
-
-    fn prune_terminal_before<'a>(
-        &'a self,
-        finished_before_ms: u64,
-        max_rows: NonZeroUsize,
-    ) -> TaskFuture<'a, Result<usize, StoreError>> {
-        let finished_before_ms = match i64::try_from(finished_before_ms) {
-            Ok(value) => value,
-            Err(_) => {
-                return Box::pin(async {
-                    Err(StoreError::InvalidRequest(
-                        "task finish cutoff exceeds the SQLite integer range",
-                    ))
-                });
-            }
-        };
-        let max_rows = match i64::try_from(max_rows.get()) {
-            Ok(value) => value,
-            Err(_) => {
-                return Box::pin(async {
-                    Err(StoreError::InvalidRequest(
-                        "task history prune limit exceeds the SQLite integer range",
-                    ))
-                });
-            }
-        };
-        self.run_write(move |connection| {
-            let transaction = connection.unchecked_transaction().map_err(failure)?;
-            let mut statement = transaction
-                .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER) < ?1 ORDER BY CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id LIMIT ?2")
-                .map_err(failure)?;
-            let rows = statement
-                .query_map(params![finished_before_ms, max_rows], |row| row.get::<_, String>(0))
-                .map_err(failure)?;
-            let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
-            drop(statement);
-            for id in &ids {
-                transaction
-                    .execute("DELETE FROM tasks WHERE id=?1", [id])
-                    .map_err(failure)?;
-            }
-            transaction.commit().map_err(failure)?;
-            Ok(ids.len())
-        })
-    }
-
-    /// Increments and records the exclusive service ownership epoch.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving to the new owner epoch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the owner lock is absent or metadata access fails.
-    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
-        let owner_state = Arc::clone(&self.owner_state);
-        let database_path = self.database_path.clone();
-        self.run(move |connection| {
-            let mut owner_state = owner_state.lock();
-            if owner_state.epoch.is_some() {
-                return Err(StoreError::OwnerConflict);
-            }
-            if owner_state.lock_file.is_none() {
-                owner_state.lock_file = Some(acquire_owner_lock(&database_path)?);
-            }
-            connection.execute("INSERT INTO metadata(key,value) VALUES('owner_epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1", []).map_err(failure)?;
-            let epoch = connection.query_row("SELECT value FROM metadata WHERE key='owner_epoch'", [], |row| row.get::<_, u64>(0)).map(OwnerEpoch).map_err(failure)?;
-            owner_state.epoch = Some(epoch);
-            Ok(epoch)
-        })
-    }
-
-    /// Releases the process lock only when the supplied epoch still matches.
-    ///
-    /// # Parameters
-    ///
-    /// * `epoch` - Ownership generation previously issued by this store.
-    ///
-    /// # Returns
-    ///
-    /// A future resolving after the lock file is released.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a stale epoch, absent owner, or lock failure.
-    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
-        let owner_state = Arc::clone(&self.owner_state);
-        let outbox_enabled = Arc::clone(&self.outbox_enabled);
-        self.run(move |_| {
-            let mut owner_state = owner_state.lock();
-            if owner_state.epoch != Some(epoch) {
-                return Err(StoreError::OwnerConflict);
-            }
-            let file = owner_state.lock_file.take().ok_or(StoreError::OwnerConflict)?;
-            owner_state.epoch = None;
-            outbox_enabled.store(false, std::sync::atomic::Ordering::Release);
-            file.unlock().map_err(failure)
-        })
-    }
-
-    fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), StoreError>> {
-        self.enable_outbox()
-    }
-    fn list_event_outbox<'a>(
-        &'a self,
-        limit: usize,
-    ) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> {
-        self.list_outbox(limit)
-    }
-    fn mark_event_published<'a>(
-        &'a self,
-        task_id: crate::model::typed::TaskId,
-        state_version: u64,
-    ) -> TaskFuture<'a, Result<(), StoreError>> {
-        self.mark_outbox_published(task_id, state_version)
     }
 }

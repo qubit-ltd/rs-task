@@ -207,7 +207,7 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     drop(legacy_connection);
 
     let open_start = Instant::now();
-    let store = SqliteTaskStore::open_next(&dataset.database_path)?;
+    let store = SqliteTaskStore::open(&dataset.database_path)?;
     let first_store_open_and_compound_index_build_ms = elapsed_ms(open_start.elapsed());
     let sqlite = Connection::open(&dataset.database_path)?;
     sqlite.execute(
@@ -440,7 +440,7 @@ fn measure_shutdown(
     for sample in 0..SHUTDOWN_SAMPLES {
         let sample_path = directory.path.join(format!("shutdown-{sample}.sqlite"));
         std::fs::copy(database_path, &sample_path)?;
-        let store = Arc::new(SqliteTaskStore::open_next(&sample_path)?);
+        let store = Arc::new(SqliteTaskStore::open(&sample_path)?);
         let codecs = Arc::new(qubit_codec::ValueBytesCodecRegistry::empty());
         let id_generator = Arc::new(qubit_id::SnowflakeGenerator::new(0)?);
         let service = runtime.block_on(TaskExecutionServiceBuilder::new(store, codecs, id_generator).build())?;
