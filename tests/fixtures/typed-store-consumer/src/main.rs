@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "sqlite")]
     {
         let fixture = SqliteFixture::new()?;
-        let store = Arc::new(SqliteTaskStore::open_next(&fixture.database)?);
+        let store = Arc::new(SqliteTaskStore::open(&fixture.database)?);
         exercise_store(store, task_id(800)).await?;
         drop(fixture);
     }

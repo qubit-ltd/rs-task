@@ -160,7 +160,7 @@ fn arguments() -> Result<(PathBuf, String, TaskId, usize), Box<dyn std::error::E
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (path, mode, id, count) = arguments()?;
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?);
-    let store = Arc::new(SqliteTaskStore::open_next(&path)?);
+    let store = Arc::new(SqliteTaskStore::open(&path)?);
     let owner = store.acquire_owner().await?;
     for index in 0..count {
         let task_id = if index == 0 {
@@ -191,7 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // us.
     store.release_owner(owner).await?;
     drop(store);
-    let store = Arc::new(SqliteTaskStore::open_next(&path)?);
+    let store = Arc::new(SqliteTaskStore::open(&path)?);
     let gate = Arc::new(Semaphore::new(usize::from(mode == "terminal")));
     let (started, mut starts) = mpsc::unbounded_channel();
     let mut builder = TaskExecutionServiceBuilder::new(

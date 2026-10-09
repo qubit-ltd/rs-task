@@ -25,7 +25,7 @@ use typed_support::SequentialIds;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!("qubit-task-typed-recovery-{}.sqlite", std::process::id()));
-    let store = Arc::new(SqliteTaskStore::open_next(&path)?);
+    let store = Arc::new(SqliteTaskStore::open(&path)?);
     let codecs = Arc::new(typed_support::codecs()?);
     let ids = Arc::new(SequentialIds::new(500));
     let mut builder = TaskExecutionServiceBuilder::new(store, codecs, ids)
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service.shutdown().await?;
     drop(service);
 
-    let store: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open_next(&path)?);
+    let store: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&path)?);
     let mut reopened = TaskExecutionServiceBuilder::new(
         store,
         Arc::new(typed_support::codecs()?),
