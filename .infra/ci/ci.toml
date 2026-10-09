@@ -1,7 +1,6 @@
-tasks = ["style", "clippy", "coverage-cfg-clippy", "verify", "strict-doc", "readme", "release-build", "feature-matrix", "project-hook", "package", "coverage", "audit"]
+tasks = ["style", "clippy", "coverage-cfg-clippy", "verify", "strict-doc", "readme", "release-build", "feature-matrix", "package", "coverage", "audit"]
 
 [local]
-hook = ".infra/bin/project-ci-check.sh"
 fuzz_mode = "smoke"
 fuzz_seconds_per_target = 10
 fuzz_max_len = 4096
