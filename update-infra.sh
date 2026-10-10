@@ -22,12 +22,15 @@ if [[ -z "$python_cmd" ]]; then
     fi
 fi
 
+if [[ $# -eq 0 ]]; then
+    set -- --yes
+fi
 mode=${1:-}
 if [[ "$mode" == --check ]]; then
     exec "$python_cmd" "$project_root/.infra/bootstrap-check.py"
 fi
-if [[ "$mode" != "" && "$mode" != --yes && "$mode" != --dry-run && "$mode" != --status ]]; then
-    echo "usage: ./update-infra.sh [--yes|--dry-run|--status|--check]" >&2
+if [[ "$mode" != --yes && "$mode" != --dry-run && "$mode" != --status ]]; then
+    echo "usage: ./update-infra.sh [--dry-run|--status|--check] (updates without prompting by default)" >&2
     exit 2
 fi
 
