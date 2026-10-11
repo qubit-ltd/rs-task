@@ -240,13 +240,13 @@ async fn assert_ready_queue_contract(store: &dyn TaskStore) {
 }
 
 #[tokio::test]
-async fn ready_queue_filters_due_retries_and_pages_in_memory() {
+async fn test_ready_queue_filters_due_retries_and_pages_in_memory() {
     assert_ready_queue_contract(&MemoryTaskStore::new(16)).await;
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn ready_queue_filters_due_retries_and_pages_in_sqlite() {
+async fn test_ready_queue_filters_due_retries_and_pages_in_sqlite() {
     let db_path = std::env::temp_dir().join(format!("qubit-task-ready-{}.sqlite", uuid::Uuid::new_v4()));
     let store = SqliteTaskStore::open(&db_path).unwrap();
     assert_ready_queue_contract(&store).await;
@@ -256,14 +256,18 @@ async fn ready_queue_filters_due_retries_and_pages_in_sqlite() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn ready_queue_and_retry_deadline_queries_use_partial_indexes() {
+fn test_ready_queue_and_retry_deadline_queries_use_partial_indexes() {
     let db_path = std::env::temp_dir().join(format!("qubit-task-ready-plan-{}.sqlite", uuid::Uuid::new_v4()));
     let store = SqliteTaskStore::open(&db_path).unwrap();
     drop(store);
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     let ready_plan = {
         let mut ready = connection.prepare(
-            "EXPLAIN QUERY PLAN SELECT id FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ORDER BY accepted_at,id LIMIT ?2",
+            concat!(
+                "EXPLAIN QUERY PLAN SELECT id FROM tasks INDEXED BY tasks_queued_accepted_id ",
+                "WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ",
+                "ORDER BY accepted_at,id LIMIT ?2",
+            ),
         ).unwrap();
         ready
             .query_map([200_i64, 10_i64], |row| row.get::<_, String>(3))
@@ -275,7 +279,11 @@ fn ready_queue_and_retry_deadline_queries_use_partial_indexes() {
     assert!(ready_plan.contains("tasks_queued_accepted_id"), "{ready_plan}");
     let retry_plan = {
         let mut statement = connection.prepare(
-            "EXPLAIN QUERY PLAN SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
+            concat!(
+                "EXPLAIN QUERY PLAN SELECT MIN(retry_not_before_ms) FROM tasks ",
+                "INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' ",
+                "AND retry_not_before_ms>?1",
+            ),
         ).unwrap();
         statement
             .query_map([200_i64], |row| row.get::<_, String>(3))
@@ -290,14 +298,14 @@ fn ready_queue_and_retry_deadline_queries_use_partial_indexes() {
 }
 
 #[tokio::test]
-async fn typed_history_filters_category_and_uses_exclusive_numeric_cursor() {
+async fn test_typed_history_filters_category_and_uses_exclusive_numeric_cursor() {
     let memory = MemoryTaskStore::new(16);
     assert_category_filter_and_exclusive_numeric_cursor(&memory).await;
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn typed_history_filters_category_and_uses_exclusive_numeric_cursor_in_sqlite() {
+async fn test_typed_history_filters_category_and_uses_exclusive_numeric_cursor_in_sqlite() {
     let db_path = std::env::temp_dir().join(format!("qubit-task-typed-query-{}.sqlite", uuid::Uuid::new_v4()));
     let memory = MemoryTaskStore::new(16);
     let sqlite = SqliteTaskStore::open(&db_path).expect("typed SQLite store opens");
@@ -309,7 +317,7 @@ async fn typed_history_filters_category_and_uses_exclusive_numeric_cursor_in_sql
 }
 
 #[tokio::test]
-async fn typed_history_uses_stable_numeric_order_in_memory() {
+async fn test_typed_history_uses_stable_numeric_order_in_memory() {
     let memory = MemoryTaskStore::new(16);
     for task_id in [id(2), id(10), id(u64::MAX)] {
         memory
@@ -321,7 +329,7 @@ async fn typed_history_uses_stable_numeric_order_in_memory() {
 }
 
 #[tokio::test]
-async fn typed_history_pages_a_queue_larger_than_the_maximum_page() {
+async fn test_typed_history_pages_a_queue_larger_than_the_maximum_page() {
     let memory = MemoryTaskStore::new(300);
     for value in 1..=257 {
         memory.accept_encoded(id(value), request("page", "257")).await.unwrap();
@@ -348,7 +356,7 @@ async fn typed_history_pages_a_queue_larger_than_the_maximum_page() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn typed_history_has_the_same_order_in_memory_and_sqlite() {
+async fn test_typed_history_has_the_same_order_in_memory_and_sqlite() {
     let db_path = std::env::temp_dir().join(format!("qubit-task-typed-order-{}.sqlite", uuid::Uuid::new_v4()));
     let memory = MemoryTaskStore::new(16);
     let sqlite = SqliteTaskStore::open(&db_path).expect("typed SQLite store opens");
@@ -372,7 +380,7 @@ async fn typed_history_has_the_same_order_in_memory_and_sqlite() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn typed_schema_four_migrates_retry_deadline_column_without_losing_rows() {
+async fn test_typed_schema_four_migrates_retry_deadline_column_without_losing_rows() {
     let db_path = std::env::temp_dir().join(format!(
         "qubit-task-typed-schema-migration-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -387,7 +395,10 @@ async fn typed_schema_four_migrates_retry_deadline_column_without_losing_rows() 
 
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection
-        .execute_batch("DROP TABLE task_event_outbox; DROP INDEX tasks_queued_retry_deadline; ALTER TABLE tasks DROP COLUMN retry_not_before_ms; PRAGMA user_version=4;")
+        .execute_batch(concat!(
+            "DROP TABLE task_event_outbox; DROP INDEX tasks_queued_retry_deadline; ",
+            "ALTER TABLE tasks DROP COLUMN retry_not_before_ms; PRAGMA user_version=4;",
+        ))
         .unwrap();
     drop(connection);
 

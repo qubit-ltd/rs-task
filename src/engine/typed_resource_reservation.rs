@@ -8,6 +8,9 @@
 /// RAII lease for resources reserved by the typed task execution path.
 #[must_use]
 pub struct TypedResourceReservation {
+    /// Stores the one-shot action that releases the reserved resources.
+    ///
+    /// The action is taken and invoked when this lease is dropped.
     release: Option<Box<dyn FnOnce() + Send>>,
 }
 

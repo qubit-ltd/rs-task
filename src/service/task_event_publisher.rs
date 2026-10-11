@@ -74,6 +74,12 @@ impl TaskEventPublisher {
         self.state.changed.notify_one();
     }
 
+    /// Returns the process-local notification counters for this publisher.
+    ///
+    /// The snapshot excludes durable outbox backlog that may remain in the
+    /// store, including events left by a previous process.
+    #[must_use]
+    #[inline]
     pub(super) fn stats(&self) -> NotificationStats {
         self.state.counters.snapshot()
     }

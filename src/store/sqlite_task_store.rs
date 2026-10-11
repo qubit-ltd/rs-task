@@ -85,6 +85,7 @@ pub struct SqliteTaskStore {
     owner_state: Arc<Mutex<SqliteOwnerState>>,
     /// Bounds connection operations to one blocking worker at a time.
     operation_slot: Arc<sync::Semaphore>,
+    /// Controls whether accepted lifecycle changes create outbox snapshots.
     outbox_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Tracks blocking worker overlap in unit tests.
     #[cfg(test)]
@@ -122,16 +123,42 @@ impl SqliteTaskStore {
 
     /// Reads a bounded oldest-first page; rejects absent ownership and invalid
     /// limits.
-    pub(super) fn list_outbox(&self, limit: usize) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
+    pub(super) fn list_outbox(
+        &self,
+        limit: usize,
+    ) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
         self.run_outbox(move |connection| {
-            if !(1..=256).contains(&limit) { return Err(StoreError::InvalidRequest("outbox page limit must be 1..=256")); }
-            let mut statement = connection.prepare("SELECT task_id,state_version,event_id,event_json FROM task_event_outbox ORDER BY created_at_ms,task_id,state_version LIMIT ?1").map_err(failure)?;
-            let rows = statement.query_map([limit as i64], |row| Ok((row.get::<_, String>(0)?,row.get::<_, u64>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?))).map_err(failure)?;
+            if !(1..=256).contains(&limit) {
+                return Err(StoreError::InvalidRequest(
+                    "outbox page limit must be 1..=256",
+                ));
+            }
+            let mut statement = connection
+                .prepare("SELECT task_id,state_version,event_id,event_json FROM task_event_outbox ORDER BY created_at_ms,task_id,state_version LIMIT ?1")
+                .map_err(failure)?;
+            let rows = statement
+                .query_map([limit as i64], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(failure)?;
             rows.map(|row| {
                 let (id, state_version, event_id, event_json) = row.map_err(failure)?;
-                let task_id = crate::model::typed::TaskId::from_id(qubit_id::Id::new(id.parse::<u64>().map_err(failure)?));
-                Ok(super::EventOutboxEntry { task_id, state_version, event_id, event_json })
-            }).collect()
+                let task_id = crate::model::typed::TaskId::from_id(qubit_id::Id::new(
+                    id.parse::<u64>().map_err(failure)?,
+                ));
+                Ok(super::EventOutboxEntry {
+                    task_id,
+                    state_version,
+                    event_id,
+                    event_json,
+                })
+            })
+            .collect()
         })
     }
 
@@ -264,12 +291,10 @@ impl SqliteTaskStore {
     }
 }
 
-/// Builds the initial queued record before the SQLite acceptance transaction.
+/// Converts a SQLite or related operation error into the store's public error type.
 ///
-/// # Parameters
-///
-/// * `id` - Service-assigned identity for the new task.
-/// * `request` - Validated reconstructable request to accept.
+/// The original error is retained as its display string so callers receive a consistent
+/// [`StoreError::Failure`] without exposing backend-specific error types.
 fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }

@@ -8,6 +8,7 @@
 use std::any::TypeId;
 
 /// Error raised before business handler code runs.
+#[must_use]
 #[derive(Debug, thiserror::Error)]
 pub enum HandlerDispatchError {
     /// No typed handler is registered under the requested kind.

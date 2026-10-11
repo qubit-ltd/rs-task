@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::model::TaskState;
 use crate::model::typed::TaskId;
+use crate::model::typed::TaskSummary;
 
 /// Versioned lifecycle snapshot emitted after a task state is persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,8 +27,8 @@ pub struct TaskEvent {
     pub correlation_key: Option<String>,
 }
 
-impl From<&crate::model::typed::TaskSummary> for TaskEvent {
-    fn from(summary: &crate::model::typed::TaskSummary) -> Self {
+impl From<&TaskSummary> for TaskEvent {
+    fn from(summary: &TaskSummary) -> Self {
         Self::from_typed_summary(summary)
     }
 }
@@ -36,7 +37,7 @@ impl TaskEvent {
     /// Captures the identity, revision, state and correlation of a committed
     /// typed summary.
     #[must_use]
-    pub fn from_typed_summary(summary: &crate::model::typed::TaskSummary) -> Self {
+    pub fn from_typed_summary(summary: &TaskSummary) -> Self {
         Self {
             schema_version: 1,
             task_id: summary.id,
@@ -54,7 +55,7 @@ mod tests {
     use crate::model::typed::TaskId;
 
     #[test]
-    fn typed_task_event_round_trips_with_schema_version() {
+    fn test_typed_task_event_round_trips_with_schema_version() {
         let event = TaskEvent {
             schema_version: 1,
             task_id: TaskId::from_id(qubit_id::Id::new(42)),
@@ -71,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_task_event_captures_committed_summary_fields() {
+    fn test_typed_task_event_captures_committed_summary_fields() {
         let summary = crate::model::typed::TaskSummary {
             id: TaskId::from_id(qubit_id::Id::new(43)),
             kind_id: "invoice.generate".into(),

@@ -10,10 +10,11 @@ use super::TaskId;
 /// Compare-and-set command that starts a queued typed task attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartCommand {
-    /// Task to start.
+    /// Identifies the queued task whose attempt should start.
     pub id: TaskId,
-    /// Expected lifecycle version.
+    /// Lifecycle version the caller expects, used to reject a start if the task
+    /// has changed since it was observed.
     pub expected_state_version: u64,
-    /// Unix epoch milliseconds when execution starts.
+    /// Unix epoch time in milliseconds to record as the attempt start time.
     pub started_at_ms: u64,
 }

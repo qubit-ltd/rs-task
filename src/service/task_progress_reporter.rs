@@ -45,6 +45,11 @@ impl TaskProgressReporter {
 }
 
 impl AsyncReporter for TaskProgressReporter {
+    /// Persists one progress event before reporting success to the caller.
+    ///
+    /// The mutex keeps version allocation and persistence ordered across
+    /// concurrent operations that share this reporter. Failed writes do not
+    /// advance the next version.
     fn report<'a>(&'a self, event: &'a Event) -> ReportFuture<'a> {
         Box::pin(async move {
             let mut current_version = self.progress_version.lock().await;
@@ -74,6 +79,10 @@ impl AsyncReporter for TaskProgressReporter {
     }
 }
 
+/// Returns the current Unix time in milliseconds, saturating at `u64::MAX`.
+///
+/// A system clock value before the Unix epoch is treated as zero so progress
+/// snapshots can still be persisted with a valid non-negative timestamp.
 fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

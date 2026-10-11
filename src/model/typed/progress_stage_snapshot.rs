@@ -8,15 +8,19 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Serializable stage projection from `rs-progress`.
+/// Serializable projection of a stage reported by `rs-progress`.
+///
+/// Optional position and stage-count values remain absent when the source does
+/// not provide them; the snapshot does not infer either value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressStageSnapshot {
-    /// Machine-readable stage identifier.
+    /// Machine-readable identifier supplied for the stage.
     pub id: String,
-    /// Human-readable stage name.
+    /// Human-readable name supplied for display or reporting.
     pub name: String,
-    /// One-based stage position, when supplied.
+    /// One-based position of this stage in the sequence, if supplied by the
+    /// source.
     pub position: Option<u64>,
-    /// Total number of stages, when supplied.
+    /// Number of stages in the sequence, if supplied by the source.
     pub total: Option<u64>,
 }

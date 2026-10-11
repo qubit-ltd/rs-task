@@ -7,11 +7,13 @@
 // =============================================================================
 use std::num::NonZeroUsize;
 
+use super::EventOutboxEntry;
 use super::StoreError;
 use super::TaskFuture;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
 use crate::model::typed::AcceptOutcome as TypedAcceptOutcome;
+use crate::model::typed::TaskCursor;
 use crate::model::typed::ProgressCommand as TypedProgressCommand;
 use crate::model::typed::StartCommand as TypedStartCommand;
 use crate::model::typed::StoredTask as TypedStoredTask;
@@ -43,7 +45,7 @@ pub trait TaskStore: Send + Sync {
     fn list_event_outbox<'a>(
         &'a self,
         limit: usize,
-    ) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> {
+    ) -> TaskFuture<'a, Result<Vec<EventOutboxEntry>, StoreError>> {
         let _ = limit;
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
@@ -96,8 +98,8 @@ pub trait TaskStore: Send + Sync {
     /// Lists queued tasks that can start at `now_ms`, ordered for keyset scans.
     fn list_ready_queued<'a>(
         &'a self,
-        after: Option<crate::model::typed::TaskCursor>,
-        limit: std::num::NonZeroUsize,
+        after: Option<TaskCursor>,
+        limit: NonZeroUsize,
         now_ms: u64,
     ) -> TaskFuture<'a, Result<TypedTaskPage, StoreError>>;
 

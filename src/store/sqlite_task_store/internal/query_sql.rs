@@ -21,6 +21,25 @@ pub(in crate::store::sqlite_task_store) struct QuerySql {
 }
 
 /// Builds a parameterized history query over typed task rows.
+///
+/// The query applies the supplied cursor and filters, removes duplicate states,
+/// and requests one extra row so the caller can determine whether another page
+/// exists. All user-provided values are bound as SQLite parameters.
+///
+/// # Parameters
+///
+/// - `query`: Cursor and filters defining the requested history slice.
+/// - `page_size`: Number of rows requested by the caller; one additional row
+///   is included in the SQL limit for pagination detection.
+///
+/// # Returns
+///
+/// Returns the SQL text and ordered parameter values needed to execute it.
+///
+/// # Errors
+///
+/// Returns `StoreError::InvalidRequest` if the extra-row limit or cursor
+/// timestamp cannot be represented as a SQLite integer.
 pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
     query: &TaskQuery,
     page_size: usize,
@@ -73,17 +92,33 @@ pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
     Ok(built)
 }
 
+/// Appends a predicate fragment with the correct `WHERE` or `AND` prefix.
+///
+/// `has_predicate` is updated after appending so subsequent fragments use
+/// `AND`; `fragment` is a static SQL fragment whose values must be bound
+/// separately.
 fn append_predicate(sql: &mut String, has_predicate: &mut bool, fragment: &'static str) {
     sql.push_str(if *has_predicate { " AND " } else { " WHERE " });
     sql.push_str(fragment);
     *has_predicate = true;
 }
 
+/// Stores a SQLite value and returns its one-based numbered placeholder.
+///
+/// The placeholder number follows the value's position in `params`.
+#[must_use]
 fn bind_value(params: &mut Vec<Value>, value: Value) -> String {
     params.push(value);
     format!("?{}", params.len())
 }
 
+/// Converts an unsigned timestamp to SQLite's signed integer representation
+/// and binds it as a numbered parameter.
+///
+/// # Errors
+///
+/// Returns `StoreError::InvalidRequest` with `overflow_message` if the
+/// timestamp exceeds the range of `i64`.
 fn bind_timestamp(
     params: &mut Vec<Value>,
     timestamp: u64,
@@ -93,6 +128,9 @@ fn bind_timestamp(
     Ok(bind_value(params, Value::Integer(timestamp)))
 }
 
+/// Binds owned text as a SQLite text value and returns its placeholder.
+#[must_use]
+#[inline]
 fn bind_text(params: &mut Vec<Value>, value: String) -> String {
     bind_value(params, Value::Text(value))
 }

@@ -19,6 +19,20 @@ pub const MAX_TASK_PROGRESS_METRICS: usize = 32;
 pub const MAX_TASK_PROGRESS_SNAPSHOT_BYTES: usize = 16 * 1024;
 
 /// Bounded progress snapshot persisted independently of task lifecycle state.
+///
+/// # Examples
+///
+/// A snapshot can be restored from its serialized representation:
+///
+/// ```
+/// use qubit_task::model::typed::TaskProgressSnapshot;
+///
+/// let snapshot: TaskProgressSnapshot = serde_json::from_str(
+///     r#"{"attempt":1,"progress_version":2,"stage":null,"metrics":[],"updated_at_ms":3}"#,
+/// )
+/// .expect("valid task progress snapshot");
+/// assert_eq!(snapshot.progress_version, 2);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskProgressSnapshot {
     /// Attempt that produced this snapshot.
@@ -46,8 +60,9 @@ impl TaskProgressSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns an error when there are too many metrics or the serialized
-    /// snapshot exceeds 16 KiB.
+    /// Returns an error when there are too many metrics, the stage ID exceeds
+    /// 128 bytes, the stage name exceeds 256 bytes, serialization fails, or
+    /// the serialized snapshot exceeds 16 KiB.
     pub fn from_command(command: ProgressCommand) -> Result<Self, ProgressSnapshotError> {
         if command.metrics.len() > MAX_TASK_PROGRESS_METRICS {
             return Err(ProgressSnapshotError::TooManyMetrics(command.metrics.len()));

@@ -7,6 +7,9 @@
 // =============================================================================
 use std::num::NonZeroUsize;
 
+use qubit_id::Id;
+use qubit_metadata::Metadata;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::StartCommand;
 use qubit_task::model::StoredPayload;
@@ -25,12 +28,12 @@ fn request(idempotency_key: Option<&str>, bytes: &[u8]) -> StoredTaskRequest {
         kind_id: "contract.handler".into(),
         category: Some("contract".into()),
         payload: StoredPayload {
-            type_id: qubit_model_id::ModelIdBuf::parse("contract.Payload").expect("valid model ID"),
+            type_id: ModelIdBuf::parse("contract.Payload").expect("valid model ID"),
             schema_version: 1,
             codec_id: "contract.bytes".into(),
             bytes: bytes.to_vec(),
         },
-        metadata: qubit_metadata::Metadata::new(),
+        metadata: Metadata::new(),
         resource_limit: ResourceRequest::default(),
         correlation_key: Some("trace-contract".into()),
         idempotency_key: idempotency_key.map(str::to_owned),
@@ -39,8 +42,8 @@ fn request(idempotency_key: Option<&str>, bytes: &[u8]) -> StoredTaskRequest {
 
 /// Checks encoded acceptance, idempotency, lifecycle CAS, and typed reads.
 pub async fn check_core_contract(store: &dyn TaskStore) {
-    let id = TaskId::from_id(qubit_id::Id::new(101));
-    let duplicate_id = TaskId::from_id(qubit_id::Id::new(102));
+    let id = TaskId::from_id(Id::new(101));
+    let duplicate_id = TaskId::from_id(Id::new(102));
     let submitted = request(Some("contract-key"), &[1, 2, 3]);
     let accepted = store
         .accept_encoded(id, submitted.clone())
@@ -143,7 +146,7 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
         Err(StoreError::Conflict)
     ));
 
-    let retry_id = TaskId::from_id(qubit_id::Id::new(103));
+    let retry_id = TaskId::from_id(Id::new(103));
     let accepted = store
         .accept_encoded(retry_id, request(None, &[4, 5, 6]))
         .await
@@ -223,7 +226,7 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
     ];
 
     for (raw_id, state, finished_at_ms) in terminal {
-        let id = TaskId::from_id(qubit_id::Id::new(raw_id));
+        let id = TaskId::from_id(Id::new(raw_id));
         let key = (raw_id == 201).then_some("reusable-prune-key");
         let accepted = store
             .accept_encoded(id, request(key, &[raw_id as u8]))
@@ -253,7 +256,7 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
             .expect("terminal prune candidate reaches its state");
     }
 
-    let blocked_id = TaskId::from_id(qubit_id::Id::new(205));
+    let blocked_id = TaskId::from_id(Id::new(205));
     let blocked = store
         .accept_encoded(blocked_id, request(None, &[5]))
         .await
@@ -274,7 +277,7 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
         })
         .await
         .expect("blocked candidate reaches its state");
-    let queued_id = TaskId::from_id(qubit_id::Id::new(206));
+    let queued_id = TaskId::from_id(Id::new(206));
     store
         .accept_encoded(queued_id, request(None, &[6]))
         .await
@@ -290,7 +293,7 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
     );
     assert!(
         store
-            .get_encoded_task(TaskId::from_id(qubit_id::Id::new(201)))
+            .get_encoded_task(TaskId::from_id(Id::new(201)))
             .await
             .expect("pruned record can be read")
             .is_none()
@@ -298,7 +301,7 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
     for id in [202, 203, 204, 205, 206] {
         assert!(
             store
-                .get_encoded_task(TaskId::from_id(qubit_id::Id::new(id)))
+                .get_encoded_task(TaskId::from_id(Id::new(id)))
                 .await
                 .expect("retained record can be read")
                 .is_some()
@@ -313,7 +316,7 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
     );
     assert!(
         store
-            .get_encoded_task(TaskId::from_id(qubit_id::Id::new(202)))
+            .get_encoded_task(TaskId::from_id(Id::new(202)))
             .await
             .expect("second pruned record can be read")
             .is_none()
@@ -336,7 +339,7 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
     for id in [204, 205, 206] {
         assert!(
             store
-                .get_encoded_task(TaskId::from_id(qubit_id::Id::new(id)))
+                .get_encoded_task(TaskId::from_id(Id::new(id)))
                 .await
                 .expect("boundary or non-terminal record can be read")
                 .is_some()
@@ -344,18 +347,18 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
     }
     let reused = store
         .accept_encoded(
-            TaskId::from_id(qubit_id::Id::new(207)),
+            TaskId::from_id(Id::new(207)),
             request(Some("reusable-prune-key"), &[7]),
         )
         .await
         .expect("pruned idempotency key can be reused");
     assert!(reused.created);
-    assert_eq!(reused.summary.id, TaskId::from_id(qubit_id::Id::new(207)));
+    assert_eq!(reused.summary.id, TaskId::from_id(Id::new(207)));
 }
 
 /// Confirms typed terminal pruning releases the memory-store payload budget.
 pub async fn check_memory_prune_reclaims_payload(store: &dyn TaskStore) {
-    let id = TaskId::from_id(qubit_id::Id::new(301));
+    let id = TaskId::from_id(Id::new(301));
     let accepted = store
         .accept_encoded(id, request(Some("capacity-prune-key"), &[1, 2, 3, 4]))
         .await
@@ -391,7 +394,7 @@ pub async fn check_memory_prune_reclaims_payload(store: &dyn TaskStore) {
     );
     let replacement = store
         .accept_encoded(
-            TaskId::from_id(qubit_id::Id::new(302)),
+            TaskId::from_id(Id::new(302)),
             request(Some("capacity-prune-key"), &[5, 6, 7, 8]),
         )
         .await

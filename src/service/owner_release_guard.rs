@@ -21,18 +21,24 @@ use crate::store::TaskStore;
 
 /// Holds an acquired owner epoch until release has finished.
 pub(super) struct OwnerReleaseGuard {
+    /// Holds the store and epoch until release succeeds or drop queues cleanup.
     owner: Option<(Arc<dyn TaskStore>, OwnerEpoch)>,
+    /// Keeps the pre-started worker available for cancellation cleanup.
     cleanup: OwnerReleaseWorker,
 }
 
+/// Carries one owner release request to the cleanup worker.
 struct ReleaseJob {
+    /// Store whose ownership must be released.
     store: Arc<dyn TaskStore>,
+    /// Generation token identifying the acquired ownership.
     epoch: OwnerEpoch,
 }
 
 /// A process-wide, pre-started cleanup thread for guards dropped while armed.
 #[derive(Clone)]
 pub(super) struct OwnerReleaseWorker {
+    /// Sends release requests to the process-wide cleanup thread.
     sender: tokio::sync::mpsc::UnboundedSender<ReleaseJob>,
 }
 

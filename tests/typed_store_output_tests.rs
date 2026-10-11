@@ -5,6 +5,13 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::env;
+use std::fs;
+use std::path::Path;
+
+use qubit_id::Id;
+use qubit_metadata::Metadata;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use qubit_task::model::ResourceRequest;
@@ -14,8 +21,13 @@ use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
+use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
+use uuid::Uuid;
+
+#[cfg(feature = "sqlite")]
+use rusqlite::Connection;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
@@ -26,12 +38,12 @@ fn request() -> StoredTaskRequest {
         kind_id: "output.test".to_owned(),
         category: None,
         payload: StoredPayload {
-            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload").expect("valid model ID"),
+            type_id: ModelIdBuf::parse("qubit_task.tests.Payload").expect("valid model ID"),
             schema_version: 1,
             codec_id: "qubit.bytes.json".to_owned(),
             bytes: vec![1],
         },
-        metadata: qubit_metadata::Metadata::new(),
+        metadata: Metadata::new(),
         resource_limit: ResourceRequest::default(),
         correlation_key: None,
         idempotency_key: None,
@@ -39,10 +51,10 @@ fn request() -> StoredTaskRequest {
 }
 
 fn task_id(value: u64) -> TaskId {
-    TaskId::from_id(qubit_id::Id::new(value))
+    TaskId::from_id(Id::new(value))
 }
 
-async fn start_task(store: &dyn TaskStore, id: TaskId) -> qubit_task::model::TaskSummary {
+async fn start_task(store: &dyn TaskStore, id: TaskId) -> TaskSummary {
     let accepted = store
         .accept_encoded(id, request())
         .await
@@ -60,9 +72,9 @@ async fn start_task(store: &dyn TaskStore, id: TaskId) -> qubit_task::model::Tas
 
 async fn finish_with_output(
     store: &dyn TaskStore,
-    running: &qubit_task::model::TaskSummary,
+    running: &TaskSummary,
     output: TaskOutput,
-) -> Result<qubit_task::model::TaskSummary, StoreError> {
+) -> Result<TaskSummary, StoreError> {
     store
         .transition_encoded(TransitionCommand {
             id: running.id,
@@ -134,22 +146,20 @@ async fn typed_memory_store_rejects_oversized_output_without_mutating_task() {
 }
 
 #[cfg(feature = "sqlite")]
-fn remove_database(path: &std::path::Path) {
+fn remove_database(path: &Path) {
     let mut owner_lock = path.as_os_str().to_owned();
     owner_lock.push(".owner.lock");
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(owner_lock);
-    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
-    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(owner_lock);
+    let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = fs::remove_file(path.with_extension("sqlite-shm"));
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_one() {
-    use rusqlite::Connection;
-
-    let directory = std::env::temp_dir().join(format!("qubit-task-output-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).expect("test directory creates");
+    let directory = env::temp_dir().join(format!("qubit-task-output-{}", Uuid::new_v4()));
+    fs::create_dir(&directory).expect("test directory creates");
     let path = directory.join("tasks.sqlite");
     let id = task_id(3);
     let expected = TaskOutput { summary: vec![9, 8, 7] };
@@ -197,8 +207,8 @@ async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_on
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn typed_sqlite_store_rejects_oversized_output_without_mutating_task() {
-    let directory = std::env::temp_dir().join(format!("qubit-task-output-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).expect("test directory creates");
+    let directory = env::temp_dir().join(format!("qubit-task-output-{}", Uuid::new_v4()));
+    fs::create_dir(&directory).expect("test directory creates");
     let path = directory.join("tasks.sqlite");
     let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
     assert_oversized_output_is_atomic(&store, task_id(4)).await;

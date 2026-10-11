@@ -8,6 +8,22 @@
 use qubit_model_id::ModelIdBuf;
 
 /// Encoded payload bytes stored for recovery without retaining Rust types.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::StoredPayload;
+/// use qubit_model_id::ModelIdBuf;
+///
+/// let payload = StoredPayload {
+///     type_id: ModelIdBuf::parse("example.TaskPayload").expect("model ID is valid"),
+///     schema_version: 1,
+///     codec_id: "json".to_owned(),
+///     bytes: vec![1, 2, 3],
+/// };
+/// assert_eq!(payload.schema_version, 1);
+/// assert_eq!(payload.bytes, vec![1, 2, 3]);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPayload {
     /// Stable identity of the payload model.

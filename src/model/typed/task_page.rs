@@ -16,10 +16,22 @@ use super::TaskSummary;
 /// inserts after the cursor may appear on a later page, while inserts at or
 /// before it cannot. Changes to a row's state or category between page calls
 /// may affect whether that row matches the next query.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::typed::TaskPage;
+///
+/// let page = TaskPage::default();
+/// assert!(page.records.is_empty());
+/// assert!(page.next.is_none());
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct TaskPage {
-    /// Summaries selected by the query.
+    /// Task summaries returned for this page, in history order.
     pub records: Vec<TaskSummary>,
-    /// Exclusive cursor for the next page, when a lookahead row exists.
+    /// Exclusive cursor after the last returned record when a lookahead row
+    /// confirms that another page may exist; `None` means no continuation was
+    /// found.
     pub next: Option<TaskCursor>,
 }

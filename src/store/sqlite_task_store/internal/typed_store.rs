@@ -73,7 +73,12 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
     let fetch =
         i64::try_from(limit.get() + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
-    let mut sql = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)".to_string();
+    let mut sql = concat!(
+        "SELECT id,request_info_json,lifecycle_json FROM tasks ",
+        "INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' ",
+        "AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)"
+    )
+    .to_string();
     let mut values = vec![rusqlite::types::Value::Integer(now)];
     if let Some(cursor) = after {
         let accepted = i64::try_from(cursor.accepted_at_ms)
@@ -108,7 +113,11 @@ pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
 ) -> Result<Option<u64>, StoreError> {
     let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
     connection.query_row(
-        "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
+        concat!(
+            "SELECT MIN(retry_not_before_ms) FROM tasks ",
+            "INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' ",
+            "AND retry_not_before_ms>?1"
+        ),
         [now],
         |row| row.get::<_, Option<i64>>(0),
     ).map_err(failure)?.map(|value| u64::try_from(value).map_err(failure)).transpose()
@@ -117,18 +126,28 @@ pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
 /// Immutable typed request fields stored separately from payload bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StoredRequestInfo {
+    /// Stable task kind identifier used to dispatch the request.
     kind_id: String,
+    /// Optional user-facing category associated with the task kind.
     category: Option<String>,
+    /// Registry identifier for the serialized payload type.
     payload_type_id: String,
+    /// Version of the payload schema expected by the decoder.
     payload_schema_version: u32,
+    /// Identifier for the codec that produced the stored payload bytes.
     payload_codec_id: String,
+    /// Request metadata persisted independently of the payload bytes.
     metadata: qubit_metadata::Metadata,
+    /// Resource limits requested for task execution.
     resource_limit: ResourceRequest,
+    /// Optional key used to correlate this task with a caller operation.
     correlation_key: Option<String>,
+    /// Optional key used to make request acceptance idempotent.
     idempotency_key: Option<String>,
 }
 
 impl From<&StoredTaskRequest> for StoredRequestInfo {
+    /// Copies immutable request attributes while leaving payload bytes in their own column.
     fn from(request: &StoredTaskRequest) -> Self {
         Self {
             kind_id: request.kind_id.clone(),
@@ -145,6 +164,7 @@ impl From<&StoredTaskRequest> for StoredRequestInfo {
 }
 
 impl StoredRequestInfo {
+    /// Reconstructs a typed request by pairing these attributes with stored payload bytes.
     fn into_request(self, bytes: Vec<u8>) -> Result<StoredTaskRequest, StoreError> {
         let type_id = self.payload_type_id.as_str().try_into().map_err(failure)?;
         Ok(StoredTaskRequest {
@@ -167,19 +187,30 @@ impl StoredRequestInfo {
 /// Mutable lifecycle values kept independent of immutable request data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StoredTypedLifecycle {
+    /// Current externally visible task state.
     state: TaskState,
+    /// Whether cancellation has been requested for the task.
     #[serde(default)]
     cancel_requested: bool,
+    /// Optional diagnostic explaining a cancellation outcome.
     #[serde(default)]
     cancel_error: Option<String>,
+    /// Monotonic revision used by compare-and-set lifecycle updates.
     state_version: u64,
+    /// Number of execution attempts started for this task.
     attempt: u32,
+    /// Earliest time at which a queued task may be retried.
     #[serde(default)]
     retry_not_before_ms: Option<u64>,
+    /// Acceptance timestamp in Unix milliseconds.
     accepted_at_ms: u64,
+    /// Timestamp of the most recently started attempt, if any.
     started_at_ms: Option<u64>,
+    /// Timestamp at which the task entered a terminal state, if any.
     finished_at_ms: Option<u64>,
+    /// Most recently persisted progress snapshot, if any.
     progress: Option<TaskProgressSnapshot>,
+    /// Result produced by a successful task, if one has been stored.
     #[serde(default)]
     output: Option<TaskOutput>,
 }
@@ -252,7 +283,13 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
     let lifecycle_json = serde_json::to_string(&lifecycle).map_err(failure)?;
     transaction
         .execute(
-            "INSERT INTO tasks (id,state_kind,accepted_at,kind_id,category,payload_type_id,payload_schema_version,codec_id,correlation_key,idempotency_key,request_info_json,payload,record_format_version,lifecycle_json,attempt,retry_not_before_ms,progress_attempt,progress_version,progress_json) VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,NULL,NULL,0,NULL)",
+            concat!(
+                "INSERT INTO tasks (id,state_kind,accepted_at,kind_id,category,payload_type_id,",
+                "payload_schema_version,codec_id,correlation_key,idempotency_key,request_info_json,",
+                "payload,record_format_version,lifecycle_json,attempt,retry_not_before_ms,",
+                "progress_attempt,progress_version,progress_json) ",
+                "VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,NULL,NULL,0,NULL)"
+            ),
             params![
                 id_key,
                 i64::try_from(accepted_at_ms).map_err(failure)?,
@@ -353,7 +390,11 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
     let lifecycle_json = serde_json::to_string(&lifecycle).map_err(failure)?;
     let changed = transaction
         .execute(
-            "UPDATE tasks SET state_kind='Running',state_version=?2,attempt=?3,started_at=?4,retry_not_before_ms=NULL,progress_attempt=NULL,progress_version=0,progress_json=NULL,lifecycle_json=?5 WHERE id=?1 AND state_kind='Queued' AND state_version=?6",
+            concat!(
+                "UPDATE tasks SET state_kind='Running',state_version=?2,attempt=?3,started_at=?4,",
+                "retry_not_before_ms=NULL,progress_attempt=NULL,progress_version=0,progress_json=NULL,",
+                "lifecycle_json=?5 WHERE id=?1 AND state_kind='Queued' AND state_version=?6"
+            ),
             params![
                 id_key,
                 lifecycle.state_version,
@@ -447,7 +488,10 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
     let lifecycle_json = serde_json::to_string(&lifecycle).map_err(failure)?;
     let changed = transaction
         .execute(
-            "UPDATE tasks SET state_kind=?2,state_version=?3,lifecycle_json=?4,retry_not_before_ms=?6 WHERE id=?1 AND state_version=?5",
+            concat!(
+                "UPDATE tasks SET state_kind=?2,state_version=?3,lifecycle_json=?4,",
+                "retry_not_before_ms=?6 WHERE id=?1 AND state_version=?5"
+            ),
             params![
                 id_key,
                 lifecycle.state.kind().as_str(),
@@ -482,7 +526,10 @@ pub(in crate::store::sqlite_task_store) fn update_progress(
     let transaction = connection.unchecked_transaction().map_err(failure)?;
     let row = transaction
         .query_row(
-            "SELECT request_info_json,lifecycle_json,state_kind,attempt,progress_attempt,progress_version FROM tasks WHERE id=?1",
+            concat!(
+                "SELECT request_info_json,lifecycle_json,state_kind,attempt,progress_attempt,",
+                "progress_version FROM tasks WHERE id=?1"
+            ),
             [&id_key],
             |row| {
                 Ok((
@@ -515,7 +562,11 @@ pub(in crate::store::sqlite_task_store) fn update_progress(
     let lifecycle_json = serde_json::to_string(&lifecycle).map_err(failure)?;
     let changed = transaction
         .execute(
-            "UPDATE tasks SET progress_attempt=?2,progress_version=?3,progress_json=?4,lifecycle_json=?5 WHERE id=?1 AND state_kind='Running' AND attempt=?2 AND (progress_attempt IS NULL OR progress_attempt!=?2 OR progress_version<?3)",
+            concat!(
+                "UPDATE tasks SET progress_attempt=?2,progress_version=?3,progress_json=?4,",
+                "lifecycle_json=?5 WHERE id=?1 AND state_kind='Running' AND attempt=?2 AND ",
+                "(progress_attempt IS NULL OR progress_attempt!=?2 OR progress_version<?3)"
+            ),
             params![
                 id_key,
                 command.expected_attempt,
@@ -564,6 +615,7 @@ fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Resul
     })
 }
 
+/// Checks that output is only attached to successful tasks and stays within the summary limit.
 fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Result<(), StoreError> {
     if output.is_some() && state != &TaskState::Succeeded {
         return Err(StoreError::InvalidRequest(
@@ -578,6 +630,7 @@ fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Re
     Ok(())
 }
 
+/// Returns the current system time as milliseconds since the Unix epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -598,8 +651,18 @@ fn insert_event_outbox(transaction: &rusqlite::Transaction<'_>, summary: &TaskSu
     // A monotonic persisted ordering key also preserves lifecycle order across
     // clock rollback.
     transaction.execute(
-        "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) VALUES (?1,?2,?3,?4,MAX(?5,COALESCE((SELECT MAX(created_at_ms) FROM task_event_outbox),?5)))",
-        params![summary.id.to_padded_decimal(), summary.state_version, event_id, json, i64::try_from(now_ms()).map_err(failure)?],
+        concat!(
+            "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) ",
+            "VALUES (?1,?2,?3,?4,MAX(?5,COALESCE((SELECT MAX(created_at_ms) ",
+            "FROM task_event_outbox),?5)))"
+        ),
+        params![
+            summary.id.to_padded_decimal(),
+            summary.state_version,
+            event_id,
+            json,
+            i64::try_from(now_ms()).map_err(failure)?
+        ],
     ).map_err(failure)?;
     Ok(())
 }

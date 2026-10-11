@@ -10,13 +10,28 @@
 
 mod support;
 
+use std::env;
+use std::path::PathBuf;
+
+use qubit_id::Id;
+use qubit_metadata::Metadata;
+use qubit_task::model::ProgressCommand;
+use qubit_task::model::ResourceRequest;
+use qubit_task::model::StartCommand;
+use qubit_task::model::StoredPayload;
+use qubit_task::model::StoredTaskRequest;
+use qubit_task::model::TaskId;
+use qubit_task::model::TaskState;
+use qubit_task::model::TransitionCommand;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
+use rusqlite::Connection;
+use uuid::Uuid;
 
 /// Creates an isolated temporary database path.
-fn database_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("task-outbox-{}.sqlite", uuid::Uuid::new_v4()))
+fn database_path() -> PathBuf {
+    env::temp_dir().join(format!("task-outbox-{}.sqlite", Uuid::new_v4()))
 }
 
 #[tokio::test]
@@ -45,13 +60,13 @@ async fn test_outbox_requires_owner_and_valid_page_size() {
 async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
     let path = database_path();
     let store = SqliteTaskStore::open(&path).expect("initialize database");
-    let id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(41));
+    let id = TaskId::from_id(Id::new(41));
     store
         .accept_encoded(id, request())
         .await
         .expect("persist existing task");
     drop(store);
-    let connection = rusqlite::Connection::open(&path).expect("open fixture");
+    let connection = Connection::open(&path).expect("open fixture");
     let before: (String, Vec<u8>, String) = connection
         .query_row(
             "SELECT request_info_json,payload,lifecycle_json FROM tasks",
@@ -65,7 +80,7 @@ async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
     drop(connection);
     drop(SqliteTaskStore::open(&path).expect("migrate v5"));
     drop(SqliteTaskStore::open(&path).expect("reopen v6"));
-    let connection = rusqlite::Connection::open(&path).expect("inspect schema");
+    let connection = Connection::open(&path).expect("inspect schema");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("version");
@@ -95,7 +110,7 @@ async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
 fn test_invalid_v6_outbox_is_rejected_without_repair() {
     let path = database_path();
     drop(SqliteTaskStore::open(&path).expect("initialize database"));
-    let connection = rusqlite::Connection::open(&path).expect("open database");
+    let connection = Connection::open(&path).expect("open database");
     connection
         .execute_batch("ALTER TABLE task_event_outbox RENAME COLUMN event_json TO corrupt_json")
         .expect("inject invalid schema");
@@ -106,10 +121,7 @@ fn test_invalid_v6_outbox_is_rejected_without_repair() {
 }
 
 /// Encoded request independent of the event-bus feature.
-fn request() -> qubit_task::model::StoredTaskRequest {
-    use qubit_task::model::ResourceRequest;
-    use qubit_task::model::StoredPayload;
-    use qubit_task::model::StoredTaskRequest;
+fn request() -> StoredTaskRequest {
     StoredTaskRequest {
         kind_id: "outbox.test".into(),
         category: None,
@@ -119,7 +131,7 @@ fn request() -> qubit_task::model::StoredTaskRequest {
             codec_id: "json".into(),
             bytes: vec![1],
         },
-        metadata: qubit_metadata::Metadata::new(),
+        metadata: Metadata::new(),
         resource_limit: ResourceRequest::default(),
         correlation_key: None,
         idempotency_key: Some("same-task".into()),
@@ -128,15 +140,11 @@ fn request() -> qubit_task::model::StoredTaskRequest {
 
 #[tokio::test]
 async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
-    use qubit_task::model::StartCommand;
-    use qubit_task::model::TaskId;
-    use qubit_task::model::TaskState;
-    use qubit_task::model::TransitionCommand;
     let path = database_path();
     let store = SqliteTaskStore::open(&path).expect("open database");
     let epoch = store.acquire_owner().await.expect("owner");
     store.enable_event_outbox().await.expect("enable");
-    let id = TaskId::from_id(qubit_id::Id::new(42));
+    let id = TaskId::from_id(Id::new(42));
     store.accept_encoded(id, request()).await.expect("accept");
     assert!(!store.accept_encoded(id, request()).await.expect("repeat").created);
     let running = store
@@ -148,7 +156,7 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
         .await
         .expect("start");
     store
-        .update_progress(qubit_task::model::ProgressCommand::new(
+        .update_progress(ProgressCommand::new(
             id,
             running.attempt,
             1,
@@ -170,7 +178,7 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
         finished_at_ms: Some(11),
         output: None,
     };
-    let connection = rusqlite::Connection::open(&path).expect("fault injection connection");
+    let connection = Connection::open(&path).expect("fault injection connection");
     connection.execute_batch("CREATE TRIGGER fail_outbox BEFORE INSERT ON task_event_outbox BEGIN SELECT RAISE(ABORT, 'injected outbox failure'); END;").expect("inject failure");
     assert!(matches!(
         store.transition_encoded(transition.clone()).await,
@@ -218,7 +226,7 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
 fn test_v6_missing_outbox_index_is_rejected() {
     let path = database_path();
     drop(SqliteTaskStore::open(&path).expect("initialize database"));
-    let connection = rusqlite::Connection::open(&path).expect("open database");
+    let connection = Connection::open(&path).expect("open database");
     connection
         .execute_batch("DROP INDEX task_event_outbox_created")
         .expect("remove index");
@@ -233,7 +241,7 @@ async fn test_oversized_event_rolls_back_acceptance() {
     let store = SqliteTaskStore::open(database_path()).expect("store");
     let owner = store.acquire_owner().await.expect("owner");
     store.enable_event_outbox().await.expect("enable");
-    let id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(43));
+    let id = TaskId::from_id(Id::new(43));
     let mut large = request();
     large.correlation_key = Some("x".repeat(128 * 1024));
     assert!(matches!(
@@ -249,7 +257,7 @@ async fn test_oversized_event_rolls_back_acceptance() {
 fn test_v6_missing_outbox_primary_key_is_rejected() {
     let path = database_path();
     drop(SqliteTaskStore::open(&path).expect("initialize database"));
-    let connection = rusqlite::Connection::open(&path).expect("open database");
+    let connection = Connection::open(&path).expect("open database");
     connection.execute_batch("DROP TABLE task_event_outbox; CREATE TABLE task_event_outbox(task_id TEXT NOT NULL,state_version INTEGER NOT NULL,event_id TEXT NOT NULL,event_json TEXT NOT NULL,created_at_ms INTEGER NOT NULL); CREATE INDEX task_event_outbox_created ON task_event_outbox(created_at_ms,task_id,state_version);").expect("remove primary key from fixture");
     assert!(matches!(SqliteTaskStore::open(&path), Err(StoreError::Failure(_))));
 }
@@ -258,7 +266,7 @@ fn test_v6_missing_outbox_primary_key_is_rejected() {
 fn test_v6_outbox_index_on_another_table_is_rejected() {
     let path = database_path();
     drop(SqliteTaskStore::open(&path).expect("initialize database"));
-    let connection = rusqlite::Connection::open(&path).expect("open database");
+    let connection = Connection::open(&path).expect("open database");
     connection
         .execute_batch(
             "DROP INDEX task_event_outbox_created;

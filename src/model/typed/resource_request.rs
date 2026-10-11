@@ -15,6 +15,22 @@ use serde::Serialize;
 ///
 /// These values constrain concurrent admission accounting; they do not enforce
 /// operating-system limits on CPU, memory, or disk use.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::ResourceRequest;
+///
+/// let request = ResourceRequest {
+///     cpu_slots: 2,
+///     gpu_count: 1,
+///     gpu_labels: vec![String::from("cuda")],
+///     ..ResourceRequest::default()
+/// };
+///
+/// assert_eq!(request.cpu_slots, 2);
+/// assert_eq!(request.gpu_labels, ["cuda"]);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResourceRequest {
     /// Number of CPU concurrency slots.
@@ -32,7 +48,18 @@ pub struct ResourceRequest {
 }
 
 impl ResourceRequest {
-    /// Checks bounded resource labels and names before request encoding.
+    /// Checks that resource labels and names satisfy encoding limits.
+    ///
+    /// The validation rejects empty or oversized labels and custom resource
+    /// names, duplicate GPU labels, labels without a requested GPU, and totals
+    /// that exceed the description byte limit. It does not modify the request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static description when there are more than 32 GPU labels or
+    /// custom resources, a label or name is empty or exceeds 128 bytes, GPU
+    /// labels are duplicated or requested without a GPU, or all label and name
+    /// bytes together exceed 8192.
     pub(crate) fn validate_limits(&self) -> Result<(), &'static str> {
         const MAX_ENTRIES: usize = 32;
         const MAX_NAME_BYTES: usize = 128;

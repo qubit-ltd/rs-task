@@ -5,11 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::error::Error;
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecDescriptor;
 use qubit_codec::ValueBytesCodecRegistration;
 use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
@@ -22,11 +25,15 @@ use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
-use qubit_task::TaskHandlerDescriptor;
 use qubit_task::TaskHandler;
+use qubit_task::TaskHandlerDescriptor;
 use qubit_task::store::TaskFuture;
+use serde_json::Error as JsonError;
+use serde_json::Value;
+use serde_json::from_slice;
+use serde_json::to_vec;
 
-pub struct FixturePayload(pub serde_json::Value);
+pub struct FixturePayload(pub Value);
 
 impl HasModelId for FixturePayload {
     const MODEL_ID: ModelId = ModelId::new("fixture.TaskPayload");
@@ -44,21 +51,21 @@ impl TaskHandler<FixturePayload> for FixtureHandler {
 #[derive(Default)]
 pub struct JsonValueCodec;
 
-impl qubit_codec::ValueEncoder<FixturePayload> for JsonValueCodec {
+impl ValueEncoder<FixturePayload> for JsonValueCodec {
     type Output = Vec<u8>;
-    type Error = serde_json::Error;
+    type Error = JsonError;
 
     fn encode(&mut self, value: &FixturePayload) -> Result<Vec<u8>, Self::Error> {
-        serde_json::to_vec(&value.0)
+        to_vec(&value.0)
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
+impl ValueDecoder<[u8]> for JsonValueCodec {
     type Output = FixturePayload;
-    type Error = serde_json::Error;
+    type Error = JsonError;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
-        serde_json::from_slice(bytes).map(FixturePayload)
+        from_slice(bytes).map(FixturePayload)
     }
 }
 
@@ -69,11 +76,11 @@ pub static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new
     ValueCodecRegistrationSource::new("qubit-task", "fixture-provider", "fixture", 1),
 );
 
-pub fn codec_registry() -> Result<Arc<ValueBytesCodecRegistry>, Box<dyn std::error::Error>> {
+pub fn codec_registry() -> Result<Arc<ValueBytesCodecRegistry>, Box<dyn Error>> {
     Ok(Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?))
 }
 
-pub fn descriptor(kind_id: &str) -> Result<TaskHandlerDescriptor, Box<dyn std::error::Error>> {
+pub fn descriptor(kind_id: &str) -> Result<TaskHandlerDescriptor, Box<dyn Error>> {
     Ok(TaskHandlerDescriptor {
         kind_id: kind_id.into(),
         payload_type_id: ModelIdBuf::try_from("fixture.TaskPayload")?,
@@ -82,7 +89,7 @@ pub fn descriptor(kind_id: &str) -> Result<TaskHandlerDescriptor, Box<dyn std::e
     })
 }
 
-pub fn request(kind_id: &str, payload: serde_json::Value, idempotency_key: String) -> TaskRequest<FixturePayload> {
+pub fn request(kind_id: &str, payload: Value, idempotency_key: String) -> TaskRequest<FixturePayload> {
     let mut request = TaskRequest::new(
         kind_id,
         1,

@@ -72,6 +72,8 @@ impl DatabaseIdentity {
     /// # Returns
     ///
     /// The path shared by SQLite and the corresponding owner-lock filename.
+    #[must_use]
+    #[inline]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

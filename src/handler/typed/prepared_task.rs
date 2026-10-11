@@ -5,13 +5,21 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::fmt::Debug;
+use std::fmt::Formatter;
+
 use crate::handler::TaskRunResult;
 use crate::handler::typed::TypedTaskContext;
 use crate::store::TaskFuture;
 
+/// Type-erased, single-use adapter for an already validated typed task handler.
 type RunPrepared = Box<dyn FnOnce(TypedTaskContext) -> TaskFuture<'static, TaskRunResult> + Send>;
 
-/// A payload that passed routing, schema, codec, and Rust value-type checks.
+/// A single-use handler payload that has passed routing, schema, codec, and Rust value-type checks.
+///
+/// Calling [`run`](Self::run) consumes the payload and starts its handler with the supplied task
+/// context. This keeps validation outside the execution attempt while ensuring the handler can be
+/// invoked at most once.
 pub struct PreparedTask {
     run: RunPrepared,
 }
@@ -29,8 +37,8 @@ impl PreparedTask {
     }
 }
 
-impl std::fmt::Debug for PreparedTask {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for PreparedTask {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("PreparedTask").finish_non_exhaustive()
     }
 }

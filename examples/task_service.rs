@@ -17,6 +17,11 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
@@ -47,7 +52,7 @@ impl HasModelId for EchoPayload {
 #[derive(Default)]
 struct JsonCodec;
 
-impl qubit_codec::ValueEncoder<EchoPayload> for JsonCodec {
+impl ValueEncoder<EchoPayload> for JsonCodec {
     type Output = Vec<u8>;
     type Error = serde_json::Error;
 
@@ -56,7 +61,7 @@ impl qubit_codec::ValueEncoder<EchoPayload> for JsonCodec {
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for JsonCodec {
+impl ValueDecoder<[u8]> for JsonCodec {
     type Output = EchoPayload;
     type Error = serde_json::Error;
 
@@ -85,9 +90,9 @@ impl TaskHandler<EchoPayload> for EchoHandler {
 
 struct SequentialIds(AtomicU64);
 
-impl qubit_id::IdGenerator for SequentialIds {
-    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
-        Ok(qubit_id::Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
+impl IdGenerator for SequentialIds {
+    fn generate(&self) -> Result<Id, IdGenerationError> {
+        Ok(Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
     }
 }
 

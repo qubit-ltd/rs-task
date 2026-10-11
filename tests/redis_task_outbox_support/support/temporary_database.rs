@@ -10,6 +10,8 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use uuid::Uuid;
+
 /// Removes a test database, its WAL/SHM sidecars and its ownership lock on
 /// drop. Declare this guard before store/service values so their handles drop
 /// first.
@@ -22,7 +24,7 @@ impl TemporaryDatabase {
     /// creating a database.
     pub fn new() -> Self {
         Self {
-            path: std::env::temp_dir().join(format!("redis-task-outbox-{}.sqlite", uuid::Uuid::new_v4())),
+            path: std::env::temp_dir().join(format!("redis-task-outbox-{}.sqlite", Uuid::new_v4())),
         }
     }
 

@@ -15,6 +15,16 @@ use super::TaskSummary;
 ///
 /// History is ordered by acceptance time ascending and then by the numeric
 /// value of [`TaskId`].
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::typed::TaskCursor;
+/// use qubit_task::model::typed::TaskId;
+///
+/// let cursor = TaskCursor::new(1_700_000_000_000, TaskId::from_id(qubit_id::Id::new(42)));
+/// assert_eq!(cursor.accepted_at_ms, 1_700_000_000_000);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TaskCursor {
     /// Acceptance timestamp in Unix epoch milliseconds.
@@ -26,12 +36,14 @@ pub struct TaskCursor {
 impl TaskCursor {
     /// Creates a cursor for the supplied history position.
     #[must_use]
+    #[inline]
     pub const fn new(accepted_at_ms: u64, id: TaskId) -> Self {
         Self { accepted_at_ms, id }
     }
 }
 
 impl From<&TaskSummary> for TaskCursor {
+    /// Copies the acceptance position from a task summary into a cursor.
     fn from(summary: &TaskSummary) -> Self {
         Self::new(summary.accepted_at_ms, summary.id)
     }

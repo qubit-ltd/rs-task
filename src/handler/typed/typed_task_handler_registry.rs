@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
@@ -18,9 +19,13 @@ use super::prepared_task::PreparedTask;
 use super::task_handler_descriptor::TaskHandlerDescriptor;
 use super::typed_task_handler::TypedTaskHandler;
 use crate::model::typed::StoredPayload;
+use crate::model::typed::TaskId;
+use crate::model::TaskRunError;
 use crate::store::TaskFuture;
 
+/// Type-erased boundary used to prepare a task after registry lookup.
 trait ErasedHandler: Send + Sync {
+    /// Validates and decodes the stored payload, then creates a runnable task.
     fn prepare(
         &self,
         payload: StoredPayload,
@@ -28,10 +33,14 @@ trait ErasedHandler: Send + Sync {
     ) -> Result<PreparedTask, HandlerDispatchError>;
 }
 
+/// Adapts a typed handler to the registry's type-erased dispatch interface.
 struct TypedAdapter<T, H> {
+    /// Descriptor used to validate the payload before decoding.
     descriptor: TaskHandlerDescriptor,
+    /// Handler retained for execution after successful preparation.
     handler: Arc<H>,
-    marker: std::marker::PhantomData<fn() -> T>,
+    /// Records the payload type expected by `H` without storing a value of `T`.
+    marker: PhantomData<fn() -> T>,
 }
 
 impl<T, H> ErasedHandler for TypedAdapter<T, H>
@@ -39,6 +48,7 @@ where
     T: Send + Sync + 'static,
     H: TypedTaskHandler<T>,
 {
+    /// Rejects mismatched metadata and creates a future that runs the typed handler.
     fn prepare(
         &self,
         payload: StoredPayload,
@@ -76,27 +86,39 @@ where
     }
 }
 
+/// Stored metadata and handler state for one registered task kind.
 struct Registration {
+    /// Source label reported if a duplicate kind is registered.
     source: String,
+    /// Descriptor exposed to callers and used during dispatch validation.
     descriptor: TaskHandlerDescriptor,
+    /// Type-erased handler implementation used to prepare payloads.
     handler: Arc<dyn ErasedHandler>,
+    /// Optional hook for kinds configured for external cancellation.
     external_cancellation_hook: Option<ExternalCancellationHook>,
 }
 
 /// Registry routing one handler per stable kind identifier.
 #[derive(Default)]
 pub struct TypedTaskHandlerRegistry {
+    /// Registered handler state keyed by each descriptor's stable kind ID.
     handlers: HashMap<String, Registration>,
 }
 
 impl TypedTaskHandlerRegistry {
     /// Creates an empty typed handler registry.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Registers one typed handler from a direct application registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the descriptor is invalid or its kind identifier is
+    /// already registered.
     pub fn register<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -110,6 +132,11 @@ impl TypedTaskHandlerRegistry {
     }
 
     /// Registers one typed handler and retains its source for conflict errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the descriptor is invalid or its kind identifier is
+    /// already registered.
     pub fn register_with_source<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -125,6 +152,11 @@ impl TypedTaskHandlerRegistry {
 
     /// Registers a typed handler with an external cancellation hook when its
     /// descriptor declares [`CancellationMode::ExternalHook`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the descriptor is invalid, the hook does not match
+    /// the cancellation mode, or the kind identifier is already registered.
     pub fn register_with_cancellation_hook<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -139,6 +171,7 @@ impl TypedTaskHandlerRegistry {
         self.register_with_options::<T, H>(descriptor, handler, source, Some(hook))
     }
 
+    /// Validates registration options and inserts the handler if its kind is free.
     fn register_with_options<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -173,7 +206,7 @@ impl TypedTaskHandlerRegistry {
         let erased: Arc<dyn ErasedHandler> = Arc::new(TypedAdapter::<T, H> {
             descriptor: descriptor.clone(),
             handler,
-            marker: std::marker::PhantomData,
+            marker: PhantomData,
         });
         self.handlers.insert(
             kind_id,
@@ -188,6 +221,11 @@ impl TypedTaskHandlerRegistry {
     }
 
     /// Validates and decodes a stored payload before any handler code runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no handler is registered or if the payload metadata,
+    /// schema, codec, or decoded value is incompatible with that handler.
     pub fn prepare(
         &self,
         kind_id: &str,
@@ -203,12 +241,14 @@ impl TypedTaskHandlerRegistry {
 
     /// Returns the registered descriptor for a handler kind.
     #[must_use]
+    #[inline]
     pub fn descriptor(&self, kind_id: &str) -> Option<&TaskHandlerDescriptor> {
         self.handlers.get(kind_id).map(|registration| &registration.descriptor)
     }
 
     /// Returns whether the kind has an external cancellation hook.
     #[must_use]
+    #[inline]
     pub fn has_external_cancellation_hook(&self, kind_id: &str) -> bool {
         self.handlers
             .get(kind_id)
@@ -220,9 +260,9 @@ impl TypedTaskHandlerRegistry {
     pub fn cancel_externally(
         &self,
         kind_id: &str,
-        task_id: crate::model::typed::TaskId,
+        task_id: TaskId,
         attempt: u32,
-    ) -> Option<TaskFuture<'static, Result<(), crate::model::TaskRunError>>> {
+    ) -> Option<TaskFuture<'static, Result<(), TaskRunError>>> {
         self.handlers
             .get(kind_id)
             .and_then(|registration| registration.external_cancellation_hook.as_ref())

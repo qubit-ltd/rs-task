@@ -12,11 +12,15 @@ use thiserror::Error;
 pub enum PayloadEncodeError {
     /// The registry has no codec registered under the payload codec ID.
     #[error("no bytes codec is registered for {0}")]
-    MissingCodec(String),
+    MissingCodec(#[doc = "The codec identifier that was not registered."] String),
     /// The selected codec expects a value type different from `T`.
     #[error("the selected bytes codec is registered for a different value type")]
     TypeMismatch,
     /// The selected codec rejected the value or could not encode it.
     #[error("payload codec failed: {0}")]
-    Codec(#[from] qubit_codec::ValueCodecExecutionError),
+    Codec(
+        #[doc = "The underlying codec execution failure."]
+        #[from]
+        qubit_codec::ValueCodecExecutionError,
+    ),
 }

@@ -18,6 +18,7 @@ use crate::model::typed::ResourceRequest as EncodedResourceRequest;
 use crate::model::typed::StartCommand;
 use crate::model::typed::StoredPayload;
 use crate::model::typed::StoredTaskRequest;
+use crate::model::typed::TaskQuery;
 use crate::model::typed::TaskId as EncodedTaskId;
 use crate::model::typed::TransitionCommand as EncodedTransitionCommand;
 use crate::store::MemoryTaskStore;
@@ -461,12 +462,12 @@ async fn test_memory_store_ready_scan_and_retry_deadline_respect_retry_time() {
     assert_eq!(ready.records[0].id, queued.id);
     let history = TypedTaskStore::list_encoded(
         &store,
-        crate::model::typed::TaskQuery {
+        TaskQuery {
             states: vec![TaskStateKind::Queued],
             category: Some("integration".to_owned()),
             correlation_key: Some("correlation-1".to_owned()),
             limit: 1,
-            ..crate::model::typed::TaskQuery::default()
+            ..TaskQuery::default()
         },
     )
     .await
@@ -552,11 +553,11 @@ async fn test_memory_store_encoded_history_filters_and_paginates() {
 
     let first = TypedTaskStore::list_encoded(
         &store,
-        crate::model::typed::TaskQuery {
+        TaskQuery {
             category: Some("wanted".to_owned()),
             correlation_key: Some("history-correlation".to_owned()),
             limit: 1,
-            ..crate::model::typed::TaskQuery::default()
+            ..TaskQuery::default()
         },
     )
     .await

@@ -22,17 +22,22 @@ use super::TaskFuture;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
+use crate::model::TaskOutput;
 use crate::model::TaskState;
 use crate::model::typed::AcceptOutcome as EncodedAcceptOutcome;
 use crate::model::typed::ProgressCommand;
 use crate::model::typed::StartCommand;
 use crate::model::typed::StoredTask;
 use crate::model::typed::StoredTaskRequest;
+use crate::model::typed::TaskCursor;
 use crate::model::typed::TaskCursor as EncodedTaskCursor;
 use crate::model::typed::TaskId as EncodedTaskId;
 use crate::model::typed::TaskPage as EncodedTaskPage;
 use crate::model::typed::TaskProgressSnapshot;
 use crate::model::typed::TaskQuery as EncodedTaskQuery;
+use crate::model::typed::TaskSummary;
+use crate::model::typed::TransitionCommand;
+use crate::model::typed::MAX_TASK_QUERY_LIMIT;
 
 /// Default number of nonterminal records retained by a memory store.
 pub const DEFAULT_MAX_UNFINISHED_RECORDS: usize = 2_048;
@@ -139,13 +144,14 @@ impl MemoryTaskStore {
     }
 }
 
-/// Reads the current Unix epoch time in milliseconds, defaulting on clock
-/// error.
+/// Checks that output is only attached to a successful state and stays within
+/// the configured summary-size limit.
 ///
-/// # Returns
+/// # Errors
 ///
-/// Current epoch milliseconds, or zero if the system clock predates the epoch.
-fn validate_encoded_output(state: &TaskState, output: Option<&crate::model::TaskOutput>) -> Result<(), StoreError> {
+/// Returns an invalid-request error when output accompanies a non-success
+/// state or its summary exceeds the limit.
+fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Result<(), StoreError> {
     if output.is_some() && state != &TaskState::Succeeded {
         return Err(StoreError::InvalidRequest(
             "task output can only be stored with the succeeded state",
@@ -159,6 +165,12 @@ fn validate_encoded_output(state: &TaskState, output: Option<&crate::model::Task
     Ok(())
 }
 
+/// Reads the current Unix epoch time in milliseconds, defaulting on clock
+/// error.
+///
+/// # Returns
+///
+/// Current epoch milliseconds, or zero if the system clock predates the epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -239,7 +251,7 @@ impl super::TaskStore for MemoryTaskStore {
                 }
             }
             let now = now_ms();
-            let summary = crate::model::typed::TaskSummary {
+            let summary = TaskSummary {
                 id,
                 kind_id: request.kind_id.clone(),
                 category: request.category.clone(),
@@ -287,7 +299,7 @@ impl super::TaskStore for MemoryTaskStore {
     fn start_encoded<'a>(
         &'a self,
         command: StartCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();
             let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
@@ -318,8 +330,8 @@ impl super::TaskStore for MemoryTaskStore {
     /// Applies a typed lifecycle transition with revision and attempt checks.
     fn transition_encoded<'a>(
         &'a self,
-        command: crate::model::typed::TransitionCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+        command: TransitionCommand,
+    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             command
                 .state
@@ -385,7 +397,7 @@ impl super::TaskStore for MemoryTaskStore {
     fn update_progress<'a>(
         &'a self,
         command: ProgressCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let snapshot = TaskProgressSnapshot::from_command(command.clone())
                 .map_err(|_| StoreError::InvalidRequest("task progress snapshot exceeds its limits"))?;
@@ -459,14 +471,17 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Lists due queued summaries after an optional cursor, in acceptance order.
+    ///
+    /// Rejects limits above the public task-query maximum.
     fn list_ready_queued<'a>(
         &'a self,
-        after: Option<crate::model::typed::TaskCursor>,
+        after: Option<TaskCursor>,
         limit: NonZeroUsize,
         now_ms: u64,
     ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
         Box::pin(async move {
-            if limit.get() > crate::model::typed::MAX_TASK_QUERY_LIMIT {
+            if limit.get() > MAX_TASK_QUERY_LIMIT {
                 return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
             }
             let state = self.state.lock();
@@ -493,6 +508,7 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Finds the earliest queued retry deadline strictly later than `now_ms`.
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
             Ok(self
@@ -507,6 +523,7 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
+    /// Removes up to `max_rows` terminal records finished before the cutoff.
     fn prune_terminal_before<'a>(
         &'a self,
         finished_before_ms: u64,

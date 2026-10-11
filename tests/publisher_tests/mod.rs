@@ -12,10 +12,13 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use qubit_codec::ValueBytesCodecRegistry;
 use qubit_event_bus::AsyncEventBus;
+use qubit_event_bus::CapabilityError;
 use qubit_event_bus::EventBusFacadeConfig;
 use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::error::SpiError;
+use qubit_event_bus::local::LocalEventBusConfig;
 use qubit_event_bus::model::AdmissionStatus;
 use qubit_event_bus::model::DestinationAdmission;
 use qubit_event_bus::model::ProviderId;
@@ -51,6 +54,11 @@ use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
+use qubit_task::store::StoreError;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use serde_json::from_slice;
 
 use crate::support::task_event_codec;
 
@@ -77,7 +85,7 @@ struct FakeSpi {
 /// Creates one individual destination acknowledgement for the receipt matrix.
 fn destination(id: u64, status: AdmissionStatus) -> DestinationAdmission {
     DestinationAdmission::new(
-        qubit_id::Id::new(id),
+        Id::new(id),
         SubscriberId::new(format!("subscriber-{id}")).expect("subscriber ID"),
         status,
     )
@@ -130,7 +138,7 @@ impl AsyncEventBusSpi for FakeSpi {
             let TransportPayload::Encoded(payload) = message.payload() else {
                 panic!("task event must be encoded for the fake provider");
             };
-            let event: TaskEvent = serde_json::from_slice(payload.bytes()).expect("decode published task event");
+            let event: TaskEvent = from_slice(payload.bytes()).expect("decode published task event");
             self.state_versions
                 .lock()
                 .expect("state versions")
@@ -177,9 +185,9 @@ impl AsyncEventBusSpi for FakeSpi {
 }
 
 struct Ids;
-impl qubit_id::IdGenerator for Ids {
-    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
-        Ok(qubit_id::Id::new(100))
+impl IdGenerator for Ids {
+    fn generate(&self) -> Result<Id, IdGenerationError> {
+        Ok(Id::new(100))
     }
 }
 
@@ -248,7 +256,7 @@ async fn test_durable_fire_and_forget_provider_is_rejected_before_outbox_enable(
     ));
     let owner = store.acquire_owner().await.expect("owner released");
     store
-        .accept_encoded(TaskId::from_id(qubit_id::Id::new(51)), super::request())
+        .accept_encoded(TaskId::from_id(Id::new(51)), super::request())
         .await
         .expect("accept without enabling outbox");
     assert!(
@@ -267,7 +275,7 @@ async fn seed() -> Arc<SqliteTaskStore> {
     let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
     let owner = store.acquire_owner().await.expect("owner");
     store.enable_event_outbox().await.expect("enable");
-    let id = TaskId::from_id(qubit_id::Id::new(42));
+    let id = TaskId::from_id(Id::new(42));
     store.accept_encoded(id, super::request()).await.expect("accept");
     store
         .start_encoded(StartCommand {
@@ -308,7 +316,7 @@ async fn service_with_timeout(
 ) -> Result<TaskExecutionService, TaskServiceError> {
     TaskExecutionServiceBuilder::new(
         store,
-        Arc::new(qubit_codec::ValueBytesCodecRegistry::empty()),
+        Arc::new(ValueBytesCodecRegistry::empty()),
         Arc::new(Ids),
     )
     .event_bus(bus)
@@ -420,7 +428,7 @@ async fn test_missing_codec_preserves_outbox_and_releases_owner_for_codec_retry(
         Err(TaskServiceError::NotificationCodecUnavailable {
             provider_id,
             topic,
-            source: qubit_event_bus::CapabilityError::CodecRequired,
+        source: CapabilityError::CodecRequired,
         }) if provider_id == "fake" && topic == "task.lifecycle"
     ));
     assert!(spi.ids.lock().expect("ids").is_empty());
@@ -445,7 +453,7 @@ async fn test_memory_store_is_rejected_for_event_outbox() {
     let (bus, _) = bus(OPAQUE_ACCEPTED, true);
     let result = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(10)),
-        Arc::new(qubit_codec::ValueBytesCodecRegistry::empty()),
+        Arc::new(ValueBytesCodecRegistry::empty()),
         Arc::new(Ids),
     )
     .event_bus(bus)
@@ -454,7 +462,7 @@ async fn test_memory_store_is_rejected_for_event_outbox() {
     assert!(matches!(
         result,
         Err(TaskServiceError::Store(
-            qubit_task::store::StoreError::UnsupportedCapability
+            StoreError::UnsupportedCapability
         ))
     ));
 }
@@ -462,7 +470,7 @@ async fn test_memory_store_is_rejected_for_event_outbox() {
 #[tokio::test]
 async fn test_service_cancellation_persists_snapshot_before_publication() {
     let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
-    let id = TaskId::from_id(qubit_id::Id::new(42));
+    let id = TaskId::from_id(Id::new(42));
     store.accept_encoded(id, super::request()).await.expect("existing task");
     store
         .transition_encoded(TransitionCommand {
@@ -526,7 +534,7 @@ async fn test_ephemeral_fake_provider_is_rejected() {
 #[tokio::test]
 async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
     let bus = Arc::new(
-        AsyncEventBus::local(qubit_event_bus::local::LocalEventBusConfig::default())
+        AsyncEventBus::local(LocalEventBusConfig::default())
             .await
             .expect("local bus"),
     );
@@ -539,7 +547,7 @@ async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
     ));
     let owner = store.acquire_owner().await.expect("owner released after rejection");
     store
-        .accept_encoded(TaskId::from_id(qubit_id::Id::new(51)), super::request())
+        .accept_encoded(TaskId::from_id(Id::new(51)), super::request())
         .await
         .expect("accept without enabling outbox");
     assert!(

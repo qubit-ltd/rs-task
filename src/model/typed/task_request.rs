@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
 use qubit_metadata::Metadata;
 use qubit_model_id::HasModelId;
 
@@ -19,6 +21,29 @@ pub const MAX_TASK_METADATA_ENTRIES: usize = 32;
 pub const MAX_TASK_METADATA_BYTES: usize = 16 * 1024;
 
 /// Typed task submission before encoding and durable acceptance.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_codec::ValueCodecId;
+/// use qubit_model_id::HasModelId;
+/// use qubit_model_id::ModelId;
+/// use qubit_task::TaskRequest;
+///
+/// struct Input;
+///
+/// impl HasModelId for Input {
+///     const MODEL_ID: ModelId = ModelId::new("example.Input");
+/// }
+///
+/// let request = TaskRequest::new(
+///     "example.kind",
+///     1,
+///     ValueCodecId::new("example.codec"),
+///     Input,
+/// );
+/// assert_eq!(request.kind_id, "example.kind");
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskRequest<T> {
     /// Handler routing identity.
@@ -45,7 +70,8 @@ impl<T: HasModelId> TaskRequest<T> {
     ///
     /// ```compile_fail
     /// use qubit_codec::ValueCodecId;
-    /// use qubit_model_id::{HasModelId, ModelId};
+    /// use qubit_model_id::HasModelId;
+    /// use qubit_model_id::ModelId;
     /// use qubit_task::TaskRequest;
     /// struct Input;
     /// impl HasModelId for Input {
@@ -56,7 +82,9 @@ impl<T: HasModelId> TaskRequest<T> {
     ///     ValueCodecId::new("example.codec"), Input,
     /// );
     /// ```
-    pub fn new(kind_id: impl Into<String>, schema_version: u32, codec_id: qubit_codec::ValueCodecId, data: T) -> Self {
+    #[must_use]
+    #[inline]
+    pub fn new(kind_id: impl Into<String>, schema_version: u32, codec_id: ValueCodecId, data: T) -> Self {
         Self {
             kind_id: kind_id.into(),
             category: None,
@@ -89,7 +117,7 @@ impl<T: HasModelId + 'static> TaskRequest<T> {
     /// lookup/encoding fails.
     pub fn encode(
         self,
-        registry: &qubit_codec::ValueBytesCodecRegistry,
+        registry: &ValueBytesCodecRegistry,
     ) -> Result<StoredTaskRequest, TaskRequestEncodeError> {
         if self.kind_id.trim().is_empty() {
             return Err(TaskRequestEncodeError::EmptyKindId);

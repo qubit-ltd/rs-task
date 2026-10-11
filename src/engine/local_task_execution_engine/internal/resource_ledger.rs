@@ -12,13 +12,16 @@ use parking_lot::Mutex;
 
 use super::usage::Usage;
 
-/// Resource amounts held by one execution reservation.
+/// Resources held by one execution reservation.
+///
+/// The tuple stores CPU, memory, and disk amounts, followed by GPU identifiers
+/// and custom resource amounts keyed by name.
 pub(in crate::engine::local_task_execution_engine) type Allocation =
     (u32, u64, u64, Vec<String>, BTreeMap<String, u64>);
 /// Active reservations indexed by their release token.
 pub(in crate::engine::local_task_execution_engine) type AllocationLedger = HashMap<u64, Allocation>;
 
-/// Usage totals and reservation identities protected by one mutex.
+/// Aggregate usage and the resources assigned to active reservation tokens.
 #[derive(Default)]
 pub(in crate::engine::local_task_execution_engine) struct ResourceLedger {
     /// Aggregate resources currently held by active attempts.
@@ -29,7 +32,10 @@ pub(in crate::engine::local_task_execution_engine) struct ResourceLedger {
     pub(in crate::engine::local_task_execution_engine) next_token: Option<u64>,
 }
 
-/// Removes one reservation and returns its resources under a single lock.
+/// Removes one reservation and subtracts its resources from aggregate usage.
+///
+/// The reservation lookup and usage updates happen while holding the ledger
+/// mutex. An unknown token leaves the ledger unchanged.
 ///
 /// # Parameters
 ///

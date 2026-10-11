@@ -9,6 +9,16 @@ use super::MAX_TASK_METADATA_BYTES;
 use super::MAX_TASK_METADATA_ENTRIES;
 
 /// Errors raised while converting a request into stored form.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskRequestEncodeError;
+///
+/// let error = TaskRequestEncodeError::EmptyKindId;
+/// assert!(matches!(error, TaskRequestEncodeError::EmptyKindId));
+/// ```
+#[must_use]
 #[derive(Debug, thiserror::Error)]
 pub enum TaskRequestEncodeError {
     /// The handler routing identity is empty or contains only whitespace.

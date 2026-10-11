@@ -13,10 +13,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use qubit_codec::ValueBytesCodecDescriptor;
 use qubit_codec::ValueBytesCodecRegistration;
 use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
@@ -33,6 +36,7 @@ use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
+use qubit_task::service::TaskServiceError;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
@@ -47,7 +51,7 @@ use tokio::main as tokio_main;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 
-struct WorkerPayload(serde_json::Value);
+struct WorkerPayload(Value);
 
 impl HasModelId for WorkerPayload {
     const MODEL_ID: ModelId = ModelId::new("fixture.CrashWorkerPayload");
@@ -76,7 +80,7 @@ impl TaskHandler<WorkerPayload> for WorkerHandler {
 #[derive(Default)]
 struct JsonValueCodec;
 
-impl qubit_codec::ValueEncoder<WorkerPayload> for JsonValueCodec {
+impl ValueEncoder<WorkerPayload> for JsonValueCodec {
     type Output = Vec<u8>;
     type Error = serde_json::Error;
 
@@ -85,7 +89,7 @@ impl qubit_codec::ValueEncoder<WorkerPayload> for JsonValueCodec {
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
+impl ValueDecoder<[u8]> for JsonValueCodec {
     type Output = WorkerPayload;
     type Error = serde_json::Error;
 
@@ -213,10 +217,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("worker handler did not start the accepted task".into());
     }
     if mode == "terminal" {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if service.get(id).await?.is_some_and(|summary| summary.state.is_terminal()) {
-                    return Ok::<(), qubit_task::service::TaskServiceError>(());
+                    return Ok::<(), TaskServiceError>(());
                 }
                 tokio::task::yield_now().await;
             }

@@ -9,6 +9,7 @@ use super::task_progress_snapshot::MAX_TASK_PROGRESS_METRICS;
 use super::task_progress_snapshot::MAX_TASK_PROGRESS_SNAPSHOT_BYTES;
 
 /// Snapshot validation failures returned before a store transaction begins.
+#[must_use]
 #[derive(Debug, thiserror::Error)]
 pub enum ProgressSnapshotError {
     /// The supplied metric vector exceeds the documented count limit.

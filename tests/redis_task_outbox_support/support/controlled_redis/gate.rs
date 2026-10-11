@@ -93,6 +93,8 @@ impl ReplyGate {
     /// Polling registers the current waker instead of waiting for the reply
     /// condition. Mutex locking may block briefly and panics if shared
     /// state is poisoned.
+    #[must_use]
+    #[inline]
     pub fn wait_applied(&self) -> WaitApplied<'_> {
         WaitApplied { gate: self }
     }

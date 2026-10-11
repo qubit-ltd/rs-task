@@ -9,6 +9,29 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Serializable metric projection from `rs-progress`.
+///
+/// Each count records one category of work in the metric; `total` is absent
+/// when the source metric does not know the configured total.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::ProgressMetricSnapshot;
+///
+/// let metric = ProgressMetricSnapshot {
+///     id: "download".to_owned(),
+///     name: "Download files".to_owned(),
+///     total: Some(10),
+///     completed: 4,
+///     active: 2,
+///     succeeded: 3,
+///     failed: 1,
+///     cancelled: 0,
+/// };
+///
+/// assert_eq!(metric.total, Some(10));
+/// assert_eq!(metric.completed, 4);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressMetricSnapshot {
     /// Machine-readable metric identifier.

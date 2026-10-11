@@ -7,16 +7,20 @@
 // =============================================================================
 //! Exercises a separately compiled task handler through the public service API.
 
+use std::error::Error;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
+use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
+use qubit_task::model::TaskSummary;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task_fixture_provider::FixtureHandler;
 use qubit_task_fixture_provider::FixturePayload;
@@ -58,16 +62,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn wait_for_terminal(
-    service: &qubit_task::TaskExecutionService,
+    service: &TaskExecutionService,
     id: TaskId,
-) -> Result<qubit_task::model::TaskSummary, Box<dyn std::error::Error>> {
+) -> Result<TaskSummary, Box<dyn Error>> {
     for _ in 0..1_000 {
         if let Some(summary) = service.get(id).await? {
             if summary.state.is_terminal() {
                 return Ok(summary);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     Err("fixture task did not finish".into())
 }

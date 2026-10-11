@@ -597,6 +597,8 @@ impl TypedTaskExecutionService {
 }
 
 impl ServiceRunner {
+    /// Extracts a readable message from a panic payload, using a stable fallback
+    /// for payloads with an unsupported type.
     fn external_cancel_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
         panic.downcast_ref::<&str>().map_or_else(
             || {
@@ -609,6 +611,8 @@ impl ServiceRunner {
         )
     }
 
+    /// Runs the registered external cancellation hook and reconciles its result
+    /// with the persisted task state for all concurrent cancellation waiters.
     async fn run_external_cancel(
         core: Arc<TypedServiceCore>,
         key: (TaskId, u32),
@@ -744,6 +748,10 @@ impl ServiceRunner {
         core.scheduler_changed.notify_one();
     }
 
+    /// Persists a cancellation hook failure while retrying revision conflicts.
+    ///
+    /// Returns `AlreadyTerminal` if the task attempt ended before the failure
+    /// could be recorded, and `ServiceFailed` for store errors.
     async fn record_external_cancel_failure(
         core: &Arc<TypedServiceCore>,
         id: TaskId,
@@ -886,8 +894,8 @@ impl ServiceRunner {
         }
     }
 
-    #[cfg(feature = "event-bus")]
     /// Wakes the optional durable event publisher after a store write.
+    #[cfg(feature = "event-bus")]
     fn notify_notifications(&self) {
         if let Some(publisher) = &self.core.publisher {
             publisher.notify();
@@ -956,6 +964,10 @@ impl ServiceRunner {
         }
     }
 
+    /// Restores tasks left queued or running by the previous service owner.
+    ///
+    /// Running tasks are returned to the queue unless cancellation was pending,
+    /// in which case they are blocked to preserve that cancellation request.
     async fn recover_unfinished(&self) -> Result<(), TaskServiceError> {
         let mut after = None;
         loop {
@@ -1011,6 +1023,8 @@ impl ServiceRunner {
         }
     }
 
+    /// Scans ready tasks, reserves resources, and starts eligible handlers until
+    /// shutdown or a latched service fault stops dispatch.
     async fn scheduler_loop(&self) {
         let mut fairness = ResourceFairness::default();
         'scheduler: loop {
@@ -1198,6 +1212,10 @@ impl ServiceRunner {
         }
     }
 
+    /// Loads and executes one admitted task attempt, then persists its outcome.
+    ///
+    /// The reservation remains held for the duration of handler execution and is
+    /// released on every return path.
     async fn run_one(&self, id: TaskId, running: TaskSummary, reservation: TypedResourceReservation) {
         let task = match self.core.store.get_encoded_task(id).await {
             Ok(Some(task)) => task,
@@ -1302,6 +1320,8 @@ impl ServiceRunner {
         }
     }
 
+    /// Moves an inadmissible queued task to the blocked state using its observed
+    /// revision, latching unexpected store failures for the service supervisor.
     async fn mark_blocked(&self, summary: &TaskSummary, reason: &str) {
         match self
             .core
@@ -1330,6 +1350,10 @@ impl ServiceRunner {
         }
     }
 
+    /// Persists the final attempt state, scheduling a retry when policy permits.
+    ///
+    /// A newer terminal transition wins; other unexpected store failures latch a
+    /// service fault rather than being silently discarded.
     async fn finish(&self, started: &TaskSummary, state: TaskState, output: Option<TaskOutput>, retryable: bool) {
         let latest = match self.core.store.get_encoded_task(started.id).await {
             Ok(Some(latest)) => latest,
@@ -1387,6 +1411,8 @@ impl ServiceRunner {
         }
     }
 
+    /// Confirms that a compare-and-set conflict corresponds to a newer task
+    /// revision; otherwise records the inconsistency as a service fault.
     async fn check_competing_transition(&self, id: TaskId, expected_version: u64) {
         match self.core.store.get_encoded_task(id).await {
             Ok(Some(task)) if task.summary.state_version != expected_version => {}
@@ -1397,6 +1423,8 @@ impl ServiceRunner {
     }
 }
 
+/// Returns the current Unix timestamp in milliseconds, or zero if the system clock
+/// predates the Unix epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1404,6 +1432,10 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Resolves a typed handler and decodes its stored payload before execution.
+///
+/// Returns the prepared task on success, or the handler/codec error rendered as
+/// a string when the registered handler cannot accept the payload.
 fn prepare_handler(
     handlers: &TypedTaskHandlerRegistry,
     codecs: &ValueBytesCodecRegistry,

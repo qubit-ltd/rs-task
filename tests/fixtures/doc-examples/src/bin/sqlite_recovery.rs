@@ -7,6 +7,9 @@
 // =============================================================================
 //! Persists a typed task in SQLite and queries it after reopening the store.
 
+#[path = "../typed_support.rs"]
+mod typed_support;
+
 use std::sync::Arc;
 
 use qubit_task::TaskExecutionServiceBuilder;
@@ -14,9 +17,6 @@ use qubit_task::model::ResourceCapacity;
 use qubit_task::model::TaskState;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
-
-#[path = "../typed_support.rs"]
-mod typed_support;
 
 use typed_support::register_handler;
 use typed_support::request;

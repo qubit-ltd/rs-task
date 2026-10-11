@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+
 use thiserror::Error;
 
 /// Storage errors distinguish unsupported capabilities from ordinary

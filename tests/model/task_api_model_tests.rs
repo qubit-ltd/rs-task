@@ -5,17 +5,27 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::collections::BTreeMap;
+
 use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-
+use qubit_progress::Metric;
+use qubit_progress::MetricDelta;
+use qubit_progress::NoopReporter;
+use qubit_progress::Progress;
+use qubit_progress::Stage;
+use qubit_task::model::TaskState;
 use qubit_task::model::typed::EncodedPayload;
 use qubit_task::model::typed::Payload;
+use qubit_task::model::typed::ProgressCommand;
+use qubit_task::model::typed::ProgressSnapshotError;
 use qubit_task::model::typed::ResourceRequest;
 use qubit_task::model::typed::TaskId;
+use qubit_task::model::typed::TaskProgressSnapshot;
 use qubit_task::model::typed::TaskRequest;
 use qubit_task::model::typed::TaskRequestEncodeError;
 
@@ -103,7 +113,6 @@ fn test_resource_request_exposes_optional_memory_and_disk_quotas() {
 
 #[test]
 fn test_task_request_rejects_invalid_resource_descriptions() {
-    use std::collections::BTreeMap;
 
     let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
     let invalid_requests = [
@@ -164,7 +173,6 @@ fn test_task_request_rejects_invalid_resource_descriptions() {
 
 #[test]
 fn test_task_state_covers_lifecycle_kinds_and_transitions() {
-    use qubit_task::model::TaskState;
 
     let states = [
         TaskState::Queued,
@@ -273,14 +281,7 @@ fn test_task_request_rejects_metadata_over_serialized_byte_budget() {
 
 #[test]
 fn test_progress_snapshot_projects_stage_and_metrics_and_round_trips() {
-    use qubit_progress::Metric;
-    use qubit_progress::MetricDelta;
-    use qubit_progress::NoopReporter;
-    use qubit_progress::Progress;
-    use qubit_progress::Stage;
 
-    use qubit_task::model::typed::ProgressCommand;
-    use qubit_task::model::typed::TaskProgressSnapshot;
 
     let reporter = NoopReporter;
     let progress = Progress::builder(&reporter)
@@ -319,14 +320,7 @@ fn test_progress_snapshot_projects_stage_and_metrics_and_round_trips() {
 
 #[test]
 fn test_progress_snapshot_rejects_metric_count_stage_size_and_encoded_size() {
-    use qubit_progress::Metric;
-    use qubit_progress::NoopReporter;
-    use qubit_progress::Progress;
-    use qubit_progress::Stage;
 
-    use qubit_task::model::typed::ProgressCommand;
-    use qubit_task::model::typed::ProgressSnapshotError;
-    use qubit_task::model::typed::TaskProgressSnapshot;
 
     let id = TaskId::from_id(qubit_id::Id::new(1));
     let reporter = NoopReporter;

@@ -24,10 +24,15 @@ pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 6;
 ///
 /// * `connection` - Mutable SQLite connection for the schema transaction.
 ///
+/// # Returns
+///
+/// Returns `Ok(())` after initialization or a supported upgrade commits.
+///
 /// # Errors
 ///
 /// Returns an error for unsupported versions, invalid typed schemas, or
-/// SQLite failures.
+/// SQLite failures. The transaction rolls back if validation or a schema change
+/// fails.
 pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
     connection: &mut Connection,
 ) -> Result<(), StoreError> {
@@ -141,7 +146,22 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
     transaction.commit().map_err(failure)
 }
 
-/// Validates required columns for the typed request schema.
+/// Confirms that `tasks` contains every column required by the typed request
+/// storage format. Extra columns are allowed so compatible local extensions
+/// remain usable.
+///
+/// # Parameters
+///
+/// * `transaction` - Active transaction whose `tasks` table is inspected.
+///
+/// # Returns
+///
+/// Returns `Ok(())` when all required columns exist.
+///
+/// # Errors
+///
+/// Returns an error if SQLite cannot inspect the table or any required column
+/// is missing.
 fn validate_next_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let columns = {
         let mut statement = transaction.prepare("PRAGMA table_info(tasks)").map_err(failure)?;
@@ -181,7 +201,21 @@ fn validate_next_schema(transaction: &Transaction<'_>) -> Result<(), StoreError>
     Ok(())
 }
 
-/// Rejects incomplete v6 databases without silently replacing their outbox.
+/// Checks that the event outbox has its required columns and ordered index.
+/// Existing outbox data is left untouched, including when the schema is invalid.
+///
+/// # Parameters
+///
+/// * `transaction` - Active transaction whose outbox schema is inspected.
+///
+/// # Returns
+///
+/// Returns `Ok(())` when the outbox schema matches the version 6 contract.
+///
+/// # Errors
+///
+/// Returns an error when the outbox columns or ordered index are invalid, or
+/// when SQLite cannot inspect them.
 fn validate_outbox_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let mut statement = transaction
         .prepare("PRAGMA table_info(task_event_outbox)")

@@ -11,6 +11,22 @@ mod support;
 
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::ResourceRequest;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::StartCommand;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::StoredPayload;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::StoredTaskRequest;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::TaskId;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::TaskOutput;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::TaskState;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
@@ -88,15 +104,6 @@ async fn test_sqlite_store_obeys_terminal_prune_contract() {
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
-    use qubit_task::model::ResourceRequest;
-    use qubit_task::model::StartCommand;
-    use qubit_task::model::StoredPayload;
-    use qubit_task::model::StoredTaskRequest;
-    use qubit_task::model::TaskId;
-    use qubit_task::model::TaskOutput;
-    use qubit_task::model::TaskState;
-    use qubit_task::model::TransitionCommand;
-
     let path = std::env::temp_dir().join(format!("rs-task-prune-atomic-{}.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
     let ids = [
@@ -148,10 +155,16 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
             .unwrap();
     }
     let blocker = rusqlite::Connection::open(&path).unwrap();
-    blocker.execute_batch(&format!(
-        "CREATE TRIGGER fail_second_prune_delete BEFORE DELETE ON tasks WHEN OLD.id='{}' BEGIN SELECT RAISE(ABORT,'injected prune failure'); END;",
-        ids[1].to_padded_decimal(),
-    )).unwrap();
+    blocker
+        .execute_batch(&format!(
+            concat!(
+                "CREATE TRIGGER fail_second_prune_delete BEFORE DELETE ON tasks ",
+                "WHEN OLD.id='{}' BEGIN SELECT RAISE(ABORT,",
+                "'injected prune failure'); END;",
+            ),
+            ids[1].to_padded_decimal(),
+        ))
+        .unwrap();
     assert!(
         store
             .prune_terminal_before(u64::MAX, std::num::NonZeroUsize::new(2).unwrap())

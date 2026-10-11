@@ -55,12 +55,23 @@ fn seed_legacy_database(path: &std::path::Path) -> String {
     let connection = Connection::open(path).expect("legacy database opens");
     connection
         .execute_batch(
-            "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, request_json TEXT NOT NULL, record_json TEXT NOT NULL); CREATE INDEX tasks_state_accepted ON tasks(state_kind, accepted_at); CREATE INDEX tasks_accepted_id ON tasks(accepted_at, id); CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL); PRAGMA user_version=3;",
+            concat!(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, ",
+                "accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, ",
+                "request_json TEXT NOT NULL, record_json TEXT NOT NULL); ",
+                "CREATE INDEX tasks_state_accepted ON tasks(state_kind, accepted_at); ",
+                "CREATE INDEX tasks_accepted_id ON tasks(accepted_at, id); ",
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL); ",
+                "PRAGMA user_version=3;",
+            ),
         )
         .expect("legacy schema is created");
     connection
         .execute(
-            "INSERT INTO tasks (id,state_kind,accepted_at,request_json,record_json) VALUES (?1,'Queued',1,'legacy-request','legacy-record')",
+            concat!(
+                "INSERT INTO tasks (id,state_kind,accepted_at,request_json,record_json) ",
+                "VALUES (?1,'Queued',1,'legacy-request','legacy-record')",
+            ),
             [&id],
         )
         .expect("legacy task is inserted");

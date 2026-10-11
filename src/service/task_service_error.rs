@@ -5,6 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::CapabilityError;
+#[cfg(feature = "event-bus")]
+use qubit_event_bus::spi::PublishGuarantee;
+use qubit_id::IdGenerationError;
+
 use crate::model::TaskStateKind;
 use crate::model::typed::TaskId;
 use crate::store::StoreError;
@@ -24,7 +30,7 @@ use crate::store::StoreError;
 pub enum TaskServiceError {
     /// ID generation failed before task acceptance.
     #[error("task ID generation failed: {0}")]
-    IdGeneration(#[from] qubit_id::IdGenerationError),
+    IdGeneration(#[from] IdGenerationError),
     /// Encoding or validating a typed task request failed.
     #[error("typed task request failed: {0}")]
     TypedRequest(String),
@@ -101,7 +107,7 @@ pub enum TaskServiceError {
         /// Identifier of the rejected event-bus provider.
         provider_id: String,
         /// Publish guarantee declared by the provider.
-        actual: qubit_event_bus::spi::PublishGuarantee,
+        actual: PublishGuarantee,
     },
     /// The task notification topic requires a codec that is not registered.
     #[cfg(feature = "event-bus")]
@@ -113,7 +119,7 @@ pub enum TaskServiceError {
         topic: String,
         /// Codec readiness diagnostic returned by the event bus.
         #[source]
-        source: qubit_event_bus::CapabilityError,
+        source: CapabilityError,
     },
     /// The task notification publisher failed while draining during shutdown.
     #[error("task notification publisher failed to close: {0}")]

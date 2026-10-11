@@ -5,7 +5,20 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-/// Error raised while validating or registering a typed handler.
+/// Describes why a typed handler descriptor cannot be validated or registered.
+///
+/// Inspect the variant to identify the invalid descriptor or conflicting
+/// registration before correcting the handler configuration.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::HandlerRegistrationError;
+///
+/// let error = HandlerRegistrationError::EmptyKindId;
+/// assert!(matches!(error, HandlerRegistrationError::EmptyKindId));
+/// ```
+#[must_use]
 #[derive(Debug, thiserror::Error)]
 pub enum HandlerRegistrationError {
     /// Handler routing key is empty.

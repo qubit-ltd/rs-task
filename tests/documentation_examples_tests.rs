@@ -7,8 +7,8 @@
 // =============================================================================
 //! Keeps the bilingual user guides aligned with the typed task API contract.
 
-/// Checks that both guides link to their typed API guide and describe event
-/// authority.
+/// Checks that both guides link to their typed API guide and describe durable
+/// lifecycle event publication.
 #[test]
 fn test_typed_task_guides_link_and_describe_lifecycle_events() {
     let english = include_str!("../doc/user-guide.md");

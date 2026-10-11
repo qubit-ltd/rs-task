@@ -5,9 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use qubit_metadata::Metadata;
 use serde::Deserialize;
 use serde::Serialize;
+use qubit_metadata::Metadata;
 
 use super::ResourceRequest;
 use super::TaskId;

@@ -34,6 +34,7 @@ pub struct ProgressCommand {
 impl ProgressCommand {
     /// Creates a progress update for the specified task attempt.
     #[must_use]
+    #[inline]
     pub fn new(
         id: TaskId,
         expected_attempt: u32,

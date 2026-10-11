@@ -7,6 +7,10 @@
 // =============================================================================
 //! Public contract tests for typed payload and task request encoding failures.
 
+use std::convert::Infallible;
+use std::io::Error;
+use std::array::TryFromSliceError;
+
 use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueDecoder;
@@ -16,6 +20,7 @@ use qubit_model_id::ModelId;
 use qubit_task::Payload;
 use qubit_task::ResourceRequest;
 use qubit_task::TaskRequest;
+use qubit_task::model::MAX_TASK_PAYLOAD_BYTES;
 use qubit_task::model::PayloadEncodeError;
 use qubit_task::model::TaskRequestEncodeError;
 
@@ -43,7 +48,7 @@ struct U32Codec;
 
 impl ValueEncoder<Counter> for U32Codec {
     type Output = Vec<u8>;
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
 
     fn encode(&mut self, value: &Counter) -> Result<Self::Output, Self::Error> {
         Ok(value.0.to_le_bytes().to_vec())
@@ -52,7 +57,7 @@ impl ValueEncoder<Counter> for U32Codec {
 
 impl ValueDecoder<[u8]> for U32Codec {
     type Output = Counter;
-    type Error = std::array::TryFromSliceError;
+    type Error = TryFromSliceError;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
         Ok(Counter(u32::from_le_bytes(bytes.try_into()?)))
@@ -70,16 +75,16 @@ struct FailingCodec;
 
 impl ValueEncoder<Counter> for FailingCodec {
     type Output = Vec<u8>;
-    type Error = std::io::Error;
+    type Error = Error;
 
     fn encode(&mut self, _value: &Counter) -> Result<Self::Output, Self::Error> {
-        Err(std::io::Error::other("intentional test encoder failure"))
+        Err(Error::other("intentional test encoder failure"))
     }
 }
 
 impl ValueDecoder<[u8]> for FailingCodec {
     type Output = Counter;
-    type Error = std::array::TryFromSliceError;
+    type Error = TryFromSliceError;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
         Ok(Counter(u32::from_le_bytes(bytes.try_into()?)))
@@ -97,7 +102,7 @@ struct BytesCodec;
 
 impl ValueEncoder<Bytes> for BytesCodec {
     type Output = Vec<u8>;
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
 
     fn encode(&mut self, value: &Bytes) -> Result<Self::Output, Self::Error> {
         Ok(value.0.clone())
@@ -106,7 +111,7 @@ impl ValueEncoder<Bytes> for BytesCodec {
 
 impl ValueDecoder<[u8]> for BytesCodec {
     type Output = Bytes;
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
         Ok(Bytes(bytes.to_vec()))
@@ -194,10 +199,10 @@ fn typed_payload_identity_comes_from_the_rust_type() {
 #[test]
 fn task_request_encode_rejects_encoded_payload_above_storage_limit() {
     let registry = ValueBytesCodecRegistry::try_global().expect("codec registry builds");
-    let oversized = vec![0_u8; qubit_task::model::MAX_TASK_PAYLOAD_BYTES + 1];
+    let oversized = vec![0_u8; MAX_TASK_PAYLOAD_BYTES + 1];
     assert!(matches!(
         request(Bytes(oversized), "qubit_task.tests.typed_encode_bytes").encode(registry),
         Err(TaskRequestEncodeError::PayloadTooLarge(size))
-            if size == qubit_task::model::MAX_TASK_PAYLOAD_BYTES + 1
+            if size == MAX_TASK_PAYLOAD_BYTES + 1
     ));
 }

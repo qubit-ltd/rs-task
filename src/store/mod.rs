@@ -9,13 +9,13 @@
 
 mod event_outbox_entry;
 mod memory_task_store;
-pub use event_outbox_entry::EventOutboxEntry;
 #[cfg(feature = "sqlite")]
 mod sqlite_task_store;
 mod store_error;
 mod task_future;
 mod task_store;
 
+pub use event_outbox_entry::EventOutboxEntry;
 pub use memory_task_store::DEFAULT_MAX_UNFINISHED_RECORDS;
 pub use memory_task_store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]

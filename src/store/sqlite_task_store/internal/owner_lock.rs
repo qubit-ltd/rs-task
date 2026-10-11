@@ -59,6 +59,8 @@ pub(crate) fn acquire_owner_lock(database_path: &Path) -> Result<File, StoreErro
 /// # Returns
 ///
 /// `true` when the error represents an existing lock.
+#[must_use]
+#[inline]
 fn is_lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
         || error
@@ -75,6 +77,7 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
 /// # Returns
 ///
 /// A store failure containing the operating-system diagnostic.
+#[must_use]
 fn failure(error: std::io::Error) -> StoreError {
     StoreError::Failure(error.to_string())
 }

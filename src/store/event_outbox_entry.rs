@@ -8,15 +8,18 @@
 //! Immutable lifecycle snapshot awaiting confirmed event-bus admission.
 use crate::model::typed::TaskId;
 
-/// A durable notification. Consumers deduplicate by task ID and state version.
+/// Holds the lifecycle event data persisted until the event bus confirms admission.
+///
+/// Consumers can use the task ID and state version to identify the committed state,
+/// while the stable event ID lets them recognize retries of the same notification.
 #[derive(Debug, Clone)]
 pub struct EventOutboxEntry {
-    /// Task whose state was committed.
+    /// Identifies the task whose lifecycle state was committed with this event.
     pub task_id: TaskId,
-    /// Committed lifecycle revision.
+    /// Revision of the task lifecycle state represented by this event.
     pub state_version: u64,
-    /// Stable event identity reused by every publish attempt.
+    /// Event identity retained across publish attempts so retries represent the same event.
     pub event_id: String,
-    /// JSON snapshot captured inside the lifecycle transaction.
+    /// Serialized event payload captured in the transaction that committed the lifecycle state.
     pub event_json: String,
 }

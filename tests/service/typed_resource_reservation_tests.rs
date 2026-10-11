@@ -5,11 +5,17 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+
+use std::array::TryFromSliceError;
+use std::convert::Infallible;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use qubit_codec::ValueBytesCodecDescriptor;
 use qubit_codec::ValueBytesCodecRegistration;
@@ -17,14 +23,23 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
+use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
+use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::AcceptOutcome;
+use qubit_task::model::OwnerEpoch;
 use qubit_task::model::ProgressCommand;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
@@ -32,40 +47,48 @@ use qubit_task::model::StartCommand;
 use qubit_task::model::StoredTask;
 use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskCursor;
+use qubit_task::model::TaskId;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskPage;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskSummary;
+use qubit_task::model::StoreCapabilities;
 use qubit_task::model::TransitionCommand;
+use qubit_task::handler::TaskRunResult;
+use qubit_task::service::CancelOutcome;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 
+use tokio;
+use tokio::sync::Notify;
+use tokio::sync::Semaphore;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counter(u32);
 
-impl qubit_model_id::HasModelId for Counter {
-    const MODEL_ID: qubit_model_id::ModelId = qubit_model_id::ModelId::new("test.ResourceReservationPayload");
+impl HasModelId for Counter {
+    const MODEL_ID: ModelId = ModelId::new("test.ResourceReservationPayload");
 }
 
 #[derive(Default)]
 struct U32Codec;
 
-impl qubit_codec::ValueEncoder<Counter> for U32Codec {
+impl ValueEncoder<Counter> for U32Codec {
     type Output = Vec<u8>;
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
 
     fn encode(&mut self, value: &Counter) -> Result<Vec<u8>, Self::Error> {
         Ok(value.0.to_le_bytes().to_vec())
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
+impl ValueDecoder<[u8]> for U32Codec {
     type Output = Counter;
-    type Error = std::array::TryFromSliceError;
+    type Error = TryFromSliceError;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Counter, Self::Error> {
         let raw: [u8; 4] = bytes.try_into()?;
@@ -87,9 +110,9 @@ static CODEC_REGISTRATION: ValueBytesCodecRegistration = ValueCodecRegistration:
 
 struct Ids(AtomicU64);
 
-impl qubit_id::IdGenerator for Ids {
-    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
-        Ok(qubit_id::Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
+impl IdGenerator for Ids {
+    fn generate(&self) -> Result<Id, IdGenerationError> {
+        Ok(Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
     }
 }
 
@@ -124,23 +147,23 @@ fn request_resources(cpu_slots: u32, gpu_count: u32) -> TaskRequest<Counter> {
 
 struct ReadyScanGate {
     armed: AtomicBool,
-    reached: tokio::sync::Notify,
-    release: tokio::sync::Semaphore,
-    completed: tokio::sync::Notify,
+    reached: Notify,
+    release: Semaphore,
+    completed: Notify,
 }
 
 #[derive(Default)]
 struct StartTrace {
-    ids: std::sync::Mutex<Vec<qubit_task::model::TaskId>>,
-    changed: tokio::sync::Notify,
-    conflicts: std::sync::Mutex<Vec<qubit_task::model::TaskId>>,
-    ready_scans: std::sync::Mutex<Vec<Option<TaskCursor>>>,
+    ids: Mutex<Vec<TaskId>>,
+    changed: Notify,
+    conflicts: Mutex<Vec<TaskId>>,
+    ready_scans: Mutex<Vec<Option<TaskCursor>>>,
 }
 
 struct StartCasGate {
     armed: AtomicBool,
-    reached: tokio::sync::Notify,
-    release: tokio::sync::Semaphore,
+    reached: Notify,
+    release: Semaphore,
 }
 
 struct GatedReadyStore {
@@ -151,19 +174,19 @@ struct GatedReadyStore {
 }
 
 impl TaskStore for GatedReadyStore {
-    fn capabilities(&self) -> qubit_task::model::StoreCapabilities {
+    fn capabilities(&self) -> StoreCapabilities {
         self.inner.capabilities()
     }
     fn accept_encoded<'a>(
         &'a self,
-        id: qubit_task::model::TaskId,
+        id: TaskId,
         request: StoredTaskRequest,
     ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         self.inner.accept_encoded(id, request)
     }
     fn get_encoded_task<'a>(
         &'a self,
-        id: qubit_task::model::TaskId,
+        id: TaskId,
     ) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         self.inner.get_encoded_task(id)
     }
@@ -208,7 +231,7 @@ impl TaskStore for GatedReadyStore {
     fn list_ready_queued<'a>(
         &'a self,
         after: Option<TaskCursor>,
-        limit: std::num::NonZeroUsize,
+        limit: NonZeroUsize,
         now_ms: u64,
     ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         Box::pin(async move {
@@ -241,21 +264,21 @@ impl TaskStore for GatedReadyStore {
     fn prune_terminal_before<'a>(
         &'a self,
         cutoff: u64,
-        max_rows: std::num::NonZeroUsize,
+        max_rows: NonZeroUsize,
     ) -> TaskFuture<'a, Result<usize, StoreError>> {
         self.inner.prune_terminal_before(cutoff, max_rows)
     }
-    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<qubit_task::model::OwnerEpoch, StoreError>> {
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         self.inner.acquire_owner()
     }
-    fn release_owner<'a>(&'a self, epoch: qubit_task::model::OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
+    fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         self.inner.release_owner(epoch)
     }
 }
 
 async fn wait_for(
-    service: &qubit_task::TaskExecutionService,
-    id: qubit_task::model::TaskId,
+    service: &TaskExecutionService,
+    id: TaskId,
     predicate: impl Fn(&TaskState) -> bool,
 ) -> TaskState {
     for _ in 0..1000 {
@@ -264,15 +287,15 @@ async fn wait_for(
         {
             return summary.state;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     panic!("typed task did not reach the expected state")
 }
 
 /// Waits for the scheduler to start at least `count` tasks and returns their
 /// order.
-async fn wait_for_starts(trace: &StartTrace, count: usize) -> Vec<qubit_task::model::TaskId> {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+async fn wait_for_starts(trace: &StartTrace, count: usize) -> Vec<TaskId> {
+    tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let changed = trace.changed.notified();
             tokio::pin!(changed);
@@ -293,17 +316,17 @@ async fn wait_for_starts(trace: &StartTrace, count: usize) -> Vec<qubit_task::mo
 async fn bypass_fixture(
     page_size: usize,
 ) -> (
-    qubit_task::TaskExecutionService,
+    TaskExecutionService,
     Arc<ReadyScanGate>,
     Arc<StartTrace>,
-    Arc<tokio::sync::Notify>,
-    Arc<tokio::sync::Semaphore>,
+    Arc<Notify>,
+    Arc<Semaphore>,
 ) {
     let gate = Arc::new(ReadyScanGate {
         armed: AtomicBool::new(false),
-        reached: tokio::sync::Notify::new(),
-        release: tokio::sync::Semaphore::new(0),
-        completed: tokio::sync::Notify::new(),
+        reached: Notify::new(),
+        release: Semaphore::new(0),
+        completed: Notify::new(),
     });
     let trace = Arc::new(StartTrace::default());
     let store = Arc::new(GatedReadyStore {
@@ -312,8 +335,8 @@ async fn bypass_fixture(
         start_gate: None,
         trace: Some(Arc::clone(&trace)),
     });
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(0));
     let codecs =
         Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).expect("codec registration"));
     let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(1000))))
@@ -322,9 +345,9 @@ async fn bypass_fixture(
             gpus: [("gpu-0".to_owned(), vec!["test".to_owned()])].into(),
             ..ResourceCapacity::default()
         })
-        .max_running_tasks(std::num::NonZeroUsize::new(2).expect("positive run limit"))
-        .scan_page_size(std::num::NonZeroUsize::new(page_size).expect("positive page size"))
-        .max_resource_bypasses(std::num::NonZeroUsize::new(1).expect("positive bypass limit"));
+        .max_running_tasks(NonZeroUsize::new(2).expect("positive run limit"))
+        .scan_page_size(NonZeroUsize::new(page_size).expect("positive page size"))
+        .max_resource_bypasses(NonZeroUsize::new(1).expect("positive bypass limit"));
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -351,26 +374,26 @@ async fn complete_gated_scan(gate: &ReadyScanGate) {
     let reached = gate.reached.notified();
     tokio::pin!(reached);
     reached.as_mut().enable();
-    tokio::time::timeout(std::time::Duration::from_secs(2), reached)
+    tokio::time::timeout(Duration::from_secs(2), reached)
         .await
         .expect("scheduler did not reach ready scan");
     let completed = gate.completed.notified();
     tokio::pin!(completed);
     completed.as_mut().enable();
     gate.release.add_permits(1);
-    tokio::time::timeout(std::time::Duration::from_secs(2), completed)
+    tokio::time::timeout(Duration::from_secs(2), completed)
         .await
         .expect("scheduler did not complete ready scan");
 }
 
 struct GatedHandler {
-    started: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Semaphore>,
+    started: Arc<Notify>,
+    release: Arc<Semaphore>,
     calls: Arc<AtomicUsize>,
 }
 
 impl TaskHandler<Counter> for GatedHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 self.started.notify_one();
@@ -402,8 +425,8 @@ async fn typed_resource_request_above_capacity_is_blocked() {
         .register::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
-                started: Arc::new(tokio::sync::Notify::new()),
-                release: Arc::new(tokio::sync::Semaphore::new(0)),
+                started: Arc::new(Notify::new()),
+                release: Arc::new(Semaphore::new(0)),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
         )
@@ -422,8 +445,8 @@ async fn typed_resource_request_above_capacity_is_blocked() {
 #[tokio::test]
 async fn typed_resource_reservation_waits_until_capacity_is_released() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut builder = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(8)),
@@ -455,7 +478,7 @@ async fn typed_resource_reservation_waits_until_capacity_is_released() {
     ));
 
     let second = service.submit(request(1)).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(matches!(
         service.get(second.id).await.unwrap().unwrap().state,
         TaskState::Queued
@@ -476,8 +499,8 @@ async fn typed_resource_reservation_waits_until_capacity_is_released() {
 #[tokio::test]
 async fn scheduler_skips_resource_blocked_task_without_consuming_run_slot() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut builder = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(8)),
@@ -489,7 +512,7 @@ async fn scheduler_skips_resource_blocked_task_without_consuming_run_slot() {
         gpus: [("gpu-0".to_owned(), vec!["test".to_owned()])].into(),
         ..ResourceCapacity::default()
     })
-    .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
+    .max_running_tasks(NonZeroUsize::new(2).unwrap());
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -539,7 +562,7 @@ async fn resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_task() 
         .submit(request_resources(1, 1))
         .await
         .expect("running task accepted");
-    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("first handler did not start");
     let anchor = service.submit(request_resources(0, 1)).await.expect("anchor accepted");
@@ -585,7 +608,7 @@ async fn resource_bypass_limit_clears_when_anchor_is_cancelled() {
         .submit(request_resources(1, 1))
         .await
         .expect("running task accepted");
-    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("first handler did not start");
     let anchor = service.submit(request_resources(0, 1)).await.expect("anchor accepted");
@@ -617,7 +640,7 @@ async fn resource_bypass_limit_clears_when_anchor_is_cancelled() {
 
     assert_eq!(
         service.cancel(anchor.id).await.expect("anchor cancellation"),
-        qubit_task::service::CancelOutcome::CancelledBeforeStart
+        CancelOutcome::CancelledBeforeStart
     );
     assert_eq!(
         wait_for_starts(&trace, 3).await,
@@ -634,7 +657,7 @@ async fn resource_bypass_limit_preserves_anchor_across_ready_pages() {
         .submit(request_resources(1, 1))
         .await
         .expect("running task accepted");
-    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("first handler did not start");
 
@@ -717,7 +740,7 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
         .submit(request_resources(1, 1))
         .await
         .expect("running task accepted");
-    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("first handler did not start");
 
@@ -771,7 +794,7 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
     let reached = gate.reached.notified();
     tokio::pin!(reached);
     reached.as_mut().enable();
-    tokio::time::timeout(std::time::Duration::from_secs(2), reached)
+    tokio::time::timeout(Duration::from_secs(2), reached)
         .await
         .expect("second scan did not reach gate");
     trace
@@ -783,7 +806,7 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
     tokio::pin!(completed);
     completed.as_mut().enable();
     gate.release.add_permits(1);
-    tokio::time::timeout(std::time::Duration::from_secs(2), completed)
+    tokio::time::timeout(Duration::from_secs(2), completed)
         .await
         .expect("second scan did not complete");
 
@@ -847,13 +870,13 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
 #[tokio::test]
 async fn resource_release_during_ready_scan_is_not_lost() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release_handler = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(Notify::new());
+    let release_handler = Arc::new(Semaphore::new(0));
     let gate = Arc::new(ReadyScanGate {
         armed: AtomicBool::new(false),
-        reached: tokio::sync::Notify::new(),
-        release: tokio::sync::Semaphore::new(0),
-        completed: tokio::sync::Notify::new(),
+        reached: Notify::new(),
+        release: Semaphore::new(0),
+        completed: Notify::new(),
     });
     let store = Arc::new(GatedReadyStore {
         inner: MemoryTaskStore::new(8),
@@ -866,7 +889,7 @@ async fn resource_release_during_ready_scan_is_not_lost() {
             cpu_slots: 1,
             ..ResourceCapacity::default()
         })
-        .max_running_tasks(std::num::NonZeroUsize::new(2).unwrap());
+        .max_running_tasks(NonZeroUsize::new(2).unwrap());
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -886,7 +909,7 @@ async fn resource_release_during_ready_scan_is_not_lost() {
     scan_reached.as_mut().enable();
     gate.armed.store(true, Ordering::Release);
     let waiting = service.submit(request(1)).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), scan_reached)
+    tokio::time::timeout(Duration::from_secs(2), scan_reached)
         .await
         .unwrap();
 
@@ -908,14 +931,14 @@ async fn cancel_during_start_cas_releases_reservation_without_running_handler() 
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let ready_gate = Arc::new(ReadyScanGate {
         armed: AtomicBool::new(false),
-        reached: tokio::sync::Notify::new(),
-        release: tokio::sync::Semaphore::new(0),
-        completed: tokio::sync::Notify::new(),
+        reached: Notify::new(),
+        release: Semaphore::new(0),
+        completed: Notify::new(),
     });
     let start_gate = Arc::new(StartCasGate {
         armed: AtomicBool::new(true),
-        reached: tokio::sync::Notify::new(),
-        release: tokio::sync::Semaphore::new(0),
+        reached: Notify::new(),
+        release: Semaphore::new(0),
     });
     let store = Arc::new(GatedReadyStore {
         inner: MemoryTaskStore::new(8),
@@ -923,8 +946,8 @@ async fn cancel_during_start_cas_releases_reservation_without_running_handler() 
         start_gate: Some(Arc::clone(&start_gate)),
         trace: None,
     });
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release_handler = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(Notify::new());
+    let release_handler = Arc::new(Semaphore::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(900)))).capacity(
         ResourceCapacity {
@@ -949,13 +972,13 @@ async fn cancel_during_start_cas_releases_reservation_without_running_handler() 
     tokio::pin!(start_reached);
     start_reached.as_mut().enable();
     let cancelled = service.submit(request(1)).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), start_reached)
+    tokio::time::timeout(Duration::from_secs(2), start_reached)
         .await
         .unwrap();
 
     assert_eq!(
         service.cancel(cancelled.id).await.unwrap(),
-        qubit_task::service::CancelOutcome::CancelledBeforeStart
+        CancelOutcome::CancelledBeforeStart
     );
     start_gate.release.add_permits(1);
     assert_eq!(

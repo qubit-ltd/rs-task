@@ -12,12 +12,17 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use qubit_codec::ValueBytesCodecRegistry;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use qubit_task::service::TaskServiceError;
+use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::StoreError;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskState;
-use qubit_task::store::MemoryTaskStore;
 
 /// Call after repairing the handler or codec configuration and restarting.
 async fn resume_after_repair(service: &TaskExecutionService, id: TaskId) -> Result<(), Box<dyn std::error::Error>> {
@@ -31,7 +36,7 @@ async fn resume_after_repair(service: &TaskExecutionService, id: TaskId) -> Resu
         }
         match service.resume_blocked(id, summary.state_version).await {
             Ok(_) => println!("{} queued for retry", id.to_padded_decimal()),
-            Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::Conflict)) => {
+            Err(TaskServiceError::Store(StoreError::Conflict)) => {
                 eprintln!("{} changed; read its summary again", id.to_padded_decimal());
             }
             Err(error) => return Err(error.into()),
@@ -42,9 +47,9 @@ async fn resume_after_repair(service: &TaskExecutionService, id: TaskId) -> Resu
 
 struct SequentialIds(AtomicU64);
 
-impl qubit_id::IdGenerator for SequentialIds {
-    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
-        Ok(qubit_id::Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
+impl IdGenerator for SequentialIds {
+    fn generate(&self) -> Result<Id, IdGenerationError> {
+        Ok(Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
     }
 }
 

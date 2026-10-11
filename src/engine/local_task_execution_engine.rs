@@ -37,6 +37,7 @@ impl LocalTaskExecutionEngine {
     ///
     /// A local engine with no resources reserved.
     #[must_use]
+    #[inline]
     pub fn new(capacity: ResourceCapacity) -> Self {
         Self {
             capacity,
@@ -48,6 +49,27 @@ impl LocalTaskExecutionEngine {
     }
 
     /// Reserves a typed task's resources in the same ledger as legacy tasks.
+    ///
+    /// The task identifier is accepted for API consistency but is not stored by
+    /// this local engine. Capacity that cannot ever satisfy the request is
+    /// reported separately from capacity that is currently reserved.
+    ///
+    /// # Parameters
+    ///
+    /// * `_id` - Identifier of the task requesting the reservation.
+    /// * `request` - CPU, GPU, memory, disk, and custom resource requirements.
+    ///
+    /// # Returns
+    ///
+    /// A reservation guard that releases the accounted resources when dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Unsatisfiable`] when the configured capacity can
+    /// never satisfy the request, [`EngineError::TemporarilyUnavailable`] when
+    /// currently reserved resources prevent admission, or
+    /// [`EngineError::ReservationTokenExhausted`] when no reservation token is
+    /// available.
     pub fn try_prepare_typed(
         &self,
         _id: crate::model::typed::TaskId,

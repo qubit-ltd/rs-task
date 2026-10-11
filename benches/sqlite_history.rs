@@ -114,7 +114,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         crate_version: env!("CARGO_PKG_VERSION"),
         sqlite_version: rusqlite::version(),
         features: &["sqlite"],
-        flush_checkpoint_strategy: "after seed and after measurements: PRAGMA wal_checkpoint(TRUNCATE); latency excludes seed, checkpoint, and index construction",
+        flush_checkpoint_strategy: concat!(
+            "after seed and after measurements: PRAGMA wal_checkpoint(TRUNCATE); ",
+            "latency excludes seed, checkpoint, and index construction",
+        ),
         datasets,
     };
     std::fs::write(&output, serde_json::to_vec_pretty(&report)?)?;
@@ -172,11 +175,17 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     let legacy_or_no_index_baseline = legacy_history_measurement(&mut no_index_connection, dataset.cursor)?;
     let legacy_or_no_index_plan = explain(
         &no_index_connection,
-        "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks
+        "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json
+         FROM tasks
          WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2))
            AND (?3 IS NULL OR correlation_key = ?3)
          ORDER BY accepted_at,id LIMIT ?4",
-        params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_padded_decimal(), Option::<String>::None, 33i64],
+        params![
+            dataset.cursor.accepted_at_ms as i64,
+            dataset.cursor.id.to_padded_decimal(),
+            Option::<String>::None,
+            33i64
+        ],
     )?;
     drop(no_index_connection);
 
@@ -198,11 +207,17 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     let legacy_or_baseline = legacy_history_measurement(&mut legacy_connection, dataset.cursor)?;
     let legacy_or_baseline_plan = explain(
         &legacy_connection,
-        "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks
+        "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json
+         FROM tasks
          WHERE (?1 IS NULL OR accepted_at > ?1 OR (accepted_at = ?1 AND id > ?2))
            AND (?3 IS NULL OR correlation_key = ?3)
          ORDER BY accepted_at,id LIMIT ?4",
-        params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_padded_decimal(), Option::<String>::None, 33i64],
+        params![
+            dataset.cursor.accepted_at_ms as i64,
+            dataset.cursor.id.to_padded_decimal(),
+            Option::<String>::None,
+            33i64
+        ],
     )?;
     drop(legacy_connection);
 
@@ -211,7 +226,8 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     let first_store_open_and_compound_index_build_ms = elapsed_ms(open_start.elapsed());
     let sqlite = Connection::open(&dataset.database_path)?;
     sqlite.execute(
-        "UPDATE tasks SET retry_not_before_ms=CASE WHEN CAST(id AS INTEGER)%4=0 THEN 0 ELSE 9223372036854775807 END WHERE state_kind='Queued'",
+        "UPDATE tasks SET retry_not_before_ms=CASE WHEN CAST(id AS INTEGER)%4=0 THEN 0 \
+         ELSE 9223372036854775807 END WHERE state_kind='Queued'",
         [],
     )?;
     sqlite.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -235,19 +251,23 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     )?;
     let unfinished_recovery_plan = explain(
         &sqlite,
-        "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks
+        "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json
+         FROM tasks
          WHERE +state_kind IN ('Queued','Running') AND (accepted_at,id) > (?1,?2)
          ORDER BY accepted_at,id LIMIT 257",
         params![dataset.cursor.accepted_at_ms as i64, dataset.cursor.id.to_padded_decimal()],
     )?;
     let ready_queue_plan = explain(
         &sqlite,
-        "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ORDER BY accepted_at,id LIMIT ?2",
+        "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id
+         WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)
+         ORDER BY accepted_at,id LIMIT ?2",
         params![i64::MAX, PAGE_SIZE as i64 + 1],
     )?;
     let retry_deadline_plan = explain(
         &sqlite,
-        "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1",
+        "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline
+         WHERE state_kind='Queued' AND retry_not_before_ms>?1",
         params![i64::MAX - 1],
     )?;
 
@@ -371,8 +391,15 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
         ready_queue_pages,
         scheduler_queries_per_wake: ready_queue_pages + 1,
         ready_queue_max_page,
-        ready_retry_mix: "queued rows with numeric task ID divisible by four are due; other queued rows retry at SQLite i64::MAX; scan time is i64::MAX-1",
-        seed: "xorshift64 seed 0x6a09e667f3bcc909; deterministic padded numeric IDs; identical prefix across sizes; ready scan adds future retry deadlines to 75% of Queued rows",
+        ready_retry_mix: concat!(
+            "queued rows with numeric task ID divisible by four are due; ",
+            "other queued rows retry at SQLite i64::MAX; scan time is i64::MAX-1",
+        ),
+        seed: concat!(
+            "xorshift64 seed 0x6a09e667f3bcc909; deterministic padded numeric IDs; ",
+            "identical prefix across sizes; ready scan adds future retry deadlines ",
+            "to 75% of Queued rows",
+        ),
         indexless_database_bytes,
         legacy_index_build_ms,
         legacy_indexed_database_bytes,
@@ -391,7 +418,10 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
         legacy_or_baseline,
         count_states,
         shutdown_samples: SHUTDOWN_SAMPLES,
-        shutdown_timing_strategy: "each sample builds a fresh service from a same-seed checkpointed DB copy before timing; build/recovery is excluded and only service.shutdown() is timed",
+        shutdown_timing_strategy: concat!(
+            "each sample builds a fresh service from a same-seed checkpointed DB copy ",
+            "before timing; build/recovery is excluded and only service.shutdown() is timed",
+        ),
         shutdown,
         query_plans,
     })
@@ -510,7 +540,8 @@ fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<Stri
     explain(
         connection,
         &format!(
-            "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json FROM tasks {where_sql}"
+            "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json \
+             FROM tasks {where_sql}"
         ),
         rusqlite::params_from_iter(values),
     )

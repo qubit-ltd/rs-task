@@ -53,6 +53,7 @@ use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
+use qubit_task::model::TaskSummary;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
@@ -394,7 +395,7 @@ async fn wait_for_state(service: &TaskExecutionService, id: TaskId, state: TaskS
     .expect("task reaches expected state before deadline");
 }
 
-async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> qubit_task::model::TaskSummary {
+async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> TaskSummary {
     timeout(DEADLINE, async {
         loop {
             let summary = service

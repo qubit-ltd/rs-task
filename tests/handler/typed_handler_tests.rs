@@ -10,9 +10,18 @@
 //! The integration-test crate root will include this module when the new
 //! handler API is wired into `handler::mod`.
 
+use std::convert::Infallible;
+use std::io::Error as IoError;
+use std::io::ErrorKind;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
+use qubit_codec::ValueCodecExecutionError;
+use qubit_id::Id;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::HandlerDispatchError;
@@ -21,7 +30,11 @@ use qubit_task::TaskContext;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
 use qubit_task::TaskHandlerRegistry;
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::StoredPayload;
+use qubit_task::model::TaskId;
+use qubit_task::model::TaskOutput;
 use qubit_task::store::TaskFuture;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -30,12 +43,10 @@ struct Input(u32);
 struct Handler;
 
 impl TaskHandler<Input> for Handler {
-    fn run<'a>(&'a self, input: Input, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, input: Input, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             assert_eq!(input, Input(42));
-            Ok(qubit_task::handler::TaskRunOutcome::Succeeded(
-                qubit_task::model::TaskOutput::default(),
-            ))
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
         })
     }
 }
@@ -67,23 +78,23 @@ fn payload(type_id: &str, schema_version: u32, codec_id: &str) -> StoredPayload 
 #[derive(Default)]
 struct U64Codec;
 
-impl qubit_codec::ValueEncoder<u64> for U64Codec {
+impl ValueEncoder<u64> for U64Codec {
     type Output = Vec<u8>;
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
 
     fn encode(&mut self, input: &u64) -> Result<Self::Output, Self::Error> {
         Ok(input.to_le_bytes().to_vec())
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for U64Codec {
+impl ValueDecoder<[u8]> for U64Codec {
     type Output = u64;
-    type Error = std::io::Error;
+    type Error = IoError;
 
     fn decode(&mut self, input: &[u8]) -> Result<Self::Output, Self::Error> {
         let bytes: [u8; 8] = input
             .try_into()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "expected 8 bytes"))?;
+            .map_err(|_| IoError::new(ErrorKind::InvalidData, "expected 8 bytes"))?;
         Ok(u64::from_le_bytes(bytes))
     }
 }
@@ -93,23 +104,23 @@ qubit_codec::register_value_bytes_codec!(id = "qubit_task.tests.handler_u64", co
 #[derive(Default)]
 struct InputCodec;
 
-impl qubit_codec::ValueEncoder<Input> for InputCodec {
+impl ValueEncoder<Input> for InputCodec {
     type Output = Vec<u8>;
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
 
     fn encode(&mut self, input: &Input) -> Result<Self::Output, Self::Error> {
         Ok(input.0.to_le_bytes().to_vec())
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for InputCodec {
+impl ValueDecoder<[u8]> for InputCodec {
     type Output = Input;
-    type Error = std::io::Error;
+    type Error = IoError;
 
     fn decode(&mut self, input: &[u8]) -> Result<Self::Output, Self::Error> {
         let bytes: [u8; 4] = input
             .try_into()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "expected 4 bytes"))?;
+            .map_err(|_| IoError::new(ErrorKind::InvalidData, "expected 4 bytes"))?;
         Ok(Input(u32::from_le_bytes(bytes)))
     }
 }
@@ -117,7 +128,7 @@ impl qubit_codec::ValueDecoder<[u8]> for InputCodec {
 qubit_codec::register_value_bytes_codec!(id = "qubit_task.tests.handler_input", codec = InputCodec, value = Input);
 
 #[test]
-fn registration_rejects_a_duplicate_kind_id_even_if_versions_differ() {
+fn test_registration_rejects_a_duplicate_kind_id_even_if_versions_differ() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
 
@@ -127,7 +138,7 @@ fn registration_rejects_a_duplicate_kind_id_even_if_versions_differ() {
 }
 
 #[test]
-fn descriptor_requires_one_payload_type_and_unique_explicit_versions() {
+fn test_descriptor_requires_one_payload_type_and_unique_explicit_versions() {
     let mut registry = TaskHandlerRegistry::new();
 
     let error = registry.register(descriptor(vec![]), Arc::new(Handler)).unwrap_err();
@@ -140,7 +151,7 @@ fn descriptor_requires_one_payload_type_and_unique_explicit_versions() {
 }
 
 #[test]
-fn registry_rejects_empty_kind_ids_and_unexpected_external_hooks() {
+fn test_registry_rejects_empty_kind_ids_and_unexpected_external_hooks() {
     let mut registry = TaskHandlerRegistry::new();
     let mut empty_kind = descriptor(vec![1]);
     empty_kind.kind_id = " \t".into();
@@ -161,7 +172,7 @@ fn registry_rejects_empty_kind_ids_and_unexpected_external_hooks() {
 }
 
 #[test]
-fn registry_reports_missing_handler_and_preserves_registration_source() {
+fn test_registry_reports_missing_handler_and_preserves_registration_source() {
     let registry = TaskHandlerRegistry::new();
     assert!(matches!(
         registry.prepare("example.unknown", payload("example.ResizeRequest", 1, "example.u32"), &ValueBytesCodecRegistry::empty()),
@@ -173,7 +184,7 @@ fn registry_reports_missing_handler_and_preserves_registration_source() {
         registry
             .cancel_externally(
                 "example.unknown",
-                qubit_task::model::TaskId::from_id(qubit_id::Id::new(42)),
+                TaskId::from_id(Id::new(42)),
                 1,
             )
             .is_none()
@@ -197,7 +208,7 @@ fn registry_reports_missing_handler_and_preserves_registration_source() {
 }
 
 #[test]
-fn handler_accepts_only_its_declared_payload_model() {
+fn test_handler_accepts_only_its_declared_payload_model() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(descriptor(vec![1, 2]), Arc::new(Handler)).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
@@ -214,7 +225,7 @@ fn handler_accepts_only_its_declared_payload_model() {
 }
 
 #[test]
-fn handler_accepts_each_declared_schema_version_but_rejects_others() {
+fn test_handler_accepts_each_declared_schema_version_but_rejects_others() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(descriptor(vec![1, 3]), Arc::new(Handler)).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
@@ -240,7 +251,7 @@ fn handler_accepts_each_declared_schema_version_but_rejects_others() {
 }
 
 #[test]
-fn missing_codec_is_rejected_before_handler_execution() {
+fn test_missing_codec_is_rejected_before_handler_execution() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
 
@@ -256,7 +267,7 @@ fn missing_codec_is_rejected_before_handler_execution() {
 }
 
 #[test]
-fn payload_codec_with_another_rust_value_type_is_rejected_before_run() {
+fn test_payload_codec_with_another_rust_value_type_is_rejected_before_run() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
@@ -273,7 +284,7 @@ fn payload_codec_with_another_rust_value_type_is_rejected_before_run() {
 }
 
 #[test]
-fn successfully_decoded_payload_is_prepared_for_execution() {
+fn test_successfully_decoded_payload_is_prepared_for_execution() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
@@ -292,7 +303,7 @@ fn successfully_decoded_payload_is_prepared_for_execution() {
 }
 
 #[test]
-fn malformed_bytes_are_classified_as_a_codec_decode_error() {
+fn test_malformed_bytes_are_classified_as_a_codec_decode_error() {
     let mut registry = TaskHandlerRegistry::new();
     registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
@@ -312,15 +323,12 @@ fn malformed_bytes_are_classified_as_a_codec_decode_error() {
 
     assert!(matches!(
         error,
-        HandlerDispatchError::Codec(qubit_codec::ValueCodecExecutionError::DecodeFailed { .. })
+        HandlerDispatchError::Codec(ValueCodecExecutionError::DecodeFailed { .. })
     ));
 }
 
 #[tokio::test]
-async fn external_cancellation_hook_is_required_and_invoked_with_attempt_identity() {
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-
+async fn test_external_cancellation_hook_is_required_and_invoked_with_attempt_identity() {
     let mut descriptor = descriptor(vec![1]);
     descriptor.cancellation_mode = CancellationMode::ExternalHook;
     let mut registry = TaskHandlerRegistry::new();
@@ -337,7 +345,7 @@ async fn external_cancellation_hook_is_required_and_invoked_with_attempt_identit
             Arc::new(move |task_id, attempt| {
                 let hook_observed = Arc::clone(&hook_observed);
                 Box::pin(async move {
-                    assert_eq!(task_id, qubit_task::model::TaskId::from_id(qubit_id::Id::new(42)));
+                    assert_eq!(task_id, TaskId::from_id(Id::new(42)));
                     assert_eq!(attempt, 7);
                     hook_observed.fetch_add(1, Ordering::AcqRel);
                     Ok(())
@@ -350,7 +358,7 @@ async fn external_cancellation_hook_is_required_and_invoked_with_attempt_identit
     registry
         .cancel_externally(
             "example.image.resize",
-            qubit_task::model::TaskId::from_id(qubit_id::Id::new(42)),
+            TaskId::from_id(Id::new(42)),
             7,
         )
         .unwrap()

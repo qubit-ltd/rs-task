@@ -5,13 +5,19 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use qubit_id::Id;
+use qubit_metadata::Metadata;
+use qubit_task::model::ResourceRequest;
 use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskId;
+use rusqlite::Connection;
+use rusqlite::params;
+use serde_json::json;
 
 /// Deterministic database paths and a real history position near its tail.
 pub struct HistoryDataset {
@@ -23,11 +29,7 @@ pub struct HistoryDataset {
 /// Creates a schema-version-4 database with deterministic legal task rows.
 /// Secondary indexes are deliberately left to SqliteTaskStore::open so the
 /// first-open/index-build cost can be measured independently of seeding.
-pub fn create(size: usize, directory: &std::path::Path) -> Result<HistoryDataset, Box<dyn std::error::Error>> {
-    use rusqlite::Connection;
-    use rusqlite::params;
-    use serde_json::json;
-
+pub fn create(size: usize, directory: &Path) -> Result<HistoryDataset, Box<dyn std::error::Error>> {
     let database_path = directory.join(format!("history-{size}.sqlite"));
     let mut connection = Connection::open(&database_path)?;
     connection.execute_batch(
@@ -91,8 +93,8 @@ pub fn create(size: usize, directory: &std::path::Path) -> Result<HistoryDataset
             "payload_type_id": "qubit_task.benchmark.Payload",
             "payload_schema_version": 1,
             "payload_codec_id": "qubit.bytes.json",
-            "metadata": qubit_metadata::Metadata::new(),
-            "resource_limit": qubit_task::model::ResourceRequest::default(),
+            "metadata": Metadata::new(),
+            "resource_limit": ResourceRequest::default(),
             "correlation_key": correlation,
             "idempotency_key": null
         })

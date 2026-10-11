@@ -9,12 +9,13 @@
 
 use std::sync::Arc;
 
-use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::AsyncEventBusRegistry;
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::RequiredCapabilities;
 use qubit_event_bus::spi::PublishGuarantee;
-use qubit_event_bus::codec::CodecRegistry;
-use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 use qubit_task::event::TaskEvent;
@@ -40,25 +41,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .durable()
                 .with_publish_guarantee(PublishGuarantee::Accepted),
         )
-        .with_provider_options([
-            ("redis.url".into(), "redis://127.0.0.1/".into()),
-            ("redis.namespace".into(), "task-service".into()),
-        ].into())
+        .with_provider_options(
+            [
+                ("redis.url".into(), "redis://127.0.0.1/".into()),
+                ("redis.namespace".into(), "task-service".into()),
+            ]
+            .into(),
+        )
         .with_facade_config(facade);
     let bus = Arc::new(AsyncEventBusRegistry::discover()?.create(&config).await?);
     let mut builder = service_builder()?;
     register_handler(&mut builder)?;
     builder = builder.event_bus(bus.clone());
     let service = builder.build().await?;
-    let accepted = service.submit(request(serde_json::json!({"source": "guide"}), "guide-1")).await?;
+    let accepted = service
+        .submit(request(serde_json::json!({"source": "guide"}), "guide-1"))
+        .await?;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if service.get(accepted.id).await?.is_some_and(|task| task.state.is_terminal()) { break; }
+            if service
+                .get(accepted.id)
+                .await?
+                .is_some_and(|task| task.state.is_terminal())
+            {
+                break;
+            }
             tokio::task::yield_now().await;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }).await??;
+    })
+    .await??;
     service.shutdown().await?;
-    let _ = bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate).await?;
+    let _ = bus
+        .shutdown(ShutdownMode::Immediate)
+        .await?;
     Ok(())
 }
