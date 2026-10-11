@@ -1015,8 +1015,6 @@ dependencies = [
 [[package]]
 name = "qubit-redis"
 version = "0.32.7-qubit.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cbfbf9c74b634707ef69276e2ed826c45cbec6872b6d70a5542cb83db1f5363"
 dependencies = [
  "async-io",
  "bytes",
