@@ -13,11 +13,11 @@ use super::TaskFuture;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
 use crate::model::typed::AcceptOutcome as TypedAcceptOutcome;
-use crate::model::typed::TaskCursor;
 use crate::model::typed::ProgressCommand as TypedProgressCommand;
 use crate::model::typed::StartCommand as TypedStartCommand;
 use crate::model::typed::StoredTask as TypedStoredTask;
 use crate::model::typed::StoredTaskRequest as TypedStoredTaskRequest;
+use crate::model::typed::TaskCursor;
 use crate::model::typed::TaskId as TypedTaskId;
 use crate::model::typed::TaskPage as TypedTaskPage;
 use crate::model::typed::TaskQuery as TypedTaskQuery;
@@ -42,10 +42,7 @@ pub trait TaskStore: Send + Sync {
     /// state_version)` order, with a limit of 1 through 256.
     /// Requires active service ownership; invalid limits and storage failures
     /// are errors.
-    fn list_event_outbox<'a>(
-        &'a self,
-        limit: usize,
-    ) -> TaskFuture<'a, Result<Vec<EventOutboxEntry>, StoreError>> {
+    fn list_event_outbox<'a>(&'a self, limit: usize) -> TaskFuture<'a, Result<Vec<EventOutboxEntry>, StoreError>> {
         let _ = limit;
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }

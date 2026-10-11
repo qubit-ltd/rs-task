@@ -115,10 +115,7 @@ impl<T: HasModelId + 'static> TaskRequest<T> {
     /// Returns an error when metadata exceeds the task entry/byte limits, its
     /// JSON encoding violates `rs-metadata` wire budgets, or payload codec
     /// lookup/encoding fails.
-    pub fn encode(
-        self,
-        registry: &ValueBytesCodecRegistry,
-    ) -> Result<StoredTaskRequest, TaskRequestEncodeError> {
+    pub fn encode(self, registry: &ValueBytesCodecRegistry) -> Result<StoredTaskRequest, TaskRequestEncodeError> {
         if self.kind_id.trim().is_empty() {
             return Err(TaskRequestEncodeError::EmptyKindId);
         }

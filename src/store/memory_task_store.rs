@@ -25,6 +25,7 @@ use crate::model::StoreCapabilities;
 use crate::model::TaskOutput;
 use crate::model::TaskState;
 use crate::model::typed::AcceptOutcome as EncodedAcceptOutcome;
+use crate::model::typed::MAX_TASK_QUERY_LIMIT;
 use crate::model::typed::ProgressCommand;
 use crate::model::typed::StartCommand;
 use crate::model::typed::StoredTask;
@@ -37,7 +38,6 @@ use crate::model::typed::TaskProgressSnapshot;
 use crate::model::typed::TaskQuery as EncodedTaskQuery;
 use crate::model::typed::TaskSummary;
 use crate::model::typed::TransitionCommand;
-use crate::model::typed::MAX_TASK_QUERY_LIMIT;
 
 /// Default number of nonterminal records retained by a memory store.
 pub const DEFAULT_MAX_UNFINISHED_RECORDS: usize = 2_048;
@@ -296,10 +296,7 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Starts a queued encoded task attempt using a lifecycle revision CAS.
-    fn start_encoded<'a>(
-        &'a self,
-        command: StartCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();
             let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
@@ -328,10 +325,7 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Applies a typed lifecycle transition with revision and attempt checks.
-    fn transition_encoded<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             command
                 .state
@@ -394,10 +388,7 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Persists a bounded progress snapshot using an attempt/version CAS.
-    fn update_progress<'a>(
-        &'a self,
-        command: ProgressCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let snapshot = TaskProgressSnapshot::from_command(command.clone())
                 .map_err(|_| StoreError::InvalidRequest("task progress snapshot exceeds its limits"))?;
@@ -471,7 +462,8 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
-    /// Lists due queued summaries after an optional cursor, in acceptance order.
+    /// Lists due queued summaries after an optional cursor, in acceptance
+    /// order.
     ///
     /// Rejects limits above the public task-query maximum.
     fn list_ready_queued<'a>(

@@ -202,7 +202,8 @@ fn validate_next_schema(transaction: &Transaction<'_>) -> Result<(), StoreError>
 }
 
 /// Checks that the event outbox has its required columns and ordered index.
-/// Existing outbox data is left untouched, including when the schema is invalid.
+/// Existing outbox data is left untouched, including when the schema is
+/// invalid.
 ///
 /// # Parameters
 ///

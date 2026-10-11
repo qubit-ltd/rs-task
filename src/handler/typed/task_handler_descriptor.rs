@@ -12,11 +12,12 @@ use qubit_model_id::ModelIdBuf;
 use super::cancellation_mode::CancellationMode;
 use super::handler_registration_error::HandlerRegistrationError;
 
-/// Declares the routing, payload schema, and cancellation contract for a typed handler.
+/// Declares the routing, payload schema, and cancellation contract for a typed
+/// handler.
 ///
-/// A descriptor is valid when its routing key is non-empty, it accepts at least one
-/// schema version, and each accepted version appears only once. Registries use the
-/// descriptor to select handlers before decoding task payloads.
+/// A descriptor is valid when its routing key is non-empty, it accepts at least
+/// one schema version, and each accepted version appears only once. Registries
+/// use the descriptor to select handlers before decoding task payloads.
 ///
 /// # Examples
 ///
@@ -49,8 +50,9 @@ impl TaskHandlerDescriptor {
     /// Checks the fields required for safe handler registration.
     ///
     /// Returns an error when the routing key is blank, no schema versions are
-    /// accepted, or a schema version is listed more than once. This check does not
-    /// validate registry-wide conflicts or cancellation-hook configuration.
+    /// accepted, or a schema version is listed more than once. This check does
+    /// not validate registry-wide conflicts or cancellation-hook
+    /// configuration.
     pub(crate) fn validate(&self) -> Result<(), HandlerRegistrationError> {
         if self.kind_id.trim().is_empty() {
             return Err(HandlerRegistrationError::EmptyKindId);

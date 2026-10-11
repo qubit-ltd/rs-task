@@ -29,8 +29,8 @@ pub(in crate::store::sqlite_task_store) struct QuerySql {
 /// # Parameters
 ///
 /// - `query`: Cursor and filters defining the requested history slice.
-/// - `page_size`: Number of rows requested by the caller; one additional row
-///   is included in the SQL limit for pagination detection.
+/// - `page_size`: Number of rows requested by the caller; one additional row is
+///   included in the SQL limit for pagination detection.
 ///
 /// # Returns
 ///

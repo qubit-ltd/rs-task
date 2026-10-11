@@ -14,7 +14,8 @@ use super::TaskSummary;
 /// [`summary`](Self::summary) identifies the retained task.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcceptOutcome {
-    /// Payload-free view of the task record retained by the acceptance operation.
+    /// Payload-free view of the task record retained by the acceptance
+    /// operation.
     pub summary: TaskSummary,
     /// Whether this call inserted a new task record; `false` means an existing
     /// task matched the request idempotently.

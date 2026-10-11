@@ -38,12 +38,14 @@ use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
 use qubit_task::model::AcceptOutcome;
 use qubit_task::model::OwnerEpoch;
 use qubit_task::model::ProgressCommand;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::StartCommand;
+use qubit_task::model::StoreCapabilities;
 use qubit_task::model::StoredTask;
 use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskCursor;
@@ -54,16 +56,12 @@ use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskSummary;
-use qubit_task::model::StoreCapabilities;
 use qubit_task::model::TransitionCommand;
-use qubit_task::handler::TaskRunResult;
 use qubit_task::service::CancelOutcome;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
-
-use tokio;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 
@@ -184,10 +182,7 @@ impl TaskStore for GatedReadyStore {
     ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         self.inner.accept_encoded(id, request)
     }
-    fn get_encoded_task<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+    fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         self.inner.get_encoded_task(id)
     }
     fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
@@ -276,11 +271,7 @@ impl TaskStore for GatedReadyStore {
     }
 }
 
-async fn wait_for(
-    service: &TaskExecutionService,
-    id: TaskId,
-    predicate: impl Fn(&TaskState) -> bool,
-) -> TaskState {
+async fn wait_for(service: &TaskExecutionService, id: TaskId, predicate: impl Fn(&TaskState) -> bool) -> TaskState {
     for _ in 0..1000 {
         if let Some(summary) = service.get(id).await.unwrap()
             && predicate(&summary.state)

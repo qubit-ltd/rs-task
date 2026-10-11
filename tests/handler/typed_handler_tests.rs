@@ -13,14 +13,14 @@
 use std::convert::Infallible;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecExecutionError;
 use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
-use qubit_codec::ValueCodecExecutionError;
 use qubit_id::Id;
 use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
@@ -182,11 +182,7 @@ fn test_registry_reports_missing_handler_and_preserves_registration_source() {
     assert!(!registry.has_external_cancellation_hook("example.unknown"));
     assert!(
         registry
-            .cancel_externally(
-                "example.unknown",
-                TaskId::from_id(Id::new(42)),
-                1,
-            )
+            .cancel_externally("example.unknown", TaskId::from_id(Id::new(42)), 1,)
             .is_none()
     );
 
@@ -356,11 +352,7 @@ async fn test_external_cancellation_hook_is_required_and_invoked_with_attempt_id
 
     assert!(registry.has_external_cancellation_hook("example.image.resize"));
     registry
-        .cancel_externally(
-            "example.image.resize",
-            TaskId::from_id(Id::new(42)),
-            7,
-        )
+        .cancel_externally("example.image.resize", TaskId::from_id(Id::new(42)), 7)
         .unwrap()
         .await
         .unwrap();

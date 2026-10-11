@@ -112,15 +112,19 @@ pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
     now_ms: u64,
 ) -> Result<Option<u64>, StoreError> {
     let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
-    connection.query_row(
-        concat!(
-            "SELECT MIN(retry_not_before_ms) FROM tasks ",
-            "INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' ",
-            "AND retry_not_before_ms>?1"
-        ),
-        [now],
-        |row| row.get::<_, Option<i64>>(0),
-    ).map_err(failure)?.map(|value| u64::try_from(value).map_err(failure)).transpose()
+    connection
+        .query_row(
+            concat!(
+                "SELECT MIN(retry_not_before_ms) FROM tasks ",
+                "INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' ",
+                "AND retry_not_before_ms>?1"
+            ),
+            [now],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(failure)?
+        .map(|value| u64::try_from(value).map_err(failure))
+        .transpose()
 }
 
 /// Immutable typed request fields stored separately from payload bytes.
@@ -147,7 +151,8 @@ struct StoredRequestInfo {
 }
 
 impl From<&StoredTaskRequest> for StoredRequestInfo {
-    /// Copies immutable request attributes while leaving payload bytes in their own column.
+    /// Copies immutable request attributes while leaving payload bytes in their
+    /// own column.
     fn from(request: &StoredTaskRequest) -> Self {
         Self {
             kind_id: request.kind_id.clone(),
@@ -164,7 +169,8 @@ impl From<&StoredTaskRequest> for StoredRequestInfo {
 }
 
 impl StoredRequestInfo {
-    /// Reconstructs a typed request by pairing these attributes with stored payload bytes.
+    /// Reconstructs a typed request by pairing these attributes with stored
+    /// payload bytes.
     fn into_request(self, bytes: Vec<u8>) -> Result<StoredTaskRequest, StoreError> {
         let type_id = self.payload_type_id.as_str().try_into().map_err(failure)?;
         Ok(StoredTaskRequest {
@@ -615,7 +621,8 @@ fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Resul
     })
 }
 
-/// Checks that output is only attached to successful tasks and stays within the summary limit.
+/// Checks that output is only attached to successful tasks and stays within the
+/// summary limit.
 fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Result<(), StoreError> {
     if output.is_some() && state != &TaskState::Succeeded {
         return Err(StoreError::InvalidRequest(
@@ -650,19 +657,21 @@ fn insert_event_outbox(transaction: &rusqlite::Transaction<'_>, summary: &TaskSu
     let event_id = format!("task:{}:{}", summary.id, summary.state_version);
     // A monotonic persisted ordering key also preserves lifecycle order across
     // clock rollback.
-    transaction.execute(
-        concat!(
-            "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) ",
-            "VALUES (?1,?2,?3,?4,MAX(?5,COALESCE((SELECT MAX(created_at_ms) ",
-            "FROM task_event_outbox),?5)))"
-        ),
-        params![
-            summary.id.to_padded_decimal(),
-            summary.state_version,
-            event_id,
-            json,
-            i64::try_from(now_ms()).map_err(failure)?
-        ],
-    ).map_err(failure)?;
+    transaction
+        .execute(
+            concat!(
+                "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) ",
+                "VALUES (?1,?2,?3,?4,MAX(?5,COALESCE((SELECT MAX(created_at_ms) ",
+                "FROM task_event_outbox),?5)))"
+            ),
+            params![
+                summary.id.to_padded_decimal(),
+                summary.state_version,
+                event_id,
+                json,
+                i64::try_from(now_ms()).map_err(failure)?
+            ],
+        )
+        .map_err(failure)?;
     Ok(())
 }

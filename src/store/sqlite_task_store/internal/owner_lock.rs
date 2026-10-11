@@ -77,7 +77,6 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
 /// # Returns
 ///
 /// A store failure containing the operating-system diagnostic.
-#[must_use]
 fn failure(error: std::io::Error) -> StoreError {
     StoreError::Failure(error.to_string())
 }

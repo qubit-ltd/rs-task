@@ -156,14 +156,7 @@ async fn test_lifecycle_outbox_snapshots_are_atomic_and_idempotent() {
         .await
         .expect("start");
     store
-        .update_progress(ProgressCommand::new(
-            id,
-            running.attempt,
-            1,
-            None,
-            Vec::new(),
-            10,
-        ))
+        .update_progress(ProgressCommand::new(id, running.attempt, 1, None, Vec::new(), 10))
         .await
         .expect("progress");
     assert_eq!(store.list_event_outbox(128).await.expect("after progress").len(), 2);

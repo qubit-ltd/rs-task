@@ -123,10 +123,7 @@ impl SqliteTaskStore {
 
     /// Reads a bounded oldest-first page; rejects absent ownership and invalid
     /// limits.
-    pub(super) fn list_outbox(
-        &self,
-        limit: usize,
-    ) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
+    pub(super) fn list_outbox(&self, limit: usize) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
         self.run_outbox(move |connection| {
             if !(1..=256).contains(&limit) {
                 return Err(StoreError::InvalidRequest(
@@ -291,10 +288,12 @@ impl SqliteTaskStore {
     }
 }
 
-/// Converts a SQLite or related operation error into the store's public error type.
+/// Converts a SQLite or related operation error into the store's public error
+/// type.
 ///
-/// The original error is retained as its display string so callers receive a consistent
-/// [`StoreError::Failure`] without exposing backend-specific error types.
+/// The original error is retained as its display string so callers receive a
+/// consistent [`StoreError::Failure`] without exposing backend-specific error
+/// types.
 fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }

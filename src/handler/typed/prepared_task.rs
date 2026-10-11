@@ -15,11 +15,12 @@ use crate::store::TaskFuture;
 /// Type-erased, single-use adapter for an already validated typed task handler.
 type RunPrepared = Box<dyn FnOnce(TypedTaskContext) -> TaskFuture<'static, TaskRunResult> + Send>;
 
-/// A single-use handler payload that has passed routing, schema, codec, and Rust value-type checks.
+/// A single-use handler payload that has passed routing, schema, codec, and
+/// Rust value-type checks.
 ///
-/// Calling [`run`](Self::run) consumes the payload and starts its handler with the supplied task
-/// context. This keeps validation outside the execution attempt while ensuring the handler can be
-/// invoked at most once.
+/// Calling [`run`](Self::run) consumes the payload and starts its handler with
+/// the supplied task context. This keeps validation outside the execution
+/// attempt while ensuring the handler can be invoked at most once.
 pub struct PreparedTask {
     run: RunPrepared,
 }

@@ -54,17 +54,15 @@ fn seed_legacy_database(path: &std::path::Path) -> String {
     let id = "550e8400-e29b-41d4-a716-446655440000".to_owned();
     let connection = Connection::open(path).expect("legacy database opens");
     connection
-        .execute_batch(
-            concat!(
-                "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, ",
-                "accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, ",
-                "request_json TEXT NOT NULL, record_json TEXT NOT NULL); ",
-                "CREATE INDEX tasks_state_accepted ON tasks(state_kind, accepted_at); ",
-                "CREATE INDEX tasks_accepted_id ON tasks(accepted_at, id); ",
-                "CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL); ",
-                "PRAGMA user_version=3;",
-            ),
-        )
+        .execute_batch(concat!(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, state_kind TEXT NOT NULL, ",
+            "accepted_at INTEGER NOT NULL, correlation_key TEXT, idempotency_key TEXT UNIQUE, ",
+            "request_json TEXT NOT NULL, record_json TEXT NOT NULL); ",
+            "CREATE INDEX tasks_state_accepted ON tasks(state_kind, accepted_at); ",
+            "CREATE INDEX tasks_accepted_id ON tasks(accepted_at, id); ",
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL); ",
+            "PRAGMA user_version=3;",
+        ))
         .expect("legacy schema is created");
     connection
         .execute(

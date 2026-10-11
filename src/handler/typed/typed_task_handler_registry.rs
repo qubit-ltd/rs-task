@@ -18,9 +18,9 @@ use super::handler_registration_error::HandlerRegistrationError;
 use super::prepared_task::PreparedTask;
 use super::task_handler_descriptor::TaskHandlerDescriptor;
 use super::typed_task_handler::TypedTaskHandler;
+use crate::model::TaskRunError;
 use crate::model::typed::StoredPayload;
 use crate::model::typed::TaskId;
-use crate::model::TaskRunError;
 use crate::store::TaskFuture;
 
 /// Type-erased boundary used to prepare a task after registry lookup.
@@ -48,7 +48,8 @@ where
     T: Send + Sync + 'static,
     H: TypedTaskHandler<T>,
 {
-    /// Rejects mismatched metadata and creates a future that runs the typed handler.
+    /// Rejects mismatched metadata and creates a future that runs the typed
+    /// handler.
     fn prepare(
         &self,
         payload: StoredPayload,
@@ -171,7 +172,8 @@ impl TypedTaskHandlerRegistry {
         self.register_with_options::<T, H>(descriptor, handler, source, Some(hook))
     }
 
-    /// Validates registration options and inserts the handler if its kind is free.
+    /// Validates registration options and inserts the handler if its kind is
+    /// free.
     fn register_with_options<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,

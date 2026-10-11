@@ -346,10 +346,7 @@ pub async fn check_terminal_prune_contract(store: &dyn TaskStore) {
         );
     }
     let reused = store
-        .accept_encoded(
-            TaskId::from_id(Id::new(207)),
-            request(Some("reusable-prune-key"), &[7]),
-        )
+        .accept_encoded(TaskId::from_id(Id::new(207)), request(Some("reusable-prune-key"), &[7]))
         .await
         .expect("pruned idempotency key can be reused");
     assert!(reused.created);

@@ -84,10 +84,13 @@ async fn test_hard_linked_database_is_rejected() {
     drop(SqliteTaskStore::open(&path).expect("database is initialized"));
     std::fs::hard_link(&path, &alias).expect("database hard link is created");
 
-    assert!(matches!(
-        SqliteTaskStore::open(&path),
-        Err(StoreError::UnsupportedDatabaseIdentity)
-    ), "a database inode with an untracked hard link is rejected");
+    assert!(
+        matches!(
+            SqliteTaskStore::open(&path),
+            Err(StoreError::UnsupportedDatabaseIdentity)
+        ),
+        "a database inode with an untracked hard link is rejected"
+    );
 
     std::fs::remove_file(&alias).expect("test hard link is removed");
     remove_database(&path);
@@ -138,10 +141,13 @@ async fn test_stale_owner_release_keeps_the_database_locked() {
     let store = SqliteTaskStore::open(&path).expect("database opens");
     let epoch = store.acquire_owner().await.expect("owner is acquired");
 
-    assert!(matches!(
-        store.release_owner(OwnerEpoch(epoch.0.saturating_add(1))).await,
-        Err(StoreError::OwnerConflict)
-    ), "a stale epoch cannot release the held owner lock");
+    assert!(
+        matches!(
+            store.release_owner(OwnerEpoch(epoch.0.saturating_add(1))).await,
+            Err(StoreError::OwnerConflict)
+        ),
+        "a stale epoch cannot release the held owner lock"
+    );
     assert!(
         matches!(SqliteTaskStore::open(&path), Err(StoreError::OwnerConflict)),
         "stale release keeps the lock held"

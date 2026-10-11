@@ -262,13 +262,13 @@ fn test_ready_queue_and_retry_deadline_queries_use_partial_indexes() {
     drop(store);
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     let ready_plan = {
-        let mut ready = connection.prepare(
-            concat!(
+        let mut ready = connection
+            .prepare(concat!(
                 "EXPLAIN QUERY PLAN SELECT id FROM tasks INDEXED BY tasks_queued_accepted_id ",
                 "WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ",
                 "ORDER BY accepted_at,id LIMIT ?2",
-            ),
-        ).unwrap();
+            ))
+            .unwrap();
         ready
             .query_map([200_i64, 10_i64], |row| row.get::<_, String>(3))
             .unwrap()
@@ -278,13 +278,13 @@ fn test_ready_queue_and_retry_deadline_queries_use_partial_indexes() {
     };
     assert!(ready_plan.contains("tasks_queued_accepted_id"), "{ready_plan}");
     let retry_plan = {
-        let mut statement = connection.prepare(
-            concat!(
+        let mut statement = connection
+            .prepare(concat!(
                 "EXPLAIN QUERY PLAN SELECT MIN(retry_not_before_ms) FROM tasks ",
                 "INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' ",
                 "AND retry_not_before_ms>?1",
-            ),
-        ).unwrap();
+            ))
+            .unwrap();
         statement
             .query_map([200_i64], |row| row.get::<_, String>(3))
             .unwrap()

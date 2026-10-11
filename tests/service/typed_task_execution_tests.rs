@@ -986,13 +986,11 @@ async fn scheduler_store_failure_is_latched_and_reported_by_shutdown() {
     let service = builder.build().await.unwrap();
     store.fail_next_list.store(true, Ordering::Release);
     wait_for_latched_store_fault(&service).await;
-    assert!(
-        matches!(
-            service.shutdown().await,
-            Err(qubit_task::service::TaskServiceError::StoreUnavailable(message))
-                if message.contains("injected list failure")
-        )
-    );
+    assert!(matches!(
+        service.shutdown().await,
+        Err(qubit_task::service::TaskServiceError::StoreUnavailable(message))
+            if message.contains("injected list failure")
+    ));
 }
 
 #[tokio::test]
@@ -1614,13 +1612,11 @@ async fn external_cancel_retries_failed_hook() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
-    assert!(
-        matches!(
-            service.cancel(accepted.id).await,
-            Err(qubit_task::service::TaskServiceError::ExternalCancellationFailed { message, .. })
-                if message == "temporary"
-        )
-    );
+    assert!(matches!(
+        service.cancel(accepted.id).await,
+        Err(qubit_task::service::TaskServiceError::ExternalCancellationFailed { message, .. })
+            if message == "temporary"
+    ));
     let summary = service.get(accepted.id).await.unwrap().unwrap();
     assert!(summary.cancel_requested);
     assert_eq!(summary.cancel_error.as_deref(), Some("temporary"));

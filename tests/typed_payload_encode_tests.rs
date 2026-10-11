@@ -7,9 +7,9 @@
 // =============================================================================
 //! Public contract tests for typed payload and task request encoding failures.
 
+use std::array::TryFromSliceError;
 use std::convert::Infallible;
 use std::io::Error;
-use std::array::TryFromSliceError;
 
 use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;

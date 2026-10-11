@@ -36,7 +36,8 @@ impl TypedTaskContext {
     ///
     /// # Returns
     ///
-    /// A context that shares the supplied cancellation flag and progress reporter.
+    /// A context that shares the supplied cancellation flag and progress
+    /// reporter.
     pub(crate) fn new(
         task_id: TaskId,
         attempt: u32,

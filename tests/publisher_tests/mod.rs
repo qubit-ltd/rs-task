@@ -43,6 +43,9 @@ use qubit_event_bus::spi::SpiFuture;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::SubscriptionModes;
 use qubit_event_bus::spi::TransportPayload;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::event::TaskEvent;
@@ -53,11 +56,8 @@ use qubit_task::model::TransitionCommand;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
-use qubit_task::store::TaskStore;
 use qubit_task::store::StoreError;
-use qubit_id::Id;
-use qubit_id::IdGenerationError;
-use qubit_id::IdGenerator;
+use qubit_task::store::TaskStore;
 use serde_json::from_slice;
 
 use crate::support::task_event_codec;
@@ -314,15 +314,11 @@ async fn service_with_timeout(
     bus: Arc<AsyncEventBus>,
     timeout: Duration,
 ) -> Result<TaskExecutionService, TaskServiceError> {
-    TaskExecutionServiceBuilder::new(
-        store,
-        Arc::new(ValueBytesCodecRegistry::empty()),
-        Arc::new(Ids),
-    )
-    .event_bus(bus)
-    .notification_shutdown_timeout(timeout)
-    .build()
-    .await
+    TaskExecutionServiceBuilder::new(store, Arc::new(ValueBytesCodecRegistry::empty()), Arc::new(Ids))
+        .event_bus(bus)
+        .notification_shutdown_timeout(timeout)
+        .build()
+        .await
 }
 
 #[tokio::test]
@@ -461,9 +457,7 @@ async fn test_memory_store_is_rejected_for_event_outbox() {
     .await;
     assert!(matches!(
         result,
-        Err(TaskServiceError::Store(
-            StoreError::UnsupportedCapability
-        ))
+        Err(TaskServiceError::Store(StoreError::UnsupportedCapability))
     ));
 }
 

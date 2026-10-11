@@ -18,7 +18,7 @@ use serde::Serialize;
 /// ```
 /// use qubit_task::model::typed::TaskId;
 ///
-/// let task_id = TaskId::from_id(qubit_id::Id::new());
+/// let task_id = TaskId::from_id(qubit_id::Id::new(42));
 /// assert_eq!(task_id.to_padded_decimal().len(), 20);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -36,7 +36,6 @@ impl TaskId {
     }
 
     /// Consumes this wrapper and returns the unchanged generated identifier.
-    #[must_use]
     #[inline]
     pub const fn into_id(self) -> Id {
         self.0
@@ -44,7 +43,8 @@ impl TaskId {
 
     /// Formats the identifier as a zero-padded, 20-digit decimal key.
     ///
-    /// The resulting string is suitable for lexicographic ordering in text stores.
+    /// The resulting string is suitable for lexicographic ordering in text
+    /// stores.
     #[must_use]
     #[inline]
     pub fn to_padded_decimal(self) -> String {
@@ -53,7 +53,8 @@ impl TaskId {
 }
 
 impl Display for TaskId {
-    /// Formats the wrapped identifier using its standard display representation.
+    /// Formats the wrapped identifier using its standard display
+    /// representation.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
     }

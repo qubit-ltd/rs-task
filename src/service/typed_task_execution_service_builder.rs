@@ -107,7 +107,8 @@ impl TypedTaskExecutionServiceBuilder {
     }
 
     /// Sets the scheduler's bounded queued-summary scan page size (1–256).
-    /// Values above 256 are capped; the non-zero argument prevents an empty scan.
+    /// Values above 256 are capped; the non-zero argument prevents an empty
+    /// scan.
     #[must_use = "the returned builder contains the updated page size"]
     #[inline]
     pub fn scan_page_size(mut self, limit: std::num::NonZeroUsize) -> Self {

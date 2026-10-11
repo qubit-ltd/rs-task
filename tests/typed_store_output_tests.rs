@@ -24,14 +24,13 @@ use qubit_task::model::TaskState;
 use qubit_task::model::TaskSummary;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
-use uuid::Uuid;
-
-#[cfg(feature = "sqlite")]
-use rusqlite::Connection;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
+#[cfg(feature = "sqlite")]
+use rusqlite::Connection;
+use uuid::Uuid;
 
 fn request() -> StoredTaskRequest {
     StoredTaskRequest {

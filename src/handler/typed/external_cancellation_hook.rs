@@ -11,9 +11,11 @@ use crate::model::TaskRunError;
 use crate::model::typed::TaskId;
 use crate::store::TaskFuture;
 
-/// A thread-safe callback that performs an optional external cancellation action for a handler kind.
+/// A thread-safe callback that performs an optional external cancellation
+/// action for a handler kind.
 ///
-/// The callback receives the task identifier and its external cancellation token, then returns a
-/// `'static` task that reports cancellation failures as [`TaskRunError`].
+/// The callback receives the task identifier and its external cancellation
+/// token, then returns a `'static` task that reports cancellation failures as
+/// [`TaskRunError`].
 pub type ExternalCancellationHook =
     Arc<dyn Fn(TaskId, u32) -> TaskFuture<'static, Result<(), TaskRunError>> + Send + Sync>;

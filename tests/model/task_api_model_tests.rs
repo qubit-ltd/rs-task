@@ -113,7 +113,6 @@ fn test_resource_request_exposes_optional_memory_and_disk_quotas() {
 
 #[test]
 fn test_task_request_rejects_invalid_resource_descriptions() {
-
     let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
     let invalid_requests = [
         ResourceRequest {
@@ -149,9 +148,7 @@ fn test_task_request_rejects_invalid_resource_descriptions() {
             ..ResourceRequest::default()
         },
         ResourceRequest {
-            custom: (0..=32)
-                .map(|index| (format!("license-{index}"), 1))
-                .collect(),
+            custom: (0..=32).map(|index| (format!("license-{index}"), 1)).collect(),
             ..ResourceRequest::default()
         },
     ];
@@ -173,13 +170,10 @@ fn test_task_request_rejects_invalid_resource_descriptions() {
 
 #[test]
 fn test_task_state_covers_lifecycle_kinds_and_transitions() {
-
     let states = [
         TaskState::Queued,
         TaskState::Running,
-        TaskState::Blocked {
-            reason: "held".into(),
-        },
+        TaskState::Blocked { reason: "held".into() },
         TaskState::Succeeded,
         TaskState::Failed {
             category: "io".into(),
@@ -195,10 +189,7 @@ fn test_task_state_covers_lifecycle_kinds_and_transitions() {
             state.is_terminal(),
             matches!(
                 state,
-                TaskState::Succeeded
-                    | TaskState::Failed { .. }
-                    | TaskState::Panicked { .. }
-                    | TaskState::Cancelled
+                TaskState::Succeeded | TaskState::Failed { .. } | TaskState::Panicked { .. } | TaskState::Cancelled
             )
         );
         let _ = state.kind();
@@ -248,12 +239,7 @@ fn test_task_request_rejects_empty_kind_id_before_encoding_payload() {
     let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
 
     for kind_id in ["", " \t\n"] {
-        let request = TaskRequest::new(
-            kind_id,
-            1,
-            ValueCodecId::new("qubit_task.tests.u32_le"),
-            Counter(1),
-        );
+        let request = TaskRequest::new(kind_id, 1, ValueCodecId::new("qubit_task.tests.u32_le"), Counter(1));
 
         assert!(matches!(
             request.encode(registry),
@@ -281,8 +267,6 @@ fn test_task_request_rejects_metadata_over_serialized_byte_budget() {
 
 #[test]
 fn test_progress_snapshot_projects_stage_and_metrics_and_round_trips() {
-
-
     let reporter = NoopReporter;
     let progress = Progress::builder(&reporter)
         .metric(Metric::new("items", "Items").total(10))
@@ -320,8 +304,6 @@ fn test_progress_snapshot_projects_stage_and_metrics_and_round_trips() {
 
 #[test]
 fn test_progress_snapshot_rejects_metric_count_stage_size_and_encoded_size() {
-
-
     let id = TaskId::from_id(qubit_id::Id::new(1));
     let reporter = NoopReporter;
     let metric_names: Vec<_> = (0..=qubit_task::model::typed::MAX_TASK_PROGRESS_METRICS)
