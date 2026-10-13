@@ -2,7 +2,7 @@
 
 [English design document](task_execution_service_design.en.md)
 
-本文面向 `qubit-task` 0.10。带类型 SQLite 存储使用 `SqliteTaskStore::open` 打开，typed schema v4/v5 会在事务中迁移到 v6；旧 UUID schema 会被拒绝且不作修改。升级步骤见[迁移指南](migration.zh_CN.md)。
+本文面向 `qubit-task` 0.10。带类型 SQLite 存储使用 `SqliteTaskStore::open` 打开，typed schema v4/v5/v6 会在事务中原位迁移到 v7；旧 UUID schema 会被拒绝且不作修改。升级步骤见[迁移指南](migration.zh_CN.md)。
 
 本文描述当前的 typed task API。旧的字节数组 request、精确 `(task_type, handler_version)` 路由、本地闭包提交和旧服务 builder 属于历史实现细节，不再构成公开契约。
 
@@ -24,7 +24,7 @@
 
 内存与 SQLite store 实现相同的 typed store 契约。SQLite 使用 typed numeric-ID schema；遇到不兼容的旧 UUID schema 时会返回诊断错误，不会静默重新解释数据。Store ownership 用于隔离并发服务实例；恢复会在取得 ownership 后继续处理保留的 queued 任务。服务在取得 owner 前启动清理 worker。若取得 owner 后取消 `build()` future，仍持有 owner 的 guard 会让该 worker 异步释放。释放是最终一致的，因此立即再次 build 可能短暂遇到 owner 冲突。
 
-单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 6 中，重启后仍会遵守；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可携带观察到的 state version 恢复 Blocked 任务。
+单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 7 中，重启后仍会遵守；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可携带观察到的 state version 恢复 Blocked 任务。
 
 ## 执行与资源准入
 
@@ -44,8 +44,8 @@ SQLite 持久化支持进程重启恢复，执行语义为至少一次。若任�
 
 后台调度或结果写入遇到存储故障时会锁存故障并停止新写入；诊断读取仍会访问 store。显式调用 `shutdown().await` 会停止调度，等待活跃处理器和通知排空，尝试释放 owner，并返回共享结果（包括已锁存的故障）。并发等待者看到同一次释放尝试的结果；取消其中一个等待者不会取消 supervisor 的排空。若 owner 释放暂时失败，之后显式调用 `shutdown()` 会重试。若释放时发生 panic，supervisor 会向等待者返回 `StoreUnavailable`，并将仍持有 owner 的 guard 交给清理 worker。最后一个外部 service 句柄被丢弃时也会异步请求同样的排空，但 `Drop` 不等待、不返回结果。若处理器始终不结束，owner 可能一直被占用。
 
-配置 `TaskExecutionServiceBuilder::event_bus` 后，服务会启用 store outbox，并在任务恢复后启动异步 publisher。每个生命周期快照与任务状态迁移写入同一个 SQLite 事务，随后发布到 `task.lifecycle`；确认接纳后才删除 outbox 行。此功能要求 store 提供持久 outbox，`MemoryTaskStore` 不具备此能力，也不适合作为 durable 配置。outbox 启用前提交的状态不会在启动时回填。
+配置 `TaskExecutionServiceBuilder::event_bus` 后，服务会启用 store outbox，并在任务恢复后启动异步 publisher。每个生命周期快照与任务状态迁移写入同一个 SQLite 事务。provider 确认接纳前，outbox 行会保留并重试，因此发布可能重复；收到 `Accepted` 后才删除该行。`Accepted` 不保证 Redis 已持久化或消费者已收到：若 Redis 在持久化前故障，SQLite 行已删除的通知仍会丢失，因此不能承诺通知至少一次送达。该语义与任务 handler 的至少一次执行不同。此功能要求 store 提供持久 outbox，`MemoryTaskStore` 不具备此能力，也不适合作为 durable 配置。outbox 启用前提交的状态不会在启动时回填。
 
-投递语义为至少一次。若发布回执不确定，或 bus 已接纳事件但进程在删除 outbox 行前停止，同一快照可能再次发布。消费者应按 `(TaskId, state_version)` 去重、忽略旧版本，并在发现版本缺口时查询服务。应监控 outbox 行数与最老行年龄；使用 Redis Streams 时，还应查看 `XLEN` 和 `XPENDING`。具体配置和运维边界见[带类型 API 指南](typed-task-api.zh_CN.md)与[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。应用仍可显式调用有界 `TaskStore::prune_terminal_before` 清理终态历史，该操作会释放幂等键供复用。
+发布回执不确定，或 bus 已接纳事件但进程在删除 outbox 行前停止，都可能导致同一快照再次发布。消费者应按 `(TaskId, state_version)` 去重、忽略旧版本，并在发现版本缺口时查询服务。可通过 `TaskExecutionService::notification_failure()` 查看失败头部，并显式调用 `quarantine_failed_notification(...)` 将其归档隔离；隔离会有意形成通知缺口，不会自动补发归档记录。应监控 outbox 行数与最老行年龄；使用 Redis Streams 时，还应查看 `XLEN` 和 `XPENDING`。具体配置和运维边界见[带类型 API 指南](typed-task-api.zh_CN.md)与[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。应用仍可显式调用有界 `TaskStore::prune_terminal_before` 清理终态历史，该操作会释放幂等键供复用。
 
 预期的提交拒绝（容量、未完成任务数上限、幂等冲突和重复任务 ID）返回结构化请求错误，不会锁存服务；其他操作性 store 故障仍按原逻辑处理。外部取消 hook 由服务托管：同一 attempt 的并发调用共享 hook，取消调用方不会中断 hook，`shutdown()` 会等待 hook 完成。hook 失败会留下可查询诊断；任务仍运行时可再次调用 `cancel()` 重试。hook 必须对 (`TaskId`, attempt) 幂等。

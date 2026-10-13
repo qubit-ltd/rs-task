@@ -4,7 +4,7 @@
 
 `qubit-task` accepts typed, versioned payloads and runs them through registered handlers. This guide is now centered on the typed API; the former byte-oriented `TaskRequest`, `(task_type, handler_version)` routing, cursor-free query examples, and closure-oriented service API are no longer the public contract.
 
-For durable task history, open the SQLite backend with `SqliteTaskStore::open(path)`. It preserves typed schema v4/v5 data while migrating to v6; legacy UUID schemas are rejected without being rewritten. See the [0.10 migration guide](migration.md) before upgrading an existing database.
+For durable task history, open the SQLite backend with `SqliteTaskStore::open(path)`. It migrates typed schema v4, v5, and v6 in place to v7 while preserving task and outbox rows; legacy UUID schemas are rejected without being rewritten. See the [0.10 migration guide](migration.md) before upgrading an existing database.
 
 ## Start here
 
@@ -55,7 +55,7 @@ let service = builder.event_bus(bus.clone()).build().await?;
 
 The [compilable wiring fixture](../tests/fixtures/doc-examples/src/main.rs) also supplies the provider options and task handler. The registry checks the requirement during bus creation. Before enabling the outbox, the task service independently checks the injected facade's cached durability and publish guarantee, then checks the `task.lifecycle` codec with `check_publish_codec`. An ephemeral provider fails with `NotificationProviderNotDurable`; a durable provider declaring `FireAndForget` fails with `NotificationProviderInsufficientGuarantee`; a missing codec fails with `NotificationCodecUnavailable`. These failures do not start publication or enable the outbox. The codec check confirms only registration in the facade configuration; it does not prove that encoding succeeds for every event or that Redis is reachable or persistent.
 
-With the publisher enabled, each committed lifecycle snapshot is written to SQLite in the same transaction as its task state change. A background worker sends rows in stable order to `task.lifecycle`, then deletes a row after accepted publication. Rows present at startup are replayed after task recovery; states committed before the outbox was enabled are not backfilled. Publication is at-least-once: an unknown result or a crash after the bus accepted an event but before SQLite deleted its row can produce a duplicate. A successful Redis `XADD` is stream acceptance, not proof of a disk `fsync`, replication, or consumer ACK. `DurabilityCapability::Durable` means the provider retains messages without subscribers; `PublishGuarantee::Accepted` describes the provider's acceptance boundary. Neither promises those later stages. After an acceptance reply, a Redis failure before persistence can still lose a notification whose SQLite outbox row has been deleted. Consumers should keep the highest `state_version` per `TaskId`, ignore duplicates and stale versions, and query the task service if versions are missing. The event is a notification, not an authoritative state record.
+With the publisher enabled, each committed lifecycle snapshot is written to SQLite in the same transaction as its task state change. A background worker sends rows in stable order to `task.lifecycle`. Until the provider reports acceptance, the row remains in SQLite and is retried, so a retry may publish duplicates. After `Accepted`, the row is deleted. Rows present at startup are replayed after task recovery; states committed before the outbox was enabled are not backfilled. A successful Redis `XADD` is stream acceptance, not proof of a disk `fsync`, replication, or consumer ACK. `DurabilityCapability::Durable` means the provider retains messages without subscribers; `PublishGuarantee::Accepted` describes the provider's acceptance boundary. Neither promises those later stages. After an acceptance reply, a Redis failure before persistence can still lose a notification whose SQLite outbox row has been deleted; consumers are not guaranteed at-least-once receipt. This notification boundary is separate from the at-least-once task handler recovery described in [Features and limits](#features-and-limits). Consumers should keep the highest `state_version` per `TaskId`, ignore duplicates and stale versions, and query the task service if versions are missing. The event is a notification, not an authoritative state record.
 
 ### Durable consumer projection
 
@@ -67,7 +67,7 @@ On shutdown the worker drains until empty or `notification_shutdown_timeout` exp
 
 Before rollout and after Redis failover, also review `INFO persistence` and `INFO replication` against the deployment's recovery objectives, then inspect `XLEN <stream-key>`, `XINFO GROUPS <stream-key>`, and `XPENDING <stream-key> <group>` (including pages of pending entries when needed). These observations help separate Redis persistence and replica state from stream growth, group progress, and consumer recovery; do not apply a fixed threshold without workload and recovery requirements. `check_publish_codec` checks whether the facade has a codec registered for `task.lifecycle`; `NotificationCodecUnavailable` reports that it does not. This readiness check proves only facade configuration: it does not prove that each event can be encoded, Redis is reachable, an accepted `XADD` was fsynced or replicated, or a consumer committed its business transaction. See the [Redis deployment readiness checklist](https://github.com/qubit-ltd/rs-event-bus-redis/blob/dev-starfish/doc/user_guide.md) for command details and the provider's persistence boundaries.
 
-The service's `notification_stats()` reports process-local queued, published, and failed counts; it does not report the durable backlog. Query SQLite for that backlog and its age:
+The service's `notification_stats()` reports process-local queued, published, and failed counts; the failed count is not a durable backlog measure. Query SQLite for the durable backlog and its age, and inspect `notification_failure()` for the current failed head's task ID, state version, event ID, and error:
 
 ```sql
 SELECT COUNT(*) AS pending,
@@ -76,5 +76,26 @@ SELECT COUNT(*) AS pending,
        END AS oldest_age_ms
 FROM task_event_outbox;
 ```
+
+### Recover a failed notification head
+
+Use this sequence when `notification_stats().failed` increases or the durable outbox backlog stops draining:
+
+1. Read `notification_failure()` and record its exact `task_id`, `state_version`, `event_id`, and `error`. The diagnostic is an in-process snapshot of the current failed head, not a durable alert.
+2. Check the authoritative task state with `service.get(task_id).await` and decide how the missing notification should be handled by the application. Inspect existing quarantine records and follow the application's archive/retention policy before isolating anything. A failed publication can still be a transient provider problem; quarantine is an operator decision.
+3. If isolation is approved, call `service.quarantine_failed_notification(expected_task_id, expected_state_version, &expected_event_id, reason).await` with the exact identity returned by the diagnostic and a meaningful reason. A changed head returns a conflict; read the diagnostic again before deciding what to do. The operation atomically archives the original outbox row and removes it from the active queue.
+4. Verify the record in `task_event_outbox_quarantine` and confirm that the next active outbox row can be dequeued and published. The archive is evidence only: quarantine intentionally loses that notification and never automatically republishes it.
+5. Consumers must detect the resulting `state_version` gap and refresh from the task service's authoritative state. Apply the refreshed state and checkpoint according to the consumer's transaction and acknowledgement policy.
+
+An archive lookup can use the exact key from the failure snapshot:
+
+```sql
+SELECT task_id, state_version, event_id, event_json, created_at_ms,
+       quarantined_at_ms, reason, last_error
+FROM task_event_outbox_quarantine
+WHERE task_id = ?1 AND state_version = ?2;
+```
+
+Do not quarantine a record merely to bypass normal network retries. SQLite schema v7 retains archived rows independently of terminal task pruning; database retention is managed by the application.
 
 See the [detailed design](task_execution_service_design.en.md), [migration guide](migration.md), and [API reference](https://docs.rs/qubit-task) for more context.

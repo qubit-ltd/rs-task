@@ -4,7 +4,7 @@
 
 `qubit-task` 接受带类型和版本的 payload，并将任务交给已注册的处理器执行。本指南以 typed API 为准；旧的字节数组 `TaskRequest`、按 `(task_type, handler_version)` 路由、旧查询示例和闭包式服务 API 已不再是公开契约。
 
-需要持久化任务历史时，使用 `SqliteTaskStore::open(path)` 打开 SQLite 后端。它会将 typed schema v4/v5 迁移到 v6 并保留现有任务记录；旧 UUID schema 会被拒绝且不会被改写。升级已有数据库前请先阅读[0.10 迁移指南](migration.zh_CN.md)。
+需要持久化任务历史时，使用 `SqliteTaskStore::open(path)` 打开 SQLite 后端。它会将 typed schema v4/v5/v6 原位迁移到 v7，并保留任务和 outbox 记录；旧 UUID schema 会被拒绝且不会被改写。升级已有数据库前请先阅读[0.10 迁移指南](migration.zh_CN.md)。
 
 ## 从这里开始
 
@@ -55,7 +55,7 @@ let service = builder.event_bus(bus.clone()).build().await?;
 
 [可编译的装配示例](../tests/fixtures/doc-examples/src/main.rs)还包含 provider 配置和任务处理器。registry 会在创建总线时检查要求；任务服务也会在启用 outbox 前独立核对注入 facade 中缓存的持久性和发布保证，然后通过 facade 的 `check_publish_codec` 检查 `task.lifecycle` codec。易失性 provider 返回 `NotificationProviderNotDurable`；声明 `FireAndForget` 的持久 provider 返回 `NotificationProviderInsufficientGuarantee`；缺少 codec 返回 `NotificationCodecUnavailable`。这些失败不会启动发布或启用 outbox。codec 检查只确认 facade 配置中已注册 codec，并不能证明每个事件都能成功编码，也不能证明 Redis 可连接或已持久化。
 
-publisher 启用后，每次生命周期状态提交都会与对应 outbox 行在同一个 SQLite 事务中写入。后台 worker 按稳定顺序将事件发往 `task.lifecycle`，确认接纳后再删除 outbox 行。服务启动时会重放已有待发事件；启用 outbox 之前提交的状态不会补发。投递语义为至少一次：发布结果不确定，或 bus 已接纳事件但进程在 SQLite 删除记录前崩溃，都可能产生重复。Redis `XADD` 成功表示 stream 已接纳记录，不能据此判断磁盘是否完成 `fsync`、副本是否收到记录，更不表示消费者已 ACK。`DurabilityCapability::Durable` 仅说明无订阅者时仍保留消息；`PublishGuarantee::Accepted` 描述 provider 的接纳边界，两者都不承诺后续阶段。Redis 回复接纳后若在持久化前故障，已从 SQLite outbox 删除的通知仍可能丢失。消费者应为每个 `TaskId` 保存最高 `state_version`，忽略重复和旧版本；发现版本缺口时查询任务服务。事件只用于通知，任务查询才是权威状态。
+publisher 启用后，每次生命周期状态提交都会与对应 outbox 行在同一个 SQLite 事务中写入。后台 worker 按稳定顺序将事件发往 `task.lifecycle`。provider 确认接纳前，outbox 行会保留并重试，因此重试可能重复发布；收到 `Accepted` 后才删除该行。服务启动时会重放已有待发事件；启用 outbox 之前提交的状态不会补发。Redis `XADD` 成功表示 stream 已接纳记录，不能据此判断磁盘是否完成 `fsync`、副本是否收到记录，更不表示消费者已 ACK。`DurabilityCapability::Durable` 仅说明无订阅者时仍保留消息；`PublishGuarantee::Accepted` 描述 provider 的接纳边界，两者都不承诺后续阶段。Redis 回复接纳后若在持久化前故障，已从 SQLite outbox 删除的通知仍可能丢失；消费者也不保证至少一次收到通知。这与前文所述 handler 至少一次执行恢复是两种不同保证。消费者应为每个 `TaskId` 保存最高 `state_version`，忽略重复和旧版本；发现版本缺口时查询任务服务。事件只用于通知，任务查询才是权威状态。
 
 ### 持久化消费者投影
 
@@ -67,7 +67,7 @@ publisher 启用后，每次生命周期状态提交都会与对应 outbox 行�
 
 上线前和 Redis 故障转移后，还应根据部署恢复目标检查 `INFO persistence` 和 `INFO replication`，并查看 `XLEN <stream-key>`、`XINFO GROUPS <stream-key>`、`XPENDING <stream-key> <group>`（必要时翻页检查 pending 记录）。这些观察项有助于区分 Redis 持久化与副本状态、stream 增长、消费组进度和 consumer 恢复；不要脱离实际负载与恢复要求套用固定阈值。`check_publish_codec` 用于检查 facade 是否已为 `task.lifecycle` 注册 codec；`NotificationCodecUnavailable` 表示尚未注册。该就绪检查只证明 facade 配置，不证明每条事件都能成功编码、Redis 可连接、已接纳的 `XADD` 已 fsync 或复制，也不证明 consumer 已提交业务事务。命令说明和 provider 的持久性边界见 [Redis 部署就绪检查表](https://github.com/qubit-ltd/rs-event-bus-redis/blob/dev-starfish/doc/user_guide.zh_CN.md)。
 
-`notification_stats()` 返回当前进程内排队、已发布和失败次数，不代表持久 backlog。可直接查询 SQLite 获取待处理行数和最老行年龄：
+`notification_stats()` 返回当前进程内排队、已发布和失败次数；失败计数不等于持久 backlog。可直接查询 SQLite 获取待处理行数和最老行年龄，并通过 `notification_failure()` 查看当前失败头部的任务 ID、状态版本、事件 ID 和错误：
 
 ```sql
 SELECT COUNT(*) AS pending,
@@ -76,5 +76,26 @@ SELECT COUNT(*) AS pending,
        END AS oldest_age_ms
 FROM task_event_outbox;
 ```
+
+### 恢复失败的通知头部
+
+当 `notification_stats().failed` 增长，或持久 outbox backlog 长时间不下降时，按以下顺序处理：
+
+1. 读取 `notification_failure()`，记录准确的 `task_id`、`state_version`、`event_id` 和 `error`。该诊断只是当前进程中失败头部的快照，不是持久告警。
+2. 使用 `service.get(task_id).await` 核对任务权威状态，并判断应用应如何处理缺失通知。隔离前先检查已有归档记录，并遵守应用的归档/保留策略。发布失败也可能只是 provider 暂时不可用；是否隔离由操作员决定。
+3. 确认需要隔离后，使用诊断返回的精确身份及有意义的原因调用 `service.quarantine_failed_notification(expected_task_id, expected_state_version, &expected_event_id, reason).await`。若头部已变化，操作会返回冲突；重新读取诊断后再判断。该操作会原子归档原始 outbox 行并将其从活动队列移除。
+4. 在 `task_event_outbox_quarantine` 中核实归档记录，并确认下一条活动 outbox 记录可以出队和发布。归档只保存证据：隔离会有意丢失该通知，也不会自动重新发布。
+5. 消费者必须发现由此产生的 `state_version` 缺口，并从任务服务刷新权威状态。随后按消费者自己的事务和确认策略提交刷新后的状态与 checkpoint。
+
+可使用失败快照中的精确键查询归档：
+
+```sql
+SELECT task_id, state_version, event_id, event_json, created_at_ms,
+       quarantined_at_ms, reason, last_error
+FROM task_event_outbox_quarantine
+WHERE task_id = ?1 AND state_version = ?2;
+```
+
+不要为了绕过正常网络重试而隔离记录。SQLite schema v7 中的归档不受终态任务清理影响；归档保留期限由应用管理。
 
 更多背景见[详细设计](task_execution_service_design.md)、[迁移指南](migration.zh_CN.md)和 [API 文档](https://docs.rs/qubit-task)。
