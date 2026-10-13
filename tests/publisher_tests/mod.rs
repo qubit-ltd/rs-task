@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use futures::poll;
 use qubit_codec::ValueBytesCodecRegistry;
 use qubit_event_bus::AsyncEventBus;
 use qubit_event_bus::CapabilityError;
@@ -53,6 +54,7 @@ use qubit_task::model::StartCommand;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
 use qubit_task::model::TransitionCommand;
+use qubit_task::service::NotificationFailure;
 use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
@@ -71,6 +73,7 @@ const PARTIALLY_ACCEPTED: u8 = 5;
 const DROPPED: u8 = 6;
 const NO_DESTINATIONS: u8 = 7;
 const NONE_ACCEPTED: u8 = 8;
+const BLOCKED_ACCEPTED: u8 = 9;
 
 /// A fixed-capability provider with controllable admission and fault outcomes.
 struct FakeSpi {
@@ -80,6 +83,8 @@ struct FakeSpi {
     visibility: PublishVisibility,
     durability: DurabilityCapability,
     publish_guarantee: PublishGuarantee,
+    publish_entered: tokio::sync::Notify,
+    release_publish: tokio::sync::Notify,
 }
 
 /// Creates one individual destination acknowledgement for the receipt matrix.
@@ -144,6 +149,11 @@ impl AsyncEventBusSpi for FakeSpi {
                 .expect("state versions")
                 .push(event.state_version);
             let mode = self.mode.load(Ordering::Acquire);
+            if mode == BLOCKED_ACCEPTED {
+                self.publish_entered.notify_one();
+                self.release_publish.notified().await;
+                return Ok(acknowledgement(ACCEPTED).expect("accepted receipt"));
+            }
             if mode == HUNG_PUBLISH {
                 return std::future::pending().await;
             }
@@ -219,6 +229,8 @@ fn bus_with_capabilities(
         visibility,
         durability,
         publish_guarantee,
+        publish_entered: tokio::sync::Notify::new(),
+        release_publish: tokio::sync::Notify::new(),
     });
     let mut registry = CodecRegistry::new();
     if codec {
@@ -272,7 +284,12 @@ async fn test_durable_fire_and_forget_provider_is_rejected_before_outbox_enable(
 
 /// Seeds committed terminal history before the next service owner starts.
 async fn seed() -> Arc<SqliteTaskStore> {
-    let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
+    seed_with_path().await.0
+}
+
+async fn seed_with_path() -> (Arc<SqliteTaskStore>, std::path::PathBuf) {
+    let path = super::database_path();
+    let store = Arc::new(SqliteTaskStore::open(&path).expect("store"));
     let owner = store.acquire_owner().await.expect("owner");
     store.enable_event_outbox().await.expect("enable");
     let id = TaskId::from_id(Id::new(42));
@@ -300,7 +317,7 @@ async fn seed() -> Arc<SqliteTaskStore> {
         .await
         .expect("finish");
     store.release_owner(owner).await.expect("release");
-    store
+    (store, path)
 }
 
 /// Starts the public service with a bounded publisher shutdown.
@@ -319,6 +336,31 @@ async fn service_with_timeout(
         .notification_shutdown_timeout(timeout)
         .build()
         .await
+}
+
+async fn wait_for_notification_failure(service: &TaskExecutionService) -> NotificationFailure {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(failure) = service.notification_failure() {
+                break failure;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("notification failure becomes observable")
+}
+
+async fn blocked_retry_service() -> (TaskExecutionService, Arc<FakeSpi>, NotificationFailure) {
+    let store = seed().await;
+    let (bus, spi) = bus(NOT_ACCEPTED_ERROR, true);
+    let service = service(store, bus).await.expect("service");
+    let failure = wait_for_notification_failure(&service).await;
+    spi.mode.store(BLOCKED_ACCEPTED, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(2), spi.publish_entered.notified())
+        .await
+        .expect("retry entered the controlled provider");
+    (service, spi, failure)
 }
 
 #[tokio::test]
@@ -585,4 +627,262 @@ async fn test_durable_provider_allows_service_construction() {
         let owner = store.acquire_owner().await.expect("owner released");
         store.release_owner(owner).await.expect("release");
     }
+}
+
+#[tokio::test]
+async fn test_failed_head_can_be_inspected_and_quarantined_to_resume_ordered_delivery() {
+    let (store, path) = seed_with_path().await;
+    // Corrupt the oldest event while retaining the two valid successors.
+    rusqlite::Connection::open(&path)
+        .expect("open database")
+        .execute(
+            "UPDATE task_event_outbox SET event_json = '{bad' WHERE event_id = 'task:42:0'",
+            [],
+        )
+        .expect("corrupt oldest event");
+    let (bus, spi) = bus(ACCEPTED, true);
+    let service = service(store.clone(), bus).await.expect("service");
+
+    let failure = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(failure) = service.notification_failure() {
+                break failure;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("failed head becomes observable");
+    assert_eq!(failure.task_id, TaskId::from_id(Id::new(42)));
+    assert_eq!(failure.state_version, 0);
+    assert_eq!(failure.event_id, "task:42:0");
+    assert!(!failure.error.is_empty());
+    assert!(spi.ids.lock().expect("ids").is_empty(), "later events stay ordered");
+
+    service
+        .quarantine_failed_notification(
+            failure.task_id,
+            failure.state_version,
+            &failure.event_id,
+            " operator approved ",
+        )
+        .await
+        .expect("quarantine exact failed head");
+    assert_eq!(service.notification_failure(), None);
+    service.shutdown().await.expect("publish successors");
+
+    let connection = rusqlite::Connection::open(&path).expect("inspect archive");
+    let archive: (String, String, String) = connection
+        .query_row(
+            "SELECT event_json, reason, last_error FROM task_event_outbox_quarantine WHERE event_id = 'task:42:0'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("archived failed event");
+    assert_eq!(archive.0, "{bad");
+    assert_eq!(archive.1, "operator approved");
+    assert!(!archive.2.is_empty());
+    assert_eq!(*spi.ids.lock().expect("ids"), ["task:42:1", "task:42:2"]);
+}
+
+#[tokio::test]
+async fn test_notification_quarantine_rejects_invalid_reason_and_stale_identity() {
+    let (store, path) = seed_with_path().await;
+    rusqlite::Connection::open(&path)
+        .expect("open database")
+        .execute(
+            "UPDATE task_event_outbox SET event_json = '{bad' WHERE event_id = 'task:42:0'",
+            [],
+        )
+        .expect("corrupt oldest event");
+    let (bus, _) = bus(ACCEPTED, true);
+    let service = service(store, bus).await.expect("service");
+    let failure = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(failure) = service.notification_failure() {
+                break failure;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("failed head becomes observable");
+    assert!(matches!(
+        service
+            .quarantine_failed_notification(failure.task_id, 99, &failure.event_id, "reason")
+            .await,
+        Err(TaskServiceError::Store(StoreError::Conflict))
+    ));
+    assert!(matches!(
+        service
+            .quarantine_failed_notification(failure.task_id, failure.state_version, &failure.event_id, "  ")
+            .await,
+        Err(TaskServiceError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        service
+            .quarantine_failed_notification(
+                failure.task_id,
+                failure.state_version,
+                &failure.event_id,
+                &"界".repeat(1366),
+            )
+            .await,
+        Err(TaskServiceError::InvalidRequest(_))
+    ));
+    assert_eq!(service.notification_failure(), Some(failure.clone()));
+    assert!(service.shutdown().await.is_err(), "bad head remains pending");
+    assert!(matches!(
+        service
+            .quarantine_failed_notification(failure.task_id, failure.state_version, &failure.event_id, "reason")
+            .await,
+        Err(TaskServiceError::ShuttingDown)
+    ));
+}
+
+#[tokio::test]
+async fn test_notification_failure_is_cleared_after_a_temporary_provider_failure_recovers() {
+    let store = seed().await;
+    let (bus, spi) = bus(NOT_ACCEPTED_ERROR, true);
+    let service = service(store, bus).await.expect("service");
+    let failure = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(failure) = service.notification_failure() {
+                break failure;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("provider failure is diagnosed");
+    assert_eq!(failure.event_id, "task:42:0");
+
+    spi.mode.store(ACCEPTED, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if service.notification_failure().is_none() && service.notification_stats().published == 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("head retries and later notifications publish");
+    service.shutdown().await.expect("publisher drained");
+}
+
+#[tokio::test]
+async fn test_notification_quarantine_reports_unsupported_without_a_publisher() {
+    let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
+    let service = TaskExecutionServiceBuilder::new(store, Arc::new(ValueBytesCodecRegistry::empty()), Arc::new(Ids))
+        .build()
+        .await
+        .expect("service without event bus");
+
+    assert_eq!(service.notification_failure(), None);
+    assert!(matches!(
+        service
+            .quarantine_failed_notification(TaskId::from_id(Id::new(43)), 0, "task:43:0", "operator reason")
+            .await,
+        Err(TaskServiceError::Store(StoreError::UnsupportedCapability))
+    ));
+    service.shutdown().await.expect("service shutdown");
+}
+
+#[tokio::test]
+async fn test_accepted_quarantine_command_is_revalidated_before_shutdown_finishes() {
+    let (service, spi, failure) = blocked_retry_service().await;
+    let quarantine = service.quarantine_failed_notification(
+        failure.task_id,
+        failure.state_version,
+        &failure.event_id,
+        "operator decision",
+    );
+    tokio::pin!(quarantine);
+    assert!(
+        poll!(quarantine.as_mut()).is_pending(),
+        "command waits behind active publish"
+    );
+
+    let shutdown = service.shutdown();
+    tokio::pin!(shutdown);
+    assert!(
+        poll!(shutdown.as_mut()).is_pending(),
+        "shutdown waits for the publisher worker"
+    );
+    spi.mode.store(ACCEPTED, Ordering::Release);
+    spi.release_publish.notify_one();
+
+    assert!(matches!(
+        quarantine.await,
+        Err(TaskServiceError::Store(StoreError::Conflict))
+    ));
+    shutdown.await.expect("shutdown drains after command completion");
+    assert_eq!(service.notification_stats().published, 3);
+    assert_eq!(service.notification_failure(), None);
+}
+
+#[tokio::test]
+async fn test_cancelling_quarantine_waiter_does_not_cancel_accepted_command() {
+    let (service, spi, failure) = blocked_retry_service().await;
+    {
+        let quarantine = service.quarantine_failed_notification(
+            failure.task_id,
+            failure.state_version,
+            &failure.event_id,
+            "operator decision",
+        );
+        tokio::pin!(quarantine);
+        assert!(
+            poll!(quarantine.as_mut()).is_pending(),
+            "command is accepted and waits behind publish"
+        );
+    }
+    spi.mode.store(ACCEPTED, Ordering::Release);
+    spi.release_publish.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while service.notification_stats().published < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker continues after the caller stops waiting");
+    service.shutdown().await.expect("worker completes and shuts down");
+}
+
+#[tokio::test]
+async fn test_worker_shutdown_failure_replies_to_an_accepted_quarantine_command() {
+    let store = seed().await;
+    let (bus, spi) = bus(HUNG_PUBLISH, true);
+    let service = service_with_timeout(store, bus, Duration::from_millis(100))
+        .await
+        .expect("service");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while spi.ids.lock().expect("published ids").is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker is blocked in provider publication");
+
+    let quarantine =
+        service.quarantine_failed_notification(TaskId::from_id(Id::new(42)), 0, "task:42:0", "operator decision");
+    tokio::pin!(quarantine);
+    assert!(
+        poll!(quarantine.as_mut()).is_pending(),
+        "command is accepted by the bounded queue"
+    );
+
+    let shutdown = service.shutdown();
+    tokio::pin!(shutdown);
+    assert!(
+        poll!(shutdown.as_mut()).is_pending(),
+        "shutdown waits for the worker deadline"
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), quarantine).await,
+        Ok(Err(TaskServiceError::NotificationClose(_)))
+    ));
+    assert!(matches!(shutdown.await, Err(TaskServiceError::NotificationClose(_))));
 }

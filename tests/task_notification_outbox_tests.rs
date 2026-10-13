@@ -23,6 +23,7 @@ use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
 use qubit_task::model::TransitionCommand;
+use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
@@ -57,7 +58,24 @@ async fn test_outbox_requires_owner_and_valid_page_size() {
 }
 
 #[tokio::test]
-async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
+async fn test_memory_store_reports_unsupported_quarantine_capability() {
+    let store = MemoryTaskStore::new(8);
+    assert!(matches!(
+        store
+            .quarantine_event_outbox_head(
+                TaskId::from_id(Id::new(40)),
+                0,
+                "task:40:0",
+                "operator decision",
+                "publish failed",
+            )
+            .await,
+        Err(StoreError::UnsupportedCapability)
+    ));
+}
+
+#[tokio::test]
+async fn test_schema_five_migrates_to_seven_and_reopens_without_rewriting_tasks() {
     let path = database_path();
     let store = SqliteTaskStore::open(&path).expect("initialize database");
     let id = TaskId::from_id(Id::new(41));
@@ -75,16 +93,18 @@ async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
         )
         .expect("original row");
     connection
-        .execute_batch("DROP TABLE IF EXISTS task_event_outbox; PRAGMA user_version=5;")
+        .execute_batch(
+            "DROP TABLE IF EXISTS task_event_outbox; DROP TABLE task_event_outbox_quarantine; PRAGMA user_version=5;",
+        )
         .expect("simulate v5");
     drop(connection);
     drop(SqliteTaskStore::open(&path).expect("migrate v5"));
-    drop(SqliteTaskStore::open(&path).expect("reopen v6"));
+    drop(SqliteTaskStore::open(&path).expect("reopen v7"));
     let connection = Connection::open(&path).expect("inspect schema");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let after: (String, Vec<u8>, String) = connection
         .query_row(
             "SELECT request_info_json,payload,lifecycle_json FROM tasks",
@@ -104,6 +124,264 @@ async fn test_schema_five_migrates_and_reopens_without_rewriting_tasks() {
     connection
         .prepare("SELECT task_id,state_version,event_id,event_json,created_at_ms FROM task_event_outbox")
         .expect("outbox schema");
+}
+
+#[tokio::test]
+async fn test_schema_six_migrates_outbox_rows_to_seven_and_reopens() {
+    let path = database_path();
+    let store = SqliteTaskStore::open(&path).expect("initialize database");
+    let owner = store.acquire_owner().await.expect("owner");
+    store.enable_event_outbox().await.expect("enable outbox");
+    let id = TaskId::from_id(Id::new(51));
+    store.accept_encoded(id, request()).await.expect("accept");
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: 0,
+            started_at_ms: 10,
+        })
+        .await
+        .expect("start");
+    store
+        .update_progress(ProgressCommand::new(id, running.attempt, 1, None, Vec::new(), 11))
+        .await
+        .expect("progress");
+    let before = store.list_event_outbox(128).await.expect("outbox before migration");
+    assert_eq!(before.len(), 2);
+    let fresh_version: i64 = Connection::open(&path)
+        .expect("inspect fresh schema")
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fresh schema version");
+    assert_eq!(fresh_version, 7);
+    store.release_owner(owner).await.expect("release owner");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open v6 fixture");
+    connection
+        .execute_batch("DROP TABLE task_event_outbox_quarantine;")
+        .expect("remove v7 quarantine table");
+    connection
+        .pragma_update(None, "user_version", 6)
+        .expect("mark fixture as v6");
+    drop(connection);
+    drop(SqliteTaskStore::open(&path).expect("migrate v6"));
+    drop(SqliteTaskStore::open(&path).expect("reopen v7"));
+
+    let store = SqliteTaskStore::open(&path).expect("open migrated database");
+    let owner = store.acquire_owner().await.expect("owner after migration");
+    store.enable_event_outbox().await.expect("enable after migration");
+    let after = store.list_event_outbox(128).await.expect("retained rows");
+    assert_eq!(after.len(), 2);
+    for (original, migrated) in before.iter().zip(&after) {
+        assert_eq!(migrated.task_id, original.task_id);
+        assert_eq!(migrated.state_version, original.state_version);
+        assert_eq!(migrated.event_id, original.event_id);
+        assert_eq!(migrated.event_json, original.event_json);
+    }
+    store.release_owner(owner).await.expect("release owner");
+    let connection = Connection::open(&path).expect("inspect schema");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("schema version");
+    assert_eq!(version, 7);
+    connection
+        .prepare("SELECT task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error FROM task_event_outbox_quarantine")
+        .expect("quarantine schema");
+}
+
+#[tokio::test]
+async fn test_schema_four_and_five_migrate_tasks_to_seven() {
+    for version in [4, 5] {
+        let path = database_path();
+        let store = SqliteTaskStore::open(&path).expect("initialize database");
+        let id = TaskId::from_id(Id::new(52 + version as u64));
+        store.accept_encoded(id, request()).await.expect("persist task");
+        drop(store);
+        let connection = Connection::open(&path).expect("open fixture");
+        connection
+            .execute_batch("DROP INDEX IF EXISTS task_event_outbox_created; DROP TABLE IF EXISTS task_event_outbox;")
+            .expect("remove v6 outbox");
+        connection
+            .execute_batch("DROP TABLE task_event_outbox_quarantine;")
+            .expect("remove v7 quarantine table");
+        if version == 4 {
+            connection
+                .execute_batch(
+                    "DROP INDEX tasks_queued_retry_deadline; ALTER TABLE tasks DROP COLUMN retry_not_before_ms;",
+                )
+                .expect("restore v4 tasks schema");
+        }
+        connection
+            .pragma_update(None, "user_version", version)
+            .expect("set old schema version");
+        drop(connection);
+
+        drop(SqliteTaskStore::open(&path).expect("migrate old schema"));
+        let connection = Connection::open(&path).expect("inspect migrated database");
+        let migrated_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(migrated_version, 7);
+        let task_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .expect("retained task count");
+        assert_eq!(task_count, 1);
+        connection
+            .prepare("SELECT task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error FROM task_event_outbox_quarantine")
+            .expect("quarantine schema");
+    }
+}
+
+#[tokio::test]
+async fn test_quarantine_requires_current_owned_head_and_archives_atomically() {
+    let path = database_path();
+    let store = SqliteTaskStore::open(&path).expect("open database");
+    let id = TaskId::from_id(Id::new(61));
+    assert!(matches!(
+        store
+            .quarantine_event_outbox_head(id, 0, "task:61:0", "operator decision", "decode failed")
+            .await,
+        Err(StoreError::OwnerConflict)
+    ));
+    let owner = store.acquire_owner().await.expect("owner");
+    store.enable_event_outbox().await.expect("enable outbox");
+    store.accept_encoded(id, request()).await.expect("accept");
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: 0,
+            started_at_ms: 10,
+        })
+        .await
+        .expect("start");
+    store
+        .update_progress(ProgressCommand::new(id, running.attempt, 1, None, Vec::new(), 11))
+        .await
+        .expect("progress");
+    let events = store.list_event_outbox(128).await.expect("outbox");
+    let head = &events[0];
+    let next = &events[1];
+    let connection = Connection::open(&path).expect("fault injection connection");
+    let original_created_at_ms: i64 = connection
+        .query_row(
+            "SELECT created_at_ms FROM task_event_outbox WHERE task_id=?1 AND state_version=?2",
+            rusqlite::params![head.task_id.to_padded_decimal(), head.state_version],
+            |row| row.get(0),
+        )
+        .expect("original event timestamp");
+    for (expected_id, expected_version, expected_event_id) in [
+        (
+            TaskId::from_id(Id::new(999)),
+            head.state_version,
+            head.event_id.as_str(),
+        ),
+        (head.task_id, head.state_version + 8, head.event_id.as_str()),
+        (head.task_id, head.state_version, "wrong-event-id"),
+        (next.task_id, next.state_version, next.event_id.as_str()),
+    ] {
+        assert!(matches!(
+            store
+                .quarantine_event_outbox_head(
+                    expected_id,
+                    expected_version,
+                    expected_event_id,
+                    "operator decision",
+                    "decode failed",
+                )
+                .await,
+            Err(StoreError::Conflict)
+        ));
+    }
+    assert!(matches!(
+        store
+            .quarantine_event_outbox_head(head.task_id, head.state_version, &head.event_id, " \t", "decode failed")
+            .await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        store
+            .quarantine_event_outbox_head(
+                head.task_id,
+                head.state_version,
+                &head.event_id,
+                "x".repeat(4097).as_str(),
+                "decode failed",
+            )
+            .await,
+        Err(StoreError::InvalidRequest(_))
+    ));
+
+    connection
+        .execute_batch("CREATE TRIGGER fail_quarantine BEFORE INSERT ON task_event_outbox_quarantine BEGIN SELECT RAISE(ABORT, 'injected quarantine failure'); END;")
+        .expect("inject archive failure");
+    assert!(matches!(
+        store
+            .quarantine_event_outbox_head(
+                head.task_id,
+                head.state_version,
+                &head.event_id,
+                "operator decision",
+                "decode failed"
+            )
+            .await,
+        Err(StoreError::Failure(_))
+    ));
+    assert_eq!(
+        store.list_event_outbox(128).await.expect("rows after rollback").len(),
+        2
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_quarantine;")
+        .expect("remove trigger");
+    store
+        .quarantine_event_outbox_head(
+            head.task_id,
+            head.state_version,
+            &head.event_id,
+            "operator decision",
+            "decode failed",
+        )
+        .await
+        .expect("quarantine current head");
+    assert_eq!(store.list_event_outbox(128).await.expect("remaining outbox").len(), 1);
+    let archived: (String, u64, String, String, i64, i64, String, String) = connection
+        .query_row(
+            "SELECT task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error FROM task_event_outbox_quarantine",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        )
+        .expect("archived event");
+    assert_eq!(archived.0, head.task_id.to_padded_decimal());
+    assert_eq!(archived.1, head.state_version);
+    assert_eq!(archived.2, head.event_id);
+    assert_eq!(archived.3, head.event_json);
+    assert_eq!(archived.4, original_created_at_ms);
+    assert!(archived.5 > 0);
+    assert_eq!(archived.6, "operator decision");
+    assert_eq!(archived.7, "decode failed");
+    let transition = TransitionCommand {
+        id,
+        expected_state_version: 1,
+        expected_attempt: running.attempt,
+        state: TaskState::Succeeded,
+        cancel_requested: false,
+        cancel_error: None,
+        retry_not_before_ms: None,
+        finished_at_ms: Some(20),
+        output: None,
+    };
+    store.transition_encoded(transition).await.expect("finish task");
+    store
+        .prune_terminal_before(21, std::num::NonZeroUsize::new(1).expect("nonzero batch"))
+        .await
+        .expect("prune terminal task");
+    let archive_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM task_event_outbox_quarantine", [], |row| {
+            row.get(0)
+        })
+        .expect("archive survives cleanup");
+    assert_eq!(archive_count, 1);
+    store.release_owner(owner).await.expect("release owner");
 }
 
 #[test]

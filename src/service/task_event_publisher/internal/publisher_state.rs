@@ -18,8 +18,12 @@ use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::Topic;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 use crate::event::TaskEvent;
+use crate::service::NotificationFailure;
+use crate::service::TaskServiceError;
+use crate::service::task_event_publisher::QuarantineCommand;
 use crate::service::task_event_publisher::internal::Counters;
 use crate::store::EventOutboxEntry;
 use crate::store::TaskStore;
@@ -44,6 +48,8 @@ pub(in crate::service::task_event_publisher) struct PublisherState {
     pub(in crate::service::task_event_publisher) counters: Counters,
     /// Latest publication or storage diagnostic retained for shutdown.
     pub(in crate::service::task_event_publisher) last_error: parking_lot::Mutex<Option<String>>,
+    /// Current failed outbox head exposed to service callers.
+    pub(in crate::service::task_event_publisher) failure: parking_lot::Mutex<Option<NotificationFailure>>,
     /// Event currently awaiting admission, retained if shutdown aborts it.
     pub(in crate::service::task_event_publisher) in_flight_event_id: parking_lot::Mutex<Option<String>>,
 }
@@ -65,6 +71,7 @@ impl PublisherState {
             pending: AtomicUsize::new(0),
             counters: Counters::default(),
             last_error: parking_lot::Mutex::new(None),
+            failure: parking_lot::Mutex::new(None),
             in_flight_event_id: parking_lot::Mutex::new(None),
         }
     }
@@ -72,31 +79,58 @@ impl PublisherState {
     /// Publishes in stable store order, retaining the failed head on every
     /// error. Polling supplements notifications to cover cancellation after
     /// transaction commit.
-    pub(in crate::service::task_event_publisher) async fn run(&self) {
+    pub(in crate::service::task_event_publisher) async fn run(&self, mut controls: mpsc::Receiver<QuarantineCommand>) {
         let mut backoff = Duration::from_millis(25);
         loop {
+            self.process_queued_controls(&mut controls).await;
             let page = self.store.list_event_outbox(128).await;
             let mut failed = false;
             match page {
                 Ok(entries) if entries.is_empty() => {
                     self.pending.store(0, Ordering::Release);
                     if self.closing.load(Ordering::Acquire) {
+                        if self.process_queued_controls(&mut controls).await {
+                            continue;
+                        }
                         return;
                     }
                     backoff = Duration::from_millis(25);
+                    tokio::select! {
+                        _ = self.changed.notified() => {},
+                        command = controls.recv() => {
+                            if let Some(command) = command { self.process_control(command).await; }
+                        },
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                    }
                 }
                 Ok(entries) => {
                     self.pending.store(entries.len(), Ordering::Release);
                     for entry in entries {
+                        self.clear_failure_if_head_changed(&entry);
+                        if self.process_queued_controls(&mut controls).await {
+                            backoff = Duration::from_millis(25);
+                            break;
+                        }
                         if let Err(error) = self.publish(&entry).await {
                             self.counters.failed.fetch_add(1, Ordering::Relaxed);
-                            *self.last_error.lock() = Some(error);
+                            *self.last_error.lock() = Some(error.clone());
+                            *self.failure.lock() = Some(NotificationFailure {
+                                task_id: entry.task_id,
+                                state_version: entry.state_version,
+                                event_id: entry.event_id.clone(),
+                                error,
+                            });
                             failed = true;
                             break;
                         }
+                        self.clear_failure_for(&entry);
                         self.pending.fetch_sub(1, Ordering::AcqRel);
                     }
                     if !failed {
+                        backoff = Duration::from_millis(25);
+                        continue;
+                    }
+                    if self.process_queued_controls(&mut controls).await {
                         backoff = Duration::from_millis(25);
                         continue;
                     }
@@ -111,10 +145,11 @@ impl PublisherState {
             // Notifications wake idle reads. Failures retain their finite backoff even
             // under a sustained stream of new commits, avoiding an outage retry storm.
             if failed {
-                self.wait_after_failure(wait).await;
+                if self.wait_after_failure(wait, &mut controls).await {
+                    backoff = Duration::from_millis(25);
+                    continue;
+                }
                 backoff = (backoff * 2).min(Duration::from_secs(1));
-            } else {
-                tokio::select! { _ = self.changed.notified() => {}, _ = tokio::time::sleep(wait) => {} }
             }
         }
     }
@@ -122,10 +157,83 @@ impl PublisherState {
     /// Waits for retry eligibility, allowing the first close signal one
     /// immediate drain attempt. Ordinary commit notifications never bypass
     /// failure backoff.
-    async fn wait_after_failure(&self, delay: Duration) {
-        tokio::select! {
-            _ = self.close_changed.notified() => {},
-            _ = tokio::time::sleep(delay) => {},
+    async fn wait_after_failure(&self, delay: Duration, controls: &mut mpsc::Receiver<QuarantineCommand>) -> bool {
+        let deadline = tokio::time::Instant::now() + delay;
+        loop {
+            tokio::select! {
+                _ = self.close_changed.notified() => return false,
+                command = controls.recv() => {
+                    if let Some(command) = command
+                        && self.process_control(command).await
+                    {
+                        return true;
+                    }
+                },
+                _ = tokio::time::sleep_until(deadline) => return false,
+            }
+        }
+    }
+
+    async fn process_queued_controls(&self, controls: &mut mpsc::Receiver<QuarantineCommand>) -> bool {
+        let mut quarantined = false;
+        while let Ok(command) = controls.try_recv() {
+            quarantined |= self.process_control(command).await;
+        }
+        quarantined
+    }
+
+    async fn process_control(&self, command: QuarantineCommand) -> bool {
+        let expected = (
+            command.expected_task_id,
+            command.expected_state_version,
+            command.expected_event_id.as_str(),
+        );
+        let result = {
+            let failure = self.failure.lock().clone();
+            match failure {
+                Some(failure) if (failure.task_id, failure.state_version, failure.event_id.as_str()) == expected => {
+                    self.store
+                        .quarantine_event_outbox_head(
+                            command.expected_task_id,
+                            command.expected_state_version,
+                            &command.expected_event_id,
+                            &command.reason,
+                            &failure.error,
+                        )
+                        .await
+                        .map_err(TaskServiceError::from)
+                }
+                _ => Err(crate::store::StoreError::Conflict.into()),
+            }
+        };
+        let quarantined = result.is_ok();
+        if quarantined {
+            *self.failure.lock() = None;
+            *self.last_error.lock() = None;
+        }
+        let _ = command.response.send(result);
+        quarantined
+    }
+
+    fn clear_failure_if_head_changed(&self, entry: &EventOutboxEntry) {
+        let mut failure = self.failure.lock();
+        if failure.as_ref().is_some_and(|current| {
+            current.task_id != entry.task_id
+                || current.state_version != entry.state_version
+                || current.event_id != entry.event_id
+        }) {
+            *failure = None;
+        }
+    }
+
+    fn clear_failure_for(&self, entry: &EventOutboxEntry) {
+        let mut failure = self.failure.lock();
+        if failure.as_ref().is_some_and(|current| {
+            current.task_id == entry.task_id
+                && current.state_version == entry.state_version
+                && current.event_id == entry.event_id
+        }) {
+            *failure = None;
         }
     }
 
@@ -167,6 +275,7 @@ mod tests {
     use qubit_event_bus::AsyncEventBusRegistry;
     use qubit_event_bus::EventBusConfig;
     use qubit_event_bus::model::Topic;
+    use tokio::sync::mpsc;
 
     use super::PublisherState;
     use crate::model::typed::TaskId;
@@ -186,7 +295,8 @@ mod tests {
             bus,
             Topic::new("task.lifecycle").expect("topic"),
         );
-        let mut first = Box::pin(state.wait_after_failure(Duration::from_secs(3600)));
+        let (_sender, mut controls) = mpsc::channel(4);
+        let mut first = Box::pin(state.wait_after_failure(Duration::from_secs(3600), &mut controls));
         assert!(poll!(first.as_mut()).is_pending());
         state.changed.notify_one();
         assert!(
@@ -198,7 +308,8 @@ mod tests {
             poll!(first.as_mut()).is_ready(),
             "close must interrupt a long retry wait"
         );
-        let mut second = Box::pin(state.wait_after_failure(Duration::from_secs(3600)));
+        drop(first);
+        let mut second = Box::pin(state.wait_after_failure(Duration::from_secs(3600), &mut controls));
         assert!(
             poll!(second.as_mut()).is_pending(),
             "sustained errors remain rate limited after the close retry"
@@ -243,7 +354,8 @@ mod tests {
         let state = PublisherState::new(store.clone(), bus, Topic::new("task.lifecycle").expect("topic"));
         state.closing.store(true, std::sync::atomic::Ordering::Release);
 
-        tokio::time::timeout(Duration::from_secs(1), state.run())
+        let (_sender, receiver) = mpsc::channel(4);
+        tokio::time::timeout(Duration::from_secs(1), state.run(receiver))
             .await
             .expect("closed empty publisher exits promptly");
 

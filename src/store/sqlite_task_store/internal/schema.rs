@@ -12,12 +12,12 @@ use super::super::failure;
 use crate::store::StoreError;
 
 /// Current schema version for typed numeric-ID task storage.
-pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 6;
+pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 7;
 
 /// Initializes the typed numeric-ID schema or upgrades a supported typed
 /// schema version in place.
 ///
-/// Versions 4 and 5 are upgraded transactionally to version 6. A UUID-based
+/// Versions 4, 5, and 6 are upgraded transactionally to version 7. A UUID-based
 /// schema is rejected without changing its tables or rows.
 ///
 /// # Parameters
@@ -39,7 +39,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(failure)?;
-    if version != 0 && version != 4 && version != 5 && version != NEXT_SCHEMA_VERSION {
+    if version != 0 && !(4..=NEXT_SCHEMA_VERSION).contains(&version) {
         return Err(StoreError::Failure(format!(
             "SQLite task schema version {version} uses the legacy UUID format; explicit task ID mapping is required before opening with the typed task API"
         )));
@@ -63,7 +63,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
             .map_err(failure)?;
         transaction.pragma_update(None, "user_version", 5).map_err(failure)?;
     }
-    if version == NEXT_SCHEMA_VERSION || version == 5 || version == 4 {
+    if version >= 4 {
         if !table_exists {
             return Err(StoreError::Failure(
                 "typed SQLite task schema is missing table `tasks`".into(),
@@ -128,7 +128,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
              CREATE INDEX IF NOT EXISTS tasks_terminal_finished_id ON tasks(CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id) WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled');",
         )
         .map_err(failure)?;
-    if version != NEXT_SCHEMA_VERSION {
+    if version == 0 || version == 4 || version == 5 {
         transaction
             .execute_batch(
                 "CREATE TABLE task_event_outbox (
@@ -138,12 +138,101 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
             CREATE INDEX task_event_outbox_created ON task_event_outbox(created_at_ms,task_id,state_version);",
             )
             .map_err(failure)?;
+        if version == 4 || version == 5 {
+            transaction.pragma_update(None, "user_version", 6).map_err(failure)?;
+        }
+    }
+    if version != NEXT_SCHEMA_VERSION {
+        transaction
+            .execute_batch(
+                "CREATE TABLE task_event_outbox_quarantine (
+                    task_id TEXT NOT NULL,
+                    state_version INTEGER NOT NULL,
+                    event_id TEXT NOT NULL,
+                    event_json TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    quarantined_at_ms INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    last_error TEXT NOT NULL,
+                    PRIMARY KEY(task_id,state_version)
+                );
+                CREATE INDEX task_event_outbox_quarantine_archived
+                    ON task_event_outbox_quarantine(quarantined_at_ms,task_id,state_version);",
+            )
+            .map_err(failure)?;
+    }
+    if version != NEXT_SCHEMA_VERSION {
         transaction
             .pragma_update(None, "user_version", NEXT_SCHEMA_VERSION)
             .map_err(failure)?;
     }
     validate_outbox_schema(&transaction)?;
+    validate_quarantine_schema(&transaction)?;
     transaction.commit().map_err(failure)
+}
+
+/// Validates the typed event archive columns, composite primary key, and index.
+fn validate_quarantine_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let mut statement = transaction
+        .prepare("PRAGMA table_info(task_event_outbox_quarantine)")
+        .map_err(failure)?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    for (name, kind, primary) in [
+        ("task_id", "TEXT", 1),
+        ("state_version", "INTEGER", 2),
+        ("event_id", "TEXT", 0),
+        ("event_json", "TEXT", 0),
+        ("created_at_ms", "INTEGER", 0),
+        ("quarantined_at_ms", "INTEGER", 0),
+        ("reason", "TEXT", 0),
+        ("last_error", "TEXT", 0),
+    ] {
+        if !columns
+            .iter()
+            .any(|(column, ty, required, pk)| column == name && ty == kind && *required == 1 && *pk == primary)
+        {
+            return Err(StoreError::Failure(format!(
+                "SQLite event quarantine has invalid required column `{name}`"
+            )));
+        }
+    }
+    let owns_index: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='task_event_outbox_quarantine_archived' AND tbl_name='task_event_outbox_quarantine')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if !owns_index {
+        return Err(StoreError::Failure(
+            "SQLite event quarantine is missing its archive index".into(),
+        ));
+    }
+    let mut statement = transaction
+        .prepare("PRAGMA index_info(task_event_outbox_quarantine_archived)")
+        .map_err(failure)?;
+    let index = statement
+        .query_map([], |row| row.get::<_, String>(2))
+        .map_err(failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    if index != ["quarantined_at_ms", "task_id", "state_version"] {
+        return Err(StoreError::Failure(
+            "SQLite event quarantine is missing its archive index".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Confirms that `tasks` contains every column required by the typed request
@@ -211,7 +300,7 @@ fn validate_next_schema(transaction: &Transaction<'_>) -> Result<(), StoreError>
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` when the outbox schema matches the version 6 contract.
+/// Returns `Ok(())` when the outbox schema has the required ordering contract.
 ///
 /// # Errors
 ///

@@ -50,6 +50,8 @@ use crate::model::typed::TaskRequest;
 use crate::model::typed::TaskSummary;
 use crate::model::typed::TransitionCommand;
 use crate::service::CancelOutcome;
+#[cfg(feature = "event-bus")]
+use crate::service::NotificationFailure;
 use crate::service::RetryPolicy;
 use crate::service::TaskServiceError;
 use crate::store::TaskStore;
@@ -387,6 +389,62 @@ impl TypedTaskExecutionService {
             .publisher
             .as_ref()
             .map_or_else(NotificationStats::default, TaskEventPublisher::stats)
+    }
+
+    /// Returns the current process-local failure snapshot for the ordered
+    /// notification outbox, if its head is failing publication.
+    ///
+    /// The snapshot is cleared when that head is published, quarantined, or
+    /// replaced. Quarantining intentionally leaves a notification gap; the
+    /// archived event is not replayed automatically, so consumers should use
+    /// task state versions to detect gaps and query authoritative task state.
+    #[cfg(feature = "event-bus")]
+    pub fn notification_failure(&self) -> Option<NotificationFailure> {
+        self.core.publisher.as_ref().and_then(TaskEventPublisher::failure)
+    }
+
+    /// Archives and removes the exact currently failed notification head.
+    ///
+    /// This intentionally creates a notification gap and does not count the
+    /// event as published. Check the task's authoritative state and decide how
+    /// consumers should recover before calling this method. If publication
+    /// succeeds or the outbox head changes before the worker processes this
+    /// command, the method returns `StoreError::Conflict` and leaves the event
+    /// untouched. A command accepted before shutdown completes before store
+    /// ownership is released, even if this future's caller is cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ShuttingDown` after shutdown begins, `StoreError::Conflict`
+    /// when the supplied identity is no longer the failed head,
+    /// `StoreError::UnsupportedCapability` when no publisher or quarantine
+    /// capability is available, or `InvalidRequest` for a blank or oversized
+    /// reason and when the bounded operator-control queue is full.
+    #[cfg(feature = "event-bus")]
+    pub async fn quarantine_failed_notification(
+        &self,
+        expected_task_id: TaskId,
+        expected_state_version: u64,
+        expected_event_id: &str,
+        reason: &str,
+    ) -> Result<(), TaskServiceError> {
+        if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
+            return Err(TaskServiceError::ShuttingDown);
+        }
+        let publisher = self
+            .core
+            .publisher
+            .as_ref()
+            .ok_or(crate::store::StoreError::UnsupportedCapability)?;
+        publisher
+            .quarantine_failed(
+                expected_task_id,
+                expected_state_version,
+                expected_event_id,
+                reason,
+                &self.core.shutting_down,
+            )
+            .await
     }
 
     /// Requeues a blocked task after its configuration or handler is repaired.

@@ -9,6 +9,8 @@
 
 mod cancel_outcome;
 #[cfg(feature = "event-bus")]
+mod notification_failure;
+#[cfg(feature = "event-bus")]
 mod notification_stats;
 mod owner_release_guard;
 #[cfg(test)]
@@ -24,6 +26,8 @@ mod typed_task_execution_service;
 mod typed_task_execution_service_builder;
 
 pub use cancel_outcome::CancelOutcome;
+#[cfg(feature = "event-bus")]
+pub use notification_failure::NotificationFailure;
 #[cfg(feature = "event-bus")]
 pub use notification_stats::NotificationStats;
 pub use retry_policy::RetryPolicy;

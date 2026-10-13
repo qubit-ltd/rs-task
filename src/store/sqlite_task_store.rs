@@ -176,6 +176,87 @@ impl SqliteTaskStore {
         })
     }
 
+    /// Archives and removes the expected current head in one SQLite
+    /// transaction while the process owner fence is held.
+    pub(super) fn quarantine_outbox_head<'a>(
+        &'a self,
+        expected_task_id: crate::model::typed::TaskId,
+        expected_state_version: u64,
+        expected_event_id: &'a str,
+        reason: &'a str,
+        last_error: &'a str,
+    ) -> TaskFuture<'a, Result<(), StoreError>> {
+        let expected_task_key = expected_task_id.to_padded_decimal();
+        let expected_event_id = expected_event_id.to_owned();
+        let reason = reason.to_owned();
+        let last_error = last_error.to_owned();
+        self.run_outbox(move |connection| {
+            if reason.trim().is_empty() || reason.len() > 4096 {
+                return Err(StoreError::InvalidRequest(
+                    "outbox quarantine reason must be nonblank and at most 4096 bytes",
+                ));
+            }
+            let transaction = connection.unchecked_transaction().map_err(failure)?;
+            let head = transaction
+                .query_row(
+                    "SELECT task_id,state_version,event_id,event_json,created_at_ms FROM task_event_outbox ORDER BY created_at_ms,task_id,state_version LIMIT 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, u64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .map_err(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => StoreError::Conflict,
+                    other => failure(other),
+                })?;
+            let (task_key, state_version, event_id, event_json, created_at_ms) = head;
+            if task_key != expected_task_key
+                || state_version != expected_state_version
+                || event_id != expected_event_id
+            {
+                return Err(StoreError::Conflict);
+            }
+            let quarantined_at_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .map_err(failure)?;
+            transaction
+                .execute(
+                    "INSERT INTO task_event_outbox_quarantine(task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    rusqlite::params![
+                        task_key,
+                        state_version,
+                        event_id,
+                        event_json,
+                        created_at_ms,
+                        quarantined_at_ms,
+                        reason,
+                        last_error,
+                    ],
+                )
+                .map_err(failure)?;
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM task_event_outbox WHERE task_id=?1 AND state_version=?2 AND event_id=?3",
+                    rusqlite::params![task_key, state_version, event_id],
+                )
+                .map_err(failure)?;
+            if deleted != 1 {
+                return Err(StoreError::Conflict);
+            }
+            transaction.commit().map_err(failure)
+        })
+    }
+
     /// Opens a database using the typed numeric-ID task schema.
     ///
     /// This cutover entry point creates a fresh schema or reopens the same
@@ -507,6 +588,23 @@ impl super::TaskStore for SqliteTaskStore {
         state_version: u64,
     ) -> TaskFuture<'a, Result<(), StoreError>> {
         self.mark_outbox_published(task_id, state_version)
+    }
+
+    fn quarantine_event_outbox_head<'a>(
+        &'a self,
+        expected_task_id: crate::model::typed::TaskId,
+        expected_state_version: u64,
+        expected_event_id: &'a str,
+        reason: &'a str,
+        last_error: &'a str,
+    ) -> TaskFuture<'a, Result<(), StoreError>> {
+        self.quarantine_outbox_head(
+            expected_task_id,
+            expected_state_version,
+            expected_event_id,
+            reason,
+            last_error,
+        )
     }
 }
 

@@ -59,6 +59,50 @@ pub trait TaskStore: Send + Sync {
         Box::pin(async { Err(StoreError::UnsupportedCapability) })
     }
 
+    /// Archives and removes the current oldest event only when its complete
+    /// expected identity still matches under the active owner.
+    ///
+    /// The archive retains the original event and timestamp together with the
+    /// operator reason, last publishing error, and quarantine time. Stores
+    /// without an atomic persistent outbox return `UnsupportedCapability`.
+    ///
+    /// # Parameters
+    ///
+    /// * `expected_task_id` - Task identity expected at the outbox head.
+    /// * `expected_state_version` - Lifecycle revision expected at the head.
+    /// * `expected_event_id` - Stable event identity expected at the head.
+    /// * `reason` - Nonblank operator explanation of the isolation decision,
+    ///   limited to 4096 UTF-8 bytes.
+    /// * `last_error` - Publishing error captured for the failed head.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` after the archive and outbox deletion commit together.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Conflict` if the expected identity is no longer the oldest
+    /// event, `OwnerConflict` without active ownership, `InvalidRequest` for an
+    /// invalid reason, `UnsupportedCapability` when atomic isolation is not
+    /// supported, or `Failure` for persistence errors.
+    fn quarantine_event_outbox_head<'a>(
+        &'a self,
+        expected_task_id: TypedTaskId,
+        expected_state_version: u64,
+        expected_event_id: &'a str,
+        reason: &'a str,
+        last_error: &'a str,
+    ) -> TaskFuture<'a, Result<(), StoreError>> {
+        let _ = (
+            expected_task_id,
+            expected_state_version,
+            expected_event_id,
+            reason,
+            last_error,
+        );
+        Box::pin(async { Err(StoreError::UnsupportedCapability) })
+    }
+
     /// Reports persistence and recovery support.
     fn capabilities(&self) -> StoreCapabilities;
 
