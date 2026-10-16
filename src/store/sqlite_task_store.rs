@@ -28,6 +28,7 @@ use internal::transition_encoded;
 use internal::update_progress;
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 use tokio::sync;
 use tokio::task;
@@ -36,8 +37,11 @@ use super::StoreError;
 use super::TaskFuture;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
+use crate::model::TaskState;
+use crate::model::typed::TaskId;
 use crate::model::typed::TaskPage as EncodedTaskPage;
 use crate::model::typed::TaskQuery as EncodedTaskQuery;
+use crate::model::typed::TaskStateCheckpoint;
 
 mod internal;
 
@@ -379,6 +383,54 @@ fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }
 
+/// Reads the current lifecycle state or its durable post-prune checkpoint.
+fn get_state_checkpoint(connection: &Connection, id: TaskId) -> Result<Option<TaskStateCheckpoint>, StoreError> {
+    let id_key = id.to_padded_decimal();
+    let current = connection
+        .query_row("SELECT lifecycle_json FROM tasks WHERE id=?1", [&id_key], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(failure)?;
+    if let Some(lifecycle_json) = current {
+        let lifecycle: serde_json::Value = serde_json::from_str(&lifecycle_json).map_err(failure)?;
+        let state: TaskState = serde_json::from_value(
+            lifecycle
+                .get("state")
+                .cloned()
+                .ok_or_else(|| StoreError::Failure("task lifecycle is missing its state".into()))?,
+        )
+        .map_err(failure)?;
+        let state_version = lifecycle
+            .get("state_version")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| StoreError::Failure("task lifecycle has an invalid state version".into()))?;
+        let state_version = u64::try_from(state_version).map_err(failure)?;
+        return Ok(Some(TaskStateCheckpoint {
+            id,
+            state_version,
+            state,
+        }));
+    }
+    let stored = connection
+        .query_row(
+            "SELECT state_version,state_json FROM task_terminal_checkpoints WHERE task_id=?1",
+            [&id_key],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(failure)?;
+    stored
+        .map(|(version, state_json)| {
+            Ok(TaskStateCheckpoint {
+                id,
+                state_version: u64::try_from(version).map_err(failure)?,
+                state: serde_json::from_str(&state_json).map_err(failure)?,
+            })
+        })
+        .transpose()
+}
+
 impl super::TaskStore for SqliteTaskStore {
     /// Reports that history is persistent and unfinished records can recover.
     ///
@@ -416,6 +468,13 @@ impl super::TaskStore for SqliteTaskStore {
         id: crate::model::typed::TaskId,
     ) -> TaskFuture<'a, Result<Option<crate::model::typed::StoredTask>, StoreError>> {
         self.run(move |connection| get_encoded_task(connection, id))
+    }
+
+    fn get_state_checkpoint<'a>(
+        &'a self,
+        id: crate::model::typed::TaskId,
+    ) -> TaskFuture<'a, Result<Option<TaskStateCheckpoint>, StoreError>> {
+        self.run(move |connection| get_state_checkpoint(connection, id))
     }
 
     /// Starts one queued typed task attempt with a revision compare-and-set.
@@ -501,20 +560,53 @@ impl super::TaskStore for SqliteTaskStore {
         self.run_write(move |connection| {
             let transaction = connection.unchecked_transaction().map_err(failure)?;
             let mut statement = transaction
-                .prepare("SELECT id FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER) < ?1 ORDER BY CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id LIMIT ?2")
+                .prepare("SELECT id,lifecycle_json,CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER) FROM tasks WHERE state_kind IN ('Succeeded','Failed','Panicked','Cancelled') AND CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER) < ?1 AND NOT EXISTS (SELECT 1 FROM task_event_outbox e WHERE e.task_id=tasks.id) ORDER BY CAST(json_extract(lifecycle_json, '$.finished_at_ms') AS INTEGER), id LIMIT ?2")
                 .map_err(failure)?;
             let rows = statement
-                .query_map(params![finished_before_ms, max_rows], |row| row.get::<_, String>(0))
+                .query_map(params![finished_before_ms, max_rows], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
                 .map_err(failure)?;
-            let ids = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
+            let rows = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
             drop(statement);
-            for id in &ids {
+            for (id, lifecycle_json, finished_at_ms) in &rows {
+                let lifecycle: serde_json::Value = serde_json::from_str(lifecycle_json).map_err(failure)?;
+                let state: TaskState = serde_json::from_value(
+                    lifecycle
+                        .get("state")
+                        .cloned()
+                        .ok_or_else(|| StoreError::Failure("task lifecycle is missing its state".into()))?,
+                )
+                .map_err(failure)?;
+                if !state.is_terminal() {
+                    return Err(StoreError::Failure(
+                        "terminal task has a nonterminal lifecycle state".into(),
+                    ));
+                }
+                let state_json = serde_json::to_string(&state).map_err(failure)?;
+                let state_version = lifecycle
+                    .get("state_version")
+                    .and_then(serde_json::Value::as_i64)
+                    .ok_or_else(|| StoreError::Failure("task lifecycle has an invalid state version".into()))?;
                 transaction
+                    .execute(
+                        "INSERT INTO task_terminal_checkpoints(task_id,state_version,state_json,finished_at_ms) VALUES (?1,?2,?3,?4) ON CONFLICT(task_id) DO UPDATE SET state_version=excluded.state_version,state_json=excluded.state_json,finished_at_ms=excluded.finished_at_ms",
+                        params![id, state_version, state_json, finished_at_ms],
+                    )
+                    .map_err(failure)?;
+                let deleted = transaction
                     .execute("DELETE FROM tasks WHERE id=?1", [id])
                     .map_err(failure)?;
+                if deleted != 1 {
+                    return Err(StoreError::Conflict);
+                }
             }
             transaction.commit().map_err(failure)?;
-            Ok(ids.len())
+            Ok(rows.len())
         })
     }
 

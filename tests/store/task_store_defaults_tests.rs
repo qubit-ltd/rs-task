@@ -42,6 +42,13 @@ mod default_method_tests {
             panic!("required method should not be called")
         }
 
+        fn get_state_checkpoint<'a>(
+            &'a self,
+            _id: TaskId,
+        ) -> TaskFuture<'a, Result<Option<crate::model::TaskStateCheckpoint>, StoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
         fn start_encoded<'a>(&'a self, _command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
             panic!("required method should not be called")
         }

@@ -52,5 +52,6 @@ pub use typed::TaskProgressSnapshot;
 pub use typed::TaskQuery;
 pub use typed::TaskRequest;
 pub use typed::TaskRequestEncodeError;
+pub use typed::TaskStateCheckpoint;
 pub use typed::TaskSummary;
 pub use typed::TransitionCommand;

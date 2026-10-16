@@ -186,6 +186,7 @@ struct FailingListStore {
     fail_next_list: std::sync::atomic::AtomicBool,
     fail_next_query: std::sync::atomic::AtomicBool,
     fail_next_get: std::sync::atomic::AtomicBool,
+    fail_next_state_checkpoint: std::sync::atomic::AtomicBool,
     fail_next_start: std::sync::atomic::AtomicBool,
     fail_next_transition: std::sync::atomic::AtomicBool,
     fail_next_release: std::sync::atomic::AtomicBool,
@@ -198,6 +199,7 @@ fn failing_store() -> Arc<FailingListStore> {
         fail_next_list: std::sync::atomic::AtomicBool::new(false),
         fail_next_query: std::sync::atomic::AtomicBool::new(false),
         fail_next_get: std::sync::atomic::AtomicBool::new(false),
+        fail_next_state_checkpoint: std::sync::atomic::AtomicBool::new(false),
         fail_next_start: std::sync::atomic::AtomicBool::new(false),
         fail_next_transition: std::sync::atomic::AtomicBool::new(false),
         fail_next_release: std::sync::atomic::AtomicBool::new(false),
@@ -240,6 +242,20 @@ impl TaskStore for FailingListStore {
             Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected get failure".into())) })
         } else {
             self.inner.get_encoded_task(id)
+        }
+    }
+    fn get_state_checkpoint<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskStateCheckpoint>, qubit_task::store::StoreError>> {
+        if self.fail_next_state_checkpoint.swap(false, Ordering::AcqRel) {
+            Box::pin(async {
+                Err(qubit_task::store::StoreError::Failure(
+                    "injected state checkpoint failure".into(),
+                ))
+            })
+        } else {
+            self.inner.get_state_checkpoint(id)
         }
     }
     fn start_encoded<'a>(
@@ -364,6 +380,12 @@ impl TaskStore for BuildGateStore {
         id: TaskId,
     ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>> {
         self.inner.get_encoded_task(id)
+    }
+    fn get_state_checkpoint<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskStateCheckpoint>, qubit_task::store::StoreError>> {
+        self.inner.get_state_checkpoint(id)
     }
     fn start_encoded<'a>(
         &'a self,
@@ -1245,6 +1267,16 @@ async fn typed_service_get_query_and_cancel_map_store_failures() {
         Err(qubit_task::service::TaskServiceError::Store(
             qubit_task::store::StoreError::Failure(message)
         )) if message == "injected get failure"
+    ));
+
+    store.fail_next_state_checkpoint.store(true, Ordering::Release);
+    assert!(matches!(
+        service
+            .get_state_checkpoint(TaskId::from_id(qubit_id::Id::new(9996)))
+            .await,
+        Err(qubit_task::service::TaskServiceError::Store(
+            qubit_task::store::StoreError::Failure(message)
+        )) if message == "injected state checkpoint failure"
     ));
 
     store.fail_next_query.store(true, Ordering::Release);

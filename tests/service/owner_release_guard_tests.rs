@@ -77,6 +77,12 @@ impl TaskStore for GatedReleaseStore {
     fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         self.inner.get_encoded_task(id)
     }
+    fn get_state_checkpoint<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<crate::model::TaskStateCheckpoint>, StoreError>> {
+        self.inner.get_state_checkpoint(id)
+    }
     fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.start_encoded(command)
     }

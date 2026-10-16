@@ -317,10 +317,10 @@ fn consume_durable(url: &str, namespace: &str, group: &str, path: &Path, service
         move |delivery| {
             let event = delivery.payload().clone();
             let result = projection.lock().expect("projection lock").apply(&event, |id| {
-                let summary = handle
-                    .block_on(authoritative_service.get(id))?
-                    .ok_or_else(|| std::io::Error::other("task service has no task for the event"))?;
-                Ok((summary.state_version, summary.state))
+                let checkpoint = handle
+                    .block_on(authoritative_service.get_state_checkpoint(id))?
+                    .ok_or_else(|| std::io::Error::other("task service has no state checkpoint for the event"))?;
+                Ok((checkpoint.state_version, checkpoint.state))
             });
             match result {
                 Ok(()) => {
@@ -436,6 +436,80 @@ async fn test_typed_lifecycle_and_cancellation_reach_durable_consumer() -> TestR
     assert_eq!(projection.get(&(cancelled.id, 3)), Some(&TaskState::Cancelled));
     assert_eq!(projection.len(), 7);
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pruned_terminal_task_is_projected_from_state_checkpoint() -> TestResult {
+    let redis = RedisServer::start()?;
+    let namespace = "typed-outbox-pruned-checkpoint";
+    let task_database = TemporaryDatabase::new();
+    let projection_database = TemporaryDatabase::new();
+    let store = Arc::new(SqliteTaskStore::open(task_database.path())?);
+    let bus = producer(redis.url(), namespace).await?;
+    let (service, mut started) = service(store.clone(), bus.clone(), Duration::from_secs(5)).await?;
+    let submitted = service
+        .submit(typed_support::request(serde_json::json!({}), "pruned-checkpoint"))
+        .await?;
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, started.recv()).await?,
+        Some(submitted.id)
+    );
+    assert_eq!(terminal(&service, submitted.id).await?, TaskState::Succeeded);
+    tokio::time::timeout(DEADLINE, async {
+        while !store.list_event_outbox(128).await?.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        Ok::<(), qubit_task::store::StoreError>(())
+    })
+    .await??;
+
+    assert_eq!(
+        store
+            .prune_terminal_before(
+                i64::MAX as u64,
+                std::num::NonZeroUsize::new(1).expect("nonzero prune batch")
+            )
+            .await?,
+        1
+    );
+    assert!(service.get(submitted.id).await?.is_none());
+    let checkpoint = service
+        .get_state_checkpoint(submitted.id)
+        .await?
+        .expect("pruned task retains its authoritative checkpoint");
+    assert_eq!(checkpoint.state_version, 2);
+    assert_eq!(checkpoint.state, TaskState::Succeeded);
+
+    let replay_namespace = "typed-outbox-pruned-checkpoint-replay";
+    let replay_bus = producer(redis.url(), replay_namespace).await?;
+    let _replay_receipt = replay_bus
+        .publish(PublishRequest::new(
+            Topic::<TaskEvent>::new("task.lifecycle")?,
+            TaskEvent {
+                schema_version: 1,
+                task_id: submitted.id,
+                state_version: 2,
+                state: TaskState::Succeeded,
+                correlation_key: None,
+            },
+        )?)
+        .await?;
+    consume_durable(
+        redis.url(),
+        replay_namespace,
+        "pruned-checkpoint",
+        projection_database.path(),
+        &service,
+    )?;
+    assert_eq!(
+        DurableProjection::snapshot(projection_database.path(), submitted.id).map_err(test_error)?,
+        (Some((2, TaskState::Succeeded)), vec![2]),
+        "the first late notification projects current terminal state via checkpoint"
+    );
+    service.shutdown().await?;
+    let _report = bus.shutdown(ShutdownMode::Immediate).await?;
+    let _report = replay_bus.shutdown(ShutdownMode::Immediate).await?;
     Ok(())
 }
 
@@ -848,5 +922,71 @@ fn test_failed_authority_query_keeps_redis_delivery_pending() -> TestResult {
     );
     subscription.cancel()?;
     let _report = bus.shutdown(ShutdownMode::Immediate)?;
+    Ok(())
+}
+
+#[test]
+fn test_missing_or_behind_checkpoint_keeps_redis_delivery_pending() -> TestResult {
+    for (case, authoritative) in [
+        ("missing", Err("checkpoint is missing")),
+        ("behind", Ok((2, TaskState::Running))),
+    ] {
+        let redis = RedisServer::start()?;
+        let namespace = format!("typed-outbox-{case}-checkpoint");
+        let group = format!("{case}-checkpoint");
+        let database = TemporaryDatabase::new();
+        let projection = Arc::new(std::sync::Mutex::new(
+            DurableProjection::open(database.path()).map_err(test_error)?,
+        ));
+        let id = TaskId::from_id(qubit_id::Id::new(if case == "missing" { 307 } else { 308 }));
+        projection
+            .lock()
+            .expect("projection lock")
+            .apply(&projection_event(id, 0, TaskState::Queued), |_| {
+                panic!("version zero needs no checkpoint query")
+            })
+            .map_err(test_error)?;
+        let before = DurableProjection::snapshot(database.path(), id).map_err(test_error)?;
+        let bus: EventBus = EventBusRegistry::discover()?.create(&config(redis.url(), &namespace)?)?;
+        let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
+        let (sender, receiver) = mpsc::channel();
+        let subscription = bus.subscribe(
+            SubscribeRequest::builder()
+                .subscriber_id(SubscriberId::new("outbox-consumer")?)
+                .consumer_group(ConsumerGroup::new(group.as_str())?)
+                .topic(topic.clone())
+                .durability(SubscriptionDurability::Durable)
+                .start_position(StartPosition::Earliest)
+                .error_handler(|_, _| FailureDirective::Requeue)
+                .build()?,
+            move |delivery| {
+                let result = projection
+                    .lock()
+                    .expect("projection lock")
+                    .apply(delivery.payload(), |_| match authoritative.clone() {
+                        Ok((version, state)) => Ok((version, state)),
+                        Err(message) => Err(std::io::Error::other(message).into()),
+                    });
+                let _ = sender.send(());
+                Err::<(), DeliveryError>(DeliveryError::Handler {
+                    source: result.expect_err("invalid checkpoint must fail projection"),
+                })
+            },
+        )?;
+        let _receipt = bus.publish(PublishRequest::new(topic, projection_event(id, 3, TaskState::Running))?)?;
+        receiver.recv_timeout(DEADLINE)?;
+        let started = std::time::Instant::now();
+        while bus.delivery_metrics().completed == 0 || pending(redis.url(), &namespace, &group)? == 0 {
+            assert!(started.elapsed() < DEADLINE, "invalid checkpoint must settle as Retry");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            DurableProjection::snapshot(database.path(), id).map_err(test_error)?,
+            before,
+            "{case} checkpoint must roll back the projection transaction"
+        );
+        subscription.cancel()?;
+        let _report = bus.shutdown(ShutdownMode::Immediate)?;
+    }
     Ok(())
 }

@@ -37,6 +37,7 @@ pub use model::typed::TaskId;
 pub use model::typed::TaskPage;
 pub use model::typed::TaskQuery;
 pub use model::typed::TaskRequest;
+pub use model::typed::TaskStateCheckpoint;
 pub use model::typed::TaskSummary;
 pub use service::RetryPolicy;
 pub use service::RetryPolicyError;

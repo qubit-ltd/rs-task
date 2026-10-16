@@ -376,6 +376,24 @@ impl TypedTaskExecutionService {
         Ok(self.core.store.get_encoded_task(id).await?.map(|task| task.summary))
     }
 
+    /// Returns the authoritative current state and revision when the store has
+    /// one.
+    ///
+    /// A pruned SQLite task can still return its terminal checkpoint. `None`
+    /// means the task was never accepted or the store no longer retains its
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskServiceError` when the store fails to read or decode the
+    /// lifecycle state.
+    pub async fn get_state_checkpoint(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<crate::model::typed::TaskStateCheckpoint>, TaskServiceError> {
+        Ok(self.core.store.get_state_checkpoint(id).await?)
+    }
+
     /// Queries typed task summaries using category filters and numeric cursors.
     pub async fn query(&self, query: TaskQuery) -> Result<TaskPage, TaskServiceError> {
         Ok(self.core.store.list_encoded(query).await?)

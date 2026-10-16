@@ -75,7 +75,7 @@ async fn test_memory_store_reports_unsupported_quarantine_capability() {
 }
 
 #[tokio::test]
-async fn test_schema_five_migrates_to_seven_and_reopens_without_rewriting_tasks() {
+async fn test_schema_five_migrates_to_eight_and_reopens_without_rewriting_tasks() {
     let path = database_path();
     let store = SqliteTaskStore::open(&path).expect("initialize database");
     let id = TaskId::from_id(Id::new(41));
@@ -94,17 +94,17 @@ async fn test_schema_five_migrates_to_seven_and_reopens_without_rewriting_tasks(
         .expect("original row");
     connection
         .execute_batch(
-            "DROP TABLE IF EXISTS task_event_outbox; DROP TABLE task_event_outbox_quarantine; PRAGMA user_version=5;",
+            "DROP TABLE IF EXISTS task_event_outbox; DROP TABLE task_event_outbox_quarantine; DROP TABLE task_terminal_checkpoints; PRAGMA user_version=5;",
         )
         .expect("simulate v5");
     drop(connection);
     drop(SqliteTaskStore::open(&path).expect("migrate v5"));
-    drop(SqliteTaskStore::open(&path).expect("reopen v7"));
+    drop(SqliteTaskStore::open(&path).expect("reopen v8"));
     let connection = Connection::open(&path).expect("inspect schema");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let after: (String, Vec<u8>, String) = connection
         .query_row(
             "SELECT request_info_json,payload,lifecycle_json FROM tasks",
@@ -127,7 +127,7 @@ async fn test_schema_five_migrates_to_seven_and_reopens_without_rewriting_tasks(
 }
 
 #[tokio::test]
-async fn test_schema_six_migrates_outbox_rows_to_seven_and_reopens() {
+async fn test_schema_six_migrates_outbox_rows_to_eight_and_reopens() {
     let path = database_path();
     let store = SqliteTaskStore::open(&path).expect("initialize database");
     let owner = store.acquire_owner().await.expect("owner");
@@ -152,20 +152,20 @@ async fn test_schema_six_migrates_outbox_rows_to_seven_and_reopens() {
         .expect("inspect fresh schema")
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fresh schema version");
-    assert_eq!(fresh_version, 7);
+    assert_eq!(fresh_version, 8);
     store.release_owner(owner).await.expect("release owner");
     drop(store);
 
     let connection = Connection::open(&path).expect("open v6 fixture");
     connection
-        .execute_batch("DROP TABLE task_event_outbox_quarantine;")
+        .execute_batch("DROP TABLE task_event_outbox_quarantine; DROP TABLE task_terminal_checkpoints;")
         .expect("remove v7 quarantine table");
     connection
         .pragma_update(None, "user_version", 6)
         .expect("mark fixture as v6");
     drop(connection);
     drop(SqliteTaskStore::open(&path).expect("migrate v6"));
-    drop(SqliteTaskStore::open(&path).expect("reopen v7"));
+    drop(SqliteTaskStore::open(&path).expect("reopen v8"));
 
     let store = SqliteTaskStore::open(&path).expect("open migrated database");
     let owner = store.acquire_owner().await.expect("owner after migration");
@@ -183,14 +183,14 @@ async fn test_schema_six_migrates_outbox_rows_to_seven_and_reopens() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version");
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     connection
         .prepare("SELECT task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error FROM task_event_outbox_quarantine")
         .expect("quarantine schema");
 }
 
 #[tokio::test]
-async fn test_schema_four_and_five_migrate_tasks_to_seven() {
+async fn test_schema_four_and_five_migrate_tasks_to_eight() {
     for version in [4, 5] {
         let path = database_path();
         let store = SqliteTaskStore::open(&path).expect("initialize database");
@@ -202,7 +202,7 @@ async fn test_schema_four_and_five_migrate_tasks_to_seven() {
             .execute_batch("DROP INDEX IF EXISTS task_event_outbox_created; DROP TABLE IF EXISTS task_event_outbox;")
             .expect("remove v6 outbox");
         connection
-            .execute_batch("DROP TABLE task_event_outbox_quarantine;")
+            .execute_batch("DROP TABLE task_event_outbox_quarantine; DROP TABLE task_terminal_checkpoints;")
             .expect("remove v7 quarantine table");
         if version == 4 {
             connection
@@ -221,7 +221,7 @@ async fn test_schema_four_and_five_migrate_tasks_to_seven() {
         let migrated_version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("schema version");
-        assert_eq!(migrated_version, 7);
+        assert_eq!(migrated_version, 8);
         let task_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
             .expect("retained task count");
@@ -230,6 +230,158 @@ async fn test_schema_four_and_five_migrate_tasks_to_seven() {
             .prepare("SELECT task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error FROM task_event_outbox_quarantine")
             .expect("quarantine schema");
     }
+}
+
+#[tokio::test]
+async fn test_schema_seven_migrates_to_eight_preserving_outbox_and_quarantine() {
+    let path = database_path();
+    let store = SqliteTaskStore::open(&path).expect("initialize database");
+    let id = TaskId::from_id(Id::new(59));
+    store.accept_encoded(id, request()).await.expect("accept task");
+    drop(store);
+    let connection = Connection::open(&path).expect("open v7 fixture");
+    connection
+        .execute(
+            "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) VALUES (?1,7,'task:59:7','{}',70)",
+            [id.to_padded_decimal()],
+        )
+        .expect("seed active outbox");
+    connection
+        .execute(
+            "INSERT INTO task_event_outbox_quarantine(task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error) VALUES (?1,8,'task:59:8','{}',80,81,'reason','error')",
+            [id.to_padded_decimal()],
+        )
+        .expect("seed quarantined event");
+    connection
+        .execute_batch("DROP TABLE task_terminal_checkpoints; PRAGMA user_version=7;")
+        .expect("mark fixture v7");
+    drop(connection);
+    drop(SqliteTaskStore::open(&path).expect("migrate v7"));
+    drop(SqliteTaskStore::open(&path).expect("reopen v8"));
+    let connection = Connection::open(&path).expect("inspect migrated v7 fixture");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("schema version");
+    assert_eq!(version, 8);
+    for table in ["task_event_outbox", "task_event_outbox_quarantine"] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .expect("retained row count");
+        assert_eq!(count, 1, "{table} data survives v7 migration");
+    }
+}
+
+#[test]
+fn test_schema_eight_reopen_rejects_invalid_checkpoint_table_without_repair() {
+    let path = database_path();
+    drop(SqliteTaskStore::open(&path).expect("initialize database"));
+    let connection = Connection::open(&path).expect("open database");
+    connection
+        .execute_batch("ALTER TABLE task_terminal_checkpoints RENAME COLUMN state_json TO corrupt_json;")
+        .expect("inject invalid checkpoint schema");
+    assert!(matches!(SqliteTaskStore::open(&path), Err(StoreError::Failure(_))));
+    connection
+        .prepare("SELECT corrupt_json FROM task_terminal_checkpoints")
+        .expect("invalid schema remains intact");
+}
+
+#[tokio::test]
+async fn test_terminal_prune_skips_outbox_then_retains_checkpoint_atomically() {
+    let path = database_path();
+    let store = SqliteTaskStore::open(&path).expect("open database");
+    let owner = store.acquire_owner().await.expect("owner");
+    store.enable_event_outbox().await.expect("enable outbox");
+    let id = TaskId::from_id(Id::new(60));
+    let accepted = store.accept_encoded(id, request()).await.expect("accept task");
+    let current_checkpoint = store
+        .get_state_checkpoint(id)
+        .await
+        .expect("current checkpoint lookup")
+        .expect("accepted task has a checkpoint");
+    assert_eq!(current_checkpoint.id, id);
+    assert_eq!(current_checkpoint.state_version, accepted.summary.state_version);
+    assert_eq!(current_checkpoint.state, accepted.summary.state);
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: 10,
+        })
+        .await
+        .expect("start task");
+    let terminal = store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            retry_not_before_ms: None,
+            finished_at_ms: Some(20),
+            output: None,
+        })
+        .await
+        .expect("finish task");
+    let limit = std::num::NonZeroUsize::new(1).expect("nonzero limit");
+    assert_eq!(
+        store
+            .prune_terminal_before(21, limit)
+            .await
+            .expect("skip active outbox"),
+        0
+    );
+    assert!(store.get_encoded_task(id).await.expect("task lookup").is_some());
+
+    let events = store.list_event_outbox(128).await.expect("read outbox");
+    for event in events {
+        store
+            .mark_event_published(id, event.state_version)
+            .await
+            .expect("mark event published");
+    }
+    let connection = Connection::open(&path).expect("fault injection connection");
+    connection
+        .execute_batch("CREATE TRIGGER fail_checkpoint BEFORE INSERT ON task_terminal_checkpoints BEGIN SELECT RAISE(ABORT, 'injected checkpoint failure'); END;")
+        .expect("inject checkpoint failure");
+    assert!(matches!(
+        store.prune_terminal_before(21, limit).await,
+        Err(StoreError::Failure(_))
+    ));
+    assert!(store.get_encoded_task(id).await.expect("task after rollback").is_some());
+    let duplicate = store
+        .accept_encoded(TaskId::from_id(Id::new(61)), request())
+        .await
+        .expect("idempotency key remains reserved after rollback");
+    assert!(!duplicate.created);
+    connection
+        .execute_batch("DROP TRIGGER fail_checkpoint;")
+        .expect("remove trigger");
+
+    assert_eq!(
+        store
+            .prune_terminal_before(21, limit)
+            .await
+            .expect("prune published task"),
+        1
+    );
+    assert!(store.get_encoded_task(id).await.expect("pruned task lookup").is_none());
+    let checkpoint = store
+        .get_state_checkpoint(id)
+        .await
+        .expect("checkpoint lookup")
+        .expect("pruned task checkpoint");
+    assert_eq!(checkpoint.id, id);
+    assert_eq!(checkpoint.state_version, terminal.state_version);
+    assert_eq!(checkpoint.state, terminal.state);
+    assert!(
+        store
+            .accept_encoded(TaskId::from_id(Id::new(62)), request())
+            .await
+            .expect("pruned idempotency key is released")
+            .created
+    );
+    store.release_owner(owner).await.expect("release owner");
 }
 
 #[tokio::test]

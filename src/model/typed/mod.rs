@@ -27,6 +27,7 @@ mod task_progress_snapshot;
 mod task_query;
 mod task_request;
 mod task_request_encode_error;
+mod task_state_checkpoint;
 mod task_summary;
 mod transition_command;
 
@@ -55,5 +56,6 @@ pub use task_request::MAX_TASK_METADATA_BYTES;
 pub use task_request::MAX_TASK_METADATA_ENTRIES;
 pub use task_request::TaskRequest;
 pub use task_request_encode_error::TaskRequestEncodeError;
+pub use task_state_checkpoint::TaskStateCheckpoint;
 pub use task_summary::TaskSummary;
 pub use transition_command::TransitionCommand;

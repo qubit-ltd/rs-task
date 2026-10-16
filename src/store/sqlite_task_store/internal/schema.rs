@@ -12,12 +12,12 @@ use super::super::failure;
 use crate::store::StoreError;
 
 /// Current schema version for typed numeric-ID task storage.
-pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 7;
+pub(in crate::store::sqlite_task_store) const NEXT_SCHEMA_VERSION: i64 = 8;
 
 /// Initializes the typed numeric-ID schema or upgrades a supported typed
 /// schema version in place.
 ///
-/// Versions 4, 5, and 6 are upgraded transactionally to version 7. A UUID-based
+/// Versions 4 through 7 are upgraded transactionally to version 8. A UUID-based
 /// schema is rejected without changing its tables or rows.
 ///
 /// # Parameters
@@ -142,7 +142,7 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
             transaction.pragma_update(None, "user_version", 6).map_err(failure)?;
         }
     }
-    if version != NEXT_SCHEMA_VERSION {
+    if version < 7 {
         transaction
             .execute_batch(
                 "CREATE TABLE task_event_outbox_quarantine (
@@ -161,6 +161,18 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
             )
             .map_err(failure)?;
     }
+    if version < NEXT_SCHEMA_VERSION {
+        transaction
+            .execute_batch(
+                "CREATE TABLE task_terminal_checkpoints (
+                task_id TEXT PRIMARY KEY NOT NULL,
+                state_version INTEGER NOT NULL CHECK(state_version >= 0),
+                state_json TEXT NOT NULL,
+                finished_at_ms INTEGER NOT NULL CHECK(finished_at_ms >= 0)
+            );",
+            )
+            .map_err(failure)?;
+    }
     if version != NEXT_SCHEMA_VERSION {
         transaction
             .pragma_update(None, "user_version", NEXT_SCHEMA_VERSION)
@@ -168,7 +180,74 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
     }
     validate_outbox_schema(&transaction)?;
     validate_quarantine_schema(&transaction)?;
+    validate_checkpoint_schema(&transaction)?;
     transaction.commit().map_err(failure)
+}
+
+/// Validates the durable terminal checkpoint columns and primary key.
+fn validate_checkpoint_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let mut statement = transaction
+        .prepare("PRAGMA table_info(task_terminal_checkpoints)")
+        .map_err(failure)?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    for (name, kind, primary) in [
+        ("task_id", "TEXT", 1),
+        ("state_version", "INTEGER", 0),
+        ("state_json", "TEXT", 0),
+        ("finished_at_ms", "INTEGER", 0),
+    ] {
+        if !columns
+            .iter()
+            .any(|(column, ty, required, pk)| column == name && ty == kind && *required == 1 && *pk == primary)
+        {
+            return Err(StoreError::Failure(format!(
+                "SQLite terminal checkpoints have invalid required column `{name}`"
+            )));
+        }
+    }
+    let has_foreign_key: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_list('task_terminal_checkpoints'))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if has_foreign_key {
+        return Err(StoreError::Failure(
+            "SQLite terminal checkpoints must not have foreign keys".into(),
+        ));
+    }
+    let definition: String = transaction
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_terminal_checkpoints'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    let normalized_definition = definition
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if !normalized_definition.contains("check(state_version>=0)")
+        || !normalized_definition.contains("check(finished_at_ms>=0)")
+    {
+        return Err(StoreError::Failure(
+            "SQLite terminal checkpoints are missing nonnegative value constraints".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validates the typed event archive columns, composite primary key, and index.

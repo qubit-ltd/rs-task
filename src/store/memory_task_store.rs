@@ -36,6 +36,7 @@ use crate::model::typed::TaskId as EncodedTaskId;
 use crate::model::typed::TaskPage as EncodedTaskPage;
 use crate::model::typed::TaskProgressSnapshot;
 use crate::model::typed::TaskQuery as EncodedTaskQuery;
+use crate::model::typed::TaskStateCheckpoint;
 use crate::model::typed::TaskSummary;
 use crate::model::typed::TransitionCommand;
 
@@ -293,6 +294,20 @@ impl super::TaskStore for MemoryTaskStore {
     /// Loads one encoded request together with its current summary.
     fn get_encoded_task<'a>(&'a self, id: EncodedTaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().encoded_tasks.get(&id).cloned()) })
+    }
+
+    fn get_state_checkpoint<'a>(
+        &'a self,
+        id: EncodedTaskId,
+    ) -> TaskFuture<'a, Result<Option<TaskStateCheckpoint>, StoreError>> {
+        Box::pin(async move {
+            let state = self.state.lock();
+            Ok(state.encoded_tasks.get(&id).map(|task| TaskStateCheckpoint {
+                id: task.summary.id,
+                state_version: task.summary.state_version,
+                state: task.summary.state.clone(),
+            }))
+        })
     }
 
     /// Starts a queued encoded task attempt using a lifecycle revision CAS.

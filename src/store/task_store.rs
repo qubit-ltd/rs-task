@@ -21,6 +21,7 @@ use crate::model::typed::TaskCursor;
 use crate::model::typed::TaskId as TypedTaskId;
 use crate::model::typed::TaskPage as TypedTaskPage;
 use crate::model::typed::TaskQuery as TypedTaskQuery;
+use crate::model::typed::TaskStateCheckpoint;
 use crate::model::typed::TaskSummary as TypedTaskSummary;
 use crate::model::typed::TransitionCommand as TypedTransitionCommand;
 
@@ -116,6 +117,22 @@ pub trait TaskStore: Send + Sync {
 
     /// Loads a retained task and its stored request.
     fn get_encoded_task<'a>(&'a self, id: TypedTaskId) -> TaskFuture<'a, Result<Option<TypedStoredTask>, StoreError>>;
+
+    /// Returns the authoritative current state and revision when the store has
+    /// one.
+    ///
+    /// SQLite stores retain a terminal checkpoint after pruning task history;
+    /// volatile stores return `None` after a task is pruned or evicted. `None`
+    /// also means the task was never accepted by this store.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoreError` when the stored lifecycle or checkpoint cannot be
+    /// read or decoded.
+    fn get_state_checkpoint<'a>(
+        &'a self,
+        id: TypedTaskId,
+    ) -> TaskFuture<'a, Result<Option<TaskStateCheckpoint>, StoreError>>;
 
     /// Starts one attempt if the task is queued at the supplied state version.
     fn start_encoded<'a>(&'a self, command: TypedStartCommand) -> TaskFuture<'a, Result<TypedTaskSummary, StoreError>>;
