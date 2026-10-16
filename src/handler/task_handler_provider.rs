@@ -10,36 +10,12 @@ use std::sync::Arc;
 use super::TaskHandler;
 use super::TaskHandlerDescriptor;
 
-/// Task handler factory contract shared by SPI providers and direct
-/// registration.
+/// Historical provider API retained as an uncompiled source snapshot.
 ///
-/// # Examples
-///
-/// ```
-/// use std::sync::Arc;
-///
-/// use qubit_task::handler::LocalTaskHandler;
-/// use qubit_task::handler::TaskHandler;
-/// use qubit_task::handler::TaskHandlerDescriptor;
-/// use qubit_task::handler::TaskHandlerProvider;
-/// use qubit_task::handler::TaskRunOutcome;
-/// use qubit_task::model::TaskOutput;
-///
-/// struct Provider;
-/// impl TaskHandlerProvider for Provider {
-///     fn descriptor(&self) -> TaskHandlerDescriptor {
-///         TaskHandlerDescriptor { task_type: "once".into(), version: "1".into() }
-///     }
-///
-///     fn create(&self) -> Result<Arc<dyn TaskHandler>, String> {
-///         Ok(Arc::new(LocalTaskHandler::new(self.descriptor(), |_| {
-///             Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
-///         })))
-///     }
-/// }
-///
-/// assert!(Provider.create().is_ok());
-/// ```
+/// This file is not declared by `handler/mod.rs`, so the trait is not part of
+/// the crate's current public API. Its `task_type`/`version` descriptor model
+/// predates the typed `kind_id` and payload-schema contract. The example was
+/// removed because it used the unavailable `LocalTaskHandler` API.
 pub trait TaskHandlerProvider: Send + Sync {
     /// Returns the stable handler type and version supplied by this provider.
     ///

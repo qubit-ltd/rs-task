@@ -31,9 +31,166 @@ qubit-task = { version = "0.10", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
+## 快速开始
+
+下面用一个内存任务串起首次接入流程：定义带类型的 payload 和 codec，注册 handler，提交任务，在五秒内等待终态并断言执行成功，最后关闭服务。它适合了解 API；SQLite 恢复和[持久生命周期通知](doc/user-guide.zh_CN.md#发布任务生命周期变化)请看[用户指南](doc/user-guide.zh_CN.md)。此代码也作为独立 fixture 编译：[tests/fixtures/readme-quick-start](tests/fixtures/readme-quick-start)。
+
+```rust
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistration;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistration;
+use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
+use qubit_model_id::ModelId;
+use qubit_model_id::ModelIdBuf;
+use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskHandler;
+use qubit_task::handler::CancellationMode;
+use qubit_task::handler::TaskContext;
+use qubit_task::handler::TaskHandlerDescriptor;
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
+use qubit_task::model::ResourceCapacity;
+use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskState;
+use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::TaskFuture;
+use serde::Deserialize;
+use serde::Serialize;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct EchoPayload {
+    message: String,
+}
+
+impl HasModelId for EchoPayload {
+    const MODEL_ID: ModelId = ModelId::new("example.EchoPayload");
+}
+
+#[derive(Default)]
+struct JsonCodec;
+
+impl ValueEncoder<EchoPayload> for JsonCodec {
+    type Output = Vec<u8>;
+    type Error = serde_json::Error;
+
+    fn encode(&mut self, value: &EchoPayload) -> Result<Self::Output, Self::Error> {
+        serde_json::to_vec(value)
+    }
+}
+
+impl ValueDecoder<[u8]> for JsonCodec {
+    type Output = EchoPayload;
+    type Error = serde_json::Error;
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
+static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
+    ValueCodecId::new("example.echo.json"),
+    &JSON_DESCRIPTOR,
+    ValueCodecRegistrationSource::new("example", "rs-task", "readme_quick_start", 1),
+);
+
+struct EchoHandler;
+
+impl TaskHandler<EchoPayload> for EchoHandler {
+    fn run<'a>(&'a self, payload: EchoPayload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        Box::pin(async move {
+            println!("{}", payload.message);
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+    }
+}
+
+struct SequentialIds(AtomicU64);
+
+impl IdGenerator for SequentialIds {
+    fn generate(&self) -> Result<Id, IdGenerationError> {
+        Ok(Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let codec_registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?);
+        let mut builder = TaskExecutionServiceBuilder::new(
+            Arc::new(MemoryTaskStore::new(256)),
+            codec_registry,
+            Arc::new(SequentialIds(AtomicU64::new(1))),
+        )
+        .capacity(ResourceCapacity {
+            cpu_slots: 4,
+            ..ResourceCapacity::default()
+        });
+
+        builder.handlers_mut().register::<EchoPayload, _>(
+            TaskHandlerDescriptor {
+                kind_id: "example.echo".into(),
+                payload_type_id: ModelIdBuf::try_from("example.EchoPayload")?,
+                accepted_schema_versions: vec![1],
+                cancellation_mode: CancellationMode::Cooperative,
+            },
+            Arc::new(EchoHandler),
+        )?;
+
+        let service = builder.build().await?;
+        let request = TaskRequest::new(
+            "example.echo",
+            1,
+            ValueCodecId::new("example.echo.json"),
+            EchoPayload {
+                message: "typed task completed".into(),
+            },
+        );
+        let accepted = service.submit(request).await?;
+        let summary = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let summary = service.get(accepted.id).await?.expect("accepted task exists");
+                if summary.state.is_terminal() {
+                    return Ok::<_, Box<dyn std::error::Error>>(summary);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        assert_eq!(summary.state, TaskState::Succeeded);
+        println!("task {} is {:?}", accepted.id, summary.state);
+        service.shutdown().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+```
+
+`MemoryTaskStore` 适合入门示例，不提供进程重启后的任务恢复。需要保留已接纳任务时，请使用 [`SqliteTaskStore`](doc/user-guide.zh_CN.md)。`submit()` 成功只表示请求已接纳；示例还会等待并检查 handler 的终态结果。
+
 `sqlite` feature 提供持久化任务历史和恢复。调度器按有界分页扫描 queued 摘要，运行中的 handler 数量不超过 `max_running_tasks`。只有 handler 错误的 `retryable` 为 true 时才会重试，重试期限会持久化；默认最多尝试三次，退避时间从 1 秒指数增长到 60 秒。修复配置后，可使用观察到的 state version 调用 `resume_blocked` 重新排队。恢复采用至少一次语义：任务若在外部副作用之后中断，恢复时可能再次运行，因此应用副作用需要幂等性或事务保护。调度仅在进程内执行；分布式调度和业务副作用恰好一次不属于本 crate 的保证。
 
-启用可选的 `event-bus` feature 后，可通过 `TaskExecutionServiceBuilder::event_bus` 从 SQLite 持久 outbox 异步发布生命周期快照。任务状态与 outbox 行在同一事务中提交。provider 确认接纳前，记录会保留并重试，因此可能重复发布；收到 `Accepted` 后 outbox 行会被删除。`Accepted` 不保证 Redis 已持久化，也不保证消费者收到，因此通知消费者不具备至少一次送达保证。这与前文所说的 handler 至少一次执行是两种不同语义。schema v7 迁移会保留已有任务和 outbox 记录。`MemoryTaskStore` 不提供持久 outbox 能力。
+启用可选的 `event-bus` feature 后，可通过 `TaskExecutionServiceBuilder::event_bus` 从 SQLite 持久 outbox 异步发布生命周期快照。任务状态与 outbox 行在同一事务中提交。provider 确认接纳前，记录会保留并重试，因此可能重复发布；收到 `Accepted` 后 outbox 行会被删除。`Accepted` 不保证 Redis 已持久化，也不保证消费者收到，因此通知消费者不具备至少一次送达保证。这与前文所说的 handler 至少一次执行是两种不同语义。schema v8 迁移会保留已有任务、活动 outbox 和隔离归档记录。`MemoryTaskStore` 不提供持久 outbox 能力。
 
 ## 文档
 
@@ -48,7 +205,7 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 
 服务恢复后 publisher 会重放已提交的 outbox 行；关闭时会在 `notification_shutdown_timeout` 限时内排空。发布回执不确定，或 Redis 已接纳事件但进程在删除 outbox 行前崩溃，都可能造成重复。Redis `XADD` 成功只表示 stream 接纳记录，不能证明已经执行磁盘 `fsync`，也不表示消费者已经 ACK。`DurabilityCapability::Durable` 表示无订阅者时仍保留消息，不承诺这些更强的保证。消费者应为每个任务保留最高 `state_version`，忽略重复和旧版本事件。稳定的 `EventId` 仅用于关联，Redis provider 不会按它去重。事务化 checkpoint、版本缺口刷新及 ACK/Retry 顺序见[持久化消费者投影指南](doc/user-guide.zh_CN.md#持久化消费者投影)。启用 publisher 不会补发服务启用前已经提交的历史状态。监控 outbox 待处理行数和最老行年龄，并同时查看 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`。
 
-调度器按 keyset 顺序扫描可运行的排队任务。较早的任务暂时拿不到资源时，资源可用的后续任务可以先启动。默认允许后续任务成功越过 32 次；可用 `TaskExecutionServiceBuilder::max_resource_bypasses` 配置正整数上限。达到上限后，调度器优先等待较早的任务，期间其他不相关资源可能空置。计数只存在于当前进程，重启后清零。该策略不保证严格 FIFO，也不保证等待时间有上界。应用可调用 `TaskStore::prune_terminal_before(finished_before_ms, max_rows)` 显式清理一批旧终态记录；清理也会释放幂等键供后续复用，Queued 和 Blocked 任务会保留。
+调度器按 keyset 顺序扫描可运行的排队任务。较早的任务暂时拿不到资源时，资源可用的后续任务可以先启动。默认允许后续任务成功越过 32 次；可用 `TaskExecutionServiceBuilder::max_resource_bypasses` 配置正整数上限。达到上限后，调度器优先等待较早的任务，期间其他不相关资源可能空置。计数只存在于当前进程，重启后清零。该策略不保证严格 FIFO，也不保证等待时间有上界。应用可调用 `TaskStore::prune_terminal_before(finished_before_ms, max_rows)` 显式清理一批旧终态任务。SQLite 会跳过仍有活动 outbox 行的任务，并在删除前保存一条最小终态检查点，供通知缺口时查询当前状态；检查点会随终态清理持续增长。清理会释放幂等键供后续复用，Queued 和 Blocked 任务会保留。
 
 需要等待运行中的处理器、通知排空和 store owner 释放，并获取关闭结果（包括错误）时，显式调用 `shutdown().await`；并发等待者共享同一次关闭结果。最后一个外部 service 句柄被丢弃时也会异步请求排空，但 `Drop` 不等待、不返回结果。取消某个 `shutdown()` 等待者不会取消排空。若处理器始终不结束，owner 也可能一直无法释放。owner 释放时若发生 panic，等待者会收到 `StoreUnavailable`，仍持有 owner 的 guard 会交给清理 worker；若释放只是暂时失败，之后显式调用 `shutdown()` 会重试。取得 owner 后取消 `build()` future，也会由预先启动的清理 worker 最终释放；因此紧接着再次 build 时，可能短暂遇到 owner 冲突。
 
