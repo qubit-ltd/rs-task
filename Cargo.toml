@@ -1,6 +1,6 @@
 [package]
 name = "qubit-task"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -48,7 +48,7 @@ parking_lot = "^0.12"
 qubit-event-bus = { path = "../rs-event-bus", version = "0.20", optional = true }
 qubit-codec = { version = "0.16", features = ["registry"] }
 qubit-id = { version = "0.7", features = ["serde"] }
-qubit-metadata = { version = "0.6.2", features = ["json"] }
+qubit-metadata = { version = "0.7.0", features = ["json"] }
 qubit-model-id = { path = "../rs-model-metadata/model-id", version = "0.1.0" }
 qubit-progress = { version = "0.9" }
 qubit-spi = "0.13"
@@ -70,11 +70,8 @@ event-bus = ["dep:qubit-event-bus", "tokio/macros"]
 [dev-dependencies]
 proptest = "1.11"
 qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "0.7" }
-redis = { version = "0.32.7", default-features = false, features = ["streams"] }
+redis = { version = "=0.32.7", git = "https://github.com/qubit-ltd/redis-rs.git", branch = "qubit/redis-0327-response-limit", default-features = false, features = ["streams"] }
 tokio = { version = "^1.53", features = ["macros", "rt-multi-thread", "time"] }
-
-[patch.crates-io]
-qubit-redis = { path = "../rs-event-bus-redis/third_party/redis-rs" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "^0.61", features = ["Win32_Storage_FileSystem"] }
