@@ -46,7 +46,7 @@ futures = "^0.3"
 fs2 = { version = "^0.4", optional = true }
 parking_lot = "^0.12"
 qubit-event-bus = { path = "../rs-event-bus", version = "0.20", optional = true }
-qubit-codec = { version = "0.17", path = "../rs-codec", features = ["registry"] }
+qubit-codec = { version = "0.17", features = ["registry"] }
 qubit-id = { version = "0.7", features = ["serde"] }
 qubit-metadata = { version = "0.7.0", path = "../rs-metadata", features = ["json"] }
 qubit-model-id = { path = "../rs-model-metadata/model-id", version = "0.1.0" }

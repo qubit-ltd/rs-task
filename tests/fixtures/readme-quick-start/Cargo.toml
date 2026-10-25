@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 qubit-task = { path = "../../.." }
-qubit-codec = { path = "../../../../rs-codec", version = "0.17", features = ["registry"] }
+qubit-codec = { version = "0.17", features = ["registry"] }
 qubit-id = { version = "0.7", features = ["serde"] }
 qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "0.1.0" }
 serde = { version = "1.0", features = ["derive"] }
