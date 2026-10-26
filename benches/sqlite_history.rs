@@ -23,6 +23,7 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 use rusqlite::Connection;
+use rusqlite::Params;
 use rusqlite::params;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value;

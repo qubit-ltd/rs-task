@@ -106,6 +106,13 @@ case "$entrypoint" in
     .infra/bin/align-ci.sh)
         prepare_dependencies
         run_latest rs-infra-style --project "$project_root" fix "$@"
+        alignment_preview=false
+        for arg in "$@"; do
+            case "$arg" in --dry-run|-h|--help) alignment_preview=true ;; esac
+        done
+        if [[ "$alignment_preview" == false ]]; then
+            run_latest rs-infra-ci --project "$project_root" --only clippy check
+        fi
         ;;
     .infra/bin/ci-check.sh)
         source "$shared_root/.infra/lib/cleanup-build-artifacts.sh"
@@ -129,9 +136,9 @@ case "$entrypoint" in
             esac
         done
         if [[ "$mode" == update ]]; then
-            "$manager_bin" latest --project "$project_root" --tool rs-infra-dependency -- --project "$project_root" sync
+            "$manager_bin" latest --project "$project_root" --tool rs-infra-dependency -- --project "$project_root" --recursive sync
         fi
-        run_latest rs-infra-dependency --project "$project_root" check
+        run_latest rs-infra-dependency --project "$project_root" --recursive check
         ;;
     .infra/bin/infra-tool.sh)
         exec "$shared_root/.infra/lib/infra-tool.sh" "$@"

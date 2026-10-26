@@ -27,7 +27,7 @@
 
 ```toml
 [dependencies]
-qubit-task = { version = "0.10", features = ["sqlite"] }
+qubit-task = { version = "0.11", features = ["sqlite"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 ```
 
