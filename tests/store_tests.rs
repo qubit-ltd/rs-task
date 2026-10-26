@@ -15,22 +15,32 @@ mod task_store_defaults_tests;
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "sqlite")]
 use std::ffi::OsString;
+#[cfg(feature = "sqlite")]
 use std::path::Path;
+#[cfg(feature = "sqlite")]
 use std::path::PathBuf;
 
+#[cfg(feature = "sqlite")]
 use qubit_task::model::OwnerEpoch;
+#[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
+#[cfg(feature = "sqlite")]
 use qubit_task::store::StoreError;
+#[cfg(feature = "sqlite")]
 use qubit_task::store::TaskStore;
+#[cfg(feature = "sqlite")]
 use uuid::Uuid;
 
 /// Creates a unique database path for an owner identity test.
+#[cfg(feature = "sqlite")]
 fn test_database_path() -> PathBuf {
     std::env::temp_dir().join(format!("qubit-task-owner-{}.sqlite", Uuid::new_v4()))
 }
 
 /// Appends the owner-lock suffix without replacing the database extension.
+#[cfg(feature = "sqlite")]
 fn owner_lock_path(path: &Path) -> PathBuf {
     let mut name: OsString = path.as_os_str().to_owned();
     name.push(".owner.lock");
@@ -38,6 +48,7 @@ fn owner_lock_path(path: &Path) -> PathBuf {
 }
 
 /// Removes disposable files created by an owner identity test.
+#[cfg(feature = "sqlite")]
 fn remove_database(path: &Path) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(owner_lock_path(path));
@@ -51,6 +62,7 @@ fn remove_database(path: &Path) {
 
 /// Prevents a symbolic link from creating a second owner lock for one file.
 #[cfg(unix)]
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_symlink_alias_uses_the_same_owner_lock() {
     use std::os::unix::fs::symlink;
@@ -72,6 +84,7 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
 }
 
 /// Keeps distinct database files independent even when their stems match.
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_different_extensions_use_distinct_owner_locks() {
     let stem = std::env::temp_dir().join(format!("qubit-task-owner-{}", Uuid::new_v4()));
@@ -87,6 +100,7 @@ async fn test_different_extensions_use_distinct_owner_locks() {
 }
 
 /// Rejects a database inode that can be reached without its owner lock.
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_hard_linked_database_is_rejected() {
     let path = test_database_path();
@@ -108,6 +122,7 @@ async fn test_hard_linked_database_is_rejected() {
 
 /// Prevents a Windows symbolic link from creating a second owner lock.
 #[cfg(windows)]
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_symlink_alias_uses_the_same_owner_lock() {
     use std::os::windows::fs::symlink_file;
@@ -128,6 +143,7 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
 }
 
 /// Refuses to issue another owner epoch while this store already owns one.
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_repeated_owner_acquisition_is_rejected() {
     let path = test_database_path();
@@ -145,6 +161,7 @@ async fn test_repeated_owner_acquisition_is_rejected() {
 }
 
 /// Verifies that an invalid epoch cannot release the held process lock.
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_stale_owner_release_keeps_the_database_locked() {
     let path = test_database_path();
