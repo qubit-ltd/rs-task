@@ -7,6 +7,7 @@
 // =============================================================================
 //! Persists `rs-progress` events as bounded task progress snapshots.
 
-mod task_progress_reporter;
+#[path = "task_progress_reporter/task_progress_reporter.rs"]
+mod reporter_impl;
 
-pub(super) use task_progress_reporter::TaskProgressReporter;
+pub(in crate::service) use reporter_impl::TaskProgressReporter;

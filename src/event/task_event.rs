@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-mod task_event;
+#[path = "task_event/task_event.rs"]
+mod implementation;
 
-pub use task_event::TaskEvent;
+pub use implementation::TaskEvent;

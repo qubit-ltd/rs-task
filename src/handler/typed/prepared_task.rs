@@ -7,6 +7,7 @@
 // =============================================================================
 //! Prepared execution payload for a validated typed task handler.
 
-mod prepared_task;
+#[path = "prepared_task/prepared_task.rs"]
+mod implementation;
 
-pub(crate) use prepared_task::PreparedTask;
+pub(crate) use implementation::PreparedTask;

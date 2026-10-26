@@ -89,7 +89,7 @@ impl PublisherState {
     pub(in crate::service::task_event_publisher) async fn run(&self, mut controls: mpsc::Receiver<QuarantineCommand>) {
         let mut backoff = Duration::from_millis(25);
         loop {
-            self.process_queued_controls(&mut controls).await;
+            let _ = self.process_queued_controls(&mut controls).await;
             let page = self.store.list_event_outbox(128).await;
             let mut failed = false;
             match page {
@@ -105,7 +105,7 @@ impl PublisherState {
                     tokio::select! {
                         _ = self.changed.notified() => {},
                         command = controls.recv() => {
-                            if let Some(command) = command { self.process_control(command).await; }
+                            if let Some(command) = command { let _ = self.process_control(command).await; }
                         },
                         _ = tokio::time::sleep(Duration::from_secs(1)) => {},
                     }

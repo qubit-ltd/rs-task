@@ -15,14 +15,14 @@ use std::sync::mpsc;
 
 use futures::FutureExt;
 
-use super::ReleaseJob;
+use super::internal::ReleaseJob;
 use crate::model::OwnerEpoch;
 use crate::store::StoreError;
 use crate::store::TaskStore;
 
 /// A process-wide, pre-started cleanup thread for guards dropped while armed.
 #[derive(Clone)]
-pub(super) struct OwnerReleaseWorker {
+pub(in crate::service) struct OwnerReleaseWorker {
     /// Sends release requests to the process-wide cleanup thread.
     sender: tokio::sync::mpsc::UnboundedSender<ReleaseJob>,
 }
@@ -40,7 +40,7 @@ impl OwnerReleaseWorker {
     ///
     /// Returns a diagnostic if locking the singleton or starting the thread or
     /// runtime fails.
-    pub(super) fn shared() -> Result<Self, String> {
+    pub(in crate::service) fn shared() -> Result<Self, String> {
         static WORKER: OnceLock<Mutex<Option<OwnerReleaseWorker>>> = OnceLock::new();
         let slot = WORKER.get_or_init(|| Mutex::new(None));
         let mut slot = slot

@@ -9,11 +9,7 @@
 
 mod engine_error;
 mod local_task_execution_engine;
-mod task_execution_engine;
-mod task_execution_engine_provider;
 mod typed_resource_reservation;
 pub(crate) use engine_error::EngineError;
 pub(crate) use local_task_execution_engine::LocalTaskExecutionEngine;
-pub(crate) use task_execution_engine::TaskExecutionEngine;
-pub(crate) use task_execution_engine_provider::TaskExecutionEngineProvider;
 pub use typed_resource_reservation::TypedResourceReservation;

@@ -11,11 +11,10 @@ use parking_lot::Mutex;
 
 mod allocation;
 mod allocation_ledger;
-mod resource_ledger;
+#[path = "resource_ledger/resource_ledger.rs"]
+mod ledger;
 
-pub(in crate::engine::local_task_execution_engine) use allocation::Allocation;
-pub(in crate::engine::local_task_execution_engine) use allocation_ledger::AllocationLedger;
-pub(in crate::engine::local_task_execution_engine) use resource_ledger::ResourceLedger;
+pub(in crate::engine::local_task_execution_engine) use ledger::ResourceLedger;
 
 /// Removes one reservation and subtracts its resources from aggregate usage.
 ///

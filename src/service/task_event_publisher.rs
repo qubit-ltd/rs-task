@@ -8,10 +8,11 @@
 //! Sequential durable lifecycle notification publication.
 
 mod internal;
-mod task_event_publisher;
+#[path = "task_event_publisher/task_event_publisher.rs"]
+mod publisher_impl;
 
-pub(super) use internal::QuarantineCommand;
-pub(super) use task_event_publisher::TaskEventPublisher;
+pub(in crate::service::task_event_publisher) use internal::QuarantineCommand;
+pub(super) use publisher_impl::TaskEventPublisher;
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {

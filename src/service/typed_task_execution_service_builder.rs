@@ -39,7 +39,7 @@ use crate::store::TaskStore;
 /// use qubit_id::IdGenerationError;
 /// use qubit_id::IdGenerator;
 /// use qubit_task::TaskExecutionServiceBuilder;
-/// use qubit_task::TaskServiceError;
+/// use qubit_task::service::TaskServiceError;
 /// use qubit_task::TaskStore;
 ///
 /// async fn start_service(

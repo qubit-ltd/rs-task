@@ -30,8 +30,8 @@ use super::StoredPayload;
 /// use qubit_metadata::Metadata;
 /// use qubit_model_id::ModelIdBuf;
 /// use qubit_task::ResourceRequest;
-/// use qubit_task::StoredPayload;
-/// use qubit_task::StoredTaskRequest;
+/// use qubit_task::model::StoredPayload;
+/// use qubit_task::model::StoredTaskRequest;
 ///
 /// let request = StoredTaskRequest {
 ///     kind_id: String::from("example.kind"),

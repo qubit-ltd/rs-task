@@ -15,7 +15,6 @@ use parking_lot::Mutex;
 use self::internal::ResourceLedger;
 use self::internal::release_reservation;
 use crate::engine::EngineError;
-use crate::engine::TaskExecutionEngine;
 use crate::engine::TypedResourceReservation;
 use crate::model::ResourceCapacity;
 use crate::model::typed::ResourceRequest;
@@ -165,13 +164,6 @@ impl LocalTaskExecutionEngine {
         Ok(TypedResourceReservation::new(Box::new(move || {
             release_reservation(token, &ledger)
         })))
-    }
-}
-
-impl TaskExecutionEngine for LocalTaskExecutionEngine {
-    /// Reserves typed task resources using the local engine's shared ledger.
-    fn try_prepare_typed(&self, id: TaskId, request: ResourceRequest) -> Result<TypedResourceReservation, EngineError> {
-        Self::try_prepare_typed(self, id, request)
     }
 }
 

@@ -15,7 +15,7 @@ use crate::store::StoreError;
 use crate::store::TaskStore;
 
 /// Holds an acquired owner epoch until release has finished.
-pub(super) struct OwnerReleaseGuard {
+pub(in crate::service) struct OwnerReleaseGuard {
     /// Holds the store and epoch until release succeeds or drop queues cleanup.
     owner: Option<(Arc<dyn TaskStore>, OwnerEpoch)>,
     /// Keeps the pre-started worker available for cancellation cleanup.
@@ -35,7 +35,7 @@ impl OwnerReleaseGuard {
     /// # Returns
     ///
     /// A guard that releases `epoch` directly or queues it during drop.
-    pub(super) fn new(store: Arc<dyn TaskStore>, epoch: OwnerEpoch, cleanup: OwnerReleaseWorker) -> Self {
+    pub(in crate::service) fn new(store: Arc<dyn TaskStore>, epoch: OwnerEpoch, cleanup: OwnerReleaseWorker) -> Self {
         Self {
             owner: Some((store, epoch)),
             cleanup,
@@ -57,7 +57,7 @@ impl OwnerReleaseGuard {
     ///
     /// Returns the store error when the release attempt fails; the guard stays
     /// armed so callers can retry.
-    pub(super) async fn release(&mut self) -> Result<(), StoreError> {
+    pub(in crate::service) async fn release(&mut self) -> Result<(), StoreError> {
         let Some((store, epoch)) = self.owner.as_ref() else {
             return Ok(());
         };

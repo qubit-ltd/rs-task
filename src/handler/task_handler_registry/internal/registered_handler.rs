@@ -12,7 +12,7 @@ use crate::handler::TaskHandler;
 /// Handler instance and diagnostic source stored under one exact descriptor.
 pub(crate) struct RegisteredHandler {
     /// Handler used to execute matching requests.
-    pub(crate) handler: Arc<dyn TaskHandler>,
+    pub(crate) handler: Arc<dyn TaskHandler<serde_json::Value>>,
     /// Registration source included in duplicate diagnostics.
     pub(crate) source: String,
 }

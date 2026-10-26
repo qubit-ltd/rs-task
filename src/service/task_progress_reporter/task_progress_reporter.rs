@@ -25,7 +25,7 @@ use crate::store::TaskStore;
 /// Each reporter belongs to one running task attempt. Progress versions are
 /// allocated serially across all progress operations created by one task
 /// context, starting above the store's empty baseline version of zero.
-pub(super) struct TaskProgressReporter {
+pub(in crate::service) struct TaskProgressReporter {
     /// Store that receives progress snapshots.
     store: Arc<dyn TaskStore>,
     /// Identifier of the task associated with this reporter.
@@ -49,7 +49,7 @@ impl TaskProgressReporter {
     ///
     /// A reporter with progress versioning initialized to the empty baseline.
     #[must_use]
-    pub(super) fn new(store: Arc<dyn TaskStore>, id: TaskId, attempt: u32) -> Self {
+    pub(in crate::service) fn new(store: Arc<dyn TaskStore>, id: TaskId, attempt: u32) -> Self {
         Self {
             store,
             id,

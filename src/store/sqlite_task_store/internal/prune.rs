@@ -36,7 +36,7 @@ use crate::store::sqlite_task_store::failure;
 ///
 /// Returns `Failure` for malformed lifecycle data or SQLite errors, and
 /// `Conflict` if a selected task row is unexpectedly absent during deletion.
-pub(super) fn prune_terminal_rows(
+pub(in crate::store::sqlite_task_store) fn prune_terminal_rows(
     transaction: &Transaction<'_>,
     rows: &[(String, String, i64)],
 ) -> Result<(), StoreError> {

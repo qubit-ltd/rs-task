@@ -7,9 +7,10 @@
 // =============================================================================
 //! Releases store ownership when construction or shutdown is cancelled.
 
+#[path = "owner_release_guard/owner_release_guard.rs"]
+mod guard_impl;
 mod internal;
-mod owner_release_guard;
 mod owner_release_worker;
 
-pub(super) use owner_release_guard::OwnerReleaseGuard;
-pub(super) use owner_release_worker::OwnerReleaseWorker;
+pub(in crate::service) use guard_impl::OwnerReleaseGuard;
+pub(in crate::service) use owner_release_worker::OwnerReleaseWorker;

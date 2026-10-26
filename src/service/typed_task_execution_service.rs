@@ -44,7 +44,6 @@ use crate::model::typed::TransitionCommand;
 use crate::service::CancelOutcome;
 #[cfg(feature = "event-bus")]
 use crate::service::NotificationFailure;
-use crate::service::RetryPolicy;
 use crate::service::TaskServiceError;
 use crate::store::TaskStore;
 
@@ -63,9 +62,10 @@ use internal::TypedServiceCore;
 pub(super) use typed_service_options::TypedServiceOptions;
 
 /// Typed task submit, dispatch, execution, and cancellation facade.
-/// A value is created by [`TypedTaskExecutionServiceBuilder::build`] after the
-/// caller supplies the store, codec registry, and ID generator to the builder.
-/// Dropping the final handle requests graceful shutdown of the service.
+/// A value is created by [`crate::service::TaskExecutionServiceBuilder::build`]
+/// after the caller supplies the store, codec registry, and ID generator to the
+/// builder. Dropping the final handle requests graceful shutdown of the
+/// service.
 ///
 /// # Examples
 ///

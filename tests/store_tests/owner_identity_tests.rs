@@ -5,8 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-#![cfg(feature = "sqlite")]
-
 use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;

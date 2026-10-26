@@ -84,7 +84,6 @@ impl TaskEvent {
     ///
     /// A version 1 event containing the summary's identity, state revision,
     /// lifecycle state, and correlation key.
-    #[must_use]
     pub fn from_typed_summary(summary: &TaskSummary) -> Self {
         Self {
             schema_version: 1,

@@ -7,9 +7,13 @@
 // =============================================================================
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
 
+use self::internal::ErasedHandler;
+use self::internal::Registration;
+use self::internal::TypedAdapter;
 use super::CancellationMode;
 use super::ExternalCancellationHook;
 use super::HandlerDispatchError;
@@ -17,9 +21,6 @@ use super::HandlerRegistrationError;
 use super::PreparedTask;
 use super::TaskHandlerDescriptor;
 use super::TypedTaskHandler;
-use super::internal::ErasedHandler;
-use super::internal::Registration;
-use super::internal::TypedAdapter;
 use crate::model::TaskRunError;
 use crate::model::typed::StoredPayload;
 use crate::model::typed::TaskId;

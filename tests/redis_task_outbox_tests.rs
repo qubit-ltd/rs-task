@@ -725,7 +725,6 @@ async fn test_process_exit_after_publish_before_delete_recovers_outbox() -> Test
 }
 
 /// Builds a synthetic notification for the projection edge cases.
-#[must_use]
 fn projection_event(id: TaskId, version: u64, state: TaskState) -> TaskEvent {
     TaskEvent {
         schema_version: 1,

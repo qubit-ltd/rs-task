@@ -119,7 +119,6 @@ impl TaskEventPublisher {
     /// # Returns
     ///
     /// A copy of this process's queued, published, failed, and dropped counts.
-    #[must_use]
     #[inline]
     pub(in crate::service) fn stats(&self) -> NotificationStats {
         self.state.counters.snapshot()

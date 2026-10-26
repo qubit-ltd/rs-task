@@ -8,6 +8,7 @@
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use futures::FutureExt;
@@ -20,12 +21,12 @@ use super::ExternalCancelEntry;
 use super::ExternalCancelFlight;
 use super::ExternalCancelResult;
 use super::InFlightGuard;
+use super::ShutdownOutcome;
 use super::TypedServiceCore;
 use super::resource_fairness::ResourceFairness;
 use crate::engine::EngineError;
 use crate::engine::TypedResourceReservation;
 use crate::handler::TaskRunOutcome;
-use crate::handler::typed::CancellationMode;
 use crate::handler::typed::TypedTaskContext;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::TaskOutput;

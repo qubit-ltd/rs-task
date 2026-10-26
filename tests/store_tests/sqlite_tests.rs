@@ -28,6 +28,7 @@ use qubit_task::model::typed::TransitionCommand as EncodedTransitionCommand;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore as TypedTaskStore;
+
 use rusqlite::Connection;
 use rusqlite::params;
 use tokio::test as tokio_test;
