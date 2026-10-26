@@ -172,11 +172,36 @@ fn file_identity(file: &File) -> Result<((u64, u64), u64), StoreError> {
     if succeeded == 0 {
         return Err(failure(std::io::Error::last_os_error()));
     }
-    let file_index = (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
-    Ok((
-        (u64::from(information.dwVolumeSerialNumber), file_index),
-        u64::from(information.nNumberOfLinks),
+    Ok(windows_file_identity_fields(
+        information.dwVolumeSerialNumber,
+        information.nFileIndexHigh,
+        information.nFileIndexLow,
+        information.nNumberOfLinks,
     ))
+}
+
+/// Converts queried Windows handle metadata into the identity used for alias
+/// detection.
+///
+/// # Parameters
+///
+/// * `volume_serial_number` - Volume identifier reported by Windows.
+/// * `file_index_high` - High 32 bits of the file index.
+/// * `file_index_low` - Low 32 bits of the file index.
+/// * `link_count` - Physical link count reported for the file.
+///
+/// # Returns
+///
+/// The volume/file-index pair and physical link count.
+#[cfg(all(windows, not(target_vendor = "uwp")))]
+fn windows_file_identity_fields(
+    volume_serial_number: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+    link_count: u32,
+) -> ((u64, u64), u64) {
+    let file_index = (u64::from(file_index_high) << 32) | u64::from(file_index_low);
+    ((u64::from(volume_serial_number), file_index), u64::from(link_count))
 }
 
 /// Reports unsupported platforms rather than claiming an unverifiable lock.
@@ -229,31 +254,6 @@ mod tests {
     }
 
     #[test]
-    fn test_database_identity_creates_parent_and_canonicalizes_relative_path() {
-        let directory = test_directory();
-        let nested = directory.join("nested");
-        let relative = nested.join("tasks.sqlite");
-        let (identity, file) = DatabaseIdentity::open(&relative).expect("database identity opens");
-        assert!(identity.path().is_absolute());
-        assert_eq!(identity.path().file_name(), Some(std::ffi::OsStr::new("tasks.sqlite")));
-        assert!(nested.exists(), "missing parent directories are created");
-        identity.verify().expect("original file identity remains valid");
-        drop(file);
-        std::fs::remove_dir_all(directory).expect("test directory is removed");
-    }
-
-    #[test]
-    fn test_database_identity_rejects_non_file_path() {
-        let directory = test_directory();
-        std::fs::create_dir_all(&directory).expect("directory is created");
-        assert!(matches!(
-            DatabaseIdentity::open(&directory),
-            Err(StoreError::Failure(_))
-        ));
-        std::fs::remove_dir_all(directory).expect("test directory is removed");
-    }
-
-    #[test]
     fn test_database_identity_detects_file_replacement_after_open() {
         let directory = test_directory();
         std::fs::create_dir_all(&directory).expect("directory is created");
@@ -262,27 +262,11 @@ mod tests {
         let replacement_path = directory.join("original.sqlite");
         std::fs::rename(&path, &replacement_path).expect("original database moves aside");
         std::fs::write(&path, b"replacement").expect("replacement database is created");
-        assert!(
-            matches!(identity.verify(), Err(StoreError::Failure(message)) if message.contains("file was replaced"))
-        );
-        drop(original_file);
-        std::fs::remove_dir_all(directory).expect("test directory is removed");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_database_identity_rejects_hard_link_aliases() {
-        let directory = test_directory();
-        std::fs::create_dir_all(&directory).expect("directory is created");
-        let path = directory.join("tasks.sqlite");
-        let alias = directory.join("alias.sqlite");
-        let (_, file) = DatabaseIdentity::open(&path).expect("database identity opens");
-        std::fs::hard_link(&path, &alias).expect("hard-link alias is created");
         assert!(matches!(
-            DatabaseIdentity::open(&alias),
-            Err(StoreError::UnsupportedDatabaseIdentity)
+            identity.verify(),
+            Err(StoreError::Failure(message)) if message.contains("file was replaced")
         ));
-        drop(file);
+        drop(original_file);
         std::fs::remove_dir_all(directory).expect("test directory is removed");
     }
 }

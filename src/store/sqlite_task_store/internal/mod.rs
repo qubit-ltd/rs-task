@@ -10,6 +10,7 @@
 
 mod database_identity;
 mod owner_lock;
+mod prune;
 mod query_sql;
 mod schema;
 mod sqlite_owner_state;
@@ -21,6 +22,7 @@ mod worker_guard;
 
 pub(super) use database_identity::DatabaseIdentity;
 pub(super) use owner_lock::acquire_owner_lock;
+pub(super) use prune::prune_terminal_rows;
 pub(super) use schema::initialize_next_schema;
 pub(super) use sqlite_owner_state::SqliteOwnerState;
 pub(super) use typed_store::accept_encoded;

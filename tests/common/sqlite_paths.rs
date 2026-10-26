@@ -18,6 +18,7 @@ use std::path::PathBuf;
 /// # Returns
 ///
 /// The lock path associated with that exact database name.
+#[must_use]
 pub(crate) fn owner_lock_path(path: &Path) -> PathBuf {
     let mut lock_name: OsString = path.as_os_str().to_owned();
     lock_name.push(".owner.lock");

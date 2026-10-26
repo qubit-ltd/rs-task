@@ -9,28 +9,29 @@
 mod common;
 mod support;
 
+use std::env;
+use std::fs;
+use std::num::NonZeroUsize;
+
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
-#[cfg(feature = "sqlite")]
+use qubit_id::Id;
+use qubit_metadata::Metadata;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::model::ResourceRequest;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::StartCommand;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::StoredPayload;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::StoredTaskRequest;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::TaskId;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::TaskOutput;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::TaskState;
-#[cfg(feature = "sqlite")]
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
+#[cfg(feature = "sqlite")]
+use rusqlite::Connection;
 use tokio::test as tokio_test;
 #[cfg(feature = "sqlite")]
 use uuid::Uuid;
@@ -55,21 +56,21 @@ async fn test_memory_store_obeys_core_contract() {
 #[tokio_test]
 async fn test_memory_state_checkpoint_reports_current_state_and_version() {
     let store = MemoryTaskStore::new(8);
-    let id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(104));
+    let id = TaskId::from_id(Id::new(104));
     let accepted = store
         .accept_encoded(
             id,
-            qubit_task::model::StoredTaskRequest {
+            StoredTaskRequest {
                 kind_id: "checkpoint.contract".into(),
                 category: None,
-                payload: qubit_task::model::StoredPayload {
-                    type_id: qubit_model_id::ModelIdBuf::parse("test.Checkpoint").expect("valid model ID"),
+                payload: StoredPayload {
+                    type_id: ModelIdBuf::parse("test.Checkpoint").expect("valid model ID"),
                     schema_version: 1,
                     codec_id: "qubit.bytes.json".into(),
                     bytes: vec![1],
                 },
-                metadata: qubit_metadata::Metadata::new(),
-                resource_limit: qubit_task::model::ResourceRequest::default(),
+                metadata: Metadata::new(),
+                resource_limit: ResourceRequest::default(),
                 correlation_key: None,
                 idempotency_key: None,
             },
@@ -87,7 +88,7 @@ async fn test_memory_state_checkpoint_reports_current_state_and_version() {
     assert_eq!(checkpoint.state, accepted.summary.state);
     assert!(
         store
-            .get_state_checkpoint(qubit_task::model::TaskId::from_id(qubit_id::Id::new(105)))
+            .get_state_checkpoint(TaskId::from_id(Id::new(105)))
             .await
             .expect("unknown checkpoint lookup succeeds")
             .is_none()
@@ -99,7 +100,7 @@ async fn test_memory_store_obeys_terminal_prune_contract() {
     let store = MemoryTaskStore::new(16);
     support::store_contract::check_terminal_prune_contract(&store).await;
     for raw_id in [201, 202, 203] {
-        let id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(raw_id));
+        let id = TaskId::from_id(Id::new(raw_id));
         assert!(
             store
                 .get_state_checkpoint(id)
@@ -113,24 +114,24 @@ async fn test_memory_store_obeys_terminal_prune_contract() {
 #[tokio_test]
 async fn test_memory_state_checkpoint_disappears_after_capacity_eviction() {
     let store = MemoryTaskStore::new(1);
-    let first_id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(401));
-    let second_id = qubit_task::model::TaskId::from_id(qubit_id::Id::new(402));
+    let first_id = TaskId::from_id(Id::new(401));
+    let second_id = TaskId::from_id(Id::new(402));
 
     for id in [first_id, second_id] {
         let accepted = store
             .accept_encoded(
                 id,
-                qubit_task::model::StoredTaskRequest {
+                StoredTaskRequest {
                     kind_id: "checkpoint.eviction".into(),
                     category: None,
-                    payload: qubit_task::model::StoredPayload {
-                        type_id: qubit_model_id::ModelIdBuf::parse("test.Checkpoint").expect("valid model ID"),
+                    payload: StoredPayload {
+                        type_id: ModelIdBuf::parse("test.Checkpoint").expect("valid model ID"),
                         schema_version: 1,
                         codec_id: "qubit.bytes.json".into(),
                         bytes: vec![1],
                     },
-                    metadata: qubit_metadata::Metadata::new(),
-                    resource_limit: qubit_task::model::ResourceRequest::default(),
+                    metadata: Metadata::new(),
+                    resource_limit: ResourceRequest::default(),
                     correlation_key: None,
                     idempotency_key: None,
                 },
@@ -138,7 +139,7 @@ async fn test_memory_state_checkpoint_disappears_after_capacity_eviction() {
             .await
             .expect("task acceptance succeeds");
         let running = store
-            .start_encoded(qubit_task::model::StartCommand {
+            .start_encoded(StartCommand {
                 id,
                 expected_state_version: accepted.summary.state_version,
                 started_at_ms: accepted.summary.accepted_at_ms,
@@ -146,12 +147,12 @@ async fn test_memory_state_checkpoint_disappears_after_capacity_eviction() {
             .await
             .expect("task starts");
         store
-            .transition_encoded(qubit_task::model::TransitionCommand {
+            .transition_encoded(TransitionCommand {
                 id,
                 expected_state_version: running.state_version,
                 expected_attempt: running.attempt,
                 retry_not_before_ms: None,
-                state: qubit_task::model::TaskState::Succeeded,
+                state: TaskState::Succeeded,
                 output: None,
                 cancel_requested: false,
                 cancel_error: None,
@@ -180,23 +181,20 @@ async fn test_memory_state_checkpoint_disappears_after_capacity_eviction() {
         .await
         .expect("retained checkpoint lookup succeeds")
         .expect("newest terminal checkpoint remains available");
-    assert_eq!(checkpoint.state, qubit_task::model::TaskState::Succeeded);
+    assert_eq!(checkpoint.state, TaskState::Succeeded);
     assert_eq!(checkpoint.state_version, 2);
 }
 
 #[tokio_test]
 async fn test_memory_terminal_prune_releases_payload_budget() {
-    let store = MemoryTaskStore::with_payload_budget(
-        16,
-        std::num::NonZeroUsize::new(4).expect("non-zero memory payload budget"),
-    );
+    let store = MemoryTaskStore::with_payload_budget(16, NonZeroUsize::new(4).expect("non-zero memory payload budget"));
     support::store_contract::check_memory_prune_reclaims_payload(&store).await;
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_store_obeys_core_contract() {
-    let path = std::env::temp_dir().join(format!("rs-task-contract-{}.sqlite", Uuid::new_v4()));
+    let path = env::temp_dir().join(format!("rs-task-contract-{}.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
     support::store_contract::check_core_contract(&store).await;
     drop(store);
@@ -206,14 +204,14 @@ async fn test_sqlite_store_obeys_core_contract() {
         &path.with_extension("sqlite-wal"),
         &path.with_extension("sqlite-shm"),
     ] {
-        let _ = std::fs::remove_file(file);
+        let _ = fs::remove_file(file);
     }
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_store_obeys_terminal_prune_contract() {
-    let path = std::env::temp_dir().join(format!("rs-task-prune-contract-{}.sqlite", Uuid::new_v4()));
+    let path = env::temp_dir().join(format!("rs-task-prune-contract-{}.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
     support::store_contract::check_terminal_prune_contract(&store).await;
     drop(store);
@@ -223,19 +221,16 @@ async fn test_sqlite_store_obeys_terminal_prune_contract() {
         &path.with_extension("sqlite-wal"),
         &path.with_extension("sqlite-shm"),
     ] {
-        let _ = std::fs::remove_file(file);
+        let _ = fs::remove_file(file);
     }
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio_test]
 async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
-    let path = std::env::temp_dir().join(format!("rs-task-prune-atomic-{}.sqlite", Uuid::new_v4()));
+    let path = env::temp_dir().join(format!("rs-task-prune-atomic-{}.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
-    let ids = [
-        TaskId::from_id(qubit_id::Id::new(881)),
-        TaskId::from_id(qubit_id::Id::new(882)),
-    ];
+    let ids = [TaskId::from_id(Id::new(881)), TaskId::from_id(Id::new(882))];
     for (index, id) in ids.iter().copied().enumerate() {
         let accepted = store
             .accept_encoded(
@@ -244,12 +239,12 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
                     kind_id: "prune.atomic".into(),
                     category: None,
                     payload: StoredPayload {
-                        type_id: qubit_model_id::ModelIdBuf::parse("test.PruneAtomic").unwrap(),
+                        type_id: ModelIdBuf::parse("test.PruneAtomic").unwrap(),
                         schema_version: 1,
                         codec_id: "qubit.bytes.json".into(),
                         bytes: vec![index as u8],
                     },
-                    metadata: qubit_metadata::Metadata::new(),
+                    metadata: Metadata::new(),
                     resource_limit: ResourceRequest::default(),
                     correlation_key: None,
                     idempotency_key: None,
@@ -280,7 +275,7 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
             .await
             .unwrap();
     }
-    let blocker = rusqlite::Connection::open(&path).unwrap();
+    let blocker = Connection::open(&path).unwrap();
     blocker
         .execute_batch(&format!(
             concat!(
@@ -293,7 +288,7 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
         .unwrap();
     assert!(
         store
-            .prune_terminal_before(u64::MAX, std::num::NonZeroUsize::new(2).unwrap())
+            .prune_terminal_before(u64::MAX, NonZeroUsize::new(2).unwrap())
             .await
             .is_err()
     );
@@ -327,6 +322,6 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
         &path.with_extension("sqlite-wal"),
         &path.with_extension("sqlite-shm"),
     ] {
-        let _ = std::fs::remove_file(file);
+        let _ = fs::remove_file(file);
     }
 }

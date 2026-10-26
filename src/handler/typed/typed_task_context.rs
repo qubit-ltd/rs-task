@@ -16,11 +16,29 @@ use qubit_progress::AsyncReporter;
 use crate::model::typed::TaskId;
 
 /// Per-attempt identity and cooperative cancellation state for typed handlers.
+///
+/// The task execution service supplies this context when it invokes a typed
+/// handler, so handlers can inspect task identity, cancellation state, and
+/// report progress without constructing the context themselves.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::TaskContext;
+///
+/// fn should_continue(context: &TaskContext) -> bool {
+///     !context.is_cancelled()
+/// }
+/// ```
 #[derive(Clone)]
 pub struct TypedTaskContext {
+    /// Stable identifier shared by every attempt of the task.
     task_id: TaskId,
+    /// One-based number of this execution attempt.
     attempt: u32,
+    /// Shared flag observed by this handler and its child work.
     cancelled: Arc<AtomicBool>,
+    /// Reporter that persists progress events for this attempt.
     progress_reporter: Arc<dyn AsyncReporter>,
 }
 

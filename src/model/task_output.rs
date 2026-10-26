@@ -9,6 +9,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Maximum number of bytes retained for a task output summary.
+///
+/// Stores and task execution services reject output summaries larger than this
+/// limit.
 pub const MAX_TASK_OUTPUT_SUMMARY_BYTES: usize = 64 * 1024;
 
 /// Small result summary saved with the task record.

@@ -11,6 +11,24 @@
 /// service process. Durable backlog remains in SQLite and can exceed this
 /// value after restart. `dropped` remains zero because the outbox never drops
 /// a committed event.
+///
+/// This type is available when the `event-bus` feature is enabled.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "event-bus")]
+/// # {
+/// use qubit_task::service::NotificationStats;
+///
+/// let stats = NotificationStats::default();
+/// assert_eq!(stats.queued, 0);
+/// assert_eq!(stats.published, 0);
+/// assert_eq!(stats.dropped, 0);
+/// assert_eq!(stats.failed, 0);
+/// # }
+/// ```
+#[must_use]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NotificationStats {
     /// Lifecycle writes signalled to the publisher in this process.

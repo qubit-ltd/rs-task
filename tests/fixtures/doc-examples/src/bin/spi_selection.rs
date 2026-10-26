@@ -7,15 +7,16 @@
 // =============================================================================
 //! Injects a configured store into the typed task service builder.
 
+#[path = "../typed_support.rs"]
+mod typed_support;
+
 use std::sync::Arc;
 
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::store::MemoryTaskStore;
-use typed_support::SequentialIds;
 
-#[path = "../typed_support.rs"]
-mod typed_support;
+use typed_support::SequentialIds;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -14,7 +14,7 @@ mod notification_failure;
 mod notification_stats;
 mod owner_release_guard;
 #[cfg(test)]
-#[path = "../../tests/service/owner_release_guard_tests.rs"]
+#[path = "../tests/service/owner_release_guard_tests.rs"]
 mod owner_release_guard_tests;
 mod retry_policy;
 mod retry_policy_error;

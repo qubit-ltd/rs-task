@@ -5,8 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::env;
+use std::fs;
 use std::num::NonZeroUsize;
+use std::path::Path;
 
+use qubit_id::Id;
+use qubit_metadata::Metadata;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::StartCommand;
 use qubit_task::model::StoredPayload;
@@ -20,18 +26,21 @@ use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
+#[cfg(feature = "sqlite")]
+use rusqlite::Connection;
+use uuid::Uuid;
 
 fn request(category: &str, correlation_key: &str) -> StoredTaskRequest {
     StoredTaskRequest {
         kind_id: "query.test".to_owned(),
         category: Some(category.to_owned()),
         payload: StoredPayload {
-            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload").expect("valid model ID"),
+            type_id: ModelIdBuf::parse("qubit_task.tests.Payload").expect("valid model ID"),
             schema_version: 1,
             codec_id: "qubit.bytes.json".to_owned(),
             bytes: vec![1],
         },
-        metadata: qubit_metadata::Metadata::new(),
+        metadata: Metadata::new(),
         resource_limit: ResourceRequest::default(),
         correlation_key: Some(correlation_key.to_owned()),
         idempotency_key: None,
@@ -39,17 +48,17 @@ fn request(category: &str, correlation_key: &str) -> StoredTaskRequest {
 }
 
 fn id(value: u64) -> TaskId {
-    TaskId::from_id(qubit_id::Id::new(value))
+    TaskId::from_id(Id::new(value))
 }
 
 #[cfg(feature = "sqlite")]
-fn remove_database(path: &std::path::Path) {
+fn remove_database(path: &Path) {
     let mut owner_lock = path.as_os_str().to_owned();
     owner_lock.push(".owner.lock");
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(owner_lock);
-    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
-    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(owner_lock);
+    let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = fs::remove_file(path.with_extension("sqlite-shm"));
 }
 
 async fn ids_in_order(store: &dyn TaskStore) -> Vec<u64> {
@@ -140,7 +149,7 @@ async fn assert_category_filter_and_exclusive_numeric_cursor(store: &dyn TaskSto
 async fn assert_ready_queue_contract(store: &dyn TaskStore) {
     assert!(
         store
-            .list_ready_queued(None, NonZeroUsize::new(257).unwrap(), 0)
+            .list_ready_queued(None, NonZeroUsize::new(257).expect("nonzero page limit"), 0,)
             .await
             .is_err()
     );
@@ -149,7 +158,7 @@ async fn assert_ready_queue_contract(store: &dyn TaskStore) {
         let accepted = store
             .accept_encoded(task_id, request("ready", &format!("{value}")))
             .await
-            .unwrap();
+            .expect("task is accepted");
         if value != 40 {
             let running = store
                 .start_encoded(StartCommand {
@@ -158,7 +167,7 @@ async fn assert_ready_queue_contract(store: &dyn TaskStore) {
                     started_at_ms: 10,
                 })
                 .await
-                .unwrap();
+                .expect("queued task starts");
             store
                 .transition_encoded(TransitionCommand {
                     id: task_id,
@@ -176,14 +185,14 @@ async fn assert_ready_queue_contract(store: &dyn TaskStore) {
                     output: None,
                 })
                 .await
-                .unwrap();
+                .expect("task is rescheduled");
         }
     }
     let running_id = id(50);
     let running = store
         .accept_encoded(running_id, request("ready", "running"))
         .await
-        .unwrap();
+        .expect("running task is accepted");
     store
         .start_encoded(StartCommand {
             id: running_id,
@@ -191,12 +200,12 @@ async fn assert_ready_queue_contract(store: &dyn TaskStore) {
             started_at_ms: 10,
         })
         .await
-        .unwrap();
+        .expect("task starts");
     let blocked_id = id(60);
     let blocked = store
         .accept_encoded(blocked_id, request("ready", "blocked"))
         .await
-        .unwrap();
+        .expect("blocked task is accepted");
     store
         .transition_encoded(TransitionCommand {
             id: blocked_id,
@@ -210,21 +219,21 @@ async fn assert_ready_queue_contract(store: &dyn TaskStore) {
             output: None,
         })
         .await
-        .unwrap();
+        .expect("task is blocked");
     let first = store
-        .list_ready_queued(None, NonZeroUsize::new(2).unwrap(), 200)
+        .list_ready_queued(None, NonZeroUsize::new(2).expect("nonzero page limit"), 200)
         .await
-        .unwrap();
+        .expect("first ready page succeeds");
     assert_eq!(first.records.len(), 2);
     assert!(first.next.is_some());
     store
         .accept_encoded(id(70), request("ready", "submitted-between-pages"))
         .await
-        .unwrap();
+        .expect("task submitted between pages is accepted");
     let second = store
-        .list_ready_queued(first.next, NonZeroUsize::new(2).unwrap(), 200)
+        .list_ready_queued(first.next, NonZeroUsize::new(2).expect("nonzero page limit"), 200)
         .await
-        .unwrap();
+        .expect("second ready page succeeds");
     assert_eq!(second.records.len(), 2);
     assert!(second.next.is_none());
     let mut ready = first
@@ -235,8 +244,20 @@ async fn assert_ready_queue_contract(store: &dyn TaskStore) {
         .collect::<Vec<_>>();
     ready.sort();
     assert_eq!(ready, [id(10), id(20), id(40), id(70)]);
-    assert_eq!(store.next_retry_deadline(200).await.unwrap(), Some(300));
-    assert_eq!(store.next_retry_deadline(300).await.unwrap(), None);
+    assert_eq!(
+        store
+            .next_retry_deadline(200)
+            .await
+            .expect("next retry deadline query succeeds"),
+        Some(300)
+    );
+    assert_eq!(
+        store
+            .next_retry_deadline(300)
+            .await
+            .expect("next retry deadline query succeeds"),
+        None
+    );
 }
 
 #[tokio::test]
@@ -247,8 +268,8 @@ async fn test_ready_queue_filters_due_retries_and_pages_in_memory() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_ready_queue_filters_due_retries_and_pages_in_sqlite() {
-    let db_path = std::env::temp_dir().join(format!("qubit-task-ready-{}.sqlite", uuid::Uuid::new_v4()));
-    let store = SqliteTaskStore::open(&db_path).unwrap();
+    let db_path = env::temp_dir().join(format!("qubit-task-ready-{}.sqlite", Uuid::new_v4()));
+    let store = SqliteTaskStore::open(&db_path).expect("SQLite store opens");
     assert_ready_queue_contract(&store).await;
     drop(store);
     remove_database(&db_path);
@@ -257,10 +278,10 @@ async fn test_ready_queue_filters_due_retries_and_pages_in_sqlite() {
 #[cfg(feature = "sqlite")]
 #[test]
 fn test_ready_queue_and_retry_deadline_queries_use_partial_indexes() {
-    let db_path = std::env::temp_dir().join(format!("qubit-task-ready-plan-{}.sqlite", uuid::Uuid::new_v4()));
-    let store = SqliteTaskStore::open(&db_path).unwrap();
+    let db_path = env::temp_dir().join(format!("qubit-task-ready-plan-{}.sqlite", Uuid::new_v4()));
+    let store = SqliteTaskStore::open(&db_path).expect("SQLite store opens");
     drop(store);
-    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let connection = Connection::open(&db_path).expect("SQLite database opens");
     let ready_plan = {
         let mut ready = connection
             .prepare(concat!(
@@ -268,11 +289,11 @@ fn test_ready_queue_and_retry_deadline_queries_use_partial_indexes() {
                 "WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ",
                 "ORDER BY accepted_at,id LIMIT ?2",
             ))
-            .unwrap();
+            .expect("ready queue query plan is prepared");
         ready
             .query_map([200_i64, 10_i64], |row| row.get::<_, String>(3))
-            .unwrap()
-            .map(Result::unwrap)
+            .expect("ready queue query plan is read")
+            .map(|row| row.expect("ready queue query plan row is valid"))
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -284,11 +305,11 @@ fn test_ready_queue_and_retry_deadline_queries_use_partial_indexes() {
                 "INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' ",
                 "AND retry_not_before_ms>?1",
             ))
-            .unwrap();
+            .expect("retry deadline query plan is prepared");
         statement
             .query_map([200_i64], |row| row.get::<_, String>(3))
-            .unwrap()
-            .map(Result::unwrap)
+            .expect("retry deadline query plan is read")
+            .map(|row| row.expect("retry deadline query plan row is valid"))
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -306,7 +327,7 @@ async fn test_typed_history_filters_category_and_uses_exclusive_numeric_cursor()
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_typed_history_filters_category_and_uses_exclusive_numeric_cursor_in_sqlite() {
-    let db_path = std::env::temp_dir().join(format!("qubit-task-typed-query-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = env::temp_dir().join(format!("qubit-task-typed-query-{}.sqlite", Uuid::new_v4()));
     let memory = MemoryTaskStore::new(16);
     let sqlite = SqliteTaskStore::open(&db_path).expect("typed SQLite store opens");
     assert_category_filter_and_exclusive_numeric_cursor(&memory).await;
@@ -332,7 +353,10 @@ async fn test_typed_history_uses_stable_numeric_order_in_memory() {
 async fn test_typed_history_pages_a_queue_larger_than_the_maximum_page() {
     let memory = MemoryTaskStore::new(300);
     for value in 1..=257 {
-        memory.accept_encoded(id(value), request("page", "257")).await.unwrap();
+        memory
+            .accept_encoded(id(value), request("page", "257"))
+            .await
+            .expect("task is accepted");
     }
     let first = memory
         .list_encoded(TaskQuery {
@@ -340,7 +364,7 @@ async fn test_typed_history_pages_a_queue_larger_than_the_maximum_page() {
             ..TaskQuery::default()
         })
         .await
-        .unwrap();
+        .expect("first history page succeeds");
     assert_eq!(first.records.len(), 256);
     let second = memory
         .list_encoded(TaskQuery {
@@ -349,7 +373,7 @@ async fn test_typed_history_pages_a_queue_larger_than_the_maximum_page() {
             ..TaskQuery::default()
         })
         .await
-        .unwrap();
+        .expect("second history page succeeds");
     assert_eq!(second.records.len(), 1);
     assert!(second.next.is_none());
 }
@@ -357,7 +381,7 @@ async fn test_typed_history_pages_a_queue_larger_than_the_maximum_page() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_typed_history_has_the_same_order_in_memory_and_sqlite() {
-    let db_path = std::env::temp_dir().join(format!("qubit-task-typed-order-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = env::temp_dir().join(format!("qubit-task-typed-order-{}.sqlite", Uuid::new_v4()));
     let memory = MemoryTaskStore::new(16);
     let sqlite = SqliteTaskStore::open(&db_path).expect("typed SQLite store opens");
     let ids = [id(2), id(10), id(u64::MAX)];
@@ -381,10 +405,7 @@ async fn test_typed_history_has_the_same_order_in_memory_and_sqlite() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_typed_schema_four_migrates_retry_deadline_column_without_losing_rows() {
-    let db_path = std::env::temp_dir().join(format!(
-        "qubit-task-typed-schema-migration-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = env::temp_dir().join(format!("qubit-task-typed-schema-migration-{}.sqlite", Uuid::new_v4()));
     let sqlite = SqliteTaskStore::open(&db_path).expect("schema 8 opens");
     let stored_id = id(801);
     sqlite
@@ -393,7 +414,7 @@ async fn test_typed_schema_four_migrates_retry_deadline_column_without_losing_ro
         .expect("task is accepted");
     drop(sqlite);
 
-    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let connection = Connection::open(&db_path).expect("SQLite database opens");
     connection
         .execute_batch(concat!(
             "DROP TABLE task_event_outbox; DROP TABLE task_event_outbox_quarantine; ",
@@ -401,11 +422,15 @@ async fn test_typed_schema_four_migrates_retry_deadline_column_without_losing_ro
             "DROP INDEX tasks_queued_retry_deadline; ",
             "ALTER TABLE tasks DROP COLUMN retry_not_before_ms; PRAGMA user_version=4;",
         ))
-        .unwrap();
+        .expect("schema 4 fixture is prepared");
     drop(connection);
 
     let migrated = SqliteTaskStore::open(&db_path).expect("typed schema 4 migrates to 8");
-    let loaded = migrated.get_encoded_task(stored_id).await.unwrap().unwrap();
+    let loaded = migrated
+        .get_encoded_task(stored_id)
+        .await
+        .expect("migrated task query succeeds")
+        .expect("migrated task is present");
     assert_eq!(loaded.summary.id, stored_id);
     assert_eq!(loaded.summary.category.as_deref(), Some("migration"));
     assert_eq!(loaded.request.payload.bytes, [1]);

@@ -12,6 +12,24 @@ use serde::Serialize;
 ///
 /// Optional position and stage-count values remain absent when the source does
 /// not provide them; the snapshot does not infer either value.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::ProgressStageSnapshot;
+///
+/// let stage = ProgressStageSnapshot {
+///     id: "download".to_owned(),
+///     name: "Download files".to_owned(),
+///     position: Some(1),
+///     total: Some(3),
+/// };
+///
+/// let encoded = serde_json::to_string(&stage).expect("serialize stage snapshot");
+/// let decoded: ProgressStageSnapshot =
+///     serde_json::from_str(&encoded).expect("deserialize stage snapshot");
+/// assert_eq!(decoded, stage);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressStageSnapshot {
     /// Machine-readable identifier supplied for the stage.

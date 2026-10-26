@@ -5,52 +5,69 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::env;
+use std::fs;
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
 use qubit_id::Id;
+use qubit_metadata::Metadata;
+use qubit_task::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES;
+use qubit_task::model::TaskState;
+use qubit_task::model::typed::ProgressCommand;
+use qubit_task::model::typed::ResourceRequest;
+use qubit_task::model::typed::StartCommand;
+use qubit_task::model::typed::StoredPayload;
+use qubit_task::model::typed::StoredTaskRequest;
+use qubit_task::model::typed::TaskId as NumericTaskId;
+use qubit_task::model::typed::TaskQuery;
+use qubit_task::model::typed::TransitionCommand as EncodedTransitionCommand;
+use qubit_task::store::SqliteTaskStore;
+use qubit_task::store::StoreError;
+use qubit_task::store::TaskStore as TypedTaskStore;
 use rusqlite::Connection;
 use rusqlite::params;
+use serde_json::Value;
+use serde_json::from_str;
+use serde_json::to_string;
+use serde_json::to_value;
 use tokio::test as tokio_test;
 
-use crate::model::TaskState;
-use crate::model::typed::ProgressCommand;
-use crate::model::typed::ResourceRequest;
-use crate::model::typed::StartCommand;
-use crate::model::typed::StoredPayload;
-use crate::model::typed::StoredTaskRequest;
-use crate::model::typed::TaskId as NumericTaskId;
-use crate::model::typed::TransitionCommand as EncodedTransitionCommand;
-use crate::store::SqliteTaskStore;
-use crate::store::StoreError;
-use crate::store::TaskStore as TypedTaskStore;
-
-fn database_path(label: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+#[must_use]
+fn database_path(label: &str) -> PathBuf {
+    env::temp_dir().join(format!(
         "qubit-task-{label}-{}-{}.sqlite",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .expect("clock is after epoch")
             .as_nanos()
     ))
 }
 
-fn remove_database(path: &std::path::Path) {
+fn remove_database(path: &Path) {
     for candidate in [
         path.to_path_buf(),
         owner_lock_path(path),
         path.with_extension("sqlite-wal"),
         path.with_extension("sqlite-shm"),
     ] {
-        let _ = std::fs::remove_file(candidate);
+        let _ = fs::remove_file(candidate);
     }
 }
 
-fn owner_lock_path(path: &std::path::Path) -> std::path::PathBuf {
+#[must_use]
+fn owner_lock_path(path: &Path) -> PathBuf {
     let mut lock_path = path.as_os_str().to_owned();
     lock_path.push(".owner.lock");
     lock_path.into()
 }
 
-fn seed_legacy_database(path: &std::path::Path) -> String {
+fn seed_legacy_database(path: &Path) -> String {
     let id = "550e8400-e29b-41d4-a716-446655440000".to_owned();
     let connection = Connection::open(path).expect("legacy database opens");
     connection
@@ -76,10 +93,12 @@ fn seed_legacy_database(path: &std::path::Path) -> String {
     id
 }
 
+#[must_use]
 fn typed_task_id(value: u64) -> NumericTaskId {
     NumericTaskId::from_id(Id::new(value))
 }
 
+#[must_use]
 fn typed_request(key: Option<&str>) -> StoredTaskRequest {
     StoredTaskRequest {
         kind_id: "example.worker".into(),
@@ -90,7 +109,7 @@ fn typed_request(key: Option<&str>) -> StoredTaskRequest {
             codec_id: "json-v1".into(),
             bytes: b"{\"report\":1}".to_vec(),
         },
-        metadata: qubit_metadata::Metadata::new(),
+        metadata: Metadata::new(),
         resource_limit: ResourceRequest::default(),
         correlation_key: Some("corr-typed".into()),
         idempotency_key: key.map(str::to_owned),
@@ -161,7 +180,7 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
                 expected_attempt: accepted.summary.attempt,
                 retry_not_before_ms: None,
                 state: TaskState::Failed {
-                    category: "x".repeat(crate::model::MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES + 1),
+                    category: "x".repeat(MAX_TASK_DIAGNOSTIC_CATEGORY_BYTES + 1),
                     message: "oversized failure category".into(),
                 },
                 cancel_requested: false,
@@ -181,7 +200,7 @@ async fn test_sqlite_typed_store_reports_missing_and_invalid_lifecycle_operation
 async fn test_sqlite_typed_prune_rejects_limit_outside_sqlite_integer_range() {
     let path = database_path("typed-prune-limit-range");
     let store = SqliteTaskStore::open(&path).expect("typed SQLite store opens");
-    let limit = std::num::NonZeroUsize::new(usize::MAX).expect("usize::MAX is nonzero");
+    let limit = NonZeroUsize::new(usize::MAX).expect("usize::MAX is nonzero");
 
     if i64::try_from(limit.get()).is_err() {
         assert!(matches!(
@@ -316,10 +335,10 @@ async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
 
     let history = TypedTaskStore::list_encoded(
         &store,
-        crate::model::typed::TaskQuery {
+        TaskQuery {
             category: Some("reports".into()),
             limit: 1,
-            ..crate::model::typed::TaskQuery::default()
+            ..TaskQuery::default()
         },
     )
     .await
@@ -328,11 +347,17 @@ async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
     assert_eq!(history.records[0].id, first_id);
     assert!(history.next.is_some());
 
-    let ready = TypedTaskStore::list_ready_queued(&store, None, std::num::NonZeroUsize::new(10).unwrap(), 10)
+    let page_limit = NonZeroUsize::new(10).expect("page limit is nonzero");
+    let ready = TypedTaskStore::list_ready_queued(&store, None, page_limit, 10)
         .await
         .expect("ready queued page is read");
     assert_eq!(ready.records.len(), 2);
-    assert_eq!(TypedTaskStore::next_retry_deadline(&store, 10).await.unwrap(), None);
+    assert_eq!(
+        TypedTaskStore::next_retry_deadline(&store, 10)
+            .await
+            .expect("next retry deadline is read"),
+        None
+    );
 
     let started = TypedTaskStore::start_encoded(
         &store,
@@ -360,11 +385,15 @@ async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
     )
     .await
     .expect("first task is delayed for retry");
-    assert_eq!(TypedTaskStore::next_retry_deadline(&store, 10).await.unwrap(), Some(30));
-    let ready_before_deadline =
-        TypedTaskStore::list_ready_queued(&store, None, std::num::NonZeroUsize::new(10).unwrap(), 29)
+    assert_eq!(
+        TypedTaskStore::next_retry_deadline(&store, 10)
             .await
-            .expect("not yet due task is omitted");
+            .expect("next retry deadline is read"),
+        Some(30)
+    );
+    let ready_before_deadline = TypedTaskStore::list_ready_queued(&store, None, page_limit, 29)
+        .await
+        .expect("not yet due task is omitted");
     assert_eq!(ready_before_deadline.records.len(), 1);
     assert_eq!(ready_before_deadline.records[0].id, second_id);
 
@@ -395,13 +424,13 @@ async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
     .await
     .expect("retried task completes");
     assert_eq!(
-        TypedTaskStore::prune_terminal_before(&store, 41, std::num::NonZeroUsize::MIN)
+        TypedTaskStore::prune_terminal_before(&store, 41, NonZeroUsize::MIN)
             .await
             .expect("terminal task is pruned by finish time"),
         1
     );
     assert!(matches!(
-        TypedTaskStore::prune_terminal_before(&store, u64::MAX, std::num::NonZeroUsize::MIN).await,
+        TypedTaskStore::prune_terminal_before(&store, u64::MAX, NonZeroUsize::MIN).await,
         Err(StoreError::InvalidRequest(_))
     ));
     assert!(
@@ -480,7 +509,14 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
     let progress = TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 1, 1, None, Vec::new(), 11))
         .await
         .expect("current attempt progress commits");
-    assert_eq!(progress.progress.as_ref().unwrap().progress_version, 1);
+    assert_eq!(
+        progress
+            .progress
+            .as_ref()
+            .expect("progress snapshot is present")
+            .progress_version,
+        1
+    );
     assert!(matches!(
         TypedTaskStore::update_progress(&store, ProgressCommand::new(id, 0, 2, None, Vec::new(), 12)).await,
         Err(StoreError::Conflict)
@@ -497,14 +533,14 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
             |row| row.get(0),
         )
         .expect("lifecycle is stored");
-    let mut lifecycle: serde_json::Value = serde_json::from_str(&lifecycle_json).expect("lifecycle JSON decodes");
-    lifecycle["state"] = serde_json::to_value(TaskState::Succeeded).expect("success state serializes");
+    let mut lifecycle: Value = from_str(&lifecycle_json).expect("lifecycle JSON decodes");
+    lifecycle["state"] = to_value(TaskState::Succeeded).expect("success state serializes");
     connection
         .execute(
             "UPDATE tasks SET state_kind='Succeeded',lifecycle_json=?2 WHERE id=?1",
             params![
                 id.to_padded_decimal(),
-                serde_json::to_string(&lifecycle).expect("lifecycle serializes")
+                to_string(&lifecycle).expect("lifecycle serializes")
             ],
         )
         .expect("task is marked terminal");
@@ -520,7 +556,14 @@ async fn test_sqlite_typed_schema_accepts_fixed_width_max_id_and_reopens_progres
         .await
         .expect("typed task reopens")
         .expect("typed row remains present");
-    assert_eq!(recovered.summary.progress.unwrap().progress_version, 1);
+    assert_eq!(
+        recovered
+            .summary
+            .progress
+            .expect("recovered progress snapshot is present")
+            .progress_version,
+        1
+    );
     drop(reopened);
     let connection = Connection::open(&path).expect("database opens for schema inspection");
     let schema_version: i64 = connection

@@ -5,32 +5,17 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use parking_lot::Mutex;
 
-use super::usage::Usage;
+mod allocation;
+mod allocation_ledger;
+mod resource_ledger;
 
-/// Resources held by one execution reservation.
-///
-/// The tuple stores CPU, memory, and disk amounts, followed by GPU identifiers
-/// and custom resource amounts keyed by name.
-pub(in crate::engine::local_task_execution_engine) type Allocation =
-    (u32, u64, u64, Vec<String>, BTreeMap<String, u64>);
-/// Active reservations indexed by their release token.
-pub(in crate::engine::local_task_execution_engine) type AllocationLedger = HashMap<u64, Allocation>;
-
-/// Aggregate usage and the resources assigned to active reservation tokens.
-#[derive(Default)]
-pub(in crate::engine::local_task_execution_engine) struct ResourceLedger {
-    /// Aggregate resources currently held by active attempts.
-    pub(in crate::engine::local_task_execution_engine) usage: Usage,
-    /// Resources associated with each reservation token.
-    pub(in crate::engine::local_task_execution_engine) allocations: AllocationLedger,
-    /// Next unused token; `None` indicates that the token space is exhausted.
-    pub(in crate::engine::local_task_execution_engine) next_token: Option<u64>,
-}
+pub(in crate::engine::local_task_execution_engine) use allocation::Allocation;
+pub(in crate::engine::local_task_execution_engine) use allocation_ledger::AllocationLedger;
+pub(in crate::engine::local_task_execution_engine) use resource_ledger::ResourceLedger;
 
 /// Removes one reservation and subtracts its resources from aggregate usage.
 ///
@@ -47,7 +32,7 @@ pub(in crate::engine::local_task_execution_engine) fn release_reservation(token:
         ledger.usage.cpu = ledger.usage.cpu.saturating_sub(cpu);
         ledger.usage.memory = ledger.usage.memory.saturating_sub(memory);
         ledger.usage.disk = ledger.usage.disk.saturating_sub(disk);
-        ledger.usage.gpus.retain(|id| !gpus.contains(id));
+        remove_reserved_gpus(&mut ledger.usage.gpus, &gpus);
         for (name, amount) in custom {
             if let Some(value) = ledger.usage.custom.get_mut(&name) {
                 *value = value.saturating_sub(amount);
@@ -57,4 +42,13 @@ pub(in crate::engine::local_task_execution_engine) fn release_reservation(token:
             }
         }
     }
+}
+
+/// Removes GPU identifiers assigned to a released reservation.
+///
+/// Borrowed set entries avoid cloning identifiers while replacing repeated
+/// linear scans of the reservation list with average constant-time lookups.
+fn remove_reserved_gpus(usage_gpus: &mut Vec<String>, reserved_gpus: &[String]) {
+    let reserved_gpus: HashSet<&str> = reserved_gpus.iter().map(String::as_str).collect();
+    usage_gpus.retain(|id| !reserved_gpus.contains(id.as_str()));
 }

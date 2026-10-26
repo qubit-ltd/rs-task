@@ -10,12 +10,18 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use qubit_codec as codec;
 use qubit_codec::ValueBytesCodecDescriptor;
 use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
+use qubit_id as id;
+use qubit_metadata as metadata;
+use qubit_model_id as model_id;
 use qubit_model_id::ModelIdBuf;
+use qubit_progress as progress;
+use qubit_task as task;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -39,14 +45,14 @@ use qubit_task::store::TaskStore;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counter(u32);
 
-impl qubit_model_id::HasModelId for Counter {
-    const MODEL_ID: qubit_model_id::ModelId = qubit_model_id::ModelId::new("test.TypedServicePayload");
+impl model_id::HasModelId for Counter {
+    const MODEL_ID: model_id::ModelId = model_id::ModelId::new("test.TypedServicePayload");
 }
 
 #[derive(Default)]
 struct U32Codec;
 
-impl qubit_codec::ValueEncoder<Counter> for U32Codec {
+impl codec::ValueEncoder<Counter> for U32Codec {
     type Output = Vec<u8>;
     type Error = std::convert::Infallible;
     fn encode(&mut self, value: &Counter) -> Result<Vec<u8>, Self::Error> {
@@ -54,7 +60,7 @@ impl qubit_codec::ValueEncoder<Counter> for U32Codec {
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
+impl codec::ValueDecoder<[u8]> for U32Codec {
     type Output = Counter;
     type Error = std::array::TryFromSliceError;
     fn decode(&mut self, bytes: &[u8]) -> Result<Counter, Self::Error> {
@@ -64,7 +70,7 @@ impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
 }
 
 static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, Counter>();
-static CODEC_REGISTRATION: qubit_codec::ValueBytesCodecRegistration = ValueCodecRegistration::new(
+static CODEC_REGISTRATION: codec::ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("qubit_task.typed_service.u32"),
     &CODEC_DESCRIPTOR,
     ValueCodecRegistrationSource::new(
@@ -77,9 +83,9 @@ static CODEC_REGISTRATION: qubit_codec::ValueBytesCodecRegistration = ValueCodec
 
 struct Ids(AtomicU64);
 
-impl qubit_id::IdGenerator for Ids {
-    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
-        Ok(qubit_id::Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
+impl id::IdGenerator for Ids {
+    fn generate(&self) -> Result<id::Id, id::IdGenerationError> {
+        Ok(id::Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
     }
 }
 
@@ -87,15 +93,15 @@ struct FailingIds;
 
 struct ConstantId;
 
-impl qubit_id::IdGenerator for ConstantId {
-    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
-        Ok(qubit_id::Id::new(2101))
+impl id::IdGenerator for ConstantId {
+    fn generate(&self) -> Result<id::Id, id::IdGenerationError> {
+        Ok(id::Id::new(2101))
     }
 }
 
-impl qubit_id::IdGenerator for FailingIds {
-    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
-        Err(qubit_id::IdGenerationError::NodeOutOfRange { node_id: 4, max: 3 })
+impl id::IdGenerator for FailingIds {
+    fn generate(&self) -> Result<id::Id, id::IdGenerationError> {
+        Err(id::IdGenerationError::NodeOutOfRange { node_id: 4, max: 3 })
     }
 }
 
@@ -104,7 +110,7 @@ struct Handler {
 }
 
 impl TaskHandler<Counter> for Handler {
-    fn run<'a>(&'a self, value: Counter, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, value: Counter, context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
         let cancel = self.cooperative_cancel;
         Box::pin(async move {
             assert_eq!(value, Counter(42));
@@ -114,7 +120,7 @@ impl TaskHandler<Counter> for Handler {
                 }
                 Ok(TaskRunOutcome::Cancelled)
             } else {
-                Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+                Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput {
                     summary: b"typed-result".to_vec(),
                 }))
             }
@@ -125,7 +131,7 @@ impl TaskHandler<Counter> for Handler {
 struct PendingHandler;
 
 impl TaskHandler<Counter> for PendingHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
         Box::pin(std::future::pending())
     }
 }
@@ -133,7 +139,7 @@ impl TaskHandler<Counter> for PendingHandler {
 struct RetryOnceHandler(AtomicU64);
 
 impl TaskHandler<Counter> for RetryOnceHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
         let attempt = self.0.fetch_add(1, Ordering::AcqRel);
         Box::pin(async move {
             if attempt == 0 {
@@ -143,7 +149,7 @@ impl TaskHandler<Counter> for RetryOnceHandler {
                     retryable: true,
                 })
             } else {
-                Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+                Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput {
                     summary: b"retried".to_vec(),
                 }))
             }
@@ -164,7 +170,7 @@ struct GatedHandler {
 }
 
 impl TaskHandler<Counter> for GatedHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
         let started = Arc::clone(&self.started);
         let release = Arc::clone(&self.release);
         Box::pin(async move {
@@ -174,7 +180,7 @@ impl TaskHandler<Counter> for GatedHandler {
                 .await
                 .expect("handler release gate remains open")
                 .forget();
-            Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+            Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput {
                 summary: Vec::new(),
             }))
         })
@@ -207,12 +213,12 @@ fn failing_store() -> Arc<FailingListStore> {
     })
 }
 
-async fn wait_for_latched_store_fault(service: &qubit_task::service::TaskExecutionService) {
+async fn wait_for_latched_store_fault(service: &task::service::TaskExecutionService) {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if matches!(
                 service.submit(request()).await,
-                Err(qubit_task::service::TaskServiceError::StoreUnavailable(_))
+                Err(task::service::TaskServiceError::StoreUnavailable(_))
             ) {
                 break;
             }
@@ -224,22 +230,22 @@ async fn wait_for_latched_store_fault(service: &qubit_task::service::TaskExecuti
 }
 
 impl TaskStore for FailingListStore {
-    fn capabilities(&self) -> qubit_task::model::StoreCapabilities {
+    fn capabilities(&self) -> task::model::StoreCapabilities {
         self.inner.capabilities()
     }
     fn accept_encoded<'a>(
         &'a self,
         id: TaskId,
-        request: qubit_task::model::StoredTaskRequest,
-    ) -> TaskFuture<'a, Result<qubit_task::model::AcceptOutcome, qubit_task::store::StoreError>> {
+        request: task::model::StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<task::model::AcceptOutcome, task::store::StoreError>> {
         self.inner.accept_encoded(id, request)
     }
     fn get_encoded_task<'a>(
         &'a self,
         id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<Option<task::model::StoredTask>, task::store::StoreError>> {
         if self.fail_next_get.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected get failure".into())) })
+            Box::pin(async { Err(task::store::StoreError::Failure("injected get failure".into())) })
         } else {
             self.inner.get_encoded_task(id)
         }
@@ -247,10 +253,10 @@ impl TaskStore for FailingListStore {
     fn get_state_checkpoint<'a>(
         &'a self,
         id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskStateCheckpoint>, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<Option<task::model::TaskStateCheckpoint>, task::store::StoreError>> {
         if self.fail_next_state_checkpoint.swap(false, Ordering::AcqRel) {
             Box::pin(async {
-                Err(qubit_task::store::StoreError::Failure(
+                Err(task::store::StoreError::Failure(
                     "injected state checkpoint failure".into(),
                 ))
             })
@@ -260,87 +266,74 @@ impl TaskStore for FailingListStore {
     }
     fn start_encoded<'a>(
         &'a self,
-        command: qubit_task::model::StartCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        command: task::model::StartCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
         if self.fail_next_start.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected start failure".into())) })
+            Box::pin(async { Err(task::store::StoreError::Failure("injected start failure".into())) })
         } else {
             self.inner.start_encoded(command)
         }
     }
     fn transition_encoded<'a>(
         &'a self,
-        command: qubit_task::model::TransitionCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        command: task::model::TransitionCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
         if self.fail_next_transition.swap(false, Ordering::AcqRel) {
-            Box::pin(async {
-                Err(qubit_task::store::StoreError::Failure(
-                    "injected transition failure".into(),
-                ))
-            })
+            Box::pin(async { Err(task::store::StoreError::Failure("injected transition failure".into())) })
         } else {
             self.inner.transition_encoded(command)
         }
     }
     fn update_progress<'a>(
         &'a self,
-        command: qubit_task::model::ProgressCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        command: task::model::ProgressCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
         self.inner.update_progress(command)
     }
     fn list_encoded<'a>(
         &'a self,
         query: TaskQuery,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<task::model::TaskPage, task::store::StoreError>> {
         if self.fail_next_query.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected list failure".into())) })
+            Box::pin(async { Err(task::store::StoreError::Failure("injected list failure".into())) })
         } else {
             self.inner.list_encoded(query)
         }
     }
     fn list_ready_queued<'a>(
         &'a self,
-        after: Option<qubit_task::model::TaskCursor>,
+        after: Option<task::model::TaskCursor>,
         limit: std::num::NonZeroUsize,
         now_ms: u64,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<task::model::TaskPage, task::store::StoreError>> {
         if self.fail_next_list.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(qubit_task::store::StoreError::Failure("injected list failure".into())) })
+            Box::pin(async { Err(task::store::StoreError::Failure("injected list failure".into())) })
         } else {
             self.inner.list_ready_queued(after, limit, now_ms)
         }
     }
-    fn next_retry_deadline<'a>(
-        &'a self,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<Option<u64>, qubit_task::store::StoreError>> {
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, task::store::StoreError>> {
         self.inner.next_retry_deadline(now_ms)
     }
     fn prune_terminal_before<'a>(
         &'a self,
         finished_before_ms: u64,
         max_rows: std::num::NonZeroUsize,
-    ) -> TaskFuture<'a, Result<usize, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<usize, task::store::StoreError>> {
         self.inner.prune_terminal_before(finished_before_ms, max_rows)
     }
-    fn acquire_owner<'a>(
-        &'a self,
-    ) -> TaskFuture<'a, Result<qubit_task::model::OwnerEpoch, qubit_task::store::StoreError>> {
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<task::model::OwnerEpoch, task::store::StoreError>> {
         self.inner.acquire_owner()
     }
     fn release_owner<'a>(
         &'a self,
-        epoch: qubit_task::model::OwnerEpoch,
-    ) -> TaskFuture<'a, Result<(), qubit_task::store::StoreError>> {
+        epoch: task::model::OwnerEpoch,
+    ) -> TaskFuture<'a, Result<(), task::store::StoreError>> {
         if self.panic_next_release.swap(false, Ordering::AcqRel) {
             panic!("injected release panic");
         }
         if self.fail_next_release.swap(false, Ordering::AcqRel) {
-            return Box::pin(async {
-                Err(qubit_task::store::StoreError::Failure(
-                    "injected release failure".into(),
-                ))
-            });
+            return Box::pin(async { Err(task::store::StoreError::Failure("injected release failure".into())) });
         }
         self.inner.release_owner(epoch)
     }
@@ -365,50 +358,50 @@ impl BuildGateStore {
 }
 
 impl TaskStore for BuildGateStore {
-    fn capabilities(&self) -> qubit_task::model::StoreCapabilities {
+    fn capabilities(&self) -> task::model::StoreCapabilities {
         self.inner.capabilities()
     }
     fn accept_encoded<'a>(
         &'a self,
         id: TaskId,
         request: StoredTaskRequest,
-    ) -> TaskFuture<'a, Result<qubit_task::model::AcceptOutcome, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<task::model::AcceptOutcome, task::store::StoreError>> {
         self.inner.accept_encoded(id, request)
     }
     fn get_encoded_task<'a>(
         &'a self,
         id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::StoredTask>, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<Option<task::model::StoredTask>, task::store::StoreError>> {
         self.inner.get_encoded_task(id)
     }
     fn get_state_checkpoint<'a>(
         &'a self,
         id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<qubit_task::model::TaskStateCheckpoint>, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<Option<task::model::TaskStateCheckpoint>, task::store::StoreError>> {
         self.inner.get_state_checkpoint(id)
     }
     fn start_encoded<'a>(
         &'a self,
-        command: qubit_task::model::StartCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        command: task::model::StartCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
         self.inner.start_encoded(command)
     }
     fn transition_encoded<'a>(
         &'a self,
-        command: qubit_task::model::TransitionCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        command: task::model::TransitionCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
         self.inner.transition_encoded(command)
     }
     fn update_progress<'a>(
         &'a self,
-        command: qubit_task::model::ProgressCommand,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskSummary, qubit_task::store::StoreError>> {
+        command: task::model::ProgressCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
         self.inner.update_progress(command)
     }
     fn list_encoded<'a>(
         &'a self,
         query: TaskQuery,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<task::model::TaskPage, task::store::StoreError>> {
         Box::pin(async move {
             if self.first_list.swap(false, Ordering::AcqRel) {
                 self.entered.notify_one();
@@ -416,7 +409,7 @@ impl TaskStore for BuildGateStore {
                     .resume
                     .acquire()
                     .await
-                    .map_err(|error| qubit_task::store::StoreError::Failure(error.to_string()))?;
+                    .map_err(|error| task::store::StoreError::Failure(error.to_string()))?;
                 permit.forget();
             }
             self.inner.list_encoded(query).await
@@ -424,40 +417,35 @@ impl TaskStore for BuildGateStore {
     }
     fn list_ready_queued<'a>(
         &'a self,
-        after: Option<qubit_task::model::TaskCursor>,
+        after: Option<task::model::TaskCursor>,
         limit: std::num::NonZeroUsize,
         now_ms: u64,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<task::model::TaskPage, task::store::StoreError>> {
         self.inner.list_ready_queued(after, limit, now_ms)
     }
-    fn next_retry_deadline<'a>(
-        &'a self,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<Option<u64>, qubit_task::store::StoreError>> {
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, task::store::StoreError>> {
         self.inner.next_retry_deadline(now_ms)
     }
     fn prune_terminal_before<'a>(
         &'a self,
         finished_before_ms: u64,
         max_rows: std::num::NonZeroUsize,
-    ) -> TaskFuture<'a, Result<usize, qubit_task::store::StoreError>> {
+    ) -> TaskFuture<'a, Result<usize, task::store::StoreError>> {
         self.inner.prune_terminal_before(finished_before_ms, max_rows)
     }
-    fn acquire_owner<'a>(
-        &'a self,
-    ) -> TaskFuture<'a, Result<qubit_task::model::OwnerEpoch, qubit_task::store::StoreError>> {
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<task::model::OwnerEpoch, task::store::StoreError>> {
         self.inner.acquire_owner()
     }
     fn release_owner<'a>(
         &'a self,
-        epoch: qubit_task::model::OwnerEpoch,
-    ) -> TaskFuture<'a, Result<(), qubit_task::store::StoreError>> {
+        epoch: task::model::OwnerEpoch,
+    ) -> TaskFuture<'a, Result<(), task::store::StoreError>> {
         self.inner.release_owner(epoch)
     }
 }
 
 #[tokio::test]
-async fn build_cancellation_releases_memory_owner() {
+async fn test_build_cancellation_releases_memory_owner() {
     let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(32));
     let gate = Arc::new(BuildGateStore::new(Arc::clone(&inner)));
     let entered = gate.entered.notified();
@@ -484,7 +472,7 @@ async fn build_cancellation_releases_memory_owner() {
                     service.shutdown().await.expect("second service shuts down");
                     break;
                 }
-                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                Err(task::service::TaskServiceError::Store(task::store::StoreError::OwnerConflict)) => {
                     tokio::task::yield_now().await
                 }
                 Err(error) => panic!("unexpected second build error: {error}"),
@@ -497,7 +485,7 @@ async fn build_cancellation_releases_memory_owner() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn build_cancellation_releases_sqlite_file_lock() {
+async fn test_build_cancellation_releases_sqlite_file_lock() {
     let path = std::env::temp_dir().join(format!(
         "qubit-task-build-cancel-{}.sqlite",
         std::time::SystemTime::now()
@@ -506,7 +494,7 @@ async fn build_cancellation_releases_sqlite_file_lock() {
             .as_nanos()
     ));
     let inner: Arc<dyn TaskStore> =
-        Arc::new(qubit_task::store::SqliteTaskStore::open(&path).expect("first SQLite store opens"));
+        Arc::new(task::store::SqliteTaskStore::open(&path).expect("first SQLite store opens"));
     let gate = Arc::new(BuildGateStore::new(Arc::clone(&inner)));
     let build = {
         let entered = gate.entered.notified();
@@ -527,7 +515,7 @@ async fn build_cancellation_releases_sqlite_file_lock() {
     let _ = build.await;
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            match qubit_task::store::SqliteTaskStore::open(&path) {
+            match task::store::SqliteTaskStore::open(&path) {
                 Ok(second) => {
                     let second: Arc<dyn TaskStore> = Arc::new(second);
                     let service =
@@ -538,7 +526,7 @@ async fn build_cancellation_releases_sqlite_file_lock() {
                     service.shutdown().await.expect("second SQLite service shuts down");
                     break;
                 }
-                Err(qubit_task::store::StoreError::OwnerConflict) => tokio::task::yield_now().await,
+                Err(task::store::StoreError::OwnerConflict) => tokio::task::yield_now().await,
                 Err(error) => panic!("unexpected second SQLite open error: {error}"),
             }
         }
@@ -554,7 +542,7 @@ async fn build_cancellation_releases_sqlite_file_lock() {
 }
 
 impl TaskHandler<Counter> for ParallelismHandler {
-    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
         self.maximum.fetch_max(active, Ordering::AcqRel);
         self.started.add_permits(1);
@@ -564,7 +552,7 @@ impl TaskHandler<Counter> for ParallelismHandler {
             let permit = release.acquire().await.unwrap();
             permit.forget();
             active.fetch_sub(1, Ordering::AcqRel);
-            Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+            Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput {
                 summary: Vec::new(),
             }))
         })
@@ -574,7 +562,7 @@ impl TaskHandler<Counter> for ParallelismHandler {
 struct ContextProgressHandler;
 
 impl TaskHandler<Counter> for ContextProgressHandler {
-    fn run<'a>(&'a self, value: Counter, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(&'a self, value: Counter, context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
         Box::pin(async move {
             assert_eq!(value, Counter(42));
             assert_eq!(context.task_id().to_padded_decimal(), "00000000000000000301");
@@ -584,13 +572,13 @@ impl TaskHandler<Counter> for ContextProgressHandler {
 
             let _progress = context
                 .progress_builder()
-                .stage(qubit_progress::Stage::new("index", "Index records").position(2, 3))
-                .metric(qubit_progress::Metric::new("records", "Records").total(100))
+                .stage(progress::Stage::new("index", "Index records").position(2, 3))
+                .metric(progress::Metric::new("records", "Records").total(100))
                 .start_async()
                 .await
                 .expect("handler progress starts and persists");
 
-            Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput {
+            Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput {
                 summary: b"context-progress".to_vec(),
             }))
         })
@@ -621,7 +609,7 @@ fn request() -> TaskRequest<Counter> {
     request
 }
 
-async fn wait_for_terminal(service: &qubit_task::TaskExecutionService, id: qubit_task::model::TaskId) -> TaskState {
+async fn wait_for_terminal(service: &task::TaskExecutionService, id: task::model::TaskId) -> TaskState {
     for _ in 0..1000 {
         if let Some(summary) = service.get(id).await.unwrap()
             && summary.state.is_terminal()
@@ -634,7 +622,7 @@ async fn wait_for_terminal(service: &qubit_task::TaskExecutionService, id: qubit
 }
 
 #[tokio::test]
-async fn typed_submit_decodes_runs_and_persists_terminal_state() {
+async fn test_typed_submit_decodes_runs_and_persists_terminal_state() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(101)))).capacity(
         ResourceCapacity {
@@ -659,7 +647,7 @@ async fn typed_submit_decodes_runs_and_persists_terminal_state() {
 }
 
 #[tokio::test]
-async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
+async fn test_typed_submit_rejection_unfinished_limit_keeps_service_running() {
     let store = Arc::new(MemoryTaskStore::with_limits(
         16,
         NonZeroUsize::new(1024).expect("payload budget is nonzero"),
@@ -687,7 +675,7 @@ async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
     blocked.expect("missing handler blocks first task");
     assert!(matches!(
         service.submit(request()).await,
-        Err(qubit_task::service::TaskServiceError::UnfinishedTaskLimitExceeded { limit: 1 })
+        Err(task::service::TaskServiceError::UnfinishedTaskLimitExceeded { limit: 1 })
     ));
     assert_eq!(
         service.cancel(first.id).await.expect("blocked task can be cancelled"),
@@ -705,9 +693,9 @@ async fn typed_submit_rejection_unfinished_limit_keeps_service_running() {
 }
 
 #[tokio::test]
-async fn typed_submit_rejection_payload_budget_keeps_service_running() {
+async fn test_typed_submit_rejection_payload_budget_keeps_service_running() {
     assert_eq!(
-        qubit_codec::ValueEncoder::encode(&mut U32Codec, &Counter(42))
+        codec::ValueEncoder::encode(&mut U32Codec, &Counter(42))
             .expect("u32 encodes")
             .len(),
         4
@@ -738,7 +726,7 @@ async fn typed_submit_rejection_payload_budget_keeps_service_running() {
     .expect("missing handler blocks first task");
     assert!(matches!(
         service.submit(request()).await,
-        Err(qubit_task::service::TaskServiceError::SubmissionCapacityExceeded {
+        Err(task::service::TaskServiceError::SubmissionCapacityExceeded {
             requested_bytes: 4,
             available_bytes: 0
         })
@@ -759,7 +747,7 @@ async fn typed_submit_rejection_payload_budget_keeps_service_running() {
 }
 
 #[tokio::test]
-async fn typed_submit_rejection_idempotency_conflict_keeps_service_running() {
+async fn test_typed_submit_rejection_idempotency_conflict_keeps_service_running() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2041))))
         .build()
@@ -773,7 +761,7 @@ async fn typed_submit_rejection_idempotency_conflict_keeps_service_running() {
     conflicting.payload.data = Counter(43);
     assert!(matches!(
         service.submit(conflicting).await,
-        Err(qubit_task::service::TaskServiceError::IdempotencyConflict)
+        Err(task::service::TaskServiceError::IdempotencyConflict)
     ));
     let mut distinct = request();
     distinct.idempotency_key = Some("distinct-key".into());
@@ -785,7 +773,7 @@ async fn typed_submit_rejection_idempotency_conflict_keeps_service_running() {
 }
 
 #[tokio::test]
-async fn typed_submit_rejection_duplicate_id_keeps_service_running() {
+async fn test_typed_submit_rejection_duplicate_id_keeps_service_running() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(ConstantId));
     builder
@@ -802,7 +790,7 @@ async fn typed_submit_rejection_duplicate_id_keeps_service_running() {
     assert_eq!(wait_for_terminal(&service, first.id).await, TaskState::Succeeded);
     assert!(matches!(
         service.submit(request()).await,
-        Err(qubit_task::service::TaskServiceError::DuplicateTaskId)
+        Err(task::service::TaskServiceError::DuplicateTaskId)
     ));
     assert_eq!(
         service
@@ -820,11 +808,11 @@ async fn typed_submit_rejection_duplicate_id_keeps_service_running() {
 }
 
 #[tokio::test]
-async fn retryable_handler_error_is_persisted_and_retried_after_deadline() {
+async fn test_retryable_handler_error_is_persisted_and_retried_after_deadline() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1201))))
         .retry_policy(
-            qubit_task::service::RetryPolicy::new(
+            task::service::RetryPolicy::new(
                 std::time::Duration::from_millis(80),
                 std::time::Duration::from_millis(80),
             )
@@ -859,7 +847,7 @@ async fn retryable_handler_error_is_persisted_and_retried_after_deadline() {
 }
 
 #[tokio::test]
-async fn max_attempts_one_persists_retryable_failure_as_terminal() {
+async fn test_max_attempts_one_persists_retryable_failure_as_terminal() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1211))))
         .max_attempts(std::num::NonZeroU32::new(1).expect("attempt limit is nonzero"));
@@ -884,7 +872,7 @@ async fn max_attempts_one_persists_retryable_failure_as_terminal() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_retry_deadline_survives_service_restart() {
+async fn test_sqlite_retry_deadline_survives_service_restart() {
     let path = std::env::temp_dir().join(format!(
         "qubit-task-retry-restart-{}.sqlite",
         std::time::SystemTime::now()
@@ -893,10 +881,10 @@ async fn sqlite_retry_deadline_survives_service_restart() {
             .as_nanos(),
     ));
     let retry_delay = std::time::Duration::from_secs(3);
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
+    let store: Arc<dyn TaskStore> = Arc::new(task::store::SqliteTaskStore::open(&path).unwrap());
     let mut first_builder =
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1251))))
-            .retry_policy(qubit_task::service::RetryPolicy::new(retry_delay, retry_delay).unwrap());
+            .retry_policy(task::service::RetryPolicy::new(retry_delay, retry_delay).unwrap());
     first_builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -921,7 +909,7 @@ async fn sqlite_retry_deadline_survives_service_restart() {
     drop(first);
     drop(store);
 
-    let reopened: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
+    let reopened: Arc<dyn TaskStore> = Arc::new(task::store::SqliteTaskStore::open(&path).unwrap());
     let mut second_builder =
         TaskExecutionServiceBuilder::new(Arc::clone(&reopened), registry(), Arc::new(Ids(AtomicU64::new(1252))));
     second_builder
@@ -957,7 +945,7 @@ async fn sqlite_retry_deadline_survives_service_restart() {
 }
 
 #[tokio::test]
-async fn scheduler_never_exceeds_configured_running_limit() {
+async fn test_scheduler_never_exceeds_configured_running_limit() {
     let store = Arc::new(MemoryTaskStore::new(32));
     let handler = Arc::new(ParallelismHandler {
         active: AtomicU64::new(0),
@@ -993,7 +981,7 @@ async fn scheduler_never_exceeds_configured_running_limit() {
 }
 
 #[tokio::test]
-async fn scheduler_store_failure_is_latched_and_reported_by_shutdown() {
+async fn test_scheduler_store_failure_is_latched_and_reported_by_shutdown() {
     let store = failing_store();
     let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1501))));
     builder
@@ -1010,13 +998,13 @@ async fn scheduler_store_failure_is_latched_and_reported_by_shutdown() {
     wait_for_latched_store_fault(&service).await;
     assert!(matches!(
         service.shutdown().await,
-        Err(qubit_task::service::TaskServiceError::StoreUnavailable(message))
+        Err(task::service::TaskServiceError::StoreUnavailable(message))
             if message.contains("injected list failure")
     ));
 }
 
 #[tokio::test]
-async fn typed_service_latches_get_and_start_failures() {
+async fn test_typed_service_latches_get_and_start_failures() {
     for (fail_get, expected) in [(true, "injected get failure"), (false, "injected start failure")] {
         let store = failing_store();
         let mut builder =
@@ -1040,13 +1028,13 @@ async fn typed_service_latches_get_and_start_failures() {
         wait_for_latched_store_fault(&service).await;
         assert!(matches!(
             service.shutdown().await,
-            Err(qubit_task::service::TaskServiceError::StoreUnavailable(message)) if message.contains(expected)
+            Err(task::service::TaskServiceError::StoreUnavailable(message)) if message.contains(expected)
         ));
     }
 }
 
 #[tokio::test]
-async fn typed_service_latches_finalizer_transition_failure() {
+async fn test_typed_service_latches_finalizer_transition_failure() {
     let store = failing_store();
     let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1581))));
     builder
@@ -1064,13 +1052,13 @@ async fn typed_service_latches_finalizer_transition_failure() {
     wait_for_latched_store_fault(&service).await;
     assert!(matches!(
         service.shutdown().await,
-        Err(qubit_task::service::TaskServiceError::StoreUnavailable(message))
+        Err(task::service::TaskServiceError::StoreUnavailable(message))
             if message.contains("injected transition failure")
     ));
 }
 
 #[tokio::test]
-async fn typed_context_exposes_attempt_cancellation_and_persisted_progress() {
+async fn test_typed_context_exposes_attempt_cancellation_and_persisted_progress() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(301)))).capacity(
         ResourceCapacity {
@@ -1097,7 +1085,7 @@ async fn typed_context_exposes_attempt_cancellation_and_persisted_progress() {
 }
 
 #[tokio::test]
-async fn typed_running_cancel_is_persisted_then_acknowledged_by_handler() {
+async fn test_typed_running_cancel_is_persisted_then_acknowledged_by_handler() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(201)))).capacity(
         ResourceCapacity {
@@ -1135,7 +1123,7 @@ async fn typed_running_cancel_is_persisted_then_acknowledged_by_handler() {
 }
 
 #[tokio::test]
-async fn missing_handler_is_retained_as_blocked_and_can_be_cancelled() {
+async fn test_missing_handler_is_retained_as_blocked_and_can_be_cancelled() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(301))))
         .build()
@@ -1161,7 +1149,7 @@ async fn missing_handler_is_retained_as_blocked_and_can_be_cancelled() {
 }
 
 #[tokio::test]
-async fn blocked_task_can_be_resumed_after_restarting_with_its_handler() {
+async fn test_blocked_task_can_be_resumed_after_restarting_with_its_handler() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let first = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1301))))
         .build()
@@ -1199,7 +1187,7 @@ async fn blocked_task_can_be_resumed_after_restarting_with_its_handler() {
 }
 
 #[tokio::test]
-async fn typed_service_query_filters_and_get_handles_missing_task() {
+async fn test_typed_service_query_filters_and_get_handles_missing_task() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1311))))
         .build()
@@ -1234,15 +1222,12 @@ async fn typed_service_query_filters_and_get_handles_missing_task() {
         .expect("correlation query succeeds");
     assert_eq!(correlation_page.records.len(), 1);
     assert_eq!(correlation_page.records[0].category.as_deref(), Some("operations"));
-    assert_eq!(
-        service.get(TaskId::from_id(qubit_id::Id::new(9999))).await.unwrap(),
-        None
-    );
+    assert_eq!(service.get(TaskId::from_id(id::Id::new(9999))).await.unwrap(), None);
     service.shutdown().await.expect("service shuts down cleanly");
 }
 
 #[tokio::test]
-async fn typed_service_get_query_and_cancel_map_store_failures() {
+async fn test_typed_service_get_query_and_cancel_map_store_failures() {
     let store = failing_store();
     let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1331))))
         .build()
@@ -1251,51 +1236,48 @@ async fn typed_service_get_query_and_cancel_map_store_failures() {
 
     store.fail_next_get.store(true, Ordering::Release);
     assert!(matches!(
-        service.get(TaskId::from_id(qubit_id::Id::new(9998))).await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::Failure(message)
+        service.get(TaskId::from_id(id::Id::new(9998))).await,
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::Failure(message)
         )) if message == "injected get failure"
     ));
-    assert_eq!(
-        service.get(TaskId::from_id(qubit_id::Id::new(9998))).await.unwrap(),
-        None
-    );
+    assert_eq!(service.get(TaskId::from_id(id::Id::new(9998))).await.unwrap(), None);
 
     store.fail_next_get.store(true, Ordering::Release);
     assert!(matches!(
-        service.cancel(TaskId::from_id(qubit_id::Id::new(9997))).await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::Failure(message)
+        service.cancel(TaskId::from_id(id::Id::new(9997))).await,
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::Failure(message)
         )) if message == "injected get failure"
     ));
 
     store.fail_next_state_checkpoint.store(true, Ordering::Release);
     assert!(matches!(
         service
-            .get_state_checkpoint(TaskId::from_id(qubit_id::Id::new(9996)))
+            .get_state_checkpoint(TaskId::from_id(id::Id::new(9996)))
             .await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::Failure(message)
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::Failure(message)
         )) if message == "injected state checkpoint failure"
     ));
 
     store.fail_next_query.store(true, Ordering::Release);
     assert!(matches!(
         service.query(TaskQuery::default()).await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::Failure(message)
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::Failure(message)
         )) if message == "injected list failure"
     ));
     assert!(service.query(TaskQuery::default()).await.is_ok());
     assert!(matches!(
         service.shutdown().await,
-        Err(qubit_task::service::TaskServiceError::StoreUnavailable(message))
+        Err(task::service::TaskServiceError::StoreUnavailable(message))
             if message.contains("injected get failure")
     ));
 }
 
 #[tokio::test]
-async fn resume_blocked_rejects_stale_revision_and_terminal_task() {
+async fn test_resume_blocked_rejects_stale_revision_and_terminal_task() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1321))))
         .build()
@@ -1316,8 +1298,8 @@ async fn resume_blocked_rejects_stale_revision_and_terminal_task() {
 
     assert!(matches!(
         service.resume_blocked(accepted.id, blocked.state_version + 1).await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::Conflict
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::Conflict
         ))
     ));
     assert_eq!(
@@ -1327,15 +1309,15 @@ async fn resume_blocked_rejects_stale_revision_and_terminal_task() {
     let cancelled = service.get(accepted.id).await.unwrap().unwrap();
     assert!(matches!(
         service.resume_blocked(accepted.id, cancelled.state_version).await,
-        Err(qubit_task::service::TaskServiceError::NotBlocked {
-            actual: qubit_task::model::TaskStateKind::Cancelled
+        Err(task::service::TaskServiceError::NotBlocked {
+            actual: task::model::TaskStateKind::Cancelled
         })
     ));
     service.shutdown().await.expect("service shuts down cleanly");
 }
 
 #[tokio::test]
-async fn id_generation_failure_prevents_acceptance() {
+async fn test_id_generation_failure_prevents_acceptance() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(FailingIds))
         .build()
@@ -1353,7 +1335,7 @@ async fn id_generation_failure_prevents_acceptance() {
 }
 
 #[tokio::test]
-async fn unsupported_schema_is_retained_as_blocked() {
+async fn test_unsupported_schema_is_retained_as_blocked() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(401))));
     builder
@@ -1373,7 +1355,7 @@ async fn unsupported_schema_is_retained_as_blocked() {
     assert!(matches!(state, TaskState::Blocked { .. }));
 }
 
-async fn wait_for_terminal_or_blocked(service: &qubit_task::TaskExecutionService, id: TaskId) -> TaskState {
+async fn wait_for_terminal_or_blocked(service: &task::TaskExecutionService, id: TaskId) -> TaskState {
     for _ in 0..1000 {
         if let Some(summary) = service.get(id).await.unwrap()
             && (summary.state.is_terminal() || matches!(summary.state, TaskState::Blocked { .. }))
@@ -1386,7 +1368,7 @@ async fn wait_for_terminal_or_blocked(service: &qubit_task::TaskExecutionService
 }
 
 #[tokio::test]
-async fn queued_typed_task_can_be_cancelled_before_resource_admission() {
+async fn test_queued_typed_task_can_be_cancelled_before_resource_admission() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(501)))).capacity(
         ResourceCapacity {
@@ -1420,7 +1402,7 @@ async fn queued_typed_task_can_be_cancelled_before_resource_admission() {
 }
 
 #[tokio::test]
-async fn typed_service_cancel_missing_task_returns_not_found() {
+async fn test_typed_service_cancel_missing_task_returns_not_found() {
     let service = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(16)),
         registry(),
@@ -1431,16 +1413,16 @@ async fn typed_service_cancel_missing_task_returns_not_found() {
     .expect("service starts");
 
     assert!(matches!(
-        service.cancel(TaskId::from_id(qubit_id::Id::new(9991))).await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::NotFound
+        service.cancel(TaskId::from_id(id::Id::new(9991))).await,
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::NotFound
         ))
     ));
     service.shutdown().await.expect("service shuts down cleanly");
 }
 
 #[tokio::test]
-async fn typed_service_resume_missing_task_returns_not_found() {
+async fn test_typed_service_resume_missing_task_returns_not_found() {
     let service = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(16)),
         registry(),
@@ -1451,18 +1433,16 @@ async fn typed_service_resume_missing_task_returns_not_found() {
     .expect("service starts");
 
     assert!(matches!(
-        service
-            .resume_blocked(TaskId::from_id(qubit_id::Id::new(9992)), 0)
-            .await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::NotFound
+        service.resume_blocked(TaskId::from_id(id::Id::new(9992)), 0).await,
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::NotFound
         ))
     ));
     service.shutdown().await.expect("service shuts down cleanly");
 }
 
 #[tokio::test]
-async fn typed_submit_missing_codec_does_not_write_task_or_consume_id() {
+async fn test_typed_submit_missing_codec_does_not_write_task_or_consume_id() {
     const FIRST_ID: u64 = 1351;
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
     let service =
@@ -1475,7 +1455,7 @@ async fn typed_submit_missing_codec_does_not_write_task_or_consume_id() {
     unsupported.payload.codec_id = ValueCodecId::new("qubit_task.typed_service.missing");
     assert!(matches!(
         service.submit(unsupported).await,
-        Err(qubit_task::service::TaskServiceError::TypedRequest(message))
+        Err(task::service::TaskServiceError::TypedRequest(message))
             if message.contains("qubit_task.typed_service.missing")
     ));
     assert!(
@@ -1488,12 +1468,12 @@ async fn typed_submit_missing_codec_does_not_write_task_or_consume_id() {
     );
 
     let accepted = service.submit(request()).await.expect("valid request is accepted");
-    assert_eq!(accepted.id, TaskId::from_id(qubit_id::Id::new(FIRST_ID)));
+    assert_eq!(accepted.id, TaskId::from_id(id::Id::new(FIRST_ID)));
     service.shutdown().await.expect("service shuts down cleanly");
 }
 
 #[tokio::test]
-async fn running_handler_without_cancel_support_reports_unsupported() {
+async fn test_running_handler_without_cancel_support_reports_unsupported() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(601))));
     builder
@@ -1520,7 +1500,7 @@ async fn running_handler_without_cancel_support_reports_unsupported() {
 }
 
 #[tokio::test]
-async fn repeated_idempotency_key_returns_the_existing_typed_task() {
+async fn test_repeated_idempotency_key_returns_the_existing_typed_task() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(801))));
     builder
@@ -1543,12 +1523,12 @@ async fn repeated_idempotency_key_returns_the_existing_typed_task() {
 }
 
 #[tokio::test]
-async fn recovery_blocks_unsupported_schema_and_missing_codec() {
+async fn test_recovery_blocks_unsupported_schema_and_missing_codec() {
     let store = Arc::new(MemoryTaskStore::new(16));
     for (value, version, codec) in [(901, 99, "qubit_task.typed_service.u32"), (902, 1, "missing.codec")] {
         store
             .accept_encoded(
-                TaskId::from_id(qubit_id::Id::new(value)),
+                TaskId::from_id(id::Id::new(value)),
                 StoredTaskRequest {
                     kind_id: "test.typed-service".into(),
                     category: Some("recovery".into()),
@@ -1558,7 +1538,7 @@ async fn recovery_blocks_unsupported_schema_and_missing_codec() {
                         codec_id: codec.into(),
                         bytes: 42_u32.to_le_bytes().to_vec(),
                     },
-                    metadata: qubit_metadata::Metadata::new(),
+                    metadata: metadata::Metadata::new(),
                     resource_limit: ResourceRequest::default(),
                     correlation_key: None,
                     idempotency_key: None,
@@ -1579,20 +1559,16 @@ async fn recovery_blocks_unsupported_schema_and_missing_codec() {
         .unwrap();
     let service = builder.build().await.unwrap();
     for value in [901, 902] {
-        let state = wait_for_terminal_or_blocked(&service, TaskId::from_id(qubit_id::Id::new(value))).await;
+        let state = wait_for_terminal_or_blocked(&service, TaskId::from_id(id::Id::new(value))).await;
         assert!(matches!(state, TaskState::Blocked { .. }));
     }
 }
 
 #[tokio::test]
-async fn external_cancel_retries_failed_hook() {
+async fn test_external_cancel_retries_failed_hook() {
     struct FinishOnExternalCancel(Arc<tokio::sync::Notify>);
     impl TaskHandler<Counter> for FinishOnExternalCancel {
-        fn run<'a>(
-            &'a self,
-            _value: Counter,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1606,7 +1582,7 @@ async fn external_cancel_retries_failed_hook() {
     let hook_call_counter = Arc::clone(&hook_calls);
     let hook_finished = Arc::new(tokio::sync::Notify::new());
     let hook_signal = Arc::clone(&hook_finished);
-    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+    let hook: task::ExternalCancellationHook = Arc::new(move |_, _| {
         let call = hook_call_counter.fetch_add(1, Ordering::Relaxed);
         let hook_signal = Arc::clone(&hook_signal);
         Box::pin(async move {
@@ -1646,7 +1622,7 @@ async fn external_cancel_retries_failed_hook() {
     }
     assert!(matches!(
         service.cancel(accepted.id).await,
-        Err(qubit_task::service::TaskServiceError::ExternalCancellationFailed { message, .. })
+        Err(task::service::TaskServiceError::ExternalCancellationFailed { message, .. })
             if message == "temporary"
     ));
     let summary = service.get(accepted.id).await.unwrap().unwrap();
@@ -1666,18 +1642,14 @@ async fn external_cancel_retries_failed_hook() {
 }
 
 #[tokio::test]
-async fn external_cancel_terminal_race_preserves_terminal_state() {
+async fn test_external_cancel_terminal_race_preserves_terminal_state() {
     struct FinishWhenReleased(Arc<tokio::sync::Notify>);
     impl TaskHandler<Counter> for FinishWhenReleased {
-        fn run<'a>(
-            &'a self,
-            _value: Counter,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
             let release = Arc::clone(&self.0);
             Box::pin(async move {
                 release.notified().await;
-                Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput::default()))
+                Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput::default()))
             })
         }
     }
@@ -1689,7 +1661,7 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
     let started = Arc::clone(&hook_started);
     let release = Arc::clone(&hook_release);
     let count = Arc::clone(&calls);
-    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+    let hook: task::ExternalCancellationHook = Arc::new(move |_, _| {
         count.fetch_add(1, Ordering::Relaxed);
         let started = Arc::clone(&started);
         let release = Arc::clone(&release);
@@ -1745,14 +1717,10 @@ async fn external_cancel_terminal_race_preserves_terminal_state() {
 }
 
 #[tokio::test]
-async fn external_cancel_concurrent_callers_share_hook() {
+async fn test_external_cancel_concurrent_callers_share_hook() {
     struct FinishOnHook(Arc<tokio::sync::Notify>);
     impl TaskHandler<Counter> for FinishOnHook {
-        fn run<'a>(
-            &'a self,
-            _value: Counter,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1769,7 +1737,7 @@ async fn external_cancel_concurrent_callers_share_hook() {
     let release = Arc::clone(&hook_release);
     let call_count = Arc::clone(&calls);
     let finished = Arc::clone(&hook_finished);
-    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+    let hook: task::ExternalCancellationHook = Arc::new(move |_, _| {
         call_count.fetch_add(1, Ordering::Relaxed);
         let started = Arc::clone(&started);
         let release = Arc::clone(&release);
@@ -1819,14 +1787,10 @@ async fn external_cancel_concurrent_callers_share_hook() {
 }
 
 #[tokio::test]
-async fn external_cancel_aborted_waiter_does_not_abort_hook() {
+async fn test_external_cancel_aborted_waiter_does_not_abort_hook() {
     struct FinishOnHook(Arc<tokio::sync::Notify>);
     impl TaskHandler<Counter> for FinishOnHook {
-        fn run<'a>(
-            &'a self,
-            _value: Counter,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
             let finished = Arc::clone(&self.0);
             Box::pin(async move {
                 finished.notified().await;
@@ -1841,7 +1805,7 @@ async fn external_cancel_aborted_waiter_does_not_abort_hook() {
     let started = Arc::clone(&hook_started);
     let release = Arc::clone(&hook_release);
     let finished = Arc::clone(&hook_finished);
-    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+    let hook: task::ExternalCancellationHook = Arc::new(move |_, _| {
         let started = Arc::clone(&started);
         let release = Arc::clone(&release);
         let finished = Arc::clone(&finished);
@@ -1890,20 +1854,19 @@ async fn external_cancel_aborted_waiter_does_not_abort_hook() {
 }
 
 #[tokio::test]
-async fn external_cancel_hook_panics_are_reported_and_retryable() {
+async fn test_external_cancel_hook_panics_are_reported_and_retryable() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let calls = Arc::new(AtomicU64::new(0));
     let hook_calls = Arc::clone(&calls);
-    let hook: qubit_task::ExternalCancellationHook =
-        Arc::new(move |_, _| match hook_calls.fetch_add(1, Ordering::Relaxed) {
-            0 => panic!("hook factory failed"),
-            1 => Box::pin(async {
-                panic!("hook future failed");
-                #[allow(unreachable_code)]
-                Ok(())
-            }),
-            _ => Box::pin(async { Ok(()) }),
-        });
+    let hook: task::ExternalCancellationHook = Arc::new(move |_, _| match hook_calls.fetch_add(1, Ordering::Relaxed) {
+        0 => panic!("hook factory failed"),
+        1 => Box::pin(async {
+            panic!("hook future failed");
+            #[allow(unreachable_code)]
+            Ok(())
+        }),
+        _ => Box::pin(async { Ok(()) }),
+    });
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(705))));
     builder
         .handlers_mut()
@@ -1930,7 +1893,7 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
 
     assert!(matches!(
         service.cancel(accepted.id).await,
-        Err(qubit_task::service::TaskServiceError::ExternalCancellationFailed {
+        Err(task::service::TaskServiceError::ExternalCancellationFailed {
             message,
             ..
         }) if message == "hook factory failed"
@@ -1941,7 +1904,7 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
     );
     assert!(matches!(
         service.cancel(accepted.id).await,
-        Err(qubit_task::service::TaskServiceError::ExternalCancellationFailed {
+        Err(task::service::TaskServiceError::ExternalCancellationFailed {
             message,
             ..
         }) if message == "hook future failed"
@@ -1958,7 +1921,7 @@ async fn external_cancel_hook_panics_are_reported_and_retryable() {
 }
 
 #[tokio::test]
-async fn shutdown_rejects_new_work_and_waits_for_running_attempts() {
+async fn test_shutdown_rejects_new_work_and_waits_for_running_attempts() {
     let store = Arc::new(MemoryTaskStore::new(16));
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(751))));
     builder
@@ -1992,7 +1955,7 @@ async fn shutdown_rejects_new_work_and_waits_for_running_attempts() {
     shutdown.await.unwrap().unwrap();
     assert!(matches!(
         service.submit(request()).await,
-        Err(qubit_task::service::TaskServiceError::ShuttingDown)
+        Err(task::service::TaskServiceError::ShuttingDown)
     ));
     assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
 }
@@ -2025,8 +1988,8 @@ async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Ar
         || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(802))));
     assert!(matches!(
         build_next().build().await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::OwnerConflict
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::OwnerConflict
         ))
     ));
     release.add_permits(1);
@@ -2037,7 +2000,7 @@ async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Ar
                     next.shutdown().await.expect("second service shuts down");
                     break;
                 }
-                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                Err(task::service::TaskServiceError::Store(task::store::StoreError::OwnerConflict)) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("unexpected second build error: {error}"),
@@ -2049,14 +2012,14 @@ async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Ar
 }
 
 #[tokio::test]
-async fn dropping_last_service_handle_drains_and_releases_owner_memory() {
+async fn test_dropping_last_service_handle_drains_and_releases_owner_memory() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
     assert_dropping_last_service_handle_drains_and_releases_owner(store).await;
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn dropping_last_service_handle_drains_and_releases_owner_sqlite() {
+async fn test_dropping_last_service_handle_drains_and_releases_owner_sqlite() {
     let path = std::env::temp_dir().join(format!(
         "qubit-task-drop-owner-{}.sqlite",
         std::time::SystemTime::now()
@@ -2064,8 +2027,7 @@ async fn dropping_last_service_handle_drains_and_releases_owner_sqlite() {
             .expect("time after epoch")
             .as_nanos(),
     ));
-    let store: Arc<dyn TaskStore> =
-        Arc::new(qubit_task::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    let store: Arc<dyn TaskStore> = Arc::new(task::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
     assert_dropping_last_service_handle_drains_and_releases_owner(Arc::clone(&store)).await;
     drop(store);
     let mut lock_path = path.as_os_str().to_owned();
@@ -2075,7 +2037,7 @@ async fn dropping_last_service_handle_drains_and_releases_owner_sqlite() {
 }
 
 #[tokio::test]
-async fn dropping_one_of_multiple_service_handles_keeps_owner() {
+async fn test_dropping_one_of_multiple_service_handles_keeps_owner() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
     let build = || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(811))));
     let first = build().build().await.expect("first service acquires owner");
@@ -2087,8 +2049,8 @@ async fn dropping_one_of_multiple_service_handles_keeps_owner() {
         .expect("remaining handle still accepts work");
     assert!(matches!(
         build().build().await,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::OwnerConflict
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::OwnerConflict
         ))
     ));
     remaining.shutdown().await.expect("remaining handle shuts down");
@@ -2097,7 +2059,7 @@ async fn dropping_one_of_multiple_service_handles_keeps_owner() {
 }
 
 #[tokio::test]
-async fn concurrent_shutdown_calls_share_result() {
+async fn test_concurrent_shutdown_calls_share_result() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
     let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(821))))
         .build()
@@ -2109,7 +2071,7 @@ async fn concurrent_shutdown_calls_share_result() {
 }
 
 #[tokio::test]
-async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
+async fn test_aborted_shutdown_waiter_does_not_cancel_owner_release() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
     let started = Arc::new(tokio::sync::Semaphore::new(0));
     let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -2139,7 +2101,7 @@ async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
         loop {
             if matches!(
                 service.submit(request()).await,
-                Err(qubit_task::service::TaskServiceError::ShuttingDown)
+                Err(task::service::TaskServiceError::ShuttingDown)
             ) {
                 break;
             }
@@ -2162,7 +2124,7 @@ async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
                     next.shutdown().await.expect("next service shuts down");
                     break;
                 }
-                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                Err(task::service::TaskServiceError::Store(task::store::StoreError::OwnerConflict)) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("unexpected next build error: {error}"),
@@ -2178,7 +2140,7 @@ async fn aborted_shutdown_waiter_does_not_cancel_owner_release() {
 }
 
 #[tokio::test]
-async fn concurrent_shutdown_calls_share_store_fault() {
+async fn test_concurrent_shutdown_calls_share_store_fault() {
     let store = failing_store();
     let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(841))))
         .build()
@@ -2189,8 +2151,8 @@ async fn concurrent_shutdown_calls_share_store_fault() {
     wait_for_latched_store_fault(&service).await;
     let (first, second) = tokio::join!(service.shutdown(), service.shutdown());
     let (
-        Err(qubit_task::service::TaskServiceError::StoreUnavailable(first)),
-        Err(qubit_task::service::TaskServiceError::StoreUnavailable(second)),
+        Err(task::service::TaskServiceError::StoreUnavailable(first)),
+        Err(task::service::TaskServiceError::StoreUnavailable(second)),
     ) = (first, second)
     else {
         panic!("both shutdown callers must observe the same store fault class");
@@ -2200,7 +2162,7 @@ async fn concurrent_shutdown_calls_share_store_fault() {
 }
 
 #[tokio::test]
-async fn panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worker() {
+async fn test_panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worker() {
     let store = failing_store();
     let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(851))))
         .build()
@@ -2213,7 +2175,7 @@ async fn panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worke
         .expect("shutdown waiter is woken after release panic");
     assert!(matches!(
         shutdown,
-        Err(qubit_task::service::TaskServiceError::StoreUnavailable(message))
+        Err(task::service::TaskServiceError::StoreUnavailable(message))
             if message.contains("shutdown supervisor panicked")
     ));
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -2226,7 +2188,7 @@ async fn panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worke
                     next.shutdown().await.expect("next service shuts down");
                     break;
                 }
-                Err(qubit_task::service::TaskServiceError::Store(qubit_task::store::StoreError::OwnerConflict)) => {
+                Err(task::service::TaskServiceError::Store(task::store::StoreError::OwnerConflict)) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("unexpected next build error: {error}"),
@@ -2238,7 +2200,7 @@ async fn panicking_owner_release_completes_shutdown_and_retries_on_cleanup_worke
 }
 
 #[tokio::test]
-async fn subsequent_shutdown_retries_transient_owner_release_failure() {
+async fn test_subsequent_shutdown_retries_transient_owner_release_failure() {
     let store = failing_store();
     let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(861))))
         .build()
@@ -2248,8 +2210,8 @@ async fn subsequent_shutdown_retries_transient_owner_release_failure() {
 
     let (first, concurrent) = tokio::join!(service.shutdown(), service.shutdown());
     let (
-        Err(qubit_task::service::TaskServiceError::StoreUnavailable(first)),
-        Err(qubit_task::service::TaskServiceError::StoreUnavailable(concurrent)),
+        Err(task::service::TaskServiceError::StoreUnavailable(first)),
+        Err(task::service::TaskServiceError::StoreUnavailable(concurrent)),
     ) = (first, concurrent)
     else {
         panic!("both waiters in the first attempt must see its release failure");
@@ -2268,7 +2230,7 @@ async fn subsequent_shutdown_retries_transient_owner_release_failure() {
 }
 
 #[tokio::test]
-async fn shutdown_fences_cancel_calls_from_previous_owner() {
+async fn test_shutdown_fences_cancel_calls_from_previous_owner() {
     let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
     let first_builder =
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(761))));
@@ -2302,7 +2264,7 @@ async fn shutdown_fences_cancel_calls_from_previous_owner() {
     let before = second.get(accepted.id).await.unwrap().unwrap();
     assert!(matches!(
         first.cancel(accepted.id).await,
-        Err(qubit_task::service::TaskServiceError::ShuttingDown)
+        Err(task::service::TaskServiceError::ShuttingDown)
     ));
     let after = second.get(accepted.id).await.unwrap().unwrap();
     assert_eq!(after, before);
@@ -2316,19 +2278,15 @@ async fn shutdown_fences_cancel_calls_from_previous_owner() {
 }
 
 #[tokio::test]
-async fn shutdown_waits_for_external_cancel_hook() {
+async fn test_shutdown_waits_for_external_cancel_hook() {
     struct HookWaitHandler(Arc<tokio::sync::Notify>);
 
     impl TaskHandler<Counter> for HookWaitHandler {
-        fn run<'a>(
-            &'a self,
-            _value: Counter,
-            _context: TaskContext,
-        ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
             let hook_finished = Arc::clone(&self.0);
             Box::pin(async move {
                 hook_finished.notified().await;
-                Ok(TaskRunOutcome::Succeeded(qubit_task::model::TaskOutput::default()))
+                Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput::default()))
             })
         }
     }
@@ -2340,7 +2298,7 @@ async fn shutdown_waits_for_external_cancel_hook() {
     let hook_signal = Arc::clone(&hook_started);
     let hook_wait = Arc::clone(&hook_release);
     let handler_signal = Arc::clone(&hook_finished);
-    let hook: qubit_task::ExternalCancellationHook = Arc::new(move |_, _| {
+    let hook: task::ExternalCancellationHook = Arc::new(move |_, _| {
         let hook_signal = Arc::clone(&hook_signal);
         let hook_wait = Arc::clone(&hook_wait);
         let handler_signal = Arc::clone(&handler_signal);
@@ -2389,7 +2347,7 @@ async fn shutdown_waits_for_external_cancel_hook() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn typed_service_persists_sqlite_terminal_transition() {
+async fn test_typed_service_persists_sqlite_terminal_transition() {
     let path = std::env::temp_dir().join(format!(
         "qubit-task-typed-service-{}.sqlite",
         std::time::SystemTime::now()
@@ -2397,7 +2355,7 @@ async fn typed_service_persists_sqlite_terminal_transition() {
             .unwrap()
             .as_nanos(),
     ));
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
+    let store: Arc<dyn TaskStore> = Arc::new(task::store::SqliteTaskStore::open(&path).unwrap());
     let mut builder =
         TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1001))));
     builder
@@ -2423,7 +2381,7 @@ async fn typed_service_persists_sqlite_terminal_transition() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn typed_service_fences_build_until_shutdown_releases_owner() {
+async fn test_typed_service_fences_build_until_shutdown_releases_owner() {
     let path = std::env::temp_dir().join(format!(
         "qubit-task-typed-owner-{}.sqlite",
         std::time::SystemTime::now()
@@ -2431,15 +2389,15 @@ async fn typed_service_fences_build_until_shutdown_releases_owner() {
             .unwrap()
             .as_nanos(),
     ));
-    let store: Arc<dyn TaskStore> = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
+    let store: Arc<dyn TaskStore> = Arc::new(task::store::SqliteTaskStore::open(&path).unwrap());
     let build =
         || TaskExecutionServiceBuilder::new(Arc::clone(&store), registry(), Arc::new(Ids(AtomicU64::new(1101))));
     let first = build().build().await.unwrap();
     let second = build().build().await;
     assert!(matches!(
         second,
-        Err(qubit_task::service::TaskServiceError::Store(
-            qubit_task::store::StoreError::OwnerConflict
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::OwnerConflict
         ))
     ));
     first.shutdown().await.unwrap();

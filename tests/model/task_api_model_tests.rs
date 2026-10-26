@@ -319,7 +319,7 @@ fn test_progress_snapshot_rejects_metric_count_stage_size_and_encoded_size() {
         .map(|name| progress.metric(name).expect("metric exists").snapshot())
         .collect();
     assert!(matches!(
-        TaskProgressSnapshot::from_command(ProgressCommand::new(id, 1, 1, None, too_many_metrics, 1)),
+        TaskProgressSnapshot::from_command(ProgressCommand::new(id, 1, 1, None, too_many_metrics, 1,)),
         Err(ProgressSnapshotError::TooManyMetrics(_))
     ));
 

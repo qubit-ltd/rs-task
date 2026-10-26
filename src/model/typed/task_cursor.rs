@@ -25,6 +25,7 @@ use super::TaskSummary;
 /// let cursor = TaskCursor::new(1_700_000_000_000, TaskId::from_id(qubit_id::Id::new(42)));
 /// assert_eq!(cursor.accepted_at_ms, 1_700_000_000_000);
 /// ```
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TaskCursor {
     /// Acceptance timestamp in Unix epoch milliseconds.
@@ -35,7 +36,15 @@ pub struct TaskCursor {
 
 impl TaskCursor {
     /// Creates a cursor for the supplied history position.
-    #[must_use]
+    ///
+    /// # Parameters
+    ///
+    /// - `accepted_at_ms`: acceptance timestamp in Unix epoch milliseconds.
+    /// - `id`: task identity used to break ties between equal timestamps.
+    ///
+    /// # Returns
+    ///
+    /// A cursor identifying the exclusive history position.
     #[inline]
     pub const fn new(accepted_at_ms: u64, id: TaskId) -> Self {
         Self { accepted_at_ms, id }
@@ -44,49 +53,12 @@ impl TaskCursor {
 
 impl From<&TaskSummary> for TaskCursor {
     /// Copies the acceptance position from a task summary into a cursor.
+    ///
+    /// # Returns
+    ///
+    /// A cursor containing the summary's acceptance timestamp and task ID.
+    #[inline]
     fn from(summary: &TaskSummary) -> Self {
         Self::new(summary.accepted_at_ms, summary.id)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::TaskCursor;
-    use crate::model::TaskState;
-    use crate::model::typed::ResourceRequest;
-    use crate::model::typed::TaskId;
-    use crate::model::typed::TaskSummary;
-
-    #[test]
-    fn cursor_from_summary_preserves_acceptance_position() {
-        let id = TaskId::from_id(qubit_id::Id::new(91));
-        let summary = TaskSummary {
-            id,
-            kind_id: "counter.add".into(),
-            category: None,
-            payload_type_id: "qubit_task.tests.Counter".into(),
-            payload_schema_version: 1,
-            payload_codec_id: "qubit_task.tests.u32_le".into(),
-            metadata: qubit_metadata::Metadata::default(),
-            resource_limit: ResourceRequest::default(),
-            correlation_key: None,
-            idempotency_key: None,
-            state: TaskState::Queued,
-            cancel_requested: false,
-            cancel_error: None,
-            state_version: 0,
-            attempt: 0,
-            retry_not_before_ms: None,
-            accepted_at_ms: 123,
-            started_at_ms: None,
-            finished_at_ms: None,
-            progress: None,
-            output: None,
-        };
-
-        let cursor = TaskCursor::from(&summary);
-
-        assert_eq!(cursor.accepted_at_ms, summary.accepted_at_ms);
-        assert_eq!(cursor.id, id);
     }
 }

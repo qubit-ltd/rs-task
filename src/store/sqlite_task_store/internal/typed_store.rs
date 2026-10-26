@@ -7,21 +7,29 @@
 // =============================================================================
 //! SQLite persistence for the typed task API during the storage cutover.
 
+use std::num::NonZeroUsize;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+use qubit_id::Id;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+use rusqlite::Transaction;
 use rusqlite::params;
-use serde::Deserialize;
-use serde::Serialize;
+use rusqlite::params_from_iter;
+use rusqlite::types::Value;
+use serde_json;
 
 use super::super::failure;
+use super::query_sql::build_encoded_history_query;
+use crate::event::TaskEvent;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::TaskOutput;
 use crate::model::TaskState;
 use crate::model::typed::AcceptOutcome;
+use crate::model::typed::MAX_TASK_QUERY_LIMIT;
 use crate::model::typed::ProgressCommand;
-use crate::model::typed::ResourceRequest;
 use crate::model::typed::StartCommand;
-use crate::model::typed::StoredPayload;
 use crate::model::typed::StoredTask;
 use crate::model::typed::StoredTaskRequest;
 use crate::model::typed::TaskCursor;
@@ -30,21 +38,43 @@ use crate::model::typed::TaskPage;
 use crate::model::typed::TaskProgressSnapshot;
 use crate::model::typed::TaskQuery;
 use crate::model::typed::TaskSummary;
+use crate::model::typed::TransitionCommand;
 use crate::store::StoreError;
+
+// Stores immutable request fields independently from encoded payload bytes.
+mod stored_request_info;
+// Stores mutable lifecycle values independently from immutable request data.
+mod stored_typed_lifecycle;
+
+use self::stored_request_info::StoredRequestInfo;
+use self::stored_typed_lifecycle::StoredTypedLifecycle;
 
 const RECORD_FORMAT_VERSION: i64 = 4;
 
 /// Lists typed task summaries in deterministic acceptance order.
+///
+/// # Returns
+///
+/// Returns the requested page and an exclusive continuation cursor when a
+/// lookahead row confirms more results exist.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task records.
+/// - `query`: Filters, ordering, and page size for the history query.
+///
+/// # Errors
+///
+/// Returns an error if the query is invalid, SQLite fails, or a stored row
+/// cannot be decoded.
 pub(in crate::store::sqlite_task_store) fn list_encoded(
     connection: &Connection,
     query: TaskQuery,
 ) -> Result<TaskPage, StoreError> {
     let page_size = query.checked_page_size()?;
-    let built = super::query_sql::build_encoded_history_query(&query, page_size)?;
+    let built = build_encoded_history_query(&query, page_size)?;
     let mut statement = connection.prepare(&built.sql).map_err(failure)?;
-    let mut rows = statement
-        .query(rusqlite::params_from_iter(built.params))
-        .map_err(failure)?;
+    let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;
     let mut records = Vec::new();
     while let Some(row) = rows.next().map_err(failure)? {
         let id = row.get::<_, String>(0).map_err(failure)?;
@@ -61,13 +91,30 @@ pub(in crate::store::sqlite_task_store) fn list_encoded(
 }
 
 /// Lists bounded queued work whose retry deadline has elapsed.
+///
+/// # Returns
+///
+/// Returns queued summaries in acceptance order and a continuation cursor
+/// when another eligible task exists.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task records.
+/// - `after`: Optional exclusive cursor for continuing the queue scan.
+/// - `limit`: Maximum number of summaries returned.
+/// - `now_ms`: Current time used to determine retry eligibility.
+///
+/// # Errors
+///
+/// Returns an error if the limit or timestamp is invalid, SQLite fails, or a
+/// stored row cannot be decoded.
 pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     connection: &Connection,
     after: Option<TaskCursor>,
-    limit: std::num::NonZeroUsize,
+    limit: NonZeroUsize,
     now_ms: u64,
 ) -> Result<TaskPage, StoreError> {
-    if limit.get() > crate::model::typed::MAX_TASK_QUERY_LIMIT {
+    if limit.get() > MAX_TASK_QUERY_LIMIT {
         return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
     }
     let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
@@ -79,19 +126,19 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
         "AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)"
     )
     .to_string();
-    let mut values = vec![rusqlite::types::Value::Integer(now)];
+    let mut values = vec![Value::Integer(now)];
     if let Some(cursor) = after {
         let accepted = i64::try_from(cursor.accepted_at_ms)
             .map_err(|_| StoreError::InvalidRequest("task cursor timestamp is too large"))?;
-        values.push(rusqlite::types::Value::Integer(accepted));
-        values.push(rusqlite::types::Value::Text(cursor.id.to_padded_decimal()));
+        values.push(Value::Integer(accepted));
+        values.push(Value::Text(cursor.id.to_padded_decimal()));
         sql.push_str(" AND (accepted_at,id)>(?2,?3)");
     }
     let limit_idx = values.len() + 1;
     sql.push_str(&format!(" ORDER BY accepted_at,id LIMIT ?{limit_idx}"));
-    values.push(rusqlite::types::Value::Integer(fetch));
+    values.push(Value::Integer(fetch));
     let mut statement = connection.prepare(&sql).map_err(failure)?;
-    let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(failure)?;
+    let mut rows = statement.query(params_from_iter(values)).map_err(failure)?;
     let mut records = Vec::new();
     while let Some(row) = rows.next().map_err(failure)? {
         records.push(decode_summary(
@@ -107,6 +154,20 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
 }
 
 /// Finds the minimum queued retry deadline strictly after the supplied time.
+///
+/// # Returns
+///
+/// Returns `None` when no queued retry deadline is later than `now_ms`.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task records.
+/// - `now_ms`: Current time used as the exclusive deadline bound.
+///
+/// # Errors
+///
+/// Returns an error if the timestamp cannot be represented by SQLite or the
+/// query fails.
 pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
     connection: &Connection,
     now_ms: u64,
@@ -127,105 +188,29 @@ pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
         .transpose()
 }
 
-/// Immutable typed request fields stored separately from payload bytes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct StoredRequestInfo {
-    /// Stable task kind identifier used to dispatch the request.
-    kind_id: String,
-    /// Optional user-facing category associated with the task kind.
-    category: Option<String>,
-    /// Registry identifier for the serialized payload type.
-    payload_type_id: String,
-    /// Version of the payload schema expected by the decoder.
-    payload_schema_version: u32,
-    /// Identifier for the codec that produced the stored payload bytes.
-    payload_codec_id: String,
-    /// Request metadata persisted independently of the payload bytes.
-    metadata: qubit_metadata::Metadata,
-    /// Resource limits requested for task execution.
-    resource_limit: ResourceRequest,
-    /// Optional key used to correlate this task with a caller operation.
-    correlation_key: Option<String>,
-    /// Optional key used to make request acceptance idempotent.
-    idempotency_key: Option<String>,
-}
-
-impl From<&StoredTaskRequest> for StoredRequestInfo {
-    /// Copies immutable request attributes while leaving payload bytes in their
-    /// own column.
-    fn from(request: &StoredTaskRequest) -> Self {
-        Self {
-            kind_id: request.kind_id.clone(),
-            category: request.category.clone(),
-            payload_type_id: request.payload.type_id.as_str().to_owned(),
-            payload_schema_version: request.payload.schema_version,
-            payload_codec_id: request.payload.codec_id.clone(),
-            metadata: request.metadata.clone(),
-            resource_limit: request.resource_limit.clone(),
-            correlation_key: request.correlation_key.clone(),
-            idempotency_key: request.idempotency_key.clone(),
-        }
-    }
-}
-
-impl StoredRequestInfo {
-    /// Reconstructs a typed request by pairing these attributes with stored
-    /// payload bytes.
-    fn into_request(self, bytes: Vec<u8>) -> Result<StoredTaskRequest, StoreError> {
-        let type_id = self.payload_type_id.as_str().try_into().map_err(failure)?;
-        Ok(StoredTaskRequest {
-            kind_id: self.kind_id,
-            category: self.category,
-            payload: StoredPayload {
-                type_id,
-                schema_version: self.payload_schema_version,
-                codec_id: self.payload_codec_id,
-                bytes,
-            },
-            metadata: self.metadata,
-            resource_limit: self.resource_limit,
-            correlation_key: self.correlation_key,
-            idempotency_key: self.idempotency_key,
-        })
-    }
-}
-
-/// Mutable lifecycle values kept independent of immutable request data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct StoredTypedLifecycle {
-    /// Current externally visible task state.
-    state: TaskState,
-    /// Whether cancellation has been requested for the task.
-    #[serde(default)]
-    cancel_requested: bool,
-    /// Optional diagnostic explaining a cancellation outcome.
-    #[serde(default)]
-    cancel_error: Option<String>,
-    /// Monotonic revision used by compare-and-set lifecycle updates.
-    state_version: u64,
-    /// Number of execution attempts started for this task.
-    attempt: u32,
-    /// Earliest time at which a queued task may be retried.
-    #[serde(default)]
-    retry_not_before_ms: Option<u64>,
-    /// Acceptance timestamp in Unix milliseconds.
-    accepted_at_ms: u64,
-    /// Timestamp of the most recently started attempt, if any.
-    started_at_ms: Option<u64>,
-    /// Timestamp at which the task entered a terminal state, if any.
-    finished_at_ms: Option<u64>,
-    /// Most recently persisted progress snapshot, if any.
-    progress: Option<TaskProgressSnapshot>,
-    /// Result produced by a successful task, if one has been stored.
-    #[serde(default)]
-    output: Option<TaskOutput>,
-}
-
 /// Atomically stores one encoded request, respecting ID and idempotency keys.
 ///
-/// Returns `true` when a row was inserted and `false` for an identical
-/// idempotent request. The duplicate checks and insert share one SQLite
-/// transaction, with primary-key and unique-key constraints as final guards.
+/// The outcome identifies the retained task and whether this call inserted a
+/// new row. An identical idempotent request returns the existing task. The
+/// duplicate checks and insert share one SQLite transaction, with primary-key
+/// and unique-key constraints as final guards.
+///
+/// # Returns
+///
+/// Returns the retained task summary and a `created` flag that is `true` only
+/// when this call inserted a new row; an idempotent match returns `false`.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection receiving the task record.
+/// - `id`: Numeric task identity to store.
+/// - `request`: Encoded request and immutable task attributes.
+/// - `outbox_enabled`: Whether to persist the corresponding event snapshot.
+///
+/// # Errors
+///
+/// Returns an error for a conflicting ID or idempotency key, invalid request
+/// data, or a failed SQLite or serialization operation.
 pub(in crate::store::sqlite_task_store) fn accept_encoded(
     connection: &Connection,
     id: TaskId,
@@ -238,7 +223,10 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
     if let Some(key) = &request.idempotency_key {
         let existing = transaction
             .query_row(
-                "SELECT id,request_info_json,payload,lifecycle_json FROM tasks WHERE idempotency_key=?1",
+                concat!(
+                    "SELECT id,request_info_json,payload,lifecycle_json ",
+                    "FROM tasks WHERE idempotency_key=?1"
+                ),
                 [key],
                 |row| {
                     Ok((
@@ -291,7 +279,8 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
         .execute(
             concat!(
                 "INSERT INTO tasks (id,state_kind,accepted_at,kind_id,category,payload_type_id,",
-                "payload_schema_version,codec_id,correlation_key,idempotency_key,request_info_json,",
+                "payload_schema_version,codec_id,correlation_key,idempotency_key,",
+                "request_info_json,",
                 "payload,record_format_version,lifecycle_json,attempt,retry_not_before_ms,",
                 "progress_attempt,progress_version,progress_json) ",
                 "VALUES (?1,'Queued',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,NULL,NULL,0,NULL)"
@@ -322,6 +311,20 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
 }
 
 /// Loads a stored typed request and its lifecycle by numeric task identity.
+///
+/// # Returns
+///
+/// Returns `None` when the task ID is not present.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task records.
+/// - `id`: Numeric identity of the task to load.
+///
+/// # Errors
+///
+/// Returns an error if SQLite fails or the stored request or lifecycle cannot
+/// be decoded.
 pub(in crate::store::sqlite_task_store) fn get_encoded_task(
     connection: &Connection,
     id: TaskId,
@@ -352,6 +355,21 @@ pub(in crate::store::sqlite_task_store) fn get_encoded_task(
 }
 
 /// Starts a queued task attempt when its state revision still matches.
+///
+/// # Returns
+///
+/// Returns the task summary after the attempt enters the running state.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task records.
+/// - `command`: Task identity, expected revision, and attempt start time.
+/// - `outbox_enabled`: Whether to persist the corresponding event snapshot.
+///
+/// # Errors
+///
+/// Returns an error if the task is missing, its state revision changed, or a
+/// persistence operation fails.
 pub(in crate::store::sqlite_task_store) fn start_encoded(
     connection: &Connection,
     command: StartCommand,
@@ -361,7 +379,10 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
     let transaction = connection.unchecked_transaction().map_err(failure)?;
     let row = transaction
         .query_row(
-            "SELECT request_info_json,lifecycle_json,state_kind,state_version FROM tasks WHERE id=?1",
+            concat!(
+                "SELECT request_info_json,lifecycle_json,state_kind,state_version ",
+                "FROM tasks WHERE id=?1"
+            ),
             [&id_key],
             |row| {
                 Ok((
@@ -398,7 +419,8 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
         .execute(
             concat!(
                 "UPDATE tasks SET state_kind='Running',state_version=?2,attempt=?3,started_at=?4,",
-                "retry_not_before_ms=NULL,progress_attempt=NULL,progress_version=0,progress_json=NULL,",
+                "retry_not_before_ms=NULL,progress_attempt=NULL,",
+                "progress_version=0,progress_json=NULL,",
                 "lifecycle_json=?5 WHERE id=?1 AND state_kind='Queued' AND state_version=?6"
             ),
             params![
@@ -423,9 +445,24 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
 }
 
 /// Applies a compare-and-set lifecycle transition to an encoded task.
+///
+/// # Returns
+///
+/// Returns the summary after the requested lifecycle update is persisted.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task records.
+/// - `command`: Target lifecycle values and expected task revision.
+/// - `outbox_enabled`: Whether to persist the corresponding event snapshot.
+///
+/// # Errors
+///
+/// Returns an error if the command is invalid, the task is missing or changed,
+/// or a persistence operation fails.
 pub(in crate::store::sqlite_task_store) fn transition_encoded(
     connection: &Connection,
-    command: crate::model::typed::TransitionCommand,
+    command: TransitionCommand,
     outbox_enabled: bool,
 ) -> Result<TaskSummary, StoreError> {
     command
@@ -521,6 +558,20 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
 
 /// Atomically persists progress only for the current running attempt and a
 /// strictly newer progress version.
+///
+/// # Returns
+///
+/// Returns the task summary containing the newly persisted progress snapshot.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task records.
+/// - `command`: Progress snapshot and expected attempt/version values.
+///
+/// # Errors
+///
+/// Returns an error if the snapshot is invalid, the task is missing or changed,
+/// or a persistence operation fails.
 pub(in crate::store::sqlite_task_store) fn update_progress(
     connection: &Connection,
     command: ProgressCommand,
@@ -595,7 +646,7 @@ fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Resul
     let request: StoredRequestInfo = serde_json::from_str(request_json).map_err(failure)?;
     let lifecycle: StoredTypedLifecycle = serde_json::from_str(lifecycle_json).map_err(failure)?;
     let value = id.parse::<u64>().map_err(failure)?;
-    let numeric_id = qubit_id::Id::new(value);
+    let numeric_id = Id::new(value);
     Ok(TaskSummary {
         id: TaskId::from_id(numeric_id),
         kind_id: request.kind_id,
@@ -638,9 +689,10 @@ fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Re
 }
 
 /// Returns the current system time as milliseconds since the Unix epoch.
+#[must_use]
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }
@@ -648,8 +700,8 @@ fn now_ms() -> u64 {
 /// Inserts the immutable notification before committing its lifecycle mutation.
 /// Snapshots larger than 128 KiB or SQLite failures roll back the surrounding
 /// transaction.
-fn insert_event_outbox(transaction: &rusqlite::Transaction<'_>, summary: &TaskSummary) -> Result<(), StoreError> {
-    let event = crate::event::TaskEvent::from_typed_summary(summary);
+fn insert_event_outbox(transaction: &Transaction<'_>, summary: &TaskSummary) -> Result<(), StoreError> {
+    let event = TaskEvent::from_typed_summary(summary);
     let json = serde_json::to_string(&event).map_err(failure)?;
     if json.len() > 128 * 1024 {
         return Err(StoreError::InvalidRequest("task event snapshot exceeds 128 KiB"));
@@ -660,7 +712,8 @@ fn insert_event_outbox(transaction: &rusqlite::Transaction<'_>, summary: &TaskSu
     transaction
         .execute(
             concat!(
-                "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,created_at_ms) ",
+                "INSERT INTO task_event_outbox(task_id,state_version,event_id,event_json,",
+                "created_at_ms) ",
                 "VALUES (?1,?2,?3,?4,MAX(?5,COALESCE((SELECT MAX(created_at_ms) ",
                 "FROM task_event_outbox),?5)))"
             ),

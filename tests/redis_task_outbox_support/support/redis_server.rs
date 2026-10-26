@@ -74,29 +74,6 @@ impl RedisServer {
         Err("Redis container did not become ready".into())
     }
 
-    /// Resolves Docker's assigned loopback port after container start or
-    /// restart. Returns process, mapping, or address-parse errors; the
-    /// owned container remains guarded by Drop if discovery fails.
-    fn refresh_url(&mut self) -> Result<(), Box<dyn Error>> {
-        let output = Command::new("docker")
-            .args(["port", &self.container_id, "6379/tcp"])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "could not resolve Redis port: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        let mapping = String::from_utf8(output.stdout)?;
-        let address: SocketAddr = mapping.trim().parse()?;
-        if !address.ip().is_loopback() {
-            return Err("isolated Redis port must bind to loopback".into());
-        }
-        self.url = format!("redis://{address}/");
-        Ok(())
-    }
-
     /// Stops the owned container and returns only after Docker confirms it
     /// stopped. This supplies an observed outage boundary without relying
     /// on elapsed time.
@@ -152,6 +129,29 @@ impl RedisServer {
     #[inline]
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Resolves Docker's assigned loopback port after container start or
+    /// restart. Returns process, mapping, or address-parse errors; the
+    /// owned container remains guarded by Drop if discovery fails.
+    fn refresh_url(&mut self) -> Result<(), Box<dyn Error>> {
+        let output = Command::new("docker")
+            .args(["port", &self.container_id, "6379/tcp"])
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "could not resolve Redis port: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        let mapping = String::from_utf8(output.stdout)?;
+        let address: SocketAddr = mapping.trim().parse()?;
+        if !address.ip().is_loopback() {
+            return Err("isolated Redis port must bind to loopback".into());
+        }
+        self.url = format!("redis://{address}/");
+        Ok(())
     }
 }
 

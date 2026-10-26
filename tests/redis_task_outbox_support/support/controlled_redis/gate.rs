@@ -39,6 +39,7 @@ impl ReplyGate {
     ///
     /// State locking may block briefly and panics if the gate mutex is
     /// poisoned.
+    #[inline]
     pub fn arm(&self) {
         self.arm_for_new_entries();
     }
@@ -53,22 +54,6 @@ impl ReplyGate {
         state.armed = true;
         state.command = Some(command.as_bytes().to_ascii_uppercase());
         state.new_entries_only = false;
-        state.reached = false;
-        state.released = false;
-        state.discard_reply = false;
-        state.waker = None;
-    }
-
-    /// Selects new-entry XREADGROUP replies while leaving recovery reads
-    /// ungated.
-    ///
-    /// Resets prior state under the mutex; a poisoned state mutex causes a
-    /// panic.
-    fn arm_for_new_entries(&self) {
-        let mut state = self.state.lock().expect("reply gate lock is healthy");
-        state.armed = true;
-        state.command = Some(b"XREADGROUP".to_vec());
-        state.new_entries_only = true;
         state.reached = false;
         state.released = false;
         state.discard_reply = false;
@@ -152,6 +137,22 @@ impl ReplyGate {
             .wait_while(state, |state| !state.released)
             .expect("reply gate lock is healthy");
         _state.discard_reply
+    }
+
+    /// Selects new-entry XREADGROUP replies while leaving recovery reads
+    /// ungated.
+    ///
+    /// Resets prior state under the mutex; a poisoned state mutex causes a
+    /// panic.
+    fn arm_for_new_entries(&self) {
+        let mut state = self.state.lock().expect("reply gate lock is healthy");
+        state.armed = true;
+        state.command = Some(b"XREADGROUP".to_vec());
+        state.new_entries_only = true;
+        state.reached = false;
+        state.released = false;
+        state.discard_reply = false;
+        state.waker = None;
     }
 }
 

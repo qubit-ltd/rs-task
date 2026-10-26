@@ -8,9 +8,8 @@
 //! Durable task notification storage and publisher behavior.
 #![cfg(feature = "sqlite")]
 
-mod support;
-
 use std::env;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use qubit_id::Id;
@@ -28,6 +27,7 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 use rusqlite::Connection;
+use rusqlite::params;
 use uuid::Uuid;
 
 /// Creates an isolated temporary database path.
@@ -323,7 +323,7 @@ async fn test_terminal_prune_skips_outbox_then_retains_checkpoint_atomically() {
         })
         .await
         .expect("finish task");
-    let limit = std::num::NonZeroUsize::new(1).expect("nonzero limit");
+    let limit = NonZeroUsize::new(1).expect("nonzero limit");
     assert_eq!(
         store
             .prune_terminal_before(21, limit)
@@ -417,7 +417,7 @@ async fn test_quarantine_requires_current_owned_head_and_archives_atomically() {
     let original_created_at_ms: i64 = connection
         .query_row(
             "SELECT created_at_ms FROM task_event_outbox WHERE task_id=?1 AND state_version=?2",
-            rusqlite::params![head.task_id.to_padded_decimal(), head.state_version],
+            params![head.task_id.to_padded_decimal(), head.state_version],
             |row| row.get(0),
         )
         .expect("original event timestamp");
@@ -524,7 +524,7 @@ async fn test_quarantine_requires_current_owned_head_and_archives_atomically() {
     };
     store.transition_encoded(transition).await.expect("finish task");
     store
-        .prune_terminal_before(21, std::num::NonZeroUsize::new(1).expect("nonzero batch"))
+        .prune_terminal_before(21, NonZeroUsize::new(1).expect("nonzero batch"))
         .await
         .expect("prune terminal task");
     let archive_count: i64 = connection
@@ -655,9 +655,6 @@ fn test_v6_missing_outbox_index_is_rejected() {
         .expect("remove index");
     assert!(matches!(SqliteTaskStore::open(&path), Err(StoreError::Failure(_))));
 }
-
-#[cfg(feature = "event-bus")]
-mod publisher_tests;
 
 #[tokio::test]
 async fn test_oversized_event_rolls_back_acceptance() {

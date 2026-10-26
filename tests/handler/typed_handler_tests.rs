@@ -7,8 +7,8 @@
 // =============================================================================
 //! Contract tests for the typed handler registry.
 //!
-//! The integration-test crate root will include this module when the new
-//! handler API is wired into `handler::mod`.
+//! The `handler_tests` integration-test target includes this module through
+//! its `handler` module.
 
 use std::convert::Infallible;
 use std::io::Error as IoError;
@@ -175,7 +175,11 @@ fn test_registry_rejects_empty_kind_ids_and_unexpected_external_hooks() {
 fn test_registry_reports_missing_handler_and_preserves_registration_source() {
     let registry = TaskHandlerRegistry::new();
     assert!(matches!(
-        registry.prepare("example.unknown", payload("example.ResizeRequest", 1, "example.u32"), &ValueBytesCodecRegistry::empty()),
+        registry.prepare(
+            "example.unknown",
+            payload("example.ResizeRequest", 1, "example.u32"),
+            &ValueBytesCodecRegistry::empty()
+        ),
         Err(HandlerDispatchError::MissingHandler(kind_id)) if kind_id == "example.unknown"
     ));
     assert_eq!(registry.descriptor("example.unknown"), None);

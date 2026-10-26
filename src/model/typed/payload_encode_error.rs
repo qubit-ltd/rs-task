@@ -8,6 +8,29 @@
 use thiserror::Error;
 
 /// Errors raised while resolving or executing a typed payload codec.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::typed::PayloadEncodeError;
+///
+/// fn report_encoding_failure(error: PayloadEncodeError) {
+///     match error {
+///         PayloadEncodeError::MissingCodec(codec_id) => {
+///             eprintln!("no codec is registered for {codec_id}");
+///         }
+///         PayloadEncodeError::TypeMismatch => {
+///             eprintln!("the registered codec targets another value type");
+///         }
+///         PayloadEncodeError::Codec(source) => {
+///             eprintln!("the codec failed: {source}");
+///         }
+///     }
+/// }
+/// ```
+///
+/// The value is supplied by [`Payload::encode`](super::Payload::encode).
+#[must_use]
 #[derive(Debug, Error)]
 pub enum PayloadEncodeError {
     /// The registry has no codec registered under the payload codec ID.

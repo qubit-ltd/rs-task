@@ -16,6 +16,24 @@ use crate::model::typed::TaskId;
 /// intentionally creates a notification gap; the archived event is not
 /// automatically replayed, so consumers should compare state versions and
 /// query authoritative task state when they detect a gap.
+///
+/// # Examples
+///
+/// A task execution service exposes this snapshot after its notification
+/// publisher reports a failure:
+///
+/// ```
+/// use qubit_task::service::TaskExecutionService;
+///
+/// fn inspect_notification_failure(service: &TaskExecutionService) {
+///     if let Some(failure) = service.notification_failure() {
+///         eprintln!(
+///             "task {} failed at version {}: {}",
+///             failure.task_id, failure.state_version, failure.error
+///         );
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NotificationFailure {
     /// Task whose lifecycle event is blocking ordered publication.

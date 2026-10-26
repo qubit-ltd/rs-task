@@ -55,7 +55,8 @@ impl SqliteFixture {
 #[cfg(feature = "sqlite")]
 impl Drop for SqliteFixture {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.directory).expect("remove this fixture's disposable database directory");
+        std::fs::remove_dir_all(&self.directory)
+            .expect("remove this fixture's disposable database directory");
     }
 }
 
@@ -74,7 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn exercise_store(store: Arc<dyn TaskStore>, id: TaskId) -> Result<(), Box<dyn std::error::Error>> {
+async fn exercise_store(
+    store: Arc<dyn TaskStore>,
+    id: TaskId,
+) -> Result<(), Box<dyn std::error::Error>> {
     let owner = store.acquire_owner().await?;
     let request = stored_request();
     let accepted = store.accept_encoded(id, request.clone()).await?;

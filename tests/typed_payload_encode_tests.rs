@@ -129,12 +129,15 @@ fn request<T: HasModelId>(data: T, codec_id: &'static str) -> TaskRequest<T> {
 }
 
 #[test]
-fn payload_encode_reports_missing_codec_and_rust_type_mismatch() {
+fn test_payload_encode_reports_missing_codec_and_rust_type_mismatch() {
     let registry = ValueBytesCodecRegistry::try_global().expect("codec registry builds");
     let error = Payload::new(1, ValueCodecId::new("qubit_task.tests.absent"), Counter(7))
         .encode(registry)
         .unwrap_err();
-    assert!(matches!(error, PayloadEncodeError::MissingCodec(id) if id == "qubit_task.tests.absent"));
+    assert!(matches!(
+        error,
+        PayloadEncodeError::MissingCodec(id) if id == "qubit_task.tests.absent"
+    ));
 
     let error = Payload::new(
         1,
@@ -147,7 +150,7 @@ fn payload_encode_reports_missing_codec_and_rust_type_mismatch() {
 }
 
 #[test]
-fn payload_encode_preserves_codec_execution_errors() {
+fn test_payload_encode_preserves_codec_execution_errors() {
     let registry = ValueBytesCodecRegistry::try_global().expect("codec registry builds");
     let error = Payload::new(
         1,
@@ -160,7 +163,7 @@ fn payload_encode_preserves_codec_execution_errors() {
 }
 
 #[test]
-fn task_request_encode_reports_invalid_resource_and_payload_errors() {
+fn test_task_request_encode_reports_invalid_resource_and_payload_errors() {
     let registry = ValueBytesCodecRegistry::try_global().expect("codec registry builds");
     let mut bad_resource_request = request(Counter(7), "qubit_task.tests.typed_encode_u32");
     bad_resource_request.resource_limit = ResourceRequest {
@@ -179,7 +182,7 @@ fn task_request_encode_reports_invalid_resource_and_payload_errors() {
 }
 
 #[test]
-fn typed_payload_identity_comes_from_the_rust_type() {
+fn test_typed_payload_identity_comes_from_the_rust_type() {
     let request = TaskRequest::new(
         "example.encode",
         1,
@@ -197,7 +200,7 @@ fn typed_payload_identity_comes_from_the_rust_type() {
 }
 
 #[test]
-fn task_request_encode_rejects_encoded_payload_above_storage_limit() {
+fn test_task_request_encode_rejects_encoded_payload_above_storage_limit() {
     let registry = ValueBytesCodecRegistry::try_global().expect("codec registry builds");
     let oversized = vec![0_u8; MAX_TASK_PAYLOAD_BYTES + 1];
     assert!(matches!(

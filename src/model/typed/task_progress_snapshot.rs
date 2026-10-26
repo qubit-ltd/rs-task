@@ -22,15 +22,25 @@ pub const MAX_TASK_PROGRESS_SNAPSHOT_BYTES: usize = 16 * 1024;
 ///
 /// # Examples
 ///
-/// A snapshot can be restored from its serialized representation:
+/// A snapshot can be created from a progress command:
 ///
 /// ```
+/// use qubit_id::Id;
 /// use qubit_task::model::typed::TaskProgressSnapshot;
+/// use qubit_task::model::typed::TaskId;
+/// use qubit_task::model::typed::ProgressCommand;
 ///
-/// let snapshot: TaskProgressSnapshot = serde_json::from_str(
-///     r#"{"attempt":1,"progress_version":2,"stage":null,"metrics":[],"updated_at_ms":3}"#,
-/// )
-/// .expect("valid task progress snapshot");
+/// let command = ProgressCommand::new(
+///     TaskId::from_id(Id::new(42)),
+///     1,
+///     2,
+///     None,
+///     Vec::new(),
+///     3,
+/// );
+/// let snapshot = TaskProgressSnapshot::from_command(command)
+///     .expect("valid task progress command");
+/// assert_eq!(snapshot.attempt, 1);
 /// assert_eq!(snapshot.progress_version, 2);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

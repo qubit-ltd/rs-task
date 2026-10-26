@@ -9,6 +9,8 @@
 
 mod counters;
 mod publisher_state;
+mod quarantine_command;
 
 pub(in crate::service::task_event_publisher) use counters::Counters;
 pub(in crate::service::task_event_publisher) use publisher_state::PublisherState;
+pub(in crate::service::task_event_publisher) use quarantine_command::QuarantineCommand;

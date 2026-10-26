@@ -8,21 +8,25 @@
 mod default_method_tests {
     use std::num::NonZeroUsize;
 
-    use crate::model::OwnerEpoch;
-    use crate::model::StoreCapabilities;
-    use crate::model::typed::ProgressCommand;
-    use crate::model::typed::StartCommand;
-    use crate::model::typed::StoredTask;
-    use crate::model::typed::StoredTaskRequest;
-    use crate::model::typed::TaskCursor;
-    use crate::model::typed::TaskId;
-    use crate::model::typed::TaskPage as TypedTaskPage;
-    use crate::model::typed::TaskQuery;
-    use crate::model::typed::TaskSummary;
-    use crate::model::typed::TransitionCommand;
-    use crate::store::StoreError;
-    use crate::store::TaskFuture;
-    use crate::store::TaskStore;
+    use qubit_id::Id;
+    use qubit_task::model::OwnerEpoch;
+    use qubit_task::model::StoreCapabilities;
+    use qubit_task::model::TaskStateCheckpoint;
+    use qubit_task::model::typed::AcceptOutcome;
+    use qubit_task::model::typed::ProgressCommand;
+    use qubit_task::model::typed::StartCommand;
+    use qubit_task::model::typed::StoredTask;
+    use qubit_task::model::typed::StoredTaskRequest;
+    use qubit_task::model::typed::TaskCursor;
+    use qubit_task::model::typed::TaskId;
+    use qubit_task::model::typed::TaskPage as TypedTaskPage;
+    use qubit_task::model::typed::TaskQuery;
+    use qubit_task::model::typed::TaskSummary;
+    use qubit_task::model::typed::TransitionCommand;
+    use qubit_task::store::StoreError;
+    use qubit_task::store::TaskFuture;
+    use qubit_task::store::TaskStore;
+
     struct NoOutboxStore;
 
     impl TaskStore for NoOutboxStore {
@@ -34,7 +38,7 @@ mod default_method_tests {
             &'a self,
             _id: TaskId,
             _request: StoredTaskRequest,
-        ) -> TaskFuture<'a, Result<crate::model::typed::AcceptOutcome, StoreError>> {
+        ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
             panic!("required method should not be called")
         }
 
@@ -45,7 +49,7 @@ mod default_method_tests {
         fn get_state_checkpoint<'a>(
             &'a self,
             _id: TaskId,
-        ) -> TaskFuture<'a, Result<Option<crate::model::TaskStateCheckpoint>, StoreError>> {
+        ) -> TaskFuture<'a, Result<Option<TaskStateCheckpoint>, StoreError>> {
             Box::pin(async { Ok(None) })
         }
 
@@ -99,11 +103,11 @@ mod default_method_tests {
     }
 
     fn typed_id(value: u64) -> TaskId {
-        TaskId::from_id(qubit_id::Id::new(value))
+        TaskId::from_id(Id::new(value))
     }
 
     #[tokio::test]
-    async fn outbox_defaults_report_unsupported_for_supplied_inputs() {
+    async fn test_outbox_defaults_report_unsupported_for_supplied_inputs() {
         let store = NoOutboxStore;
 
         assert!(matches!(

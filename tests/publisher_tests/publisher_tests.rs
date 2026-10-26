@@ -6,17 +6,14 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Publisher fault scenarios through the public service and real SQLite.
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use futures::poll;
 use qubit_codec::ValueBytesCodecRegistry;
-use qubit_event_bus::AsyncEventBus;
-use qubit_event_bus::CapabilityError;
-use qubit_event_bus::EventBusFacadeConfig;
 use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::error::SpiError;
 use qubit_event_bus::local::LocalEventBusConfig;
@@ -44,6 +41,9 @@ use qubit_event_bus::spi::SpiFuture;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::SubscriptionModes;
 use qubit_event_bus::spi::TransportPayload;
+use qubit_event_bus::AsyncEventBus;
+use qubit_event_bus::CapabilityError;
+use qubit_event_bus::EventBusFacadeConfig;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
@@ -137,13 +137,17 @@ impl AsyncEventBusSpi for FakeSpi {
             .build()
             .expect("capabilities")
     }
-    fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
+    fn publish<'a>(
+        &'a self,
+        message: OutboundMessage,
+    ) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         Box::pin(async move {
             self.ids.lock().expect("ids").push(message.id().as_str().to_owned());
             let TransportPayload::Encoded(payload) = message.payload() else {
                 panic!("task event must be encoded for the fake provider");
             };
-            let event: TaskEvent = from_slice(payload.bytes()).expect("decode published task event");
+            let event: TaskEvent =
+                from_slice(payload.bytes()).expect("decode published task event");
             self.state_versions
                 .lock()
                 .expect("state versions")
@@ -207,7 +211,11 @@ fn bus(mode: u8, codec: bool) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
 }
 
 /// Builds a fake with explicit durability for the rejected-provider case.
-fn bus_with_durability(mode: u8, codec: bool, durability: DurabilityCapability) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
+fn bus_with_durability(
+    mode: u8,
+    codec: bool,
+    durability: DurabilityCapability,
+) -> (Arc<AsyncEventBus>, Arc<FakeSpi>) {
     bus_with_capabilities(mode, codec, durability, PublishGuarantee::Accepted)
 }
 
@@ -241,7 +249,12 @@ fn bus_with_capabilities(
     let config = EventBusFacadeConfig::new().with_codec_registry(Arc::new(registry));
     (
         Arc::new(
-            AsyncEventBus::with_config(ProviderId::new("fake").expect("provider"), spi.clone(), config).expect("bus"),
+            AsyncEventBus::with_config(
+                ProviderId::new("fake").expect("provider"),
+                spi.clone(),
+                config,
+            )
+            .expect("bus"),
         ),
         spi,
     )
@@ -251,7 +264,7 @@ fn bus_with_capabilities(
 /// acceptance.
 #[tokio::test]
 async fn test_durable_fire_and_forget_provider_is_rejected_before_outbox_enable() {
-    let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
+    let store = Arc::new(SqliteTaskStore::open(super::super::database_path()).expect("store"));
     let (bus, spi) = bus_with_capabilities(
         OPAQUE_ACCEPTED,
         true,
@@ -268,7 +281,7 @@ async fn test_durable_fire_and_forget_provider_is_rejected_before_outbox_enable(
     ));
     let owner = store.acquire_owner().await.expect("owner released");
     store
-        .accept_encoded(TaskId::from_id(Id::new(51)), super::request())
+        .accept_encoded(TaskId::from_id(Id::new(51)), super::super::request())
         .await
         .expect("accept without enabling outbox");
     assert!(
@@ -288,12 +301,12 @@ async fn seed() -> Arc<SqliteTaskStore> {
 }
 
 async fn seed_with_path() -> (Arc<SqliteTaskStore>, std::path::PathBuf) {
-    let path = super::database_path();
+    let path = super::super::database_path();
     let store = Arc::new(SqliteTaskStore::open(&path).expect("store"));
     let owner = store.acquire_owner().await.expect("owner");
     store.enable_event_outbox().await.expect("enable");
     let id = TaskId::from_id(Id::new(42));
-    store.accept_encoded(id, super::request()).await.expect("accept");
+    store.accept_encoded(id, super::super::request()).await.expect("accept");
     store
         .start_encoded(StartCommand {
             id,
@@ -321,7 +334,10 @@ async fn seed_with_path() -> (Arc<SqliteTaskStore>, std::path::PathBuf) {
 }
 
 /// Starts the public service with a bounded publisher shutdown.
-async fn service(store: Arc<dyn TaskStore>, bus: Arc<AsyncEventBus>) -> Result<TaskExecutionService, TaskServiceError> {
+async fn service(
+    store: Arc<dyn TaskStore>,
+    bus: Arc<AsyncEventBus>,
+) -> Result<TaskExecutionService, TaskServiceError> {
     service_with_timeout(store, bus, Duration::from_secs(5)).await
 }
 
@@ -331,11 +347,15 @@ async fn service_with_timeout(
     bus: Arc<AsyncEventBus>,
     timeout: Duration,
 ) -> Result<TaskExecutionService, TaskServiceError> {
-    TaskExecutionServiceBuilder::new(store, Arc::new(ValueBytesCodecRegistry::empty()), Arc::new(Ids))
-        .event_bus(bus)
-        .notification_shutdown_timeout(timeout)
-        .build()
-        .await
+    TaskExecutionServiceBuilder::new(
+        store,
+        Arc::new(ValueBytesCodecRegistry::empty()),
+        Arc::new(Ids),
+    )
+    .event_bus(bus)
+    .notification_shutdown_timeout(timeout)
+    .build()
+    .await
 }
 
 async fn wait_for_notification_failure(service: &TaskExecutionService) -> NotificationFailure {
@@ -505,9 +525,9 @@ async fn test_memory_store_is_rejected_for_event_outbox() {
 
 #[tokio::test]
 async fn test_service_cancellation_persists_snapshot_before_publication() {
-    let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
+    let store = Arc::new(SqliteTaskStore::open(super::super::database_path()).expect("store"));
     let id = TaskId::from_id(Id::new(42));
-    store.accept_encoded(id, super::request()).await.expect("existing task");
+    store.accept_encoded(id, super::super::request()).await.expect("existing task");
     store
         .transition_encoded(TransitionCommand {
             id,
@@ -554,7 +574,7 @@ async fn test_no_destination_admission_retains_notifications() {
 /// Rejects an explicitly ephemeral SPI as well as the built-in local provider.
 #[tokio::test]
 async fn test_ephemeral_fake_provider_is_rejected() {
-    let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
+    let store = Arc::new(SqliteTaskStore::open(super::super::database_path()).expect("store"));
     let (bus, _) = bus_with_durability(OPAQUE_ACCEPTED, true, DurabilityCapability::Ephemeral);
     let result = service(store.clone(), bus).await;
     assert!(matches!(
@@ -574,7 +594,7 @@ async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
             .await
             .expect("local bus"),
     );
-    let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
+    let store = Arc::new(SqliteTaskStore::open(super::super::database_path()).expect("store"));
     let result = service(store.clone(), bus.clone()).await;
     assert!(matches!(
         result,
@@ -583,7 +603,7 @@ async fn test_ephemeral_provider_releases_owner_without_outbox_side_effects() {
     ));
     let owner = store.acquire_owner().await.expect("owner released after rejection");
     store
-        .accept_encoded(TaskId::from_id(Id::new(51)), super::request())
+        .accept_encoded(TaskId::from_id(Id::new(51)), super::super::request())
         .await
         .expect("accept without enabling outbox");
     assert!(
@@ -618,8 +638,13 @@ async fn test_durable_provider_allows_service_construction() {
         PublishGuarantee::Confirmed,
         PublishGuarantee::DurablyStored,
     ] {
-        let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
-        let (bus, _) = bus_with_capabilities(OPAQUE_ACCEPTED, true, DurabilityCapability::Durable, guarantee);
+        let store = Arc::new(SqliteTaskStore::open(super::super::database_path()).expect("store"));
+        let (bus, _) = bus_with_capabilities(
+            OPAQUE_ACCEPTED,
+            true,
+            DurabilityCapability::Durable,
+            guarantee,
+        );
         let service = service(store.clone(), bus)
             .await
             .expect("durable provider with sufficient guarantee accepted");
@@ -773,11 +798,15 @@ async fn test_notification_failure_is_cleared_after_a_temporary_provider_failure
 
 #[tokio::test]
 async fn test_notification_quarantine_reports_unsupported_without_a_publisher() {
-    let store = Arc::new(SqliteTaskStore::open(super::database_path()).expect("store"));
-    let service = TaskExecutionServiceBuilder::new(store, Arc::new(ValueBytesCodecRegistry::empty()), Arc::new(Ids))
-        .build()
-        .await
-        .expect("service without event bus");
+    let store = Arc::new(SqliteTaskStore::open(super::super::database_path()).expect("store"));
+    let service = TaskExecutionServiceBuilder::new(
+        store,
+        Arc::new(ValueBytesCodecRegistry::empty()),
+        Arc::new(Ids),
+    )
+    .build()
+    .await
+    .expect("service without event bus");
 
     assert_eq!(service.notification_failure(), None);
     assert!(matches!(

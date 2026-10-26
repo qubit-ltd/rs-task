@@ -7,99 +7,68 @@
 // =============================================================================
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
 
-use super::cancellation_mode::CancellationMode;
-use super::external_cancellation_hook::ExternalCancellationHook;
-use super::handler_dispatch_error::HandlerDispatchError;
-use super::handler_registration_error::HandlerRegistrationError;
-use super::prepared_task::PreparedTask;
-use super::task_handler_descriptor::TaskHandlerDescriptor;
-use super::typed_task_handler::TypedTaskHandler;
+use super::CancellationMode;
+use super::ExternalCancellationHook;
+use super::HandlerDispatchError;
+use super::HandlerRegistrationError;
+use super::PreparedTask;
+use super::TaskHandlerDescriptor;
+use super::TypedTaskHandler;
+use super::internal::ErasedHandler;
+use super::internal::Registration;
+use super::internal::TypedAdapter;
 use crate::model::TaskRunError;
 use crate::model::typed::StoredPayload;
 use crate::model::typed::TaskId;
 use crate::store::TaskFuture;
 
-/// Type-erased boundary used to prepare a task after registry lookup.
-trait ErasedHandler: Send + Sync {
-    /// Validates and decodes the stored payload, then creates a runnable task.
-    fn prepare(
-        &self,
-        payload: StoredPayload,
-        codecs: &ValueBytesCodecRegistry,
-    ) -> Result<PreparedTask, HandlerDispatchError>;
-}
-
-/// Adapts a typed handler to the registry's type-erased dispatch interface.
-struct TypedAdapter<T, H> {
-    /// Descriptor used to validate the payload before decoding.
-    descriptor: TaskHandlerDescriptor,
-    /// Handler retained for execution after successful preparation.
-    handler: Arc<H>,
-    /// Records the payload type expected by `H` without storing a value of `T`.
-    marker: PhantomData<fn() -> T>,
-}
-
-impl<T, H> ErasedHandler for TypedAdapter<T, H>
-where
-    T: Send + Sync + 'static,
-    H: TypedTaskHandler<T>,
-{
-    /// Rejects mismatched metadata and creates a future that runs the typed
-    /// handler.
-    fn prepare(
-        &self,
-        payload: StoredPayload,
-        codecs: &ValueBytesCodecRegistry,
-    ) -> Result<PreparedTask, HandlerDispatchError> {
-        if payload.type_id != self.descriptor.payload_type_id {
-            return Err(HandlerDispatchError::PayloadTypeMismatch {
-                expected: self.descriptor.payload_type_id.to_string(),
-                actual: payload.type_id.to_string(),
-            });
-        }
-        if !self
-            .descriptor
-            .accepted_schema_versions
-            .contains(&payload.schema_version)
-        {
-            return Err(HandlerDispatchError::UnsupportedSchemaVersion(payload.schema_version));
-        }
-        let codec = codecs
-            .get(&payload.codec_id)
-            .ok_or_else(|| HandlerDispatchError::MissingCodec(payload.codec_id.clone()))?;
-        let decoded = codec.descriptor().decode(&payload.bytes)?;
-        let actual_type = decoded.as_ref().type_id();
-        let input = decoded
-            .downcast::<T>()
-            .map_err(|_| HandlerDispatchError::DecodedValueTypeMismatch {
-                expected: std::any::type_name::<T>(),
-                actual: actual_type,
-            })?;
-        let input = *input;
-        let handler = Arc::clone(&self.handler);
-        Ok(PreparedTask::new(Box::new(move |context| {
-            Box::pin(async move { handler.run(input, context).await })
-        })))
-    }
-}
-
-/// Stored metadata and handler state for one registered task kind.
-struct Registration {
-    /// Source label reported if a duplicate kind is registered.
-    source: String,
-    /// Descriptor exposed to callers and used during dispatch validation.
-    descriptor: TaskHandlerDescriptor,
-    /// Type-erased handler implementation used to prepare payloads.
-    handler: Arc<dyn ErasedHandler>,
-    /// Optional hook for kinds configured for external cancellation.
-    external_cancellation_hook: Option<ExternalCancellationHook>,
-}
+// Stores and retrieves one implementation for each stable handler kind.
+mod internal;
 
 /// Registry routing one handler per stable kind identifier.
+///
+/// Registration validates the descriptor and cancellation-hook configuration
+/// before retaining the handler. During dispatch, the registry checks payload
+/// metadata and decodes the value before invoking application code.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use qubit_model_id::ModelIdBuf;
+/// use qubit_task::CancellationMode;
+/// use qubit_task::TaskHandler;
+/// use qubit_task::TaskHandlerDescriptor;
+/// use qubit_task::TaskHandlerRegistry;
+/// use qubit_task::handler::TaskRunOutcome;
+/// use qubit_task::handler::TaskRunResult;
+/// use qubit_task::store::TaskFuture;
+/// use qubit_task::TaskContext;
+/// use qubit_task::TaskOutput;
+///
+/// struct Handler;
+///
+/// impl TaskHandler<String> for Handler {
+///     fn run<'a>(&'a self, _input: String, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+///         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
+///     }
+/// }
+///
+/// let descriptor = TaskHandlerDescriptor {
+///     kind_id: "email.send".to_owned(),
+///     payload_type_id: ModelIdBuf::parse("example.SendEmail").expect("valid model ID"),
+///     accepted_schema_versions: vec![1],
+///     cancellation_mode: CancellationMode::Cooperative,
+/// };
+/// let mut registry = TaskHandlerRegistry::new();
+/// registry
+///     .register::<String, _>(descriptor, Arc::new(Handler))
+///     .expect("valid handler registration");
+/// ```
 #[derive(Default)]
 pub struct TypedTaskHandlerRegistry {
     /// Registered handler state keyed by each descriptor's stable kind ID.
@@ -108,18 +77,71 @@ pub struct TypedTaskHandlerRegistry {
 
 impl TypedTaskHandlerRegistry {
     /// Creates an empty typed handler registry.
+    ///
+    /// # Returns
+    ///
+    /// An empty registry ready to accept handler registrations.
     #[must_use]
     #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Returns the registered descriptor for a handler kind.
+    ///
+    /// # Parameters
+    ///
+    /// * `kind_id` is the stable routing key to look up.
+    ///
+    /// # Returns
+    ///
+    /// `Some` borrows the registered descriptor; `None` means no handler uses
+    /// that kind ID.
+    #[inline]
+    pub fn descriptor(&self, kind_id: &str) -> Option<&TaskHandlerDescriptor> {
+        self.handlers.get(kind_id).map(|registration| &registration.descriptor)
+    }
+
+    /// Returns whether the kind has an external cancellation hook.
+    ///
+    /// # Parameters
+    ///
+    /// * `kind_id` is the stable routing key to inspect.
+    ///
+    /// # Returns
+    ///
+    /// `true` when that kind has a hook, or `false` when it has no handler or
+    /// no hook.
+    #[must_use]
+    #[inline]
+    pub fn has_external_cancellation_hook(&self, kind_id: &str) -> bool {
+        self.handlers
+            .get(kind_id)
+            .is_some_and(|registration| registration.external_cancellation_hook.is_some())
+    }
+
     /// Registers one typed handler from a direct application registration.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` is the decoded payload type passed to the handler.
+    /// * `H` is the application handler implementation.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` declares the stable kind, payload schema, and
+    ///   cancellation mode.
+    /// * `handler` is retained and shared for dispatches of this kind.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when registration succeeds.
     ///
     /// # Errors
     ///
-    /// Returns an error if the descriptor is invalid or its kind identifier is
-    /// already registered.
+    /// Returns an error if the descriptor is invalid, external cancellation
+    /// requires a hook, or its kind identifier is already registered.
+    #[inline]
     pub fn register<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -134,10 +156,27 @@ impl TypedTaskHandlerRegistry {
 
     /// Registers one typed handler and retains its source for conflict errors.
     ///
+    /// # Type Parameters
+    ///
+    /// * `T` is the decoded payload type passed to the handler.
+    /// * `H` is the application handler implementation.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` declares the stable kind, payload schema, and
+    ///   cancellation mode.
+    /// * `handler` is retained and shared for dispatches of this kind.
+    /// * `source` labels this registration in duplicate-kind errors.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when registration succeeds.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the descriptor is invalid or its kind identifier is
-    /// already registered.
+    /// Returns an error if the descriptor is invalid, external cancellation
+    /// requires a hook, or its kind identifier is already registered.
+    #[inline]
     pub fn register_with_source<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -154,10 +193,28 @@ impl TypedTaskHandlerRegistry {
     /// Registers a typed handler with an external cancellation hook when its
     /// descriptor declares [`CancellationMode::ExternalHook`].
     ///
+    /// # Type Parameters
+    ///
+    /// * `T` is the decoded payload type passed to the handler.
+    /// * `H` is the application handler implementation.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` declares the stable kind, payload schema, and
+    ///   cancellation mode.
+    /// * `handler` is retained and shared for dispatches of this kind.
+    /// * `source` labels this registration in duplicate-kind errors.
+    /// * `hook` is called when external cancellation is requested.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when registration succeeds.
+    ///
     /// # Errors
     ///
     /// Returns an error if the descriptor is invalid, the hook does not match
     /// the cancellation mode, or the kind identifier is already registered.
+    #[inline]
     pub fn register_with_cancellation_hook<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -174,6 +231,30 @@ impl TypedTaskHandlerRegistry {
 
     /// Validates registration options and inserts the handler if its kind is
     /// free.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` is the decoded payload type supplied to the handler.
+    /// * `H` is the concrete handler implementation retained for dispatch.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` declares the handler kind, payload schema, and
+    ///   cancellation mode.
+    /// * `handler` is retained and adapted for erased registry dispatch.
+    /// * `source` identifies this registration in duplicate-kind errors.
+    /// * `external_cancellation_hook` provides external cancellation behavior
+    ///   when required by the descriptor's cancellation mode.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the registration is validated and inserted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the descriptor is invalid, the cancellation hook
+    /// does not match the descriptor's mode, or the kind identifier is already
+    /// registered.
     fn register_with_options<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -224,6 +305,16 @@ impl TypedTaskHandlerRegistry {
 
     /// Validates and decodes a stored payload before any handler code runs.
     ///
+    /// # Parameters
+    ///
+    /// * `kind_id` selects the registered handler.
+    /// * `payload` is consumed after validating and decoding its stored value.
+    /// * `codecs` supplies the decoder registered for the payload codec ID.
+    ///
+    /// # Returns
+    ///
+    /// A prepared, single-use task when validation succeeds.
+    ///
     /// # Errors
     ///
     /// Returns an error if no handler is registered or if the payload metadata,
@@ -241,24 +332,18 @@ impl TypedTaskHandlerRegistry {
             .prepare(payload, codecs)
     }
 
-    /// Returns the registered descriptor for a handler kind.
-    #[must_use]
-    #[inline]
-    pub fn descriptor(&self, kind_id: &str) -> Option<&TaskHandlerDescriptor> {
-        self.handlers.get(kind_id).map(|registration| &registration.descriptor)
-    }
-
-    /// Returns whether the kind has an external cancellation hook.
-    #[must_use]
-    #[inline]
-    pub fn has_external_cancellation_hook(&self, kind_id: &str) -> bool {
-        self.handlers
-            .get(kind_id)
-            .is_some_and(|registration| registration.external_cancellation_hook.is_some())
-    }
-
     /// Calls an external cancellation hook, if registered for this kind.
-    #[must_use]
+    ///
+    /// # Parameters
+    ///
+    /// * `kind_id` selects the registered handler.
+    /// * `task_id` identifies the task whose external work should stop.
+    /// * `attempt` identifies the active attempt.
+    ///
+    /// # Returns
+    ///
+    /// `Some` contains the hook's future; `None` means no hook is registered
+    /// for the kind.
     pub fn cancel_externally(
         &self,
         kind_id: &str,

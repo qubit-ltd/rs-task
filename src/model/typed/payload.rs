@@ -18,6 +18,33 @@ use super::EncodedPayload;
 use super::PayloadEncodeError;
 
 /// Typed input payload submitted by application code.
+///
+/// `Payload` keeps the schema and codec identities beside the value so the
+/// payload can be checked against a registered encoder before persistence.
+///
+/// # Type Parameters
+///
+/// - `T`: Application value type, which must have a stable [`HasModelId`]
+///   implementation when constructing or encoding the payload.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_codec::ValueCodecId;
+/// use qubit_model_id::HasModelId;
+/// use qubit_model_id::ModelId;
+/// use qubit_task::Payload;
+///
+/// struct Input(u32);
+///
+/// impl HasModelId for Input {
+///     const MODEL_ID: ModelId = ModelId::new("example.Input");
+/// }
+///
+/// let payload = Payload::new(1, ValueCodecId::new("example.u32"), Input(42));
+/// assert_eq!(payload.type_id(), ModelId::new("example.Input"));
+/// assert_eq!(payload.data.0, 42);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Payload<T> {
     /// Version of the payload schema, independent of the codec version.
@@ -36,6 +63,13 @@ impl<T: HasModelId> Payload<T> {
     /// - `schema_version`: version of the payload schema.
     /// - `codec_id`: stable identity of the codec that will encode the value.
     /// - `data`: application value to carry in the payload.
+    ///
+    /// # Returns
+    ///
+    /// A payload containing the supplied schema version, codec identity, and
+    /// application value.
+    #[must_use]
+    #[inline]
     pub fn new(schema_version: u32, codec_id: ValueCodecId, data: T) -> Self {
         Self {
             schema_version,
@@ -45,6 +79,11 @@ impl<T: HasModelId> Payload<T> {
     }
 
     /// Returns the stable identity of the payload's Rust model type.
+    ///
+    /// # Returns
+    ///
+    /// The model ID declared by `T`'s [`HasModelId`] implementation.
+    #[inline]
     pub const fn type_id(&self) -> ModelId {
         T::MODEL_ID
     }
@@ -52,6 +91,16 @@ impl<T: HasModelId> Payload<T> {
 
 impl<T: HasModelId + 'static> Payload<T> {
     /// Encodes the value with its registered bytes codec.
+    ///
+    /// # Parameters
+    ///
+    /// - `self`: The payload whose value should be encoded.
+    /// - `registry`: Registry containing the codec identified by `codec_id`.
+    ///
+    /// # Returns
+    ///
+    /// An encoded payload retaining the model type marker and payload
+    /// metadata alongside the codec-produced bytes.
     ///
     /// # Errors
     ///

@@ -5,8 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-/// Engine errors distinguish temporary contention from invalid capacity
-/// requests.
+/// Failures reported when a resource request cannot proceed or reservation
+/// identifiers are exhausted.
 #[derive(Debug, thiserror::Error)]
 #[must_use]
 pub enum EngineError {

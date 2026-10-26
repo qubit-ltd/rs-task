@@ -5,7 +5,17 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-/// Cancellation support declared by a handler registration.
+/// Declares how a registered handler participates in cancellation of in-flight
+/// attempts.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::CancellationMode;
+///
+/// let mode = CancellationMode::Cooperative;
+/// assert!(matches!(mode, CancellationMode::Cooperative));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CancellationMode {
     /// The handler cannot stop an in-flight attempt on request.

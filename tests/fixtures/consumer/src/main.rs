@@ -7,15 +7,12 @@
 // =============================================================================
 //! Exercises a separately compiled task handler through the public service API.
 
+mod fixture_ids;
+
 use std::error::Error;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use qubit_id::Id;
-use qubit_id::IdGenerationError;
-use qubit_id::IdGenerator;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::TaskId;
@@ -28,20 +25,15 @@ use qubit_task_fixture_provider::codec_registry;
 use qubit_task_fixture_provider::descriptor;
 use qubit_task_fixture_provider::request;
 
-struct FixtureIds(AtomicU64);
+use crate::fixture_ids::FixtureIds;
 
-impl IdGenerator<Id, IdGenerationError> for FixtureIds {
-    fn generate(&self) -> Result<Id, IdGenerationError> {
-        Ok(Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
-    }
-}
-
+/// Runs a task through the public API from the separately compiled consumer.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(16)),
         codec_registry()?,
-        Arc::new(FixtureIds(AtomicU64::new(1))),
+        Arc::new(FixtureIds::new(1)),
     );
     builder.handlers_mut().register::<FixturePayload, _>(
         descriptor("fixture")?,
@@ -61,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Polls the service until the task reaches a terminal state or the deadline expires.
 async fn wait_for_terminal(
     service: &TaskExecutionService,
     id: TaskId,

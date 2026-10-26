@@ -20,11 +20,15 @@ use qubit_task::model::TaskCursor;
 use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskStateKind;
 use qubit_task::store::SqliteTaskStore;
+use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 use rusqlite::Connection;
 use rusqlite::params;
+use rusqlite::params_from_iter;
+use rusqlite::types::Value;
 use serde::Serialize;
 use tokio::runtime::Builder;
+use tokio::runtime::Runtime;
 
 const QUERY_SAMPLES: usize = 25;
 const QUERY_WARMUPS: usize = 3;
@@ -166,7 +170,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     Ok(Options { output, sizes })
 }
 
-fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<DatasetReport, Box<dyn std::error::Error>> {
+fn run_dataset(runtime: &Runtime, size: usize) -> Result<DatasetReport, Box<dyn std::error::Error>> {
     let directory = history_dataset::temporary_directory()?;
     let dataset = history_dataset::create(size, &directory.path)?;
     let indexless_database_bytes = file_size(&dataset.database_path)?;
@@ -339,7 +343,7 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
                 break;
             }
         }
-        Ok::<_, qubit_task::store::StoreError>((rows, pages, max_page))
+        Ok::<_, StoreError>((rows, pages, max_page))
     })?;
     let ready_queue_scan = measure(runtime, || async {
         let mut after = None;
@@ -427,10 +431,10 @@ fn run_dataset(runtime: &tokio::runtime::Runtime, size: usize) -> Result<Dataset
     })
 }
 
-fn measure<F, Fut, T>(runtime: &tokio::runtime::Runtime, mut operation: F) -> Result<Timing, Box<dyn std::error::Error>>
+fn measure<F, Fut, T>(runtime: &Runtime, mut operation: F) -> Result<Timing, Box<dyn std::error::Error>>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, qubit_task::store::StoreError>>,
+    Fut: std::future::Future<Output = Result<T, StoreError>>,
 {
     for _ in 0..QUERY_WARMUPS {
         let _ = runtime.block_on(operation())?;
@@ -461,10 +465,7 @@ where
     Ok(summarize(samples))
 }
 
-fn measure_shutdown(
-    runtime: &tokio::runtime::Runtime,
-    database_path: &Path,
-) -> Result<Timing, Box<dyn std::error::Error>> {
+fn measure_shutdown(runtime: &Runtime, database_path: &Path) -> Result<Timing, Box<dyn std::error::Error>> {
     let mut samples = Vec::with_capacity(SHUTDOWN_SAMPLES);
     let directory = history_dataset::temporary_directory()?;
     for sample in 0..SHUTDOWN_SAMPLES {
@@ -517,23 +518,23 @@ fn legacy_history_measurement(
 fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // The plan is read through the public store query in production; this EXPLAIN
     // uses its stable SQL shape for reproducible plan reporting.
-    let (where_sql, values): (&str, Vec<rusqlite::types::Value>) = if let Some(key) = query.correlation_key {
+    let (where_sql, values): (&str, Vec<Value>) = if let Some(key) = query.correlation_key {
         (
             "WHERE (accepted_at,id) > (?1,?2) AND correlation_key = ?3 ORDER BY accepted_at,id LIMIT ?4",
             vec![
-                rusqlite::types::Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
-                rusqlite::types::Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
-                rusqlite::types::Value::Text(key),
-                rusqlite::types::Value::Integer((query.limit + 1) as i64),
+                Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
+                Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
+                Value::Text(key),
+                Value::Integer((query.limit + 1) as i64),
             ],
         )
     } else {
         (
             "WHERE (accepted_at,id) > (?1,?2) ORDER BY accepted_at,id LIMIT ?3",
             vec![
-                rusqlite::types::Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
-                rusqlite::types::Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
-                rusqlite::types::Value::Integer((query.limit + 1) as i64),
+                Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
+                Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
+                Value::Integer((query.limit + 1) as i64),
             ],
         )
     };
@@ -543,11 +544,11 @@ fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<Stri
             "SELECT id,state_kind,accepted_at,correlation_key,idempotency_key,record_format_version,request_info_json,lifecycle_json \
              FROM tasks {where_sql}"
         ),
-        rusqlite::params_from_iter(values),
+        params_from_iter(values),
     )
 }
 
-fn explain<P: rusqlite::Params>(
+fn explain<P: Params>(
     connection: &Connection,
     sql: &str,
     params: P,
@@ -569,9 +570,11 @@ fn summarize(mut samples: Vec<Duration>) -> Timing {
 fn elapsed_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
+
 fn file_size(path: &Path) -> Result<u64, std::io::Error> {
     Ok(std::fs::metadata(path)?.len())
 }
+
 fn sidecar_size(path: &Path, suffix: &str) -> u64 {
     let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
     std::fs::metadata(sidecar).map(|metadata| metadata.len()).unwrap_or(0)

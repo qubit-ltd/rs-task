@@ -145,7 +145,7 @@ mod tests {
     use crate::store::StoreError;
 
     #[test]
-    fn history_query_binds_filters_and_rejects_an_overflowing_cursor() {
+    fn test_history_query_binds_filters_and_rejects_an_overflowing_cursor() {
         let query = TaskQuery {
             states: vec![TaskStateKind::Queued, TaskStateKind::Queued],
             category: Some("billing".into()),

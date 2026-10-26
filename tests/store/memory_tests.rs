@@ -7,32 +7,34 @@
 // =============================================================================
 use std::num::NonZeroUsize;
 
+use qubit_id::Id;
+use qubit_metadata::Metadata;
+use qubit_model_id::ModelIdBuf;
+use qubit_task::model::MAX_TASK_QUERY_LIMIT;
+use qubit_task::model::TaskOutput;
+use qubit_task::model::TaskState;
+use qubit_task::model::TaskStateKind;
+use qubit_task::model::typed::ProgressCommand;
+use qubit_task::model::typed::ResourceRequest as EncodedResourceRequest;
+use qubit_task::model::typed::StartCommand;
+use qubit_task::model::typed::StoredPayload;
+use qubit_task::model::typed::StoredTaskRequest;
+use qubit_task::model::typed::TaskId as EncodedTaskId;
+use qubit_task::model::typed::TaskQuery;
+use qubit_task::model::typed::TransitionCommand as EncodedTransitionCommand;
+use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::StoreError;
+use qubit_task::store::TaskStore as TypedTaskStore;
 use tokio::test as tokio_test;
 
-use crate::model::MAX_TASK_QUERY_LIMIT;
-use crate::model::TaskOutput;
-use crate::model::TaskState;
-use crate::model::TaskStateKind;
-use crate::model::typed::ProgressCommand;
-use crate::model::typed::ResourceRequest as EncodedResourceRequest;
-use crate::model::typed::StartCommand;
-use crate::model::typed::StoredPayload;
-use crate::model::typed::StoredTaskRequest;
-use crate::model::typed::TaskId as EncodedTaskId;
-use crate::model::typed::TaskQuery;
-use crate::model::typed::TransitionCommand as EncodedTransitionCommand;
-use crate::store::MemoryTaskStore;
-use crate::store::StoreError;
-use crate::store::TaskStore as TypedTaskStore;
-
 fn encoded_request(key: Option<&str>, bytes: Vec<u8>) -> StoredTaskRequest {
-    let mut metadata = qubit_metadata::Metadata::new();
+    let mut metadata = Metadata::new();
     metadata.insert("trace", "memory-test");
     StoredTaskRequest {
         kind_id: "memory.encoded".to_owned(),
         category: Some("integration".to_owned()),
         payload: StoredPayload {
-            type_id: qubit_model_id::ModelIdBuf::parse("qubit_task.tests.Payload").expect("model ID is valid"),
+            type_id: ModelIdBuf::parse("qubit_task.tests.Payload").expect("model ID is valid"),
             schema_version: 2,
             codec_id: "qubit.bytes.json".to_owned(),
             bytes,
@@ -45,7 +47,7 @@ fn encoded_request(key: Option<&str>, bytes: Vec<u8>) -> StoredTaskRequest {
 }
 
 fn encoded_id(value: u64) -> EncodedTaskId {
-    EncodedTaskId::from_id(qubit_id::Id::new(value))
+    EncodedTaskId::from_id(Id::new(value))
 }
 
 #[tokio_test]
@@ -567,7 +569,7 @@ async fn test_memory_store_encoded_history_filters_and_paginates() {
 
     let second = TypedTaskStore::list_encoded(
         &store,
-        crate::model::typed::TaskQuery {
+        TaskQuery {
             states: vec![TaskStateKind::Queued],
             category: Some("wanted".to_owned()),
             correlation_key: Some("history-correlation".to_owned()),

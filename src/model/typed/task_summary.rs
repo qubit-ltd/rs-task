@@ -16,6 +16,48 @@ use crate::model::TaskOutput;
 use crate::model::TaskState;
 
 /// Payload-free task view including current execution progress.
+///
+/// A summary is returned by public task-store and execution-service operations,
+/// such as `TaskExecutionService::get`; callers can inspect its state and
+/// progress without decoding the task payload. Its public fields also allow
+/// callers to construct summaries directly when needed.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::model::TaskState;
+/// use qubit_task::model::typed::ResourceRequest;
+/// use qubit_task::model::typed::TaskId;
+/// use qubit_task::model::typed::TaskSummary;
+///
+/// let id = TaskId::from_id(qubit_id::Id::new(42));
+/// let summary = TaskSummary {
+///     id,
+///     kind_id: String::from("counter.add"),
+///     category: None,
+///     payload_type_id: String::from("example.Counter"),
+///     payload_schema_version: 1,
+///     payload_codec_id: String::from("example.u32_le"),
+///     metadata: qubit_metadata::Metadata::default(),
+///     resource_limit: ResourceRequest::default(),
+///     correlation_key: None,
+///     idempotency_key: None,
+///     state: TaskState::Queued,
+///     cancel_requested: false,
+///     cancel_error: None,
+///     state_version: 0,
+///     attempt: 0,
+///     retry_not_before_ms: None,
+///     accepted_at_ms: 1_700_000_000_000,
+///     started_at_ms: None,
+///     finished_at_ms: None,
+///     progress: None,
+///     output: None,
+/// };
+///
+/// assert_eq!(summary.id, id);
+/// assert_eq!(summary.state, TaskState::Queued);
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskSummary {
     /// Stable task identity.

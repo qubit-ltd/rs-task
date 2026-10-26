@@ -24,7 +24,11 @@ use qubit_task::service::TaskServiceError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
 
-/// Call after repairing the handler or codec configuration and restarting.
+/// Rechecks a task and requeues it when it remains blocked after a repair.
+///
+/// The caller obtains `service` from the public service builder and `id` from
+/// an accepted task summary. Call this after repairing the handler or codec
+/// configuration and restarting the service.
 async fn resume_after_repair(service: &TaskExecutionService, id: TaskId) -> Result<(), Box<dyn std::error::Error>> {
     let Some(summary) = service.get(id).await? else {
         return Ok(());
@@ -45,6 +49,7 @@ async fn resume_after_repair(service: &TaskExecutionService, id: TaskId) -> Resu
     Ok(())
 }
 
+/// Generates predictable IDs for the in-memory task service in this example.
 struct SequentialIds(AtomicU64);
 
 impl IdGenerator for SequentialIds {

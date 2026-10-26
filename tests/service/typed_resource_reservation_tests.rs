@@ -406,7 +406,7 @@ impl TaskHandler<Counter> for GatedHandler {
 }
 
 #[tokio::test]
-async fn typed_resource_request_above_capacity_is_blocked() {
+async fn test_typed_resource_request_above_capacity_is_blocked() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let mut builder = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(8)),
@@ -440,7 +440,7 @@ async fn typed_resource_request_above_capacity_is_blocked() {
 }
 
 #[tokio::test]
-async fn typed_resource_reservation_waits_until_capacity_is_released() {
+async fn test_typed_resource_reservation_waits_until_capacity_is_released() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let started = Arc::new(Notify::new());
     let release = Arc::new(Semaphore::new(0));
@@ -494,7 +494,7 @@ async fn typed_resource_reservation_waits_until_capacity_is_released() {
 }
 
 #[tokio::test]
-async fn scheduler_skips_resource_blocked_task_without_consuming_run_slot() {
+async fn test_scheduler_skips_resource_blocked_task_without_consuming_run_slot() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let started = Arc::new(Notify::new());
     let release = Arc::new(Semaphore::new(0));
@@ -553,7 +553,7 @@ async fn scheduler_skips_resource_blocked_task_without_consuming_run_slot() {
 }
 
 #[tokio::test]
-async fn resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_task() {
+async fn test_resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_task() {
     let (service, gate, trace, started, release) = bypass_fixture(128).await;
     let running = service
         .submit(request_resources(1, 1))
@@ -599,7 +599,7 @@ async fn resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_task() 
 }
 
 #[tokio::test]
-async fn resource_bypass_limit_clears_when_anchor_is_cancelled() {
+async fn test_resource_bypass_limit_clears_when_anchor_is_cancelled() {
     let (service, gate, trace, started, release) = bypass_fixture(128).await;
     let running = service
         .submit(request_resources(1, 1))
@@ -648,7 +648,7 @@ async fn resource_bypass_limit_clears_when_anchor_is_cancelled() {
 }
 
 #[tokio::test]
-async fn resource_bypass_limit_preserves_anchor_across_ready_pages() {
+async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
     let (service, gate, trace, started, release) = bypass_fixture(2).await;
     let running = service
         .submit(request_resources(1, 1))
@@ -731,7 +731,7 @@ async fn resource_bypass_limit_preserves_anchor_across_ready_pages() {
 }
 
 #[tokio::test]
-async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
+async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
     let (service, gate, trace, started, release) = bypass_fixture(2).await;
     let running = service
         .submit(request_resources(1, 1))
@@ -865,7 +865,7 @@ async fn resource_bypass_limit_rescans_anchor_beyond_persistent_first_page() {
 }
 
 #[tokio::test]
-async fn resource_release_during_ready_scan_is_not_lost() {
+async fn test_resource_release_during_ready_scan_is_not_lost() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let started = Arc::new(Notify::new());
     let release_handler = Arc::new(Semaphore::new(0));
@@ -924,7 +924,7 @@ async fn resource_release_during_ready_scan_is_not_lost() {
 }
 
 #[tokio::test]
-async fn cancel_during_start_cas_releases_reservation_without_running_handler() {
+async fn test_cancel_during_start_cas_releases_reservation_without_running_handler() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
     let ready_gate = Arc::new(ReadyScanGate {
         armed: AtomicBool::new(false),

@@ -221,7 +221,7 @@ async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result
         assert!(
             observed
                 .iter()
-                .any(|(_, actual_version, state)| *actual_version == version && state == &expected_state)
+                .any(|(_, actual_version, state)| { *actual_version == version && state == &expected_state })
         );
     }
     subscription.cancel()?;

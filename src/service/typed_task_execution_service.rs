@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -24,7 +23,6 @@ use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
-use qubit_progress::AsyncReporter;
 use tokio::sync::watch;
 
 #[cfg(feature = "event-bus")]
@@ -33,15 +31,9 @@ use super::owner_release_guard::OwnerReleaseGuard;
 use super::owner_release_guard::OwnerReleaseWorker;
 #[cfg(feature = "event-bus")]
 use super::task_event_publisher::TaskEventPublisher;
-use crate::engine::EngineError;
 use crate::engine::LocalTaskExecutionEngine;
-use crate::engine::TypedResourceReservation;
-use crate::handler::TaskRunOutcome;
 use crate::handler::typed::CancellationMode;
-use crate::handler::typed::TypedTaskContext;
 use crate::handler::typed::TypedTaskHandlerRegistry;
-use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
-use crate::model::TaskOutput;
 use crate::model::TaskState;
 use crate::model::typed::TaskId;
 use crate::model::typed::TaskPage;
@@ -56,148 +48,67 @@ use crate::service::RetryPolicy;
 use crate::service::TaskServiceError;
 use crate::store::TaskStore;
 
-struct TypedServiceCore {
-    store: Arc<dyn TaskStore>,
-    codecs: Arc<ValueBytesCodecRegistry>,
-    id_generator: Arc<dyn IdGenerator<Id, IdGenerationError>>,
-    engine: Arc<LocalTaskExecutionEngine>,
-    handlers: TypedTaskHandlerRegistry,
-    cancellations: Mutex<HashMap<(TaskId, u32), Arc<AtomicBool>>>,
-    external_cancellations: Mutex<HashMap<(TaskId, u32), ExternalCancelEntry>>,
-    owner_guard: tokio::sync::Mutex<Option<OwnerReleaseGuard>>,
-    admission: tokio::sync::RwLock<()>,
-    scheduler_changed: tokio::sync::Notify,
-    scheduler_stopped: AtomicBool,
-    scheduler_stopped_changed: tokio::sync::Notify,
-    max_running_tasks: usize,
-    scan_page_size: usize,
-    max_resource_bypasses: usize,
-    max_attempts: u32,
-    retry_policy: RetryPolicy,
-    fault: Mutex<Option<String>>,
-    in_flight: AtomicUsize,
-    in_flight_changed: tokio::sync::Notify,
-    shutting_down: AtomicBool,
-    shutdown_changed: tokio::sync::Notify,
-    shutdown_completed: tokio::sync::Notify,
-    shutdown_progress: Mutex<ShutdownProgress>,
-    public_gone: AtomicBool,
-    owner_released: AtomicBool,
-    #[cfg(feature = "event-bus")]
-    publisher: Option<TaskEventPublisher>,
-    #[cfg(feature = "event-bus")]
-    notification_close_error: Mutex<Option<String>>,
-}
+mod internal;
+mod typed_service_options;
 
-enum ExternalCancelEntry {
-    InFlight(Arc<ExternalCancelFlight>),
-    Succeeded,
-}
-
-struct ExternalCancelFlight {
-    result: watch::Sender<Option<ExternalCancelResult>>,
-}
-
-#[derive(Clone)]
-enum ExternalCancelResult {
-    Success,
-    AlreadyTerminal,
-    HookFailed(String),
-    ServiceFailed(String),
-}
-
-impl TypedServiceCore {
-    /// Signals the supervisor without blocking the dropping handle or caller.
-    fn request_shutdown(&self) {
-        self.shutting_down.store(true, Ordering::Release);
-        self.scheduler_changed.notify_waiters();
-        self.shutdown_changed.notify_waiters();
-    }
-}
-
-struct PublicLifetime {
-    core: Weak<TypedServiceCore>,
-}
-
-impl Drop for PublicLifetime {
-    fn drop(&mut self) {
-        if let Some(core) = self.core.upgrade() {
-            core.public_gone.store(true, Ordering::Release);
-            core.request_shutdown();
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ServiceRunner {
-    core: Arc<TypedServiceCore>,
-}
-
-#[derive(Clone)]
-enum ShutdownOutcome {
-    Complete,
-    StoreUnavailable(String),
-    #[cfg(feature = "event-bus")]
-    NotificationClose(String),
-}
-
-#[derive(Default)]
-struct ShutdownProgress {
-    attempt: usize,
-    results: Vec<ShutdownOutcome>,
-    retryable_release: bool,
-    retry_requested: bool,
-}
-
-impl ShutdownOutcome {
-    /// Reconstructs an owned public error for each independent shutdown waiter.
-    fn into_result(self) -> Result<(), TaskServiceError> {
-        match self {
-            Self::Complete => Ok(()),
-            Self::StoreUnavailable(error) => Err(TaskServiceError::StoreUnavailable(error)),
-            #[cfg(feature = "event-bus")]
-            Self::NotificationClose(error) => Err(TaskServiceError::NotificationClose(error)),
-        }
-    }
-}
-
-pub(super) struct TypedServiceOptions {
-    pub(super) max_running_tasks: usize,
-    pub(super) scan_page_size: usize,
-    pub(super) max_resource_bypasses: usize,
-    pub(super) max_attempts: u32,
-    pub(super) retry_policy: RetryPolicy,
-    #[cfg(feature = "event-bus")]
-    pub(super) event_bus: Option<Arc<qubit_event_bus::AsyncEventBus>>,
-    #[cfg(feature = "event-bus")]
-    pub(super) notification_shutdown_timeout: std::time::Duration,
-}
-
-/// Tracks the oldest resource-waiting task and successful newer starts.
-#[derive(Default)]
-struct ResourceFairness {
-    anchor: Option<(TaskId, u64)>,
-    bypasses: usize,
-}
-
-struct InFlightGuard(Arc<TypedServiceCore>);
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
-        self.0.in_flight_changed.notify_waiters();
-        self.0.scheduler_changed.notify_one();
-    }
-}
+use internal::ExternalCancelEntry;
+use internal::ExternalCancelFlight;
+use internal::ExternalCancelResult;
+use internal::InFlightGuard;
+use internal::PublicLifetime;
+use internal::ServiceRunner;
+use internal::ShutdownOutcome;
+use internal::ShutdownProgress;
+use internal::TypedServiceCore;
+pub(super) use typed_service_options::TypedServiceOptions;
 
 /// Typed task submit, dispatch, execution, and cancellation facade.
+/// A value is created by [`TypedTaskExecutionServiceBuilder::build`] after the
+/// caller supplies the store, codec registry, and ID generator to the builder.
+/// Dropping the final handle requests graceful shutdown of the service.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::service::TaskExecutionServiceBuilder;
+/// use qubit_task::service::TaskServiceError;
+///
+/// async fn start_service(
+///     builder: TaskExecutionServiceBuilder,
+/// ) -> Result<(), TaskServiceError> {
+///     let service = builder.build().await?;
+///     service.shutdown().await
+/// }
+/// ```
+#[must_use = "keep the service handle alive until shutdown is requested"]
 #[derive(Clone)]
 pub struct TypedTaskExecutionService {
+    /// Shared state used by this public handle and its background workers.
     core: Arc<TypedServiceCore>,
+    /// Requests graceful shutdown when the final public handle is dropped.
     _lifetime: Arc<PublicLifetime>,
 }
 
 impl TypedTaskExecutionService {
+    /// Creates the service after acquiring store ownership and recovering
+    /// unfinished tasks, then starts its background workers.
+    ///
+    /// # Parameters
+    ///
+    /// * `store` - Persistence implementation whose ownership is acquired.
+    /// * `codecs` - Payload codec registry shared with task handlers.
+    /// * `id_generator` - Generator used for newly accepted task identities.
+    /// * `engine` - Resource reservation engine used by task dispatch.
+    /// * `handlers` - Registry of handlers available to execute tasks.
+    /// * `options` - Scheduler, retry, and optional notification settings.
+    ///
+    /// # Returns
+    ///
+    /// A service with its scheduler and shutdown supervisor running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if store ownership, recovery, or publisher setup fails.
     pub(super) async fn new(
         store: Arc<dyn TaskStore>,
         codecs: Arc<ValueBytesCodecRegistry>,
@@ -339,14 +250,23 @@ impl TypedTaskExecutionService {
         Ok(service)
     }
 
-    /// Creates an internal handle that never retains the public lifetime token.
-    fn runner(&self) -> ServiceRunner {
-        ServiceRunner {
-            core: Arc::clone(&self.core),
-        }
-    }
-
     /// Encodes, assigns an ID, durably accepts, and dispatches a typed request.
+    ///
+    /// # Parameters
+    ///
+    /// * `request` - Typed request containing routing, payload, and scheduling
+    ///   metadata.
+    ///
+    /// # Returns
+    ///
+    /// The accepted task summary, including its assigned identity and initial
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if admission has stopped, request encoding or ID
+    /// generation fails, or the store rejects the request or cannot accept
+    /// it.
     pub async fn submit<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
@@ -372,6 +292,19 @@ impl TypedTaskExecutionService {
     }
 
     /// Returns a typed task's current persisted summary.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the task to read.
+    ///
+    /// # Returns
+    ///
+    /// `Some` contains the persisted summary; `None` means no current record is
+    /// retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot read the task.
     pub async fn get(&self, id: TaskId) -> Result<Option<TaskSummary>, TaskServiceError> {
         Ok(self.core.store.get_encoded_task(id).await?.map(|task| task.summary))
     }
@@ -382,6 +315,15 @@ impl TypedTaskExecutionService {
     /// A pruned SQLite task can still return its terminal checkpoint. `None`
     /// means the task was never accepted or the store no longer retains its
     /// state.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the task to inspect.
+    ///
+    /// # Returns
+    ///
+    /// The retained authoritative checkpoint, or `None` when no checkpoint
+    /// remains.
     ///
     /// # Errors
     ///
@@ -395,12 +337,29 @@ impl TypedTaskExecutionService {
     }
 
     /// Queries typed task summaries using category filters and numeric cursors.
+    ///
+    /// # Parameters
+    ///
+    /// * `query` - Filters, cursor, and page bound for the history query.
+    ///
+    /// # Returns
+    ///
+    /// A page of matching summaries and an optional continuation cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot execute the query.
     pub async fn query(&self, query: TaskQuery) -> Result<TaskPage, TaskServiceError> {
         Ok(self.core.store.list_encoded(query).await?)
     }
 
     /// Returns process-local notification outcomes. Durable backlog remains in
     /// SQLite and is not bounded by this snapshot.
+    ///
+    /// # Returns
+    ///
+    /// A snapshot of this process's notification counters, or zeroed counters
+    /// when no publisher is configured.
     #[cfg(feature = "event-bus")]
     pub fn notification_stats(&self) -> NotificationStats {
         self.core
@@ -416,6 +375,11 @@ impl TypedTaskExecutionService {
     /// replaced. Quarantining intentionally leaves a notification gap; the
     /// archived event is not replayed automatically, so consumers should use
     /// task state versions to detect gaps and query authoritative task state.
+    ///
+    /// # Returns
+    ///
+    /// `Some` contains the current failed outbox head's diagnostic snapshot;
+    /// `None` means there is no publisher or no failing head.
     #[cfg(feature = "event-bus")]
     pub fn notification_failure(&self) -> Option<NotificationFailure> {
         self.core.publisher.as_ref().and_then(TaskEventPublisher::failure)
@@ -430,6 +394,20 @@ impl TypedTaskExecutionService {
     /// command, the method returns `StoreError::Conflict` and leaves the event
     /// untouched. A command accepted before shutdown completes before store
     /// ownership is released, even if this future's caller is cancelled.
+    ///
+    /// # Parameters
+    ///
+    /// * `expected_task_id` - Identity of the task owning the failed
+    ///   notification.
+    /// * `expected_state_version` - Revision that must still be current.
+    /// * `expected_event_id` - Identity that must still be the failed outbox
+    ///   head.
+    /// * `reason` - Operator explanation stored with the archived event.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the exact failed notification head is archived and
+    /// removed.
     ///
     /// # Errors
     ///
@@ -466,6 +444,22 @@ impl TypedTaskExecutionService {
     }
 
     /// Requeues a blocked task after its configuration or handler is repaired.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identity of the blocked task.
+    /// * `expected_state_version` - Revision observed by the caller, preventing
+    ///   stale updates.
+    ///
+    /// # Returns
+    ///
+    /// The task summary after it has been queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shutdown has begun, the task is missing or changed,
+    /// it is not blocked, cancellation remains pending, or the store fails
+    /// the transition.
     pub async fn resume_blocked(
         &self,
         id: TaskId,
@@ -515,6 +509,15 @@ impl TypedTaskExecutionService {
     /// exclusive store ownership. Queued tasks remain recoverable for the next
     /// service owner. Concurrent waiters share one release attempt's result;
     /// a later call retries an owner release that returned a store error.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when shutdown releases ownership successfully.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a store fault, owner release, or notification
+    /// close fails.
     pub async fn shutdown(&self) -> Result<(), TaskServiceError> {
         self.core.request_shutdown();
         let (attempt, retry) = {
@@ -541,6 +544,20 @@ impl TypedTaskExecutionService {
     }
 
     /// Requests cancellation, persisting intent before signalling a handler.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identity of the task whose cancellation is requested.
+    ///
+    /// # Returns
+    ///
+    /// The outcome describing whether cancellation was requested, unsupported,
+    /// or already complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shutdown has begun, the task is missing, storage
+    /// fails, or an external cancellation hook fails.
     pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let _admission = self.core.admission.read().await;
         self.runner().check_fault()?;
@@ -585,31 +602,9 @@ impl TypedTaskExecutionService {
         }
         if descriptor.cancellation_mode == CancellationMode::ExternalHook {
             let key = (id, summary.attempt);
-            let (flight, start) = {
-                let mut entries = self.core.external_cancellations.lock();
-                match entries.get(&key) {
-                    Some(ExternalCancelEntry::InFlight(flight)) => (Arc::clone(flight), false),
-                    Some(ExternalCancelEntry::Succeeded) => {
-                        return Ok(CancelOutcome::CancellationRequested);
-                    }
-                    None => {
-                        let (result, _) = watch::channel(None);
-                        let flight = Arc::new(ExternalCancelFlight { result });
-                        entries.insert(key, ExternalCancelEntry::InFlight(Arc::clone(&flight)));
-                        (flight, true)
-                    }
-                }
+            let Some(flight) = self.start_or_join_external_cancel(key, &summary.kind_id) else {
+                return Ok(CancelOutcome::CancellationRequested);
             };
-            if start {
-                self.core.in_flight.fetch_add(1, Ordering::AcqRel);
-                let core = Arc::clone(&self.core);
-                let kind_id = summary.kind_id.clone();
-                let task_flight = Arc::clone(&flight);
-                tokio::spawn(async move {
-                    let _in_flight = InFlightGuard(Arc::clone(&core));
-                    ServiceRunner::run_external_cancel(core, key, kind_id, task_flight).await;
-                });
-            }
             drop(_admission);
             return Self::wait_external_cancel(id, summary.attempt, flight).await;
         }
@@ -644,6 +639,44 @@ impl TypedTaskExecutionService {
         }
     }
 
+    /// Shares an existing external cancellation hook or starts the task
+    /// attempt's hook.
+    fn start_or_join_external_cancel(&self, key: (TaskId, u32), kind_id: &str) -> Option<Arc<ExternalCancelFlight>> {
+        let (flight, start) = {
+            let mut entries = self.core.external_cancellations.lock();
+            match entries.get(&key) {
+                Some(ExternalCancelEntry::InFlight(flight)) => (Arc::clone(flight), false),
+                Some(ExternalCancelEntry::Succeeded) => return None,
+                None => {
+                    let (result, _) = watch::channel(None);
+                    let flight = Arc::new(ExternalCancelFlight { result });
+                    entries.insert(key, ExternalCancelEntry::InFlight(Arc::clone(&flight)));
+                    (flight, true)
+                }
+            }
+        };
+        if start {
+            self.core.in_flight.fetch_add(1, Ordering::AcqRel);
+            let core = Arc::clone(&self.core);
+            let kind_id = kind_id.to_owned();
+            let task_flight = Arc::clone(&flight);
+            tokio::spawn(async move {
+                let _in_flight = InFlightGuard(Arc::clone(&core));
+                ServiceRunner::run_external_cancel(core, key, kind_id, task_flight).await;
+            });
+        }
+        Some(flight)
+    }
+
+    /// Creates an internal handle that never retains the public lifetime token.
+    #[inline]
+    fn runner(&self) -> ServiceRunner {
+        ServiceRunner {
+            core: Arc::clone(&self.core),
+        }
+    }
+
+    /// Waits for the shared external hook and maps its outcome for this caller.
     async fn wait_external_cancel(
         id: TaskId,
         attempt: u32,
@@ -668,835 +701,6 @@ impl TypedTaskExecutionService {
                     "external cancellation task ended without a result".into(),
                 ));
             }
-        }
-    }
-}
-
-impl ServiceRunner {
-    /// Extracts a readable message from a panic payload, using a stable
-    /// fallback for payloads with an unsupported type.
-    fn external_cancel_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
-        panic.downcast_ref::<&str>().map_or_else(
-            || {
-                panic
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .unwrap_or_else(|| "external cancellation hook panicked".into())
-            },
-            |message| (*message).to_owned(),
-        )
-    }
-
-    /// Runs the registered external cancellation hook and reconciles its result
-    /// with the persisted task state for all concurrent cancellation waiters.
-    async fn run_external_cancel(
-        core: Arc<TypedServiceCore>,
-        key: (TaskId, u32),
-        kind_id: String,
-        flight: Arc<ExternalCancelFlight>,
-    ) {
-        let (id, attempt) = key;
-        let runner = Self {
-            core: Arc::clone(&core),
-        };
-        let result = async {
-            loop {
-                let task = match core.store.get_encoded_task(id).await {
-                    Ok(Some(task)) => task,
-                    Ok(None) => {
-                        return ExternalCancelResult::ServiceFailed(
-                            "task disappeared during external cancellation".into(),
-                        );
-                    }
-                    Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
-                };
-                let summary = task.summary;
-                if summary.state.is_terminal()
-                    || summary.attempt != attempt
-                    || !matches!(summary.state, TaskState::Running)
-                {
-                    return ExternalCancelResult::AlreadyTerminal;
-                }
-                if !summary.cancel_requested || summary.cancel_error.is_some() {
-                    match core
-                        .store
-                        .transition_encoded(TransitionCommand {
-                            id,
-                            expected_state_version: summary.state_version,
-                            expected_attempt: attempt,
-                            retry_not_before_ms: None,
-                            state: TaskState::Running,
-                            cancel_requested: true,
-                            cancel_error: None,
-                            finished_at_ms: None,
-                            output: None,
-                        })
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(crate::store::StoreError::Conflict) => continue,
-                        Err(error) => {
-                            return ExternalCancelResult::ServiceFailed(error.to_string());
-                        }
-                    }
-                }
-                break;
-            }
-            let hook = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                core.handlers.cancel_externally(&kind_id, id, attempt)
-            })) {
-                Ok(Some(hook)) => hook,
-                Ok(None) => {
-                    return ExternalCancelResult::ServiceFailed("external cancellation hook is unavailable".into());
-                }
-                Err(panic) => {
-                    let message = Self::external_cancel_panic_message(panic);
-                    return Self::record_external_cancel_failure(&core, id, attempt, message).await;
-                }
-            };
-            match AssertUnwindSafe(hook).catch_unwind().await {
-                Ok(Ok(())) => loop {
-                    let task = match core.store.get_encoded_task(id).await {
-                        Ok(Some(task)) => task,
-                        Ok(None) => {
-                            return ExternalCancelResult::ServiceFailed(
-                                "task disappeared after external cancellation".into(),
-                            );
-                        }
-                        Err(error) => {
-                            return ExternalCancelResult::ServiceFailed(error.to_string());
-                        }
-                    };
-                    let summary = task.summary;
-                    if summary.state.is_terminal()
-                        || summary.attempt != attempt
-                        || !matches!(summary.state, TaskState::Running)
-                    {
-                        return ExternalCancelResult::AlreadyTerminal;
-                    }
-                    if summary.cancel_error.is_none() {
-                        return ExternalCancelResult::Success;
-                    }
-                    match core
-                        .store
-                        .transition_encoded(TransitionCommand {
-                            id,
-                            expected_state_version: summary.state_version,
-                            expected_attempt: attempt,
-                            retry_not_before_ms: None,
-                            state: TaskState::Running,
-                            cancel_requested: true,
-                            cancel_error: None,
-                            finished_at_ms: None,
-                            output: None,
-                        })
-                        .await
-                    {
-                        Ok(_) => return ExternalCancelResult::Success,
-                        Err(crate::store::StoreError::Conflict) => continue,
-                        Err(error) => {
-                            return ExternalCancelResult::ServiceFailed(error.to_string());
-                        }
-                    }
-                },
-                Ok(Err(error)) => Self::record_external_cancel_failure(&core, id, attempt, error.message).await,
-                Err(panic) => {
-                    let message = Self::external_cancel_panic_message(panic);
-                    Self::record_external_cancel_failure(&core, id, attempt, message).await
-                }
-            }
-        }
-        .await;
-        match &result {
-            ExternalCancelResult::Success => {
-                core.external_cancellations
-                    .lock()
-                    .insert(key, ExternalCancelEntry::Succeeded);
-            }
-            _ => {
-                core.external_cancellations.lock().remove(&key);
-            }
-        }
-        if let ExternalCancelResult::ServiceFailed(message) = &result {
-            runner.latch_fault(message.clone());
-        }
-        flight.result.send_replace(Some(result));
-        core.scheduler_changed.notify_one();
-    }
-
-    /// Persists a cancellation hook failure while retrying revision conflicts.
-    ///
-    /// Returns `AlreadyTerminal` if the task attempt ended before the failure
-    /// could be recorded, and `ServiceFailed` for store errors.
-    async fn record_external_cancel_failure(
-        core: &Arc<TypedServiceCore>,
-        id: TaskId,
-        attempt: u32,
-        message: String,
-    ) -> ExternalCancelResult {
-        loop {
-            let task = match core.store.get_encoded_task(id).await {
-                Ok(Some(task)) => task,
-                Ok(None) => {
-                    return ExternalCancelResult::ServiceFailed(
-                        "task disappeared while recording cancellation failure".into(),
-                    );
-                }
-                Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
-            };
-            let summary = task.summary;
-            if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running)
-            {
-                return ExternalCancelResult::AlreadyTerminal;
-            }
-            match core
-                .store
-                .transition_encoded(TransitionCommand {
-                    id,
-                    expected_state_version: summary.state_version,
-                    expected_attempt: attempt,
-                    retry_not_before_ms: None,
-                    state: TaskState::Running,
-                    cancel_requested: true,
-                    cancel_error: Some(message.clone()),
-                    finished_at_ms: None,
-                    output: None,
-                })
-                .await
-            {
-                Ok(_) => return ExternalCancelResult::HookFailed(message),
-                Err(crate::store::StoreError::Conflict) => continue,
-                Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
-            }
-        }
-    }
-
-    /// Waits for a stop request, drains work, and publishes one terminal
-    /// result.
-    async fn shutdown_supervisor(&self) {
-        loop {
-            let notified = self.core.shutdown_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.core.shutting_down.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
-        let admission = self.core.admission.write().await;
-        self.core.scheduler_changed.notify_waiters();
-        drop(admission);
-        loop {
-            let notified = self.core.scheduler_stopped_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.core.scheduler_stopped.load(Ordering::Acquire) {
-                break;
-            }
-            notified.await;
-        }
-        loop {
-            let notified = self.core.in_flight_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.core.in_flight.load(Ordering::Acquire) == 0 {
-                break;
-            }
-            notified.await;
-        }
-        #[cfg(feature = "event-bus")]
-        if let Some(publisher) = &self.core.publisher
-            && let Err(error) = publisher.close().await
-        {
-            *self.core.notification_close_error.lock() = Some(error.to_string());
-        }
-        loop {
-            let release = {
-                let mut guard = self.core.owner_guard.lock().await;
-                match guard.as_mut() {
-                    Some(owner_guard) => owner_guard.release().await,
-                    None => Err(crate::store::StoreError::Failure(
-                        "started service has no owner release guard".into(),
-                    )),
-                }
-            };
-            let release_error = release.err().map(|error| error.to_string());
-            let retryable = release_error.is_some();
-            if !retryable {
-                self.core.owner_released.store(true, Ordering::Release);
-            }
-            let outcome = if let Some(fault) = self.core.fault.lock().clone() {
-                ShutdownOutcome::StoreUnavailable(fault)
-            } else if let Some(error) = release_error {
-                ShutdownOutcome::StoreUnavailable(error)
-            } else {
-                #[cfg(feature = "event-bus")]
-                {
-                    if let Some(error) = self.core.notification_close_error.lock().clone() {
-                        ShutdownOutcome::NotificationClose(error)
-                    } else {
-                        ShutdownOutcome::Complete
-                    }
-                }
-                #[cfg(not(feature = "event-bus"))]
-                {
-                    ShutdownOutcome::Complete
-                }
-            };
-            {
-                let mut progress = self.core.shutdown_progress.lock();
-                progress.results.push(outcome);
-                progress.retryable_release = retryable;
-                progress.retry_requested = false;
-            }
-            self.core.shutdown_completed.notify_waiters();
-            if !retryable {
-                return;
-            }
-            loop {
-                let notified = self.core.shutdown_changed.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if self.core.public_gone.load(Ordering::Acquire) {
-                    let armed_guard = self.core.owner_guard.lock().await.take();
-                    drop(armed_guard);
-                    return;
-                }
-                if self.core.shutdown_progress.lock().retry_requested {
-                    break;
-                }
-                notified.await;
-            }
-        }
-    }
-
-    /// Wakes the optional durable event publisher after a store write.
-    #[cfg(feature = "event-bus")]
-    fn notify_notifications(&self) {
-        if let Some(publisher) = &self.core.publisher {
-            publisher.notify();
-        }
-    }
-
-    /// Converts a store write result and wakes the optional publisher.
-    fn store_write_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
-        let value = self.store_result(result)?;
-        #[cfg(feature = "event-bus")]
-        self.notify_notifications();
-        Ok(value)
-    }
-
-    /// Records the first scheduler/store fault and wakes every shutdown stage.
-    fn latch_fault(&self, error: impl std::fmt::Display) {
-        let mut fault = self.core.fault.lock();
-        if fault.is_none() {
-            *fault = Some(error.to_string());
-        }
-        drop(fault);
-        self.core.request_shutdown();
-        self.core.in_flight_changed.notify_waiters();
-    }
-
-    /// Returns the first latched store or scheduler fault, if any.
-    fn check_fault(&self) -> Result<(), TaskServiceError> {
-        self.core
-            .fault
-            .lock()
-            .clone()
-            .map_or(Ok(()), |fault| Err(TaskServiceError::StoreUnavailable(fault)))
-    }
-
-    /// Latches operational store failures while preserving conflict errors.
-    fn store_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
-        result.map_err(|error| {
-            if !matches!(
-                error,
-                crate::store::StoreError::Conflict | crate::store::StoreError::NotFound
-            ) {
-                self.latch_fault(&error);
-            }
-            TaskServiceError::Store(error)
-        })
-    }
-
-    /// Maps known rejection errors from a single submit store result to
-    /// structured service errors without changing the service state. Other
-    /// store errors retain the existing fault-latching behavior.
-    fn submission_store_result<T>(&self, result: Result<T, crate::store::StoreError>) -> Result<T, TaskServiceError> {
-        match result {
-            Err(crate::store::StoreError::CapacityExceeded {
-                requested_bytes,
-                available_bytes,
-            }) => Err(TaskServiceError::SubmissionCapacityExceeded {
-                requested_bytes,
-                available_bytes,
-            }),
-            Err(crate::store::StoreError::UnfinishedRecordLimitExceeded { limit }) => {
-                Err(TaskServiceError::UnfinishedTaskLimitExceeded { limit })
-            }
-            Err(crate::store::StoreError::IdempotencyConflict) => Err(TaskServiceError::IdempotencyConflict),
-            Err(crate::store::StoreError::DuplicateTask) => Err(TaskServiceError::DuplicateTaskId),
-            other => self.store_result(other),
-        }
-    }
-
-    /// Restores tasks left queued or running by the previous service owner.
-    ///
-    /// Running tasks are returned to the queue unless cancellation was pending,
-    /// in which case they are blocked to preserve that cancellation request.
-    async fn recover_unfinished(&self) -> Result<(), TaskServiceError> {
-        let mut after = None;
-        loop {
-            let page = self
-                .core
-                .store
-                .list_encoded(crate::model::typed::TaskQuery {
-                    states: vec![
-                        crate::model::TaskStateKind::Queued,
-                        crate::model::TaskStateKind::Running,
-                    ],
-                    category: None,
-                    correlation_key: None,
-                    after,
-                    limit: 128,
-                })
-                .await?;
-            for summary in page.records {
-                if matches!(summary.state, TaskState::Running) {
-                    let (state, keep_cancel) = if summary.cancel_requested {
-                        (
-                            TaskState::Blocked {
-                                reason: "service stopped while cancellation was pending".into(),
-                            },
-                            true,
-                        )
-                    } else {
-                        (TaskState::Queued, false)
-                    };
-                    let _recovered = self.store_write_result(
-                        self.core
-                            .store
-                            .transition_encoded(TransitionCommand {
-                                id: summary.id,
-                                expected_state_version: summary.state_version,
-                                expected_attempt: summary.attempt,
-                                retry_not_before_ms: None,
-                                state,
-                                cancel_requested: keep_cancel,
-                                cancel_error: summary.cancel_error.clone(),
-                                finished_at_ms: None,
-                                output: None,
-                            })
-                            .await,
-                    )?;
-                }
-            }
-            after = page.next;
-            if after.is_none() {
-                self.core.scheduler_changed.notify_one();
-                return Ok(());
-            }
-        }
-    }
-
-    /// Scans ready tasks, reserves resources, and starts eligible handlers
-    /// until shutdown or a latched service fault stops dispatch.
-    async fn scheduler_loop(&self) {
-        let mut fairness = ResourceFairness::default();
-        'scheduler: loop {
-            if self.core.shutting_down.load(Ordering::Acquire) || self.core.fault.lock().is_some() {
-                return;
-            }
-            let notified = self.core.scheduler_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.core.in_flight.load(Ordering::Acquire) < self.core.max_running_tasks {
-                let now = now_ms();
-                let mut after = None;
-                let mut saw_anchor = fairness.anchor.is_none();
-                let mut completed_scan = false;
-                loop {
-                    if self.core.shutting_down.load(Ordering::Acquire)
-                        || self.core.fault.lock().is_some()
-                        || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
-                    {
-                        break;
-                    }
-                    let page = match self
-                        .core
-                        .store
-                        .list_ready_queued(
-                            after,
-                            std::num::NonZeroUsize::new(self.core.scan_page_size).expect("scan size is nonzero"),
-                            now,
-                        )
-                        .await
-                    {
-                        Ok(page) => page,
-                        Err(error) => {
-                            self.latch_fault(error);
-                            return;
-                        }
-                    };
-                    for summary in &page.records {
-                        if self.core.shutting_down.load(Ordering::Acquire)
-                            || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
-                        {
-                            break;
-                        }
-                        if fairness.anchor == Some((summary.id, summary.accepted_at_ms)) {
-                            saw_anchor = true;
-                        }
-                        let Some(descriptor) = self.core.handlers.descriptor(&summary.kind_id) else {
-                            self.mark_blocked(summary, "handler is not registered").await;
-                            continue;
-                        };
-                        if summary.payload_type_id != descriptor.payload_type_id.as_str()
-                            || !descriptor
-                                .accepted_schema_versions
-                                .contains(&summary.payload_schema_version)
-                        {
-                            self.mark_blocked(
-                                summary,
-                                "handler does not accept the payload identity or schema version",
-                            )
-                            .await;
-                            continue;
-                        }
-                        if self.core.codecs.get(&summary.payload_codec_id).is_none() {
-                            self.mark_blocked(summary, "payload bytes codec is not registered")
-                                .await;
-                            continue;
-                        }
-                        let reservation = match self
-                            .core
-                            .engine
-                            .try_prepare_typed(summary.id, summary.resource_limit.clone())
-                        {
-                            Ok(reservation) => reservation,
-                            Err(EngineError::TemporarilyUnavailable) => {
-                                if fairness.anchor.is_none() {
-                                    fairness.anchor = Some((summary.id, summary.accepted_at_ms));
-                                    saw_anchor = true;
-                                }
-                                continue;
-                            }
-                            Err(EngineError::Unsatisfiable) => {
-                                self.mark_blocked(summary, "requested resources exceed configured capacity")
-                                    .await;
-                                continue;
-                            }
-                            Err(error) => {
-                                self.mark_blocked(summary, &error.to_string()).await;
-                                continue;
-                            }
-                        };
-                        if let Some((anchor_id, anchor_accepted_at_ms)) = fairness.anchor
-                            && fairness.bypasses >= self.core.max_resource_bypasses
-                            && (summary.accepted_at_ms, summary.id) > (anchor_accepted_at_ms, anchor_id)
-                        {
-                            drop(reservation);
-                            continue;
-                        }
-                        let admission = self.core.admission.read().await;
-                        if self.core.shutting_down.load(Ordering::Acquire) {
-                            drop(reservation);
-                            break;
-                        }
-                        let running = match self
-                            .core
-                            .store
-                            .start_encoded(crate::model::typed::StartCommand {
-                                id: summary.id,
-                                expected_state_version: summary.state_version,
-                                started_at_ms: now_ms(),
-                            })
-                            .await
-                        {
-                            Ok(running) => running,
-                            Err(crate::store::StoreError::Conflict | crate::store::StoreError::NotFound) => {
-                                drop(admission);
-                                drop(reservation);
-                                continue;
-                            }
-                            Err(error) => {
-                                drop(admission);
-                                drop(reservation);
-                                self.latch_fault(error);
-                                return;
-                            }
-                        };
-                        drop(admission);
-                        if let Some((anchor_id, anchor_accepted_at_ms)) = fairness.anchor {
-                            let key = (summary.accepted_at_ms, summary.id);
-                            let anchor_key = (anchor_accepted_at_ms, anchor_id);
-                            if key == anchor_key {
-                                fairness = ResourceFairness::default();
-                            } else if key > anchor_key {
-                                fairness.bypasses += 1;
-                            }
-                        }
-                        #[cfg(feature = "event-bus")]
-                        self.notify_notifications();
-                        self.core.in_flight.fetch_add(1, Ordering::AcqRel);
-                        let service = self.clone();
-                        let core = Arc::clone(&self.core);
-                        let id = summary.id;
-                        tokio::spawn(async move {
-                            let _in_flight = InFlightGuard(core);
-                            if AssertUnwindSafe(service.run_one(id, running, reservation))
-                                .catch_unwind()
-                                .await
-                                .is_err()
-                            {
-                                service.latch_fault(format!(
-                                    "task execution supervisor panicked for {}",
-                                    id.to_padded_decimal()
-                                ));
-                            }
-                        });
-                    }
-                    if self.core.shutting_down.load(Ordering::Acquire)
-                        || self.core.in_flight.load(Ordering::Acquire) >= self.core.max_running_tasks
-                    {
-                        break;
-                    }
-                    after = page.next;
-                    if after.is_none() {
-                        completed_scan = true;
-                        break;
-                    }
-                }
-                if completed_scan && !saw_anchor && fairness.anchor.is_some() {
-                    fairness = ResourceFairness::default();
-                    continue 'scheduler;
-                }
-            }
-            let retry_at = match self.core.store.next_retry_deadline(now_ms()).await {
-                Ok(deadline) => deadline,
-                Err(error) => {
-                    self.latch_fault(error);
-                    return;
-                }
-            };
-            if let Some(retry_at) = retry_at {
-                let wait = std::time::Duration::from_millis(retry_at.saturating_sub(now_ms()));
-                let _ = tokio::time::timeout(wait, notified).await;
-            } else {
-                notified.await;
-            }
-        }
-    }
-
-    /// Loads and executes one admitted task attempt, then persists its outcome.
-    ///
-    /// The reservation remains held for the duration of handler execution and
-    /// is released on every return path.
-    async fn run_one(&self, id: TaskId, running: TaskSummary, reservation: TypedResourceReservation) {
-        let task = match self.core.store.get_encoded_task(id).await {
-            Ok(Some(task)) => task,
-            Ok(None) => return,
-            Err(error) => {
-                self.latch_fault(error);
-                return;
-            }
-        };
-        if !matches!(task.summary.state, TaskState::Running) {
-            return;
-        }
-        let prepared = match prepare_handler(
-            &self.core.handlers,
-            &self.core.codecs,
-            &running.kind_id,
-            task.request.payload,
-        ) {
-            Ok(prepared) => prepared,
-            Err(message) => {
-                self.finish(
-                    &running,
-                    TaskState::Failed {
-                        category: "payload_decode".into(),
-                        message,
-                    },
-                    None,
-                    false,
-                )
-                .await;
-                return;
-            }
-        };
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.core
-            .cancellations
-            .lock()
-            .insert((id, running.attempt), Arc::clone(&cancelled));
-        let latest_cancel_requested = match self.core.store.get_encoded_task(id).await {
-            Ok(task) => task.is_some_and(|task| task.summary.cancel_requested),
-            Err(error) => {
-                self.latch_fault(error);
-                return;
-            }
-        };
-        if latest_cancel_requested {
-            cancelled.store(true, Ordering::Release);
-        }
-        let reporter: Arc<dyn AsyncReporter> = Arc::new(super::task_progress_reporter::TaskProgressReporter::new(
-            Arc::clone(&self.core.store),
-            id,
-            running.attempt,
-        ));
-        let context = TypedTaskContext::new(id, running.attempt, cancelled, reporter);
-        let execution = AssertUnwindSafe(prepared.run(context)).catch_unwind().await;
-        self.core.cancellations.lock().remove(&(id, running.attempt));
-        drop(reservation);
-        match execution {
-            Ok(Ok(TaskRunOutcome::Succeeded(output))) => {
-                if output.summary.len() <= MAX_TASK_OUTPUT_SUMMARY_BYTES {
-                    self.finish(&running, TaskState::Succeeded, Some(output), false).await;
-                } else {
-                    self.finish(
-                        &running,
-                        TaskState::Failed {
-                            category: "task_output_too_large".into(),
-                            message: format!(
-                                "task output summary exceeds the {MAX_TASK_OUTPUT_SUMMARY_BYTES}-byte limit"
-                            ),
-                        },
-                        None,
-                        false,
-                    )
-                    .await;
-                }
-            }
-            Ok(Ok(TaskRunOutcome::Cancelled)) => self.finish(&running, TaskState::Cancelled, None, false).await,
-            Ok(Err(error)) => {
-                let retryable = error.retryable;
-                self.finish(
-                    &running,
-                    TaskState::Failed {
-                        category: error.category,
-                        message: error.message,
-                    },
-                    None,
-                    retryable,
-                )
-                .await
-            }
-            Err(_) => {
-                self.finish(
-                    &running,
-                    TaskState::Panicked {
-                        message: "typed task handler panicked".into(),
-                    },
-                    None,
-                    false,
-                )
-                .await
-            }
-        }
-    }
-
-    /// Moves an inadmissible queued task to the blocked state using its
-    /// observed revision, latching unexpected store failures for the
-    /// service supervisor.
-    async fn mark_blocked(&self, summary: &TaskSummary, reason: &str) {
-        match self
-            .core
-            .store
-            .transition_encoded(TransitionCommand {
-                id: summary.id,
-                expected_state_version: summary.state_version,
-                expected_attempt: summary.attempt,
-                retry_not_before_ms: None,
-                state: TaskState::Blocked { reason: reason.into() },
-                cancel_requested: false,
-                cancel_error: None,
-                finished_at_ms: None,
-                output: None,
-            })
-            .await
-        {
-            Ok(_updated) => {
-                #[cfg(feature = "event-bus")]
-                self.notify_notifications();
-            }
-            Err(crate::store::StoreError::Conflict) => {
-                self.check_competing_transition(summary.id, summary.state_version).await
-            }
-            Err(error) => self.latch_fault(error),
-        }
-    }
-
-    /// Persists the final attempt state, scheduling a retry when policy
-    /// permits.
-    ///
-    /// A newer terminal transition wins; other unexpected store failures latch
-    /// a service fault rather than being silently discarded.
-    async fn finish(&self, started: &TaskSummary, state: TaskState, output: Option<TaskOutput>, retryable: bool) {
-        let latest = match self.core.store.get_encoded_task(started.id).await {
-            Ok(Some(latest)) => latest,
-            Ok(None) => {
-                self.latch_fault("task disappeared while finalizing");
-                return;
-            }
-            Err(error) => {
-                self.latch_fault(error);
-                return;
-            }
-        };
-        if latest.summary.state.is_terminal() {
-            self.core
-                .external_cancellations
-                .lock()
-                .remove(&(started.id, started.attempt));
-            return;
-        }
-        let retry = retryable && !latest.summary.cancel_requested && started.attempt < self.core.max_attempts;
-        let retry_deadline = retry.then(|| {
-            let delay = self.core.retry_policy.delay_for_attempt(started.attempt);
-            now_ms().saturating_add(delay.as_millis().min(u64::MAX as u128) as u64)
-        });
-        let final_state = if retry { TaskState::Queued } else { state };
-        match self
-            .core
-            .store
-            .transition_encoded(TransitionCommand {
-                id: started.id,
-                expected_state_version: latest.summary.state_version,
-                expected_attempt: started.attempt,
-                retry_not_before_ms: retry_deadline,
-                state: final_state,
-                cancel_requested: latest.summary.cancel_requested,
-                cancel_error: latest.summary.cancel_error,
-                finished_at_ms: Some(now_ms()),
-                output,
-            })
-            .await
-        {
-            Ok(_updated) => {
-                self.core
-                    .external_cancellations
-                    .lock()
-                    .remove(&(started.id, started.attempt));
-                #[cfg(feature = "event-bus")]
-                self.notify_notifications();
-            }
-            Err(crate::store::StoreError::Conflict) => {
-                self.check_competing_transition(started.id, latest.summary.state_version)
-                    .await
-            }
-            Err(error) => self.latch_fault(error),
-        }
-    }
-
-    /// Confirms that a compare-and-set conflict corresponds to a newer task
-    /// revision; otherwise records the inconsistency as a service fault.
-    async fn check_competing_transition(&self, id: TaskId, expected_version: u64) {
-        match self.core.store.get_encoded_task(id).await {
-            Ok(Some(task)) if task.summary.state_version != expected_version => {}
-            Ok(Some(_)) => self.latch_fault("task lifecycle compare-and-set conflicted without a competing revision"),
-            Ok(None) => self.latch_fault("task disappeared after lifecycle compare-and-set conflict"),
-            Err(error) => self.latch_fault(error),
         }
     }
 }

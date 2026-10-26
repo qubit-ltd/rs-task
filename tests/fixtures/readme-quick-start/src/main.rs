@@ -70,7 +70,8 @@ impl ValueDecoder<[u8]> for JsonCodec {
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("example.echo.json"),
     &JSON_DESCRIPTOR,
@@ -80,7 +81,11 @@ static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
 struct EchoHandler;
 
 impl TaskHandler<EchoPayload> for EchoHandler {
-    fn run<'a>(&'a self, payload: EchoPayload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        payload: EchoPayload,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             println!("{}", payload.message);
             Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))

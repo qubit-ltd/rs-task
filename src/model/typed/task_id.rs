@@ -6,6 +6,8 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::fmt::Display;
+use std::fmt::Formatter;
+use std::fmt::Result;
 
 use qubit_id::Id;
 use serde::Deserialize;
@@ -23,12 +25,23 @@ use serde::Serialize;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TaskId(Id);
+pub struct TaskId(
+    /// Generated identifier associated with this task.
+    Id,
+);
 
 impl TaskId {
     /// Associates a generated identifier with the task identity type.
     ///
     /// The identifier is retained unchanged.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Generated identifier to associate with a task.
+    ///
+    /// # Returns
+    ///
+    /// A task identity containing `id`.
     #[must_use]
     #[inline]
     pub const fn from_id(id: Id) -> Self {
@@ -36,6 +49,10 @@ impl TaskId {
     }
 
     /// Consumes this wrapper and returns the unchanged generated identifier.
+    ///
+    /// # Returns
+    ///
+    /// The generated identifier stored in this task identity.
     #[inline]
     pub const fn into_id(self) -> Id {
         self.0
@@ -45,6 +62,11 @@ impl TaskId {
     ///
     /// The resulting string is suitable for lexicographic ordering in text
     /// stores.
+    ///
+    /// # Returns
+    ///
+    /// The identifier formatted as exactly 20 decimal digits, with leading
+    /// zeroes when needed.
     #[must_use]
     #[inline]
     pub fn to_padded_decimal(self) -> String {
@@ -55,7 +77,19 @@ impl TaskId {
 impl Display for TaskId {
     /// Formats the wrapped identifier using its standard display
     /// representation.
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    ///
+    /// # Parameters
+    ///
+    /// * `formatter` - Destination formatter receiving the decimal digits.
+    ///
+    /// # Returns
+    ///
+    /// Success when the formatter accepts all decimal digits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the formatter's error if writing the decimal digits fails.
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> Result {
         self.0.fmt(formatter)
     }
 }

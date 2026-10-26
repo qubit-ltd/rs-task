@@ -6,6 +6,9 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 mod memory_tests;
+
 #[cfg(feature = "sqlite")]
 mod sqlite_tests;
-mod task_store_defaults_tests;
+
+#[cfg(feature = "sqlite")]
+mod sqlite_identity_tests;

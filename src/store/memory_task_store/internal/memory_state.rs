@@ -33,6 +33,12 @@ pub(in crate::store::memory_task_store) struct MemoryState {
 
 impl MemoryState {
     /// Evicts the oldest typed terminal task when payload capacity is needed.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the oldest ID in the eviction order had a retained task that
+    /// was removed, or `false` if the order is empty or that ID was not
+    /// retained.
     pub(in crate::store::memory_task_store) fn evict_oldest_encoded_terminal(&mut self) -> bool {
         match self.encoded_terminal_order.front().copied() {
             Some(id) => self.remove_encoded_task(id).is_some(),
@@ -40,7 +46,23 @@ impl MemoryState {
         }
     }
 
-    /// Removes an encoded record and updates shared retention accounting.
+    /// Removes an encoded record and updates the indexes and retention counts
+    /// that refer to it.
+    ///
+    /// The record is removed before its payload-byte count is subtracted. A
+    /// non-terminal record also decrements `unfinished_records`; terminal
+    /// records leave that count unchanged. If the request has an idempotency
+    /// key, its entry is removed from `encoded_idempotency`, and the task ID is
+    /// removed from `encoded_terminal_order`.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - ID of the encoded task to remove.
+    ///
+    /// # Returns
+    ///
+    /// The removed task, or `None` if no task with `id` was retained. When no
+    /// task is retained, none of the indexes or accounting fields are changed.
     pub(in crate::store::memory_task_store) fn remove_encoded_task(&mut self, id: EncodedTaskId) -> Option<StoredTask> {
         let task = self.encoded_tasks.remove(&id)?;
         self.retained_payload_bytes -= task.request.payload.bytes.len();

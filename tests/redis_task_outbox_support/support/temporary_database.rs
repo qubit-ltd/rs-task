@@ -29,6 +29,8 @@ impl TemporaryDatabase {
     }
 
     /// Returns the path retained until this owning guard is dropped.
+    #[must_use]
+    #[inline]
     pub fn path(&self) -> &Path {
         &self.path
     }

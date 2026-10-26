@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -16,6 +17,7 @@ use tokio::sync::Semaphore;
 
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
+use crate::model::TaskStateCheckpoint;
 use crate::model::typed::AcceptOutcome;
 use crate::model::typed::ProgressCommand;
 use crate::model::typed::StartCommand;
@@ -80,7 +82,7 @@ impl TaskStore for GatedReleaseStore {
     fn get_state_checkpoint<'a>(
         &'a self,
         id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<crate::model::TaskStateCheckpoint>, StoreError>> {
+    ) -> TaskFuture<'a, Result<Option<TaskStateCheckpoint>, StoreError>> {
         self.inner.get_state_checkpoint(id)
     }
     fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {

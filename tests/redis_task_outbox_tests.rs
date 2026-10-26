@@ -10,6 +10,7 @@
 #![cfg(all(feature = "sqlite", feature = "event-bus"))]
 
 mod redis_task_outbox_support;
+
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::Path;
@@ -160,8 +161,12 @@ impl DurableProjection {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let mut statement = connection
-            .prepare("SELECT state_version FROM projection_effects WHERE task_id = ?1 ORDER BY state_version")?;
+        let mut statement = connection.prepare(
+            "SELECT state_version
+                 FROM projection_effects
+                 WHERE task_id = ?1
+                 ORDER BY state_version",
+        )?;
         let versions = statement
             .query_map([&id], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -720,6 +725,7 @@ async fn test_process_exit_after_publish_before_delete_recovers_outbox() -> Test
 }
 
 /// Builds a synthetic notification for the projection edge cases.
+#[must_use]
 fn projection_event(id: TaskId, version: u64, state: TaskState) -> TaskEvent {
     TaskEvent {
         schema_version: 1,

@@ -7,6 +7,7 @@
 // =============================================================================
 //! Versioned task handler contracts and registry.
 
+mod task_handler_registry;
 mod task_run_outcome;
 pub(crate) mod typed;
 

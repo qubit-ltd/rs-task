@@ -10,10 +10,19 @@
 //! execution.
 #![cfg(feature = "sqlite")]
 
+use std::collections::BTreeSet;
+use std::env::consts::EXE_SUFFIX;
+use std::env::temp_dir;
 use std::fs::OpenOptions;
 use std::fs::Permissions;
+use std::fs::create_dir;
+use std::fs::metadata;
+use std::fs::read;
+use std::fs::remove_dir_all;
+use std::fs::rename;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::ErrorKind;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -33,6 +42,8 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
@@ -58,13 +69,19 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 use serde::Deserialize;
+use serde_json::Error as JsonError;
 use serde_json::Value;
+use serde_json::from_slice;
 use serde_json::from_str;
 use serde_json::from_value;
+use serde_json::json;
+use serde_json::to_vec;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::task::spawn_blocking;
+use tokio::task::yield_now;
 use tokio::test as tokio_test;
+use tokio::time::sleep;
 use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -83,21 +100,21 @@ static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(10_000);
 #[derive(Default)]
 struct JsonValueCodec;
 
-impl qubit_codec::ValueEncoder<CrashPayload> for JsonValueCodec {
+impl ValueEncoder<CrashPayload> for JsonValueCodec {
     type Output = Vec<u8>;
-    type Error = serde_json::Error;
+    type Error = JsonError;
 
     fn encode(&mut self, value: &CrashPayload) -> Result<Self::Output, Self::Error> {
-        serde_json::to_vec(&value.0)
+        to_vec(&value.0)
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
+impl ValueDecoder<[u8]> for JsonValueCodec {
     type Output = CrashPayload;
-    type Error = serde_json::Error;
+    type Error = JsonError;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
-        serde_json::from_slice(bytes).map(CrashPayload)
+        from_slice(bytes).map(CrashPayload)
     }
 }
 
@@ -157,12 +174,10 @@ fn build_worker() -> WorkerInstance {
         );
         let executable = target
             .join("debug")
-            .join(format!("rs-task-crash-worker-fixture{}", std::env::consts::EXE_SUFFIX));
+            .join(format!("rs-task-crash-worker-fixture{EXE_SUFFIX}"));
         let fixture = WorkerFixture {
-            bytes: std::fs::read(&executable).expect("compiled worker bytes are retained"),
-            permissions: std::fs::metadata(&executable)
-                .expect("worker permissions read")
-                .permissions(),
+            bytes: read(&executable).expect("compiled worker bytes are retained"),
+            permissions: metadata(&executable).expect("worker permissions read").permissions(),
         };
         drop(workspace);
         assert!(
@@ -173,8 +188,8 @@ fn build_worker() -> WorkerInstance {
     });
 
     let workspace = Database::new();
-    let path = workspace.0.join(format!("worker{}", std::env::consts::EXE_SUFFIX));
-    let temporary_path = workspace.0.join(format!("worker.tmp{}", std::env::consts::EXE_SUFFIX));
+    let path = workspace.0.join(format!("worker{EXE_SUFFIX}"));
+    let temporary_path = workspace.0.join(format!("worker.tmp{EXE_SUFFIX}"));
     let mut temporary_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -188,7 +203,7 @@ fn build_worker() -> WorkerInstance {
         .expect("worker executable permissions are restored");
     temporary_file.sync_all().expect("worker executable is flushed");
     drop(temporary_file);
-    std::fs::rename(&temporary_path, &path).expect("complete worker executable is published atomically");
+    rename(&temporary_path, &path).expect("complete worker executable is published atomically");
     WorkerInstance {
         path,
         _workspace: workspace,
@@ -212,8 +227,8 @@ struct Database(PathBuf);
 
 impl Database {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("qubit-task-process-crash-{}", new_task_id()));
-        std::fs::create_dir(&path).expect("disposable database directory is created");
+        let path = temp_dir().join(format!("qubit-task-process-crash-{}", new_task_id()));
+        create_dir(&path).expect("disposable database directory is created");
         Self(path)
     }
 
@@ -224,7 +239,7 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = remove_dir_all(&self.0);
     }
 }
 
@@ -253,11 +268,11 @@ async fn crash_worker(database: &Database, mode: &str, id: TaskId, count: usize)
     let child = loop {
         match command.spawn() {
             Ok(child) => break child,
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+            Err(error) if error.kind() == ErrorKind::ExecutableFileBusy => {
                 if etxtbsy_attempts >= 5 {
                     panic!("crash worker remains busy at {}: {error}", worker.path.display());
                 }
-                tokio::time::sleep(Duration::from_millis(1 << etxtbsy_attempts)).await;
+                sleep(Duration::from_millis(1 << etxtbsy_attempts)).await;
                 etxtbsy_attempts += 1;
             }
             Err(error) => panic!("crash worker starts at {}: {error}", worker.path.display()),
@@ -314,7 +329,7 @@ fn request(id: TaskId) -> TaskRequest<CrashPayload> {
         "crash-worker",
         1,
         ValueCodecId::new(CODEC_ID),
-        CrashPayload(serde_json::json!({"payload": "durable"})),
+        CrashPayload(json!({"payload": "durable"})),
     );
     request.idempotency_key = Some(id.to_string());
     request
@@ -388,7 +403,7 @@ async fn wait_for_state(service: &TaskExecutionService, id: TaskId, state: TaskS
             {
                 return;
             }
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -406,7 +421,7 @@ async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> TaskSu
             if summary.state.is_terminal() {
                 return summary;
             }
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -558,7 +573,7 @@ async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
     crash_worker(&database, "queued", id, 513).await;
     let store = SqliteTaskStore::open(database.path()).expect("multi-page database reopens");
     let mut cursor = None;
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = BTreeSet::new();
     for expected in [256, 256, 1] {
         let page = store
             .list_encoded(TaskQuery {

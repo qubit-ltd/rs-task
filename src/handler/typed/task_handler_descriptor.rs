@@ -22,9 +22,9 @@ use super::handler_registration_error::HandlerRegistrationError;
 /// # Examples
 ///
 /// ```
+/// use qubit_model_id::ModelIdBuf;
 /// use qubit_task::CancellationMode;
 /// use qubit_task::TaskHandlerDescriptor;
-/// use qubit_model_id::ModelIdBuf;
 ///
 /// let descriptor = TaskHandlerDescriptor {
 ///     kind_id: "email.send".to_owned(),
@@ -53,6 +53,18 @@ impl TaskHandlerDescriptor {
     /// accepted, or a schema version is listed more than once. This check does
     /// not validate registry-wide conflicts or cancellation-hook
     /// configuration.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the descriptor fields pass local validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HandlerRegistrationError::EmptyKindId`] for a blank routing
+    /// key, [`HandlerRegistrationError::NoAcceptedSchemaVersions`] when no
+    /// schema version is accepted, or
+    /// [`HandlerRegistrationError::DuplicateSchemaVersion`] when a version is
+    /// repeated.
     pub(crate) fn validate(&self) -> Result<(), HandlerRegistrationError> {
         if self.kind_id.trim().is_empty() {
             return Err(HandlerRegistrationError::EmptyKindId);

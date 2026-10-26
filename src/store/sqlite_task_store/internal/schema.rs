@@ -185,6 +185,20 @@ pub(in crate::store::sqlite_task_store) fn initialize_next_schema(
 }
 
 /// Validates the durable terminal checkpoint columns and primary key.
+///
+/// # Parameters
+///
+/// * `transaction` - Active transaction whose checkpoint schema is inspected.
+///
+/// # Returns
+///
+/// Returns `Ok(())` when the required columns, constraints, and lack of foreign
+/// keys are valid.
+///
+/// # Errors
+///
+/// Returns an error if SQLite cannot inspect the schema or the checkpoint
+/// table has invalid columns, constraints, or foreign keys.
 fn validate_checkpoint_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let mut statement = transaction
         .prepare("PRAGMA table_info(task_terminal_checkpoints)")
@@ -251,6 +265,20 @@ fn validate_checkpoint_schema(transaction: &Transaction<'_>) -> Result<(), Store
 }
 
 /// Validates the typed event archive columns, composite primary key, and index.
+///
+/// # Parameters
+///
+/// * `transaction` - Active transaction whose quarantine schema is inspected.
+///
+/// # Returns
+///
+/// Returns `Ok(())` when the required columns and ordered archive index are
+/// valid.
+///
+/// # Errors
+///
+/// Returns an error if SQLite cannot inspect the schema or the quarantine
+/// table has invalid columns or an invalid archive index.
 fn validate_quarantine_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let mut statement = transaction
         .prepare("PRAGMA table_info(task_event_outbox_quarantine)")

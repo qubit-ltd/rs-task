@@ -13,6 +13,8 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use internal::MemoryState;
 use parking_lot::Mutex;
@@ -173,8 +175,8 @@ fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Re
 ///
 /// Current epoch milliseconds, or zero if the system clock predates the epoch.
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }
@@ -194,6 +196,22 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Atomically retains a typed request after its payload has been encoded.
+    ///
+    /// Existing idempotency keys replay the original summary when the request
+    /// matches. New requests may evict terminal records to satisfy configured
+    /// retention limits; unfinished records are never evicted here.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidRequest` for empty kind or codec identifiers or when
+    /// payload capacity is insufficient, `NotFound` for a stale idempotency
+    /// index, `IdempotencyConflict` for a key reused with different content,
+    /// `DuplicateTask` for an existing ID, or
+    /// `UnfinishedRecordLimitExceeded` when the unfinished limit is reached.
+    ///
+    /// # Returns
+    ///
+    /// Returns the accepted summary and whether this call created the task.
     fn accept_encoded<'a>(
         &'a self,
         id: EncodedTaskId,
@@ -291,11 +309,36 @@ impl super::TaskStore for MemoryTaskStore {
         })
     }
 
-    /// Loads one encoded request together with its current summary.
+    /// Loads one retained encoded request together with its current summary.
+    ///
+    /// Returns `None` when the ID was never retained or its record was evicted
+    /// or pruned. The returned value is an owned snapshot.
+    ///
+    /// # Errors
+    ///
+    /// This in-memory implementation does not produce read errors.
+    ///
+    /// # Returns
+    ///
+    /// Returns the stored request and summary, or `None` when the task is not
+    /// retained.
     fn get_encoded_task<'a>(&'a self, id: EncodedTaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().encoded_tasks.get(&id).cloned()) })
     }
 
+    /// Returns the retained task's authoritative lifecycle state and revision.
+    ///
+    /// A pruned or evicted task has no checkpoint in this volatile store.
+    /// The checkpoint is an owned snapshot that can be used to reconcile a
+    /// caller's lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// This in-memory implementation does not produce read errors.
+    ///
+    /// # Returns
+    ///
+    /// Returns the current checkpoint, or `None` when no task is retained.
     fn get_state_checkpoint<'a>(
         &'a self,
         id: EncodedTaskId,
@@ -311,6 +354,18 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Starts a queued encoded task attempt using a lifecycle revision CAS.
+    ///
+    /// Successful starts increment both the attempt and state revision, record
+    /// the supplied start time, and clear retry and progress data.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` if the task is not retained, `Conflict` unless it is
+    /// queued at the expected revision, or `Failure` if a counter overflows.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated summary after the attempt starts.
     fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();
@@ -340,6 +395,20 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Applies a typed lifecycle transition with revision and attempt checks.
+    ///
+    /// A newly terminal task enters bounded history retention; the returned
+    /// summary reflects the committed transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidRequest` for invalid diagnostics, output, or retry
+    /// deadline; `NotFound` for an unretained task; `Conflict` when its
+    /// revision, attempt, or transition no longer matches; or `Failure` if
+    /// the state revision overflows.
+    ///
+    /// # Returns
+    ///
+    /// Returns the summary after the transition is applied.
     fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             command
@@ -403,6 +472,19 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Persists a bounded progress snapshot using an attempt/version CAS.
+    ///
+    /// Progress is accepted only for a running task, its current attempt, and
+    /// a version newer than the stored snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidRequest` when the snapshot exceeds its limits,
+    /// `NotFound` when the task is not retained, or `Conflict` when the task
+    /// is not running or the attempt/version is stale.
+    ///
+    /// # Returns
+    ///
+    /// Returns the summary containing the new progress snapshot.
     fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let snapshot = TaskProgressSnapshot::from_command(command.clone())
@@ -425,6 +507,19 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Lists typed summaries using `(accepted_at_ms, numeric task ID)` order.
+    ///
+    /// Applies the query filters and returns at most the checked page size. A
+    /// cursor is included only when another matching record exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidRequest` when the query page size is invalid or cannot
+    /// be incremented safely.
+    ///
+    /// # Returns
+    ///
+    /// Returns the matching page and, when more records remain, its next
+    /// cursor.
     fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
         Box::pin(async move {
             let page_size = query.checked_page_size()?;
@@ -480,7 +575,18 @@ impl super::TaskStore for MemoryTaskStore {
     /// Lists due queued summaries after an optional cursor, in acceptance
     /// order.
     ///
+    /// Only tasks whose retry deadline is absent or no later than `now_ms`
+    /// are returned. A cursor is included when another eligible task exists.
     /// Rejects limits above the public task-query maximum.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidRequest` when `limit` exceeds 256.
+    ///
+    /// # Returns
+    ///
+    /// Returns eligible queued summaries and a cursor when another page
+    /// remains.
     fn list_ready_queued<'a>(
         &'a self,
         after: Option<TaskCursor>,
@@ -516,6 +622,16 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Finds the earliest queued retry deadline strictly later than `now_ms`.
+    ///
+    /// Returns `None` when no queued task has a future retry deadline.
+    ///
+    /// # Errors
+    ///
+    /// This in-memory implementation does not produce read errors.
+    ///
+    /// # Returns
+    ///
+    /// Returns the earliest future retry deadline, or `None` if there is none.
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
             Ok(self
@@ -531,6 +647,17 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Removes up to `max_rows` terminal records finished before the cutoff.
+    ///
+    /// Eligible records are removed in `(finished_at_ms, task ID)` order;
+    /// unfinished records and records at the cutoff are retained.
+    ///
+    /// # Errors
+    ///
+    /// This in-memory implementation does not produce pruning errors.
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of records removed.
     fn prune_terminal_before<'a>(
         &'a self,
         finished_before_ms: u64,
@@ -570,6 +697,14 @@ impl super::TaskStore for MemoryTaskStore {
     ///
     /// The epoch is local to this `MemoryTaskStore`; it does not imply restart
     /// recovery or coordination with another process.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` if an owner already holds this store.
+    ///
+    /// # Returns
+    ///
+    /// Returns the newly acquired ownership epoch.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();
@@ -588,6 +723,16 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Releases the current in-process owner when its epoch matches.
+    ///
+    /// A stale epoch cannot release ownership acquired by a later service.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` unless `epoch` is the current owner epoch.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` after ownership is released.
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();

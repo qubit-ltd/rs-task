@@ -7,9 +7,33 @@
 // =============================================================================
 use std::any::TypeId;
 
+use qubit_codec::ValueCodecExecutionError;
+use thiserror::Error;
+
 /// Error raised before business handler code runs.
+///
+/// The typed handler registry returns this error when it cannot prepare a
+/// payload for a handler. Handle it at the dispatch boundary before invoking
+/// business logic.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_task::HandlerDispatchError;
+///
+/// fn dispatch_result(result: Result<(), HandlerDispatchError>) {
+///     if let Err(error) = result {
+///         match error {
+///             HandlerDispatchError::MissingHandler(kind_id) => {
+///                 eprintln!("no handler registered for {kind_id}");
+///             }
+///             other => eprintln!("could not prepare handler payload: {other}"),
+///         }
+///     }
+/// }
+/// ```
 #[must_use]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum HandlerDispatchError {
     /// No typed handler is registered under the requested kind.
     #[error("no handler is registered for kind_id `{0}`")]
@@ -38,5 +62,5 @@ pub enum HandlerDispatchError {
     },
     /// The selected codec failed while decoding the payload bytes.
     #[error("payload bytes codec failed: {0}")]
-    Codec(#[from] qubit_codec::ValueCodecExecutionError),
+    Codec(#[from] ValueCodecExecutionError),
 }

@@ -7,7 +7,9 @@
 // =============================================================================
 //! Compiles typed task execution with automatic lifecycle publication.
 
+use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 
 use qubit_event_bus::AsyncEventBusRegistry;
 use qubit_event_bus::codec::CodecRegistry;
@@ -29,7 +31,7 @@ use typed_support::request;
 use typed_support::service_builder;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
     let codec = TaskEventJsonCodec::new()?;
     let mut event_codecs = CodecRegistry::new();
     event_codecs.register::<TaskEvent>(Arc::new(codec))?;
@@ -57,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let accepted = service
         .submit(request(serde_json::json!({"source": "guide"}), "guide-1"))
         .await?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if service
                 .get(accepted.id)
@@ -68,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             tokio::task::yield_now().await;
         }
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
     .await??;
     service.shutdown().await?;

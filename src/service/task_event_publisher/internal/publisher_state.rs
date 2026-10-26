@@ -56,6 +56,7 @@ pub(in crate::service::task_event_publisher) struct PublisherState {
 
 impl PublisherState {
     /// Creates shared state for one owned publisher worker.
+    #[must_use]
     pub(in crate::service::task_event_publisher) fn new(
         store: Arc<dyn TaskStore>,
         bus: Arc<AsyncEventBus>,
@@ -79,6 +80,12 @@ impl PublisherState {
     /// Publishes in stable store order, retaining the failed head on every
     /// error. Polling supplements notifications to cover cancellation after
     /// transaction commit.
+    ///
+    /// # Parameters
+    ///
+    /// - `controls`: Receives quarantine requests from the owning service. The
+    ///   publisher worker receives this channel from the service that starts
+    ///   its lifecycle.
     pub(in crate::service::task_event_publisher) async fn run(&self, mut controls: mpsc::Receiver<QuarantineCommand>) {
         let mut backoff = Duration::from_millis(25);
         loop {
@@ -154,9 +161,17 @@ impl PublisherState {
         }
     }
 
-    /// Waits for retry eligibility, allowing the first close signal one
-    /// immediate drain attempt. Ordinary commit notifications never bypass
-    /// failure backoff.
+    /// Waits for retry eligibility, a completed quarantine, or shutdown.
+    ///
+    /// Ordinary commit notifications do not bypass failure backoff. Returns
+    /// `true` when quarantine removed the failed head and the caller should
+    /// immediately drain the next entry.
+    ///
+    /// # Returns
+    ///
+    /// `true` if quarantine removed the failed head; otherwise, `false` after
+    /// the retry delay or shutdown signal.
+    #[must_use]
     async fn wait_after_failure(&self, delay: Duration, controls: &mut mpsc::Receiver<QuarantineCommand>) -> bool {
         let deadline = tokio::time::Instant::now() + delay;
         loop {
@@ -174,6 +189,16 @@ impl PublisherState {
         }
     }
 
+    /// Processes every quarantine request already queued by service callers.
+    ///
+    /// Returns whether at least one request successfully quarantined the
+    /// current failed outbox head.
+    ///
+    /// # Returns
+    ///
+    /// `true` if at least one queued request quarantined the head; otherwise,
+    /// `false`.
+    #[must_use]
     async fn process_queued_controls(&self, controls: &mut mpsc::Receiver<QuarantineCommand>) -> bool {
         let mut quarantined = false;
         while let Ok(command) = controls.try_recv() {
@@ -182,6 +207,15 @@ impl PublisherState {
         quarantined
     }
 
+    /// Applies a quarantine request only when it still identifies the failed
+    /// outbox head, then sends the result to the waiting caller.
+    ///
+    /// Returns whether the request successfully removed that head.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the request removed the failed head; otherwise, `false`.
+    #[must_use]
     async fn process_control(&self, command: QuarantineCommand) -> bool {
         let expected = (
             command.expected_task_id,
@@ -215,6 +249,7 @@ impl PublisherState {
         quarantined
     }
 
+    /// Clears the retained failure when the store now exposes a different head.
     fn clear_failure_if_head_changed(&self, entry: &EventOutboxEntry) {
         let mut failure = self.failure.lock();
         if failure.as_ref().is_some_and(|current| {
@@ -226,6 +261,7 @@ impl PublisherState {
         }
     }
 
+    /// Clears the retained failure when it belongs to the published entry.
     fn clear_failure_for(&self, entry: &EventOutboxEntry) {
         let mut failure = self.failure.lock();
         if failure.as_ref().is_some_and(|current| {
@@ -240,6 +276,12 @@ impl PublisherState {
     /// Publishes one immutable snapshot and removes it only after confirmed
     /// admission. Any decoding, publication, or deletion error leaves the
     /// row available for replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stored event cannot be decoded, the bus rejects
+    /// admission, or the store cannot mark the event as published. In each
+    /// case, the outbox row remains available for replay.
     async fn publish(&self, entry: &EventOutboxEntry) -> Result<(), String> {
         let event: TaskEvent = serde_json::from_str(&entry.event_json).map_err(|error| error.to_string())?;
         let event_id = EventId::new(&entry.event_id).map_err(|error| error.to_string())?;

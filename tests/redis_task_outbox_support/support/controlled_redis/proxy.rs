@@ -104,11 +104,13 @@ impl ControlledRedis {
     }
 
     /// Returns a newly allocated Redis URL for this proxy's local TCP listener.
+    #[must_use]
     pub fn url(&self) -> String {
         format!("redis://{}/", self.address)
     }
 
     /// Returns a shared handle to the reply gate controlled by this fixture.
+    #[must_use]
     pub fn gate(&self) -> Arc<ReplyGate> {
         Arc::clone(&self.gate)
     }

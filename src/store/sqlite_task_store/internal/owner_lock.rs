@@ -10,6 +10,7 @@ use std::fs::File;
 use std::path::Path;
 
 use fs2::FileExt;
+use fs2::lock_contended_error;
 
 use crate::store::StoreError;
 
@@ -65,7 +66,7 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
         || error
             .raw_os_error()
-            .is_some_and(|code| Some(code) == fs2::lock_contended_error().raw_os_error())
+            .is_some_and(|code| Some(code) == lock_contended_error().raw_os_error())
 }
 
 /// Converts an operating-system error into a store diagnostic.
@@ -83,42 +84,18 @@ fn failure(error: std::io::Error) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use super::acquire_owner_lock;
     use super::is_lock_contended;
-    use crate::store::StoreError;
-
-    fn unique_path() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "qubit-task-owner-lock-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock is after epoch")
-                .as_nanos()
-        ))
-    }
+    use super::lock_contended_error;
 
     /// Recognizes the lock-contention error code exported by `fs2`.
     #[test]
     fn test_lock_contention_recognizes_fs2_platform_error() {
-        assert!(is_lock_contended(&fs2::lock_contended_error()));
+        assert!(is_lock_contended(&lock_contended_error()));
     }
 
     /// Keeps unrelated system errors on the storage-failure path.
     #[test]
     fn test_lock_contention_rejects_unrelated_error() {
         assert!(!is_lock_contended(&std::io::Error::other("unrelated error")));
-    }
-
-    #[test]
-    fn test_owner_lock_reports_filesystem_open_failures() {
-        let missing_parent = unique_path().join("missing").join("tasks.sqlite");
-
-        assert!(matches!(
-            acquire_owner_lock(&missing_parent),
-            Err(StoreError::Failure(_))
-        ));
     }
 }

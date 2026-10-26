@@ -15,6 +15,8 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
@@ -33,50 +35,67 @@ use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::TaskFuture;
+use serde_json::Error as JsonError;
+use serde_json::Value;
+use serde_json::from_slice;
+use serde_json::to_vec;
 
+/// JSON-backed payload used by the typed task examples.
 #[derive(Clone)]
-pub struct ExamplePayload(pub serde_json::Value);
+pub struct ExamplePayload(
+    /// The JSON value serialized by [`JsonValueCodec`].
+    pub Value,
+);
 
 impl HasModelId for ExamplePayload {
     const MODEL_ID: ModelId = ModelId::new("example.TaskPayload");
 }
 
+/// JSON encoder and decoder for [`ExamplePayload`].
 #[derive(Default)]
 pub struct JsonValueCodec;
 
-impl qubit_codec::ValueEncoder<ExamplePayload> for JsonValueCodec {
+impl ValueEncoder<ExamplePayload> for JsonValueCodec {
     type Output = Vec<u8>;
-    type Error = serde_json::Error;
+    type Error = JsonError;
 
     fn encode(&mut self, value: &ExamplePayload) -> Result<Vec<u8>, Self::Error> {
-        serde_json::to_vec(&value.0)
+        to_vec(&value.0)
     }
 }
 
-impl qubit_codec::ValueDecoder<[u8]> for JsonValueCodec {
+impl ValueDecoder<[u8]> for JsonValueCodec {
     type Output = ExamplePayload;
-    type Error = serde_json::Error;
+    type Error = JsonError;
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
-        serde_json::from_slice(bytes).map(ExamplePayload)
+        from_slice(bytes).map(ExamplePayload)
     }
 }
 
+/// Describes the byte codec used to encode and decode example payloads.
 pub static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
     ValueBytesCodecDescriptor::of::<JsonValueCodec, ExamplePayload>();
+/// Registration for the example payload's JSON byte codec.
 pub static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("example.task.json"),
     &JSON_DESCRIPTOR,
     ValueCodecRegistrationSource::new("qubit-task", "doc-examples", "typed-api", 1),
 );
 
+/// Builds a registry containing the codec required by the typed examples.
+///
+/// Returns an error if the codec registration cannot be added to the registry.
 pub fn codecs() -> Result<ValueBytesCodecRegistry, Box<dyn std::error::Error>> {
     Ok(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?)
 }
 
+/// Generates deterministic, sequential IDs for repeatable examples.
 pub struct SequentialIds(AtomicU64);
 
 impl SequentialIds {
+    /// Creates a generator whose first ID has the supplied numeric value.
+    #[must_use]
     pub fn new(first: u64) -> Self {
         Self(AtomicU64::new(first))
     }
@@ -88,6 +107,10 @@ impl IdGenerator<Id, IdGenerationError> for SequentialIds {
     }
 }
 
+/// Creates a service builder wired to the in-memory example store and codecs.
+///
+/// The builder starts generated IDs at 100. Returns an error if codec setup
+/// fails.
 pub fn service_builder() -> Result<TaskExecutionServiceBuilder, Box<dyn std::error::Error>> {
     Ok(TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(256)),
@@ -96,7 +119,11 @@ pub fn service_builder() -> Result<TaskExecutionServiceBuilder, Box<dyn std::err
     ))
 }
 
-pub fn request(data: serde_json::Value, key: &str) -> TaskRequest<ExamplePayload> {
+/// Creates a typed request for the example handler with an idempotency key.
+///
+/// `data` becomes the JSON payload and `key` is used to identify retries.
+#[must_use]
+pub fn request(data: Value, key: &str) -> TaskRequest<ExamplePayload> {
     let mut request = TaskRequest::new(
         "example.process",
         1,
@@ -109,6 +136,7 @@ pub fn request(data: serde_json::Value, key: &str) -> TaskRequest<ExamplePayload
     request
 }
 
+/// Completes each example task successfully without additional work.
 pub struct ExampleHandler;
 
 impl TaskHandler<ExamplePayload> for ExampleHandler {
@@ -117,6 +145,9 @@ impl TaskHandler<ExamplePayload> for ExampleHandler {
     }
 }
 
+/// Registers [`ExampleHandler`] for the example task kind in the builder.
+///
+/// Returns an error if the handler descriptor cannot be registered.
 pub fn register_handler(builder: &mut TaskExecutionServiceBuilder) -> Result<(), Box<dyn std::error::Error>> {
     builder.handlers_mut().register::<ExamplePayload, _>(
         TaskHandlerDescriptor {

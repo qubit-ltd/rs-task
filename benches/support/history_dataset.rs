@@ -139,6 +139,7 @@ pub fn create(size: usize, directory: &Path) -> Result<HistoryDataset, Box<dyn s
 struct FixedRng(u64);
 
 impl FixedRng {
+    #[inline]
     fn next(&mut self) -> u64 {
         let mut value = self.0;
         value ^= value << 13;

@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+//! Public contract tests for typed task output storage.
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -90,7 +92,7 @@ async fn finish_with_output(
 }
 
 #[tokio::test]
-async fn typed_memory_store_persists_success_output_in_summary_and_record() {
+async fn test_typed_memory_store_persists_success_output_in_summary_and_record() {
     let store = MemoryTaskStore::new(16);
     let running = start_task(&store, task_id(1)).await;
     let expected = TaskOutput { summary: vec![4, 2] };
@@ -139,7 +141,7 @@ async fn assert_oversized_output_is_atomic(store: &dyn TaskStore, id: TaskId) {
 }
 
 #[tokio::test]
-async fn typed_memory_store_rejects_oversized_output_without_mutating_task() {
+async fn test_typed_memory_store_rejects_oversized_output_without_mutating_task() {
     let store = MemoryTaskStore::new(16);
     assert_oversized_output_is_atomic(&store, task_id(2)).await;
 }
@@ -156,7 +158,7 @@ fn remove_database(path: &Path) {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_one() {
+async fn test_typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_one() {
     let directory = env::temp_dir().join(format!("qubit-task-output-{}", Uuid::new_v4()));
     fs::create_dir(&directory).expect("test directory creates");
     let path = directory.join("tasks.sqlite");
@@ -200,12 +202,12 @@ async fn typed_sqlite_store_persists_output_and_reads_older_lifecycle_without_on
     assert_eq!(summary.output, None);
     drop(compatible);
     remove_database(&path);
-    let _ = std::fs::remove_dir(directory);
+    let _ = fs::remove_dir(directory);
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn typed_sqlite_store_rejects_oversized_output_without_mutating_task() {
+async fn test_typed_sqlite_store_rejects_oversized_output_without_mutating_task() {
     let directory = env::temp_dir().join(format!("qubit-task-output-{}", Uuid::new_v4()));
     fs::create_dir(&directory).expect("test directory creates");
     let path = directory.join("tasks.sqlite");
@@ -213,5 +215,5 @@ async fn typed_sqlite_store_rejects_oversized_output_without_mutating_task() {
     assert_oversized_output_is_atomic(&store, task_id(4)).await;
     drop(store);
     remove_database(&path);
-    let _ = std::fs::remove_dir(directory);
+    let _ = fs::remove_dir(directory);
 }

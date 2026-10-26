@@ -9,19 +9,21 @@
 
 use std::ffi::OsString;
 use std::path::Path;
+use std::path::PathBuf;
 
 use qubit_task::model::OwnerEpoch;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
+use uuid::Uuid;
 
 /// Creates a unique database path for an owner identity test.
-fn test_database_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("qubit-task-owner-{}.sqlite", uuid::Uuid::new_v4()))
+fn test_database_path() -> PathBuf {
+    std::env::temp_dir().join(format!("qubit-task-owner-{}.sqlite", Uuid::new_v4()))
 }
 
 /// Appends the owner-lock suffix without replacing the database extension.
-fn owner_lock_path(path: &Path) -> std::path::PathBuf {
+fn owner_lock_path(path: &Path) -> PathBuf {
     let mut name: OsString = path.as_os_str().to_owned();
     name.push(".owner.lock");
     name.into()
@@ -46,7 +48,7 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
     use std::os::unix::fs::symlink;
 
     let path = test_database_path();
-    let alias = path.with_file_name(format!("{}-alias.sqlite", uuid::Uuid::new_v4()));
+    let alias = path.with_file_name(format!("{}-alias.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).expect("canonical database opens");
     symlink(&path, &alias).expect("database alias is created");
 
@@ -64,7 +66,7 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
 /// Keeps distinct database files independent even when their stems match.
 #[tokio::test]
 async fn test_different_extensions_use_distinct_owner_locks() {
-    let stem = std::env::temp_dir().join(format!("qubit-task-owner-{}", uuid::Uuid::new_v4()));
+    let stem = std::env::temp_dir().join(format!("qubit-task-owner-{}", Uuid::new_v4()));
     let sqlite_path = stem.with_extension("sqlite");
     let db_path = stem.with_extension("db");
     let sqlite_store = SqliteTaskStore::open(&sqlite_path).expect("sqlite file opens");
@@ -80,7 +82,7 @@ async fn test_different_extensions_use_distinct_owner_locks() {
 #[tokio::test]
 async fn test_hard_linked_database_is_rejected() {
     let path = test_database_path();
-    let alias = path.with_file_name(format!("{}-hardlink.sqlite", uuid::Uuid::new_v4()));
+    let alias = path.with_file_name(format!("{}-hardlink.sqlite", Uuid::new_v4()));
     drop(SqliteTaskStore::open(&path).expect("database is initialized"));
     std::fs::hard_link(&path, &alias).expect("database hard link is created");
 
@@ -103,7 +105,7 @@ async fn test_symlink_alias_uses_the_same_owner_lock() {
     use std::os::windows::fs::symlink_file;
 
     let path = test_database_path();
-    let alias = path.with_file_name(format!("{}-alias.sqlite", uuid::Uuid::new_v4()));
+    let alias = path.with_file_name(format!("{}-alias.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).expect("canonical database opens");
     symlink_file(&path, &alias).expect("database alias is created");
 

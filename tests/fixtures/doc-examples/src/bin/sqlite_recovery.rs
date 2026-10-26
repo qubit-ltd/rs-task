@@ -10,6 +10,12 @@
 #[path = "../typed_support.rs"]
 mod typed_support;
 
+use std::env::temp_dir;
+use std::error::Error;
+use std::fs::remove_file;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::id;
 use std::sync::Arc;
 
 use qubit_task::TaskExecutionServiceBuilder;
@@ -23,13 +29,19 @@ use typed_support::request;
 use typed_support::SequentialIds;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!("qubit-task-typed-recovery-{}.sqlite", std::process::id()));
+async fn main() -> Result<(), Box<dyn Error>> {
+    let path = temp_dir().join(format!(
+        "qubit-task-typed-recovery-{}.sqlite",
+        id()
+    ));
     let store = Arc::new(SqliteTaskStore::open(&path)?);
     let codecs = Arc::new(typed_support::codecs()?);
     let ids = Arc::new(SequentialIds::new(500));
     let mut builder = TaskExecutionServiceBuilder::new(store, codecs, ids)
-        .capacity(ResourceCapacity { cpu_slots: 1, ..ResourceCapacity::default() });
+        .capacity(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        });
     register_handler(&mut builder)?;
     let service = builder.build().await?;
     let accepted = service.submit(request(serde_json::json!({"rows": 4}), "import-4")).await?;
@@ -44,7 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     register_handler(&mut reopened)?;
     let recovered_service = reopened.build().await?;
-    let recovered = recovered_service.get(accepted.id).await?
+    let recovered = recovered_service
+        .get(accepted.id)
+        .await?
         .expect("the persisted task remains queryable");
     assert_eq!(recovered.state, TaskState::Succeeded);
     recovered_service.shutdown().await?;
@@ -54,11 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn remove_sqlite_files(path: &std::path::Path) {
-    let _ = std::fs::remove_file(path);
+fn remove_sqlite_files(path: &Path) {
+    let _ = remove_file(path);
     let mut lock_path = path.as_os_str().to_owned();
     lock_path.push(".owner.lock");
-    let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
-    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
-    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    let _ = remove_file(PathBuf::from(lock_path));
+    let _ = remove_file(path.with_extension("sqlite-wal"));
+    let _ = remove_file(path.with_extension("sqlite-shm"));
 }

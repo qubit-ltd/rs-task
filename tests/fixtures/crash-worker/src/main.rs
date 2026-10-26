@@ -18,18 +18,22 @@ use std::time::Duration;
 use qubit_codec::ValueBytesCodecDescriptor;
 use qubit_codec::ValueBytesCodecRegistration;
 use qubit_codec::ValueBytesCodecRegistry;
-use qubit_codec::ValueDecoder;
-use qubit_codec::ValueEncoder;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
+use qubit_task::CancellationMode;
+use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskHandler;
+use qubit_task::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::TaskId;
@@ -40,10 +44,6 @@ use qubit_task::service::TaskServiceError;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
-use qubit_task::TaskHandler;
-use qubit_task::TaskContext;
-use qubit_task::TaskHandlerDescriptor;
-use qubit_task::CancellationMode;
 use serde_json::Value;
 use serde_json::from_value;
 use serde_json::json;
@@ -51,6 +51,7 @@ use tokio::main as tokio_main;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 
+/// JSON payload persisted by the crash-worker fixture for its synthetic task.
 struct WorkerPayload(Value);
 
 impl HasModelId for WorkerPayload {
@@ -64,7 +65,11 @@ struct WorkerHandler {
 }
 
 impl TaskHandler<WorkerPayload> for WorkerHandler {
-    fn run<'a>(&'a self, _payload: WorkerPayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        _payload: WorkerPayload,
+        context: TaskContext,
+    ) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             self.started
                 .send(context.task_id())
@@ -77,6 +82,7 @@ impl TaskHandler<WorkerPayload> for WorkerHandler {
     }
 }
 
+/// Encodes fixture payloads as JSON and decodes them for task dispatch.
 #[derive(Default)]
 struct JsonValueCodec;
 
@@ -98,13 +104,15 @@ impl ValueDecoder<[u8]> for JsonValueCodec {
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, WorkerPayload>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<JsonValueCodec, WorkerPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("fixture.crash_worker.json"),
     &JSON_DESCRIPTOR,
     ValueCodecRegistrationSource::new("qubit-task", "crash-worker", "fixture", 1),
 );
 
+/// Generates distinct deterministic IDs for tasks created by the fixture service.
 struct WorkerIds(AtomicU64);
 
 impl IdGenerator<Id, IdGenerationError> for WorkerIds {
@@ -113,6 +121,7 @@ impl IdGenerator<Id, IdGenerationError> for WorkerIds {
     }
 }
 
+/// Builds a durable crash-worker task using the supplied idempotency key.
 fn request(idempotency_key: String) -> TaskRequest<WorkerPayload> {
     let mut request = TaskRequest::new(
         "crash-worker",
@@ -153,7 +162,10 @@ fn arguments() -> Result<(PathBuf, String, TaskId, usize), Box<dyn std::error::E
         || (mode != "queued" && count != 1)
         || arguments.next().is_some()
     {
-        return Err("expected a new absolute database path, valid mode, UUID, and 1..=513 queued rows".into());
+        return Err(
+            "expected a new absolute database path, valid mode, UUID, and 1..=513 queued rows"
+                .into(),
+        );
     }
     Ok((path, mode, id, count))
 }

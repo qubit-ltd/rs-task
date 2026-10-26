@@ -22,6 +22,11 @@ pub const MAX_TASK_METADATA_BYTES: usize = 16 * 1024;
 
 /// Typed task submission before encoding and durable acceptance.
 ///
+/// # Type Parameters
+///
+/// * `T` - Payload value type, which supplies the stable model identity through
+///   [`HasModelId`].
+///
 /// # Examples
 ///
 /// ```
@@ -65,6 +70,18 @@ pub struct TaskRequest<T> {
 impl<T: HasModelId> TaskRequest<T> {
     /// Creates a typed request with the supplied routing and payload identity.
     /// The payload model identity always comes from `T::MODEL_ID`.
+    ///
+    /// # Parameters
+    ///
+    /// * `kind_id` - Stable identity of the handler that accepts the request.
+    /// * `schema_version` - Version of the payload schema.
+    /// * `codec_id` - Stable identity of the codec that encodes the payload.
+    /// * `data` - Typed application value carried by the request.
+    ///
+    /// # Returns
+    ///
+    /// A request with empty metadata, default resource limits, and no caller
+    /// correlation or idempotency keys.
     ///
     /// Supplying an independent model ID is no longer supported:
     ///

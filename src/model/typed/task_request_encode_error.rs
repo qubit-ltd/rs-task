@@ -13,10 +13,33 @@ use super::MAX_TASK_METADATA_ENTRIES;
 /// # Examples
 ///
 /// ```
+/// use qubit_codec::ValueBytesCodecRegistry;
+/// use qubit_model_id::HasModelId;
+/// use qubit_model_id::ModelId;
+/// use qubit_task::TaskRequest;
 /// use qubit_task::model::TaskRequestEncodeError;
 ///
-/// let error = TaskRequestEncodeError::EmptyKindId;
-/// assert!(matches!(error, TaskRequestEncodeError::EmptyKindId));
+/// struct Input;
+///
+/// impl HasModelId for Input {
+///     const MODEL_ID: ModelId = ModelId::new("example.Input");
+/// }
+///
+/// fn encode_request(
+///     request: TaskRequest<Input>,
+///     registry: &ValueBytesCodecRegistry,
+/// ) {
+///     match request.encode(registry) {
+///         Ok(_stored) => {}
+///         Err(error) => match error {
+///             TaskRequestEncodeError::EmptyKindId => eprintln!("missing task kind"),
+///             other => eprintln!("request encoding failed: {other}"),
+///         },
+///     }
+/// }
+///
+/// // The caller supplies the request and registry; `encode` produces the error.
+/// let _encode_request = encode_request;
 /// ```
 #[must_use]
 #[derive(Debug, thiserror::Error)]
@@ -26,20 +49,40 @@ pub enum TaskRequestEncodeError {
     EmptyKindId,
     /// Metadata contains more entries than the request-level limit.
     #[error("task metadata has {0} entries; the maximum is {MAX_TASK_METADATA_ENTRIES}")]
-    TooManyMetadataEntries(usize),
+    TooManyMetadataEntries(
+        /// Number of metadata entries on the request that exceeded the limit.
+        usize,
+    ),
     /// Metadata's bounded JSON representation exceeds the request-level limit.
     #[error("task metadata has {0} encoded bytes; the maximum is {MAX_TASK_METADATA_BYTES}")]
-    MetadataTooLarge(usize),
+    MetadataTooLarge(
+        /// Number of encoded metadata bytes that exceeded the limit.
+        usize,
+    ),
     /// Encoded payload exceeds the service's reconstructable payload limit.
     #[error("encoded task payload has {0} bytes; the maximum is {max}", max = crate::model::MAX_TASK_PAYLOAD_BYTES)]
-    PayloadTooLarge(usize),
+    PayloadTooLarge(
+        /// Number of encoded payload bytes that exceeded the limit.
+        usize,
+    ),
     /// `rs-metadata` rejected serialization under its own JSON budget.
     #[error("task metadata serialization failed: {0}")]
-    Metadata(#[source] qubit_metadata::MetadataWireEncodeError),
+    Metadata(
+        /// Serialization failure returned by `rs-metadata`.
+        #[source]
+        qubit_metadata::MetadataWireEncodeError,
+    ),
     /// The payload codec could not be resolved or failed to encode the value.
     #[error(transparent)]
-    Payload(#[from] super::PayloadEncodeError),
+    Payload(
+        /// Failure to resolve or run the payload codec.
+        #[from]
+        super::PayloadEncodeError,
+    ),
     /// Scheduling resource names or labels exceed their wire limits.
     #[error("task resource request is invalid: {0}")]
-    Resource(String),
+    Resource(
+        /// Description of the invalid scheduling resource request.
+        String,
+    ),
 }

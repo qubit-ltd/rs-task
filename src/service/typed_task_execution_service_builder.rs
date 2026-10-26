@@ -28,6 +28,32 @@ use crate::store::TaskStore;
 /// The builder owns the dependencies and configuration used to create the
 /// service. Its configuration methods consume and return the builder so they
 /// can be chained before `build` starts service recovery.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use qubit_codec::ValueBytesCodecRegistry;
+/// use qubit_id::Id;
+/// use qubit_id::IdGenerationError;
+/// use qubit_id::IdGenerator;
+/// use qubit_task::TaskExecutionServiceBuilder;
+/// use qubit_task::TaskServiceError;
+/// use qubit_task::TaskStore;
+///
+/// async fn start_service(
+///     store: Arc<dyn TaskStore>,
+///     codecs: Arc<ValueBytesCodecRegistry>,
+///     id_generator: Arc<dyn IdGenerator<Id, IdGenerationError>>,
+/// ) -> Result<(), TaskServiceError> {
+///     let service = TaskExecutionServiceBuilder::new(store, codecs, id_generator)
+///         .build()
+///         .await?;
+///     drop(service);
+///     Ok(())
+/// }
+/// ```
 pub struct TypedTaskExecutionServiceBuilder {
     /// Persistent task storage used by the service.
     store: Arc<dyn TaskStore>,
@@ -176,6 +202,10 @@ impl TypedTaskExecutionServiceBuilder {
     }
 
     /// Builds the service and begins recovering encoded queued tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if service initialization or recovery fails.
     pub async fn build(self) -> Result<TypedTaskExecutionService, TaskServiceError> {
         TypedTaskExecutionService::new(
             self.store,

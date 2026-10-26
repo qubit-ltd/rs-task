@@ -10,40 +10,58 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use internal::DatabaseIdentity;
-use internal::SqliteOwnerState;
-#[cfg(test)]
-use internal::WorkerCounts;
-#[cfg(test)]
-use internal::WorkerGuard;
-use internal::accept_encoded;
-use internal::acquire_owner_lock;
-use internal::get_encoded_task;
-use internal::initialize_next_schema;
-use internal::list_encoded;
-use internal::list_ready_queued;
-use internal::next_retry_deadline;
-use internal::start_encoded;
-use internal::transition_encoded;
-use internal::update_progress;
 use parking_lot::Mutex;
+use qubit_id::Id;
 use rusqlite::Connection;
+use rusqlite::Error;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
+use serde_json::Value;
+use serde_json::from_str;
+use serde_json::from_value;
+use serde_json::to_string;
 use tokio::sync;
 use tokio::task;
 
+use self::internal::DatabaseIdentity;
+use self::internal::SqliteOwnerState;
+#[cfg(test)]
+use self::internal::WorkerCounts;
+#[cfg(test)]
+use self::internal::WorkerGuard;
+use self::internal::accept_encoded;
+use self::internal::acquire_owner_lock;
+use self::internal::get_encoded_task;
+use self::internal::initialize_next_schema;
+use self::internal::list_encoded;
+use self::internal::list_ready_queued;
+use self::internal::next_retry_deadline;
+use self::internal::prune_terminal_rows;
+use self::internal::start_encoded;
+use self::internal::transition_encoded;
+use self::internal::update_progress;
 use super::StoreError;
 use super::TaskFuture;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
 use crate::model::TaskState;
+use crate::model::typed::AcceptOutcome;
+use crate::model::typed::ProgressCommand;
+use crate::model::typed::StartCommand;
+use crate::model::typed::StoredTask;
+use crate::model::typed::StoredTaskRequest;
+use crate::model::typed::TaskCursor;
 use crate::model::typed::TaskId;
 use crate::model::typed::TaskPage as EncodedTaskPage;
 use crate::model::typed::TaskQuery as EncodedTaskQuery;
 use crate::model::typed::TaskStateCheckpoint;
+use crate::model::typed::TaskSummary;
+use crate::model::typed::TransitionCommand;
 
 mod internal;
+#[cfg(test)]
+#[path = "../tests/store/sqlite_task_store/owner_lock_tests.rs"]
+mod owner_lock_tests;
 
 /// SQLite-backed history with an exclusive OS lock for one active service
 /// process.
@@ -97,26 +115,65 @@ pub struct SqliteTaskStore {
 }
 
 impl SqliteTaskStore {
-    /// Serializes outbox operations with epoch validation and owner release.
-    /// Returns `OwnerConflict` if ownership has not been acquired or was
-    /// released.
-    fn run_outbox<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
-    where
-        T: Send + 'static,
-        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
-    {
-        let owner_state = Arc::clone(&self.owner_state);
-        self.run(move |connection| {
-            let owner = owner_state.lock();
-            if owner.epoch.is_none() || owner.lock_file.is_none() {
-                return Err(StoreError::OwnerConflict);
-            }
-            operation(connection)
+    /// Opens a database using the typed numeric-ID task schema.
+    ///
+    /// This cutover entry point creates a fresh schema or reopens the same
+    /// typed schema. Legacy UUID databases are rejected with a migration
+    /// diagnostic and left unchanged; converting their IDs requires an
+    /// explicit mapping migration.
+    ///
+    /// # Parameters
+    ///
+    /// * `path` - SQLite database path to open or create.
+    ///
+    /// # Returns
+    ///
+    /// A store holding the process lock for the canonical database path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` if another process owns the database,
+    /// `UnsupportedDatabaseIdentity` if the file cannot be safely fenced, or
+    /// `Failure` when filesystem, identity, schema, or SQLite configuration
+    /// operations fail.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let (identity, _database_file) = DatabaseIdentity::open(path.as_ref())?;
+        let lock = acquire_owner_lock(identity.path())?;
+        identity.verify()?;
+        let mut connection = Connection::open(identity.path()).map_err(failure)?;
+        identity.verify()?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(failure)?;
+        initialize_next_schema(&mut connection)?;
+        connection
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .map_err(failure)?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            database_path: identity.path().to_path_buf(),
+            owner_state: Arc::new(Mutex::new(SqliteOwnerState {
+                lock_file: Some(lock),
+                epoch: None,
+            })),
+            operation_slot: Arc::new(sync::Semaphore::new(1)),
+            outbox_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            worker_counts: Arc::new(WorkerCounts::default()),
         })
     }
 
     /// Enables subsequent transactional snapshots while holding the owner
     /// barrier.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after snapshot creation is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership or a storage failure
+    /// if the operation cannot complete.
     pub(super) fn enable_outbox(&self) -> TaskFuture<'_, Result<(), StoreError>> {
         let enabled = Arc::clone(&self.outbox_enabled);
         self.run_outbox(move |_| {
@@ -127,6 +184,19 @@ impl SqliteTaskStore {
 
     /// Reads a bounded oldest-first page; rejects absent ownership and invalid
     /// limits.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Maximum number of entries, from 1 through 256.
+    ///
+    /// # Returns
+    ///
+    /// Outbox entries in deterministic creation, task, and version order.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership, `InvalidRequest` for
+    /// an invalid limit, or `Failure` for a database error.
     pub(super) fn list_outbox(&self, limit: usize) -> TaskFuture<'_, Result<Vec<super::EventOutboxEntry>, StoreError>> {
         self.run_outbox(move |connection| {
             if !(1..=256).contains(&limit) {
@@ -149,7 +219,7 @@ impl SqliteTaskStore {
                 .map_err(failure)?;
             rows.map(|row| {
                 let (id, state_version, event_id, event_json) = row.map_err(failure)?;
-                let task_id = crate::model::typed::TaskId::from_id(qubit_id::Id::new(
+                let task_id = TaskId::from_id(Id::new(
                     id.parse::<u64>().map_err(failure)?,
                 ));
                 Ok(super::EventOutboxEntry {
@@ -164,16 +234,26 @@ impl SqliteTaskStore {
     }
 
     /// Deletes a confirmed event idempotently while ownership remains fenced.
-    pub(super) fn mark_outbox_published(
-        &self,
-        id: crate::model::typed::TaskId,
-        version: u64,
-    ) -> TaskFuture<'_, Result<(), StoreError>> {
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Task identity attached to the published event.
+    /// * `version` - Lifecycle version attached to the published event.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after the matching outbox row is removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership or `Failure` when the
+    /// delete operation fails.
+    pub(super) fn mark_outbox_published(&self, id: TaskId, version: u64) -> TaskFuture<'_, Result<(), StoreError>> {
         self.run_outbox(move |connection| {
             connection
                 .execute(
                     "DELETE FROM task_event_outbox WHERE task_id=?1 AND state_version=?2",
-                    rusqlite::params![id.to_padded_decimal(), version],
+                    params![id.to_padded_decimal(), version],
                 )
                 .map_err(failure)?;
             Ok(())
@@ -182,9 +262,27 @@ impl SqliteTaskStore {
 
     /// Archives and removes the expected current head in one SQLite
     /// transaction while the process owner fence is held.
+    ///
+    /// # Parameters
+    ///
+    /// * `expected_task_id` - Task identity expected at the queue head.
+    /// * `expected_state_version` - Lifecycle revision expected at the head.
+    /// * `expected_event_id` - Event identity expected at the head.
+    /// * `reason` - Nonblank operator explanation, limited to 4096 bytes.
+    /// * `last_error` - Publishing error retained in the archive.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after the archive and deletion commit together.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership, `Conflict` if the
+    /// expected head changed, `InvalidRequest` for an invalid reason, or
+    /// `Failure` for a transaction error.
     pub(super) fn quarantine_outbox_head<'a>(
         &'a self,
-        expected_task_id: crate::model::typed::TaskId,
+        expected_task_id: TaskId,
         expected_state_version: u64,
         expected_event_id: &'a str,
         reason: &'a str,
@@ -216,7 +314,7 @@ impl SqliteTaskStore {
                     },
                 )
                 .map_err(|error| match error {
-                    rusqlite::Error::QueryReturnedNoRows => StoreError::Conflict,
+                    Error::QueryReturnedNoRows => StoreError::Conflict,
                     other => failure(other),
                 })?;
             let (task_key, state_version, event_id, event_json, created_at_ms) = head;
@@ -236,7 +334,7 @@ impl SqliteTaskStore {
             transaction
                 .execute(
                     "INSERT INTO task_event_outbox_quarantine(task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                    rusqlite::params![
+                    params![
                         task_key,
                         state_version,
                         event_id,
@@ -251,7 +349,7 @@ impl SqliteTaskStore {
             let deleted = transaction
                 .execute(
                     "DELETE FROM task_event_outbox WHERE task_id=?1 AND state_version=?2 AND event_id=?3",
-                    rusqlite::params![task_key, state_version, event_id],
+                    params![task_key, state_version, event_id],
                 )
                 .map_err(failure)?;
             if deleted != 1 {
@@ -261,36 +359,38 @@ impl SqliteTaskStore {
         })
     }
 
-    /// Opens a database using the typed numeric-ID task schema.
+    /// Serializes an outbox operation with epoch validation and owner release.
+    /// The owner-state lock remains held while the supplied operation runs.
     ///
-    /// This cutover entry point creates a fresh schema or reopens the same
-    /// typed schema. Legacy UUID databases are rejected with a migration
-    /// diagnostic and left unchanged; converting their IDs requires an
-    /// explicit mapping migration.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let (identity, _database_file) = DatabaseIdentity::open(path.as_ref())?;
-        let lock = acquire_owner_lock(identity.path())?;
-        identity.verify()?;
-        let mut connection = Connection::open(identity.path()).map_err(failure)?;
-        identity.verify()?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(failure)?;
-        initialize_next_schema(&mut connection)?;
-        connection
-            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(failure)?;
-        Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
-            database_path: identity.path().to_path_buf(),
-            owner_state: Arc::new(Mutex::new(SqliteOwnerState {
-                lock_file: Some(lock),
-                epoch: None,
-            })),
-            operation_slot: Arc::new(sync::Semaphore::new(1)),
-            outbox_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            worker_counts: Arc::new(WorkerCounts::default()),
+    /// # Type Parameters
+    ///
+    /// * `T` - Value produced by the operation.
+    /// * `F` - Outbox operation executed against the SQLite connection.
+    ///
+    /// # Parameters
+    ///
+    /// * `operation` - Work to execute while active ownership is confirmed.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the operation's value.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership and propagates errors
+    /// from the operation or blocking worker.
+    fn run_outbox<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
+    {
+        let owner_state = Arc::clone(&self.owner_state);
+        self.run(move |connection| {
+            let owner = owner_state.lock();
+            if owner.epoch.is_none() || owner.lock_file.is_none() {
+                return Err(StoreError::OwnerConflict);
+            }
+            operation(connection)
         })
     }
 
@@ -379,11 +479,34 @@ impl SqliteTaskStore {
 /// The original error is retained as its display string so callers receive a
 /// consistent [`StoreError::Failure`] without exposing backend-specific error
 /// types.
+///
+/// # Parameters
+///
+/// * `error` - SQLite or related error to convert.
+///
+/// # Returns
+///
+/// A store failure containing the original display diagnostic.
 fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
 }
 
 /// Reads the current lifecycle state or its durable post-prune checkpoint.
+///
+/// # Parameters
+///
+/// * `connection` - SQLite connection containing task history.
+/// * `id` - Task identity to look up.
+///
+/// # Returns
+///
+/// `Some` when a retained task or terminal checkpoint exists, or `None` when
+/// neither record exists for the ID.
+///
+/// # Errors
+///
+/// Returns `Failure` when SQLite data cannot be read or its lifecycle state
+/// cannot be decoded.
 fn get_state_checkpoint(connection: &Connection, id: TaskId) -> Result<Option<TaskStateCheckpoint>, StoreError> {
     let id_key = id.to_padded_decimal();
     let current = connection
@@ -393,8 +516,8 @@ fn get_state_checkpoint(connection: &Connection, id: TaskId) -> Result<Option<Ta
         .optional()
         .map_err(failure)?;
     if let Some(lifecycle_json) = current {
-        let lifecycle: serde_json::Value = serde_json::from_str(&lifecycle_json).map_err(failure)?;
-        let state: TaskState = serde_json::from_value(
+        let lifecycle: Value = from_str(&lifecycle_json).map_err(failure)?;
+        let state: TaskState = from_value(
             lifecycle
                 .get("state")
                 .cloned()
@@ -403,7 +526,7 @@ fn get_state_checkpoint(connection: &Connection, id: TaskId) -> Result<Option<Ta
         .map_err(failure)?;
         let state_version = lifecycle
             .get("state_version")
-            .and_then(serde_json::Value::as_i64)
+            .and_then(Value::as_i64)
             .ok_or_else(|| StoreError::Failure("task lifecycle has an invalid state version".into()))?;
         let state_version = u64::try_from(state_version).map_err(failure)?;
         return Ok(Some(TaskStateCheckpoint {
@@ -425,7 +548,7 @@ fn get_state_checkpoint(connection: &Connection, id: TaskId) -> Result<Option<Ta
             Ok(TaskStateCheckpoint {
                 id,
                 state_version: u64::try_from(version).map_err(failure)?,
-                state: serde_json::from_str(&state_json).map_err(failure)?,
+                state: from_str(&state_json).map_err(failure)?,
             })
         })
         .transpose()
@@ -437,6 +560,7 @@ impl super::TaskStore for SqliteTaskStore {
     /// # Returns
     ///
     /// Both persistent-history and restart-recovery capabilities.
+    #[inline]
     fn capabilities(&self) -> StoreCapabilities {
         StoreCapabilities {
             persistent_history: true,
@@ -446,11 +570,25 @@ impl super::TaskStore for SqliteTaskStore {
 
     /// Atomically accepts an encoded typed request on a store opened with
     /// [`SqliteTaskStore::open`].
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity assigned to the new task.
+    /// * `request` - Encoded request and metadata to persist.
+    ///
+    /// # Returns
+    ///
+    /// The acceptance outcome, including whether this request was newly stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for inactive ownership, conflicting identity or
+    /// idempotency data, or a persistence failure.
     fn accept_encoded<'a>(
         &'a self,
-        id: crate::model::typed::TaskId,
-        request: crate::model::typed::StoredTaskRequest,
-    ) -> TaskFuture<'a, Result<crate::model::typed::AcceptOutcome, StoreError>> {
+        id: TaskId,
+        request: StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         let outbox_enabled = Arc::clone(&self.outbox_enabled);
         self.run_write(move |connection| {
             accept_encoded(
@@ -463,25 +601,61 @@ impl super::TaskStore for SqliteTaskStore {
     }
 
     /// Loads an encoded typed task without decoding its application payload.
-    fn get_encoded_task<'a>(
-        &'a self,
-        id: crate::model::typed::TaskId,
-    ) -> TaskFuture<'a, Result<Option<crate::model::typed::StoredTask>, StoreError>> {
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the task to load.
+    ///
+    /// # Returns
+    ///
+    /// The stored task when retained, or `None` when it is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite data cannot be read or decoded.
+    fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         self.run(move |connection| get_encoded_task(connection, id))
     }
 
+    /// Reads the authoritative lifecycle state or retained terminal checkpoint.
+    ///
+    /// A missing result means the task was never accepted or is no longer
+    /// retained by this store.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the task to inspect.
+    ///
+    /// # Returns
+    ///
+    /// The current state and revision, or `None` when no task/checkpoint
+    /// exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persisted lifecycle data cannot be read or decoded.
     fn get_state_checkpoint<'a>(
         &'a self,
-        id: crate::model::typed::TaskId,
+        id: TaskId,
     ) -> TaskFuture<'a, Result<Option<TaskStateCheckpoint>, StoreError>> {
         self.run(move |connection| get_state_checkpoint(connection, id))
     }
 
     /// Starts one queued typed task attempt with a revision compare-and-set.
-    fn start_encoded<'a>(
-        &'a self,
-        command: crate::model::typed::StartCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Task identity, expected revision, and attempt details.
+    ///
+    /// # Returns
+    ///
+    /// The updated task summary after the attempt starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task is absent, its revision changed, its state
+    /// cannot start, or persistence fails.
+    fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         let outbox_enabled = Arc::clone(&self.outbox_enabled);
         self.run_write(move |connection| {
             start_encoded(
@@ -493,10 +667,20 @@ impl super::TaskStore for SqliteTaskStore {
     }
 
     /// Applies a typed lifecycle transition atomically.
-    fn transition_encoded<'a>(
-        &'a self,
-        command: crate::model::typed::TransitionCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Expected task revision and requested transition.
+    ///
+    /// # Returns
+    ///
+    /// The updated task summary after the transition commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the revision changed, the transition is invalid, or
+    /// persistence fails.
+    fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         let outbox_enabled = Arc::clone(&self.outbox_enabled);
         self.run_write(move |connection| {
             transition_encoded(
@@ -508,30 +692,105 @@ impl super::TaskStore for SqliteTaskStore {
     }
 
     /// Persists a progress snapshot for the matching running attempt.
-    fn update_progress<'a>(
-        &'a self,
-        command: crate::model::typed::ProgressCommand,
-    ) -> TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Task attempt identity and progress snapshot to persist.
+    ///
+    /// # Returns
+    ///
+    /// The updated task summary after progress is stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task attempt is not current, progress is
+    /// invalid, or persistence fails.
+    fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.run_write(move |connection| update_progress(connection, command))
     }
 
+    /// Returns a deterministic page of encoded task summaries matching query.
+    ///
+    /// # Parameters
+    ///
+    /// * `query` - Typed task filters, ordering, and page cursor.
+    ///
+    /// # Returns
+    ///
+    /// A page of task summaries and, when more results exist, its next cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid query values or database failures.
     fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
         self.run(move |connection| list_encoded(connection, query))
     }
 
+    /// Lists queued tasks whose retry time has arrived in keyset order.
+    ///
+    /// `after` resumes after a prior cursor, and `now_ms` defines readiness.
+    ///
+    /// # Parameters
+    ///
+    /// * `after` - Optional cursor from the preceding page.
+    /// * `limit` - Maximum number of returned tasks.
+    /// * `now_ms` - Current time used to determine retry readiness.
+    ///
+    /// # Returns
+    ///
+    /// A page of ready queued tasks and an optional continuation cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an out-of-range time or page limit, or a database
+    /// failure.
     fn list_ready_queued<'a>(
         &'a self,
-        after: Option<crate::model::typed::TaskCursor>,
+        after: Option<TaskCursor>,
         limit: NonZeroUsize,
         now_ms: u64,
     ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
         self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
     }
 
+    /// Finds the earliest queued retry time strictly later than `now_ms`.
+    ///
+    /// # Parameters
+    ///
+    /// * `now_ms` - Current time in milliseconds since the Unix epoch.
+    ///
+    /// # Returns
+    ///
+    /// `Some(deadline)` when a later retry is queued, or `None` when none
+    /// exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the time is outside SQLite's integer range or the
+    /// query fails.
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         self.run(move |connection| next_retry_deadline(connection, now_ms))
     }
 
+    /// Removes a bounded batch of old terminal records and retains checkpoints.
+    ///
+    /// Records with outbox entries are preserved so pending events remain
+    /// publishable.
+    ///
+    /// # Parameters
+    ///
+    /// * `finished_before_ms` - Exclusive terminal-finish cutoff.
+    /// * `max_rows` - Maximum number of records to prune.
+    ///
+    /// # Returns
+    ///
+    /// The number of records deleted after their terminal checkpoints are
+    /// saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for out-of-range values, inconsistent state, or a
+    /// transaction failure.
     fn prune_terminal_before<'a>(
         &'a self,
         finished_before_ms: u64,
@@ -573,38 +832,7 @@ impl super::TaskStore for SqliteTaskStore {
                 .map_err(failure)?;
             let rows = rows.collect::<Result<Vec<_>, _>>().map_err(failure)?;
             drop(statement);
-            for (id, lifecycle_json, finished_at_ms) in &rows {
-                let lifecycle: serde_json::Value = serde_json::from_str(lifecycle_json).map_err(failure)?;
-                let state: TaskState = serde_json::from_value(
-                    lifecycle
-                        .get("state")
-                        .cloned()
-                        .ok_or_else(|| StoreError::Failure("task lifecycle is missing its state".into()))?,
-                )
-                .map_err(failure)?;
-                if !state.is_terminal() {
-                    return Err(StoreError::Failure(
-                        "terminal task has a nonterminal lifecycle state".into(),
-                    ));
-                }
-                let state_json = serde_json::to_string(&state).map_err(failure)?;
-                let state_version = lifecycle
-                    .get("state_version")
-                    .and_then(serde_json::Value::as_i64)
-                    .ok_or_else(|| StoreError::Failure("task lifecycle has an invalid state version".into()))?;
-                transaction
-                    .execute(
-                        "INSERT INTO task_terminal_checkpoints(task_id,state_version,state_json,finished_at_ms) VALUES (?1,?2,?3,?4) ON CONFLICT(task_id) DO UPDATE SET state_version=excluded.state_version,state_json=excluded.state_json,finished_at_ms=excluded.finished_at_ms",
-                        params![id, state_version, state_json, finished_at_ms],
-                    )
-                    .map_err(failure)?;
-                let deleted = transaction
-                    .execute("DELETE FROM tasks WHERE id=?1", [id])
-                    .map_err(failure)?;
-                if deleted != 1 {
-                    return Err(StoreError::Conflict);
-                }
-            }
+            prune_terminal_rows(&transaction, &rows)?;
             transaction.commit().map_err(failure)?;
             Ok(rows.len())
         })
@@ -665,26 +893,89 @@ impl super::TaskStore for SqliteTaskStore {
         })
     }
 
+    /// Enables durable event snapshots for subsequent lifecycle commits.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after event snapshots are enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership or a persistence error.
+    #[inline]
     fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), StoreError>> {
         self.enable_outbox()
     }
+    /// Reads oldest event snapshots in deterministic order, up to `limit`.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Maximum number of snapshots, from 1 through 256.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to the ordered event snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership, `InvalidRequest` for
+    /// an invalid limit, or a persistence error.
+    #[inline]
     fn list_event_outbox<'a>(
         &'a self,
         limit: usize,
     ) -> TaskFuture<'a, Result<Vec<super::EventOutboxEntry>, StoreError>> {
         self.list_outbox(limit)
     }
+    /// Removes the event snapshot confirmed by the publisher.
+    ///
+    /// # Parameters
+    ///
+    /// * `task_id` - Task identity attached to the published event.
+    /// * `state_version` - Lifecycle revision attached to the event.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after the matching snapshot is removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership or a persistence error.
+    #[inline]
     fn mark_event_published<'a>(
         &'a self,
-        task_id: crate::model::typed::TaskId,
+        task_id: TaskId,
         state_version: u64,
     ) -> TaskFuture<'a, Result<(), StoreError>> {
         self.mark_outbox_published(task_id, state_version)
     }
 
+    /// Archives and removes the oldest event when its expected identity
+    /// matches.
+    ///
+    /// The reason must be nonblank and no longer than 4096 bytes.
+    ///
+    /// # Parameters
+    ///
+    /// * `expected_task_id` - Task identity expected at the outbox head.
+    /// * `expected_state_version` - Lifecycle revision expected at the head.
+    /// * `expected_event_id` - Stable event identity expected at the head.
+    /// * `reason` - Nonblank operator explanation, limited to 4096 bytes.
+    /// * `last_error` - Publishing error retained in the archive.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving after the archive and deletion commit together.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OwnerConflict` without active ownership, `Conflict` when the
+    /// head identity changed, `InvalidRequest` for an invalid reason, or a
+    /// persistence error.
+    #[inline]
     fn quarantine_event_outbox_head<'a>(
         &'a self,
-        expected_task_id: crate::model::typed::TaskId,
+        expected_task_id: TaskId,
         expected_state_version: u64,
         expected_event_id: &'a str,
         reason: &'a str,
@@ -740,25 +1031,6 @@ mod tests {
         let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
-    }
-
-    #[tokio_crate::test]
-    async fn test_pruning_rejects_values_outside_sqlite_integer_range() {
-        let path = test_database_path();
-        let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
-        let cutoff = store
-            .prune_terminal_before(u64::MAX, std::num::NonZeroUsize::new(1).expect("positive limit"))
-            .await;
-        assert!(matches!(cutoff, Err(crate::store::StoreError::InvalidRequest(_))));
-        let limit = store
-            .prune_terminal_before(
-                0,
-                std::num::NonZeroUsize::new(i64::MAX as usize + 1).expect("positive limit"),
-            )
-            .await;
-        assert!(matches!(limit, Err(crate::store::StoreError::InvalidRequest(_))));
-        drop(store);
-        remove_database(&path);
     }
 
     #[tokio_crate::test]
