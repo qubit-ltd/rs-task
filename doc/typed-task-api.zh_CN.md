@@ -6,6 +6,8 @@
 
 `Payload<T>` 持有业务值。`TaskRequest<T>::encode` 从 `ValueBytesCodecRegistry` 查找 `ValueBytesCodecDescriptor` 并生成 `EncodedPayload<T>`；存储层接收类型擦除后的 `StoredPayload`。bytes 注册表使用 `ValueEncoder<T>` 和 `ValueDecoder<[u8]>`。任务 metadata 使用 `rs-metadata::Metadata`，任务请求限制最多 32 个条目、序列化后 16 KiB；同时遵守 `rs-metadata` 自身 wire 配额。
 
+16 KiB metadata 输出额度在 JSON 编码期间执行。返回 `TaskRequestEncodeError::MetadataTooLarge(n)` 时，`n` 是已知长度下界（当前为 16,385），不一定是完整编码后的精确长度。调用方应将它用于识别超限请求，不应把它显示为精确原始大小。这是明确的错误诊断语义变化；枚举形状、成功编码路径和 `StoredTaskRequest` wire 表示保持不变。
+
 ## 端到端示例
 
 示例展示从带类型的值、codec 注册到处理器执行的完整路径。应用显式注入 ID generator。生产环境使用 Snowflake 类生成器时，不同进程必须分配不同节点 ID，并满足时钟配置要求。

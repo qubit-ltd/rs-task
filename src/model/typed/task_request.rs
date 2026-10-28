@@ -5,9 +5,13 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use qubit_budget::ResourceLimit;
+use qubit_budget::json::JsonResource;
 use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_metadata::Metadata;
+use qubit_metadata::MetadataWireEncodeError;
+use qubit_metadata::default_json_encode_limits;
 use qubit_model_id::HasModelId;
 
 use super::Payload;
@@ -142,10 +146,19 @@ impl<T: HasModelId + 'static> TaskRequest<T> {
         if self.metadata.len() > MAX_TASK_METADATA_ENTRIES {
             return Err(TaskRequestEncodeError::TooManyMetadataEntries(self.metadata.len()));
         }
-        let metadata_bytes = self.metadata.to_json_vec().map_err(TaskRequestEncodeError::Metadata)?;
-        if metadata_bytes.len() > MAX_TASK_METADATA_BYTES {
-            return Err(TaskRequestEncodeError::MetadataTooLarge(metadata_bytes.len()));
-        }
+        let encode_limits = default_json_encode_limits()
+            .into_builder()
+            .output_bytes_limit(ResourceLimit::new(JsonResource::OutputBytes, MAX_TASK_METADATA_BYTES))
+            .build();
+        let _ = self
+            .metadata
+            .to_json_vec_with_limits(encode_limits)
+            .map_err(|error| match error {
+                MetadataWireEncodeError::Budget(ref source) if *source.resource() == JsonResource::OutputBytes => {
+                    TaskRequestEncodeError::MetadataTooLarge(MAX_TASK_METADATA_BYTES + 1)
+                }
+                other => TaskRequestEncodeError::Metadata(other),
+            })?;
         let payload = self.payload.encode(registry)?.into_stored();
         if payload.bytes.len() > crate::model::MAX_TASK_PAYLOAD_BYTES {
             return Err(TaskRequestEncodeError::PayloadTooLarge(payload.bytes.len()));

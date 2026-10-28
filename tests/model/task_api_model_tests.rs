@@ -11,6 +11,7 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
+use qubit_metadata::Metadata;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_progress::Metric;
@@ -20,6 +21,7 @@ use qubit_progress::Progress;
 use qubit_progress::Stage;
 use qubit_task::model::TaskState;
 use qubit_task::model::typed::EncodedPayload;
+use qubit_task::model::typed::MAX_TASK_METADATA_BYTES;
 use qubit_task::model::typed::Payload;
 use qubit_task::model::typed::ProgressCommand;
 use qubit_task::model::typed::ProgressSnapshotError;
@@ -224,7 +226,7 @@ fn test_task_request_rejects_metadata_over_entry_budget() {
         Counter(1),
     );
     for index in 0..=qubit_task::model::typed::MAX_TASK_METADATA_ENTRIES {
-        request.metadata.insert(&format!("key_{index}"), "value");
+        request.metadata.insert(&format!("key_{index}"), "x".repeat(1024));
     }
 
     let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
@@ -263,6 +265,70 @@ fn test_task_request_rejects_metadata_over_serialized_byte_budget() {
         request.encode(registry),
         Err(TaskRequestEncodeError::MetadataTooLarge(_))
     ));
+}
+
+fn metadata_with_encoded_size(target: usize) -> Metadata {
+    let empty = Metadata::new().with("notes", "");
+    let overhead = empty.to_json_vec().expect("empty value must encode").len();
+    assert!(target >= overhead, "target must fit the wire envelope");
+    let metadata = Metadata::new().with("notes", "x".repeat(target - overhead));
+    assert_eq!(metadata.to_json_vec().expect("fixture must encode").len(), target);
+    metadata
+}
+
+#[test]
+fn test_task_request_metadata_encoded_byte_boundary() {
+    let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
+    for size in [MAX_TASK_METADATA_BYTES, MAX_TASK_METADATA_BYTES + 1] {
+        let mut request = TaskRequest::new(
+            "example.count",
+            1,
+            ValueCodecId::new("qubit_task.tests.u32_le"),
+            Counter(1),
+        );
+        request.metadata = metadata_with_encoded_size(size);
+        let result = request.encode(registry);
+        if size == MAX_TASK_METADATA_BYTES {
+            assert!(result.is_ok(), "exact limit must be accepted: {result:?}");
+        } else {
+            assert!(matches!(result, Err(TaskRequestEncodeError::MetadataTooLarge(n))
+                if n == MAX_TASK_METADATA_BYTES + 1));
+        }
+    }
+}
+
+#[test]
+fn test_task_request_metadata_reports_size_lower_bound() {
+    let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
+    let mut request = TaskRequest::new(
+        "example.count",
+        1,
+        ValueCodecId::new("qubit_task.tests.u32_le"),
+        Counter(1),
+    );
+    request.metadata = Metadata::new().with("notes", "x".repeat(64 * 1024));
+    let error = request.encode(registry).expect_err("oversized metadata must fail");
+    assert!(matches!(error, TaskRequestEncodeError::MetadataTooLarge(n)
+        if n == MAX_TASK_METADATA_BYTES + 1));
+    assert!(error.to_string().contains("at least 16385"));
+}
+
+#[test]
+fn test_task_request_preserves_metadata_wire_failures() {
+    let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
+    let mut request = TaskRequest::new(
+        "example.count",
+        1,
+        ValueCodecId::new("qubit_task.tests.u32_le"),
+        Counter(1),
+    );
+    request.metadata.insert(&"k".repeat(257), "value");
+    let error = request.encode(registry).expect_err("oversized wire key must fail");
+    assert!(matches!(&error, TaskRequestEncodeError::Metadata(_)));
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "metadata source chain is retained"
+    );
 }
 
 #[test]

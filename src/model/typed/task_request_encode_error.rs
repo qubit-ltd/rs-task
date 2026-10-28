@@ -54,9 +54,11 @@ pub enum TaskRequestEncodeError {
         usize,
     ),
     /// Metadata's bounded JSON representation exceeds the request-level limit.
-    #[error("task metadata has {0} encoded bytes; the maximum is {MAX_TASK_METADATA_BYTES}")]
+    /// The value is a known lower bound, not necessarily the complete encoded
+    /// length.
+    #[error("task metadata has at least {0} encoded bytes; the maximum is {MAX_TASK_METADATA_BYTES}")]
     MetadataTooLarge(
-        /// Number of encoded metadata bytes that exceeded the limit.
+        /// Known lower bound on encoded metadata bytes that exceeded the limit.
         usize,
     ),
     /// Encoded payload exceeds the service's reconstructable payload limit.

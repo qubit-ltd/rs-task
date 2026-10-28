@@ -6,6 +6,8 @@ The typed API keeps application values typed until acceptance. Payload identity 
 
 `Payload<T>` derives its stable model identity from `T: HasModelId`; callers supply only schema version, codec ID, and value. `TaskRequest<T>::encode` resolves a `ValueBytesCodecDescriptor` from `ValueBytesCodecRegistry` and creates an `EncodedPayload<T>`; storage receives its type-erased `StoredPayload`. The bytes registry uses `ValueEncoder<T>` and `ValueDecoder<[u8]>`. Task metadata uses `rs-metadata::Metadata` and is limited to 32 entries and 16 KiB serialized bytes by the task request, in addition to `rs-metadata`'s wire budgets.
 
+The 16 KiB metadata output budget is enforced while JSON is encoded. When `TaskRequestEncodeError::MetadataTooLarge(n)` is returned, `n` is a known lower bound (currently 16,385), not the exact complete encoded size. Callers should use it to identify an over-limit request and must not present it as the exact original size. The enum shape, successful encoding path, and `StoredTaskRequest` wire representation are unchanged; this lower-bound diagnostic is a deliberate error-semantics change.
+
 ## End-to-end outline
 
 This example follows one request from a typed value through codec registration and handler execution. Application code injects the ID generator. In production, a Snowflake-style generator requires distinct node IDs for each process and suitable clock configuration across those processes.
