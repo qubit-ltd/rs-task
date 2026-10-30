@@ -29,6 +29,13 @@ use crate::store::TaskStore;
 /// service. Its configuration methods consume and return the builder so they
 /// can be chained before `build` starts service recovery.
 ///
+/// Synchronous ID generation during submission runs on Tokio's blocking pool.
+/// A cancelled submission does not stop a generator call that has already
+/// started, so it may consume an ID without accepting a task. Uncancelled
+/// submissions remain inside the service's shutdown admission boundary.
+/// Custom generators should return eventually and must not depend on
+/// executor-local state. Runtime shutdown can wait for an active blocking call.
+///
 /// # Examples
 ///
 /// ```

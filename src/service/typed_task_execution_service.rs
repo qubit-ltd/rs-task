@@ -7,6 +7,7 @@
 // =============================================================================
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
+use std::panic::resume_unwind;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
@@ -24,6 +25,7 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use tokio::sync::watch;
+use tokio::task::spawn_blocking;
 
 #[cfg(feature = "event-bus")]
 use super::NotificationStats;
@@ -267,6 +269,9 @@ impl TypedTaskExecutionService {
     /// Returns an error if admission has stopped, request encoding or ID
     /// generation fails, or the store rejects the request or cannot accept
     /// it.
+    ///
+    /// Synchronous ID generation runs on Tokio's blocking pool. Cancelling
+    /// this future does not stop a generator call that has already started.
     pub async fn submit<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
@@ -279,7 +284,17 @@ impl TypedTaskExecutionService {
         let stored = request
             .encode(&self.core.codecs)
             .map_err(|error| TaskServiceError::TypedRequest(error.to_string()))?;
-        let id = TaskId::from_id(self.core.id_generator.generate()?);
+        let generator = Arc::clone(&self.core.id_generator);
+        let allocated = match spawn_blocking(move || generator.generate()).await {
+            Ok(result) => result?,
+            Err(error) if error.is_panic() => resume_unwind(error.into_panic()),
+            Err(error) => {
+                return Err(TaskServiceError::SchedulerUnavailable(format!(
+                    "task ID generation worker unavailable: {error}"
+                )));
+            }
+        };
+        let id = TaskId::from_id(allocated);
         let accepted = self
             .runner()
             .submission_store_result(self.core.store.accept_encoded(id, stored).await)?;

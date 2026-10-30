@@ -85,10 +85,14 @@ pub enum TaskServiceError {
         /// First store failure retained by the service.
         String,
     ),
-    /// The scheduler or execution engine cannot accept or start more work.
+    /// A scheduler, execution engine, or task execution infrastructure worker
+    /// could not start or complete its work.
+    ///
+    /// The diagnostic identifies the unavailable work item, including an ID
+    /// generation worker when that worker cannot be joined.
     #[error("task execution scheduler is unavailable: {0}")]
     SchedulerUnavailable(
-        /// Scheduler or engine failure retained by the service.
+        /// Diagnostic for the unavailable task execution infrastructure.
         String,
     ),
     /// The notification bus cannot retain messages without active subscribers.

@@ -14,7 +14,7 @@ The runnable typed examples are [`examples/task_service.rs`](../examples/task_se
 
 ## Main concepts
 
-- **Task identity:** each accepted task has an `rs-id::Id` wrapped by `TaskId`. Inject an `IdGenerator`; Snowflake generators need distinct node IDs across processes and suitable clock configuration.
+- **Task identity:** each accepted task has an `rs-id::Id` wrapped by `TaskId`. Inject an `IdGenerator`; Snowflake generators need distinct node IDs across processes and suitable clock configuration. Synchronous generation runs on Tokio's blocking pool. Cancelling submission does not stop an already-started generator call, so it may consume an ID without accepting a task; uncancelled submissions remain part of the shutdown admission boundary. Custom generators should return eventually and must not depend on executor-local state. Runtime shutdown can wait for a blocking call; this adds scheduling overhead but provides no hard timeout or unlimited-concurrency guarantee.
 - **Routing and classification:** `kind_id` chooses a handler. `category` is an independent business filter for queries.
 - **Payload compatibility:** `Payload<T>` binds `type_id`, `schema_version`, and `codec_id` to the value. A handler accepts one payload type ID and an explicit set of schema versions. A codec may serve multiple schema versions.
 - **Resource admission:** CPU, GPU, memory, disk, and custom units are concurrency quotas. They reserve capacity inside the execution engine; they do not pin CPUs, isolate GPUs, or enforce operating-system memory or disk use.

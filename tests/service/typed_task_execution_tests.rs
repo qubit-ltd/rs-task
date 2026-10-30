@@ -7,8 +7,12 @@
 // =============================================================================
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use qubit_codec as codec;
 use qubit_codec::ValueBytesCodecDescriptor;
@@ -41,6 +45,7 @@ use qubit_task::service::CancelOutcome;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counter(u32);
@@ -82,6 +87,33 @@ static CODEC_REGISTRATION: codec::ValueBytesCodecRegistration = ValueCodecRegist
 );
 
 struct Ids(AtomicU64);
+
+struct GatedIds {
+    entered: Notify,
+    completed: Notify,
+    release: StdMutex<mpsc::Receiver<()>>,
+}
+
+impl id::IdGenerator for GatedIds {
+    fn generate(&self) -> Result<id::Id, id::IdGenerationError> {
+        self.entered.notify_one();
+        self.release
+            .lock()
+            .expect("release lock")
+            .recv()
+            .expect("external driver releases the generator");
+        self.completed.notify_one();
+        Ok(id::Id::new(7001))
+    }
+}
+
+struct PanickingIds;
+
+impl id::IdGenerator for PanickingIds {
+    fn generate(&self) -> Result<id::Id, id::IdGenerationError> {
+        panic!("controlled ID generator panic")
+    }
+}
 
 impl id::IdGenerator for Ids {
     fn generate(&self) -> Result<id::Id, id::IdGenerationError> {
@@ -619,6 +651,48 @@ async fn wait_for_terminal(service: &task::TaskExecutionService, id: task::model
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
     panic!("typed task did not reach a terminal state")
+}
+
+#[test]
+fn test_submit_keeps_current_thread_runtime_responsive() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (release_tx, release_rx) = mpsc::channel();
+    let gate = Arc::new(GatedIds {
+        entered: Notify::new(),
+        completed: Notify::new(),
+        release: StdMutex::new(release_rx),
+    });
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let progressed = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&progressed);
+    let driver = std::thread::spawn(move || {
+        let ok = progress_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        observed.store(ok, Ordering::Release);
+        let _ = release_tx.send(());
+    });
+
+    runtime.block_on(async {
+        let store = Arc::new(MemoryTaskStore::new(16));
+        let service = TaskExecutionServiceBuilder::new(store, registry(), gate.clone())
+            .build()
+            .await
+            .expect("service");
+        let submitter = service.clone();
+        let worker = tokio::spawn(async move { submitter.submit(request()).await });
+        gate.entered.notified().await;
+        let _ = progress_tx.send(());
+        worker.await.expect("submission task").expect("accepted");
+        service.shutdown().await.expect("shutdown");
+    });
+
+    driver.join().expect("external driver");
+    assert!(
+        progressed.load(Ordering::Acquire),
+        "runtime did not progress until an external thread released ID generation"
+    );
 }
 
 #[tokio::test]
@@ -1323,7 +1397,12 @@ async fn test_id_generation_failure_prevents_acceptance() {
         .build()
         .await
         .unwrap();
-    assert!(service.submit(request()).await.is_err());
+    assert!(matches!(
+        service.submit(request()).await,
+        Err(task::service::TaskServiceError::IdGeneration(
+            id::IdGenerationError::NodeOutOfRange { node_id: 4, max: 3 }
+        ))
+    ));
     let page = store
         .list_encoded(TaskQuery {
             limit: 10,
@@ -1332,6 +1411,105 @@ async fn test_id_generation_failure_prevents_acceptance() {
         .await
         .unwrap();
     assert!(page.records.is_empty());
+}
+
+#[tokio::test]
+async fn test_submit_cancellation_does_not_accept_after_id_generation() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let (release_tx, release_rx) = mpsc::channel();
+    let gate = Arc::new(GatedIds {
+        entered: Notify::new(),
+        completed: Notify::new(),
+        release: StdMutex::new(release_rx),
+    });
+    let (driver_tx, driver_rx) = mpsc::channel();
+    let driver = std::thread::spawn(move || {
+        let _ = driver_rx.recv_timeout(Duration::from_secs(5));
+        let _ = release_tx.send(());
+    });
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), gate.clone())
+        .build()
+        .await
+        .expect("service");
+    let submitter = service.clone();
+    let worker = tokio::spawn(async move { submitter.submit(request()).await });
+    gate.entered.notified().await;
+    worker.abort();
+    assert!(worker.await.expect_err("submission is cancelled").is_cancelled());
+    assert!(
+        store
+            .list_encoded(TaskQuery::default())
+            .await
+            .unwrap()
+            .records
+            .is_empty()
+    );
+
+    service.shutdown().await.expect("shutdown");
+    let completed = gate.completed.notified();
+    let _ = driver_tx.send(());
+    completed.await;
+    assert!(
+        store
+            .list_encoded(TaskQuery::default())
+            .await
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    driver.join().expect("external driver");
+}
+
+#[tokio::test]
+async fn test_submit_generator_panic_preserves_panic() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(PanickingIds))
+        .build()
+        .await
+        .expect("service");
+    let submitter = service.clone();
+    let worker = tokio::spawn(async move { submitter.submit(request()).await });
+    assert!(worker.await.expect_err("generator panic is preserved").is_panic());
+    assert!(
+        store
+            .list_encoded(TaskQuery::default())
+            .await
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    service.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn test_shutdown_waits_for_uncancelled_submission() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let (release_tx, release_rx) = mpsc::channel();
+    let gate = Arc::new(GatedIds {
+        entered: Notify::new(),
+        completed: Notify::new(),
+        release: StdMutex::new(release_rx),
+    });
+    let (driver_tx, driver_rx) = mpsc::channel();
+    let driver = std::thread::spawn(move || {
+        let _ = driver_rx.recv_timeout(Duration::from_secs(5));
+        let _ = release_tx.send(());
+    });
+    let service = TaskExecutionServiceBuilder::new(store, registry(), gate.clone())
+        .build()
+        .await
+        .expect("service");
+    let submitter = service.clone();
+    let submission = tokio::spawn(async move { submitter.submit(request()).await });
+    gate.entered.notified().await;
+    let shutdown_service = service.clone();
+    let shutdown = tokio::spawn(async move { shutdown_service.shutdown().await });
+    tokio::task::yield_now().await;
+    assert!(!shutdown.is_finished(), "shutdown waits for admitted submission");
+    let _ = driver_tx.send(());
+    submission.await.expect("submission task").expect("accepted");
+    shutdown.await.expect("shutdown task").expect("shutdown");
+    driver.join().expect("external driver");
 }
 
 #[tokio::test]
