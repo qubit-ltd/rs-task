@@ -52,7 +52,7 @@ qubit-id = { version = "^0.7", features = ["serde"] }
 qubit-metadata = { path = "../rs-metadata", version = "0.7.0", features = ["json"] }
 qubit-model-id = { path = "../rs-model-metadata/model-id", version = "0.1.0" }
 qubit-progress = "^0.9"
-qubit-spi = "^0.13"
+qubit-spi = "^0.14"
 rusqlite = { version = "^0.32", features = ["bundled"], optional = true }
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
