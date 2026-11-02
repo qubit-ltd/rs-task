@@ -1027,7 +1027,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.15.0"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13ee50328f95637a2689cd8c77fa3a4f8cdb7b2af3fda3b991001eb92b0df4d4"
 dependencies = [
  "qubit-budget 0.10.0",
  "qubit-json",
@@ -1038,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "qubit-clock",
  "qubit-id",
@@ -1093,7 +1095,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-json"
-version = "0.12.0"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ca9db6748b7adb03191688291692d5a16a66a7fd1513ace19dc0c2f2769b2e8"
 dependencies = [
  "qubit-budget 0.10.0",
  "qubit-io",
@@ -1153,9 +1157,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-spi"
-version = "0.13.1"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3041ac742907d2dba4d461453539b0ced8e046185a2c2f741d429654c4f4c6b0"
+checksum = "402c5dfb62b10e854d0345e56db75abac1e970eb3383cc8467760e310952303d"
 dependencies = [
  "inventory",
  "parking_lot",
