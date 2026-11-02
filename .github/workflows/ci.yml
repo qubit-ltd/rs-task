@@ -30,16 +30,26 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      - name: Prepare local path dependencies
-        shell: bash
-        run: ./.infra/bin/prepare-local-path-dependencies.sh
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.94
+      - name: Update infrastructure bootstrap
+        shell: bash
+        run: |
+          ./update-infra.sh
+          ./update-infra.sh --check
+      - name: Prepare local path dependencies
+        shell: bash
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
       - name: Test SQLite store and ownership on Windows
         shell: bash
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}\rs-task-windows-sqlite-target
         run: >-
-          cargo test --locked --features sqlite --lib
-          --test task_store_contract_tests --test owner_identity_tests
+          ./.infra/bin/infra-tool.sh rs-infra-platform --project . check
+          --platform windows --suite windows-sqlite --require windows
+      - name: Preserve platform reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-sqlite-platform-reports
+          path: ${{ env.LOCALAPPDATA }}/rs-infra/platform/reports/
+          if-no-files-found: warn

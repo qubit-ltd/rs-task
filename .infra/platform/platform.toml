@@ -1,0 +1,12 @@
+version = 1
+
+# Keep the Windows workflow and local runner on the same SQLite/owner suite.
+[[suites]]
+id = "windows-sqlite"
+platforms = ["windows"]
+timeout_seconds = 3600
+minimum_tests = 1
+requirements = ["msvc", "writable-tmpdir", "symlinks"]
+commands = [
+    { kind = "test", argv = ["cargo", "test", "--locked", "--features", "sqlite", "--lib", "--test", "task_store_contract_tests", "--test", "store_tests"], cwd = "." },
+]
