@@ -56,7 +56,7 @@ impl ControlledRedis {
             .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid Redis URL"))?
             .get_connection_info()
             .clone();
-        let ConnectionAddr::Tcp(host, port) = connection_info.addr else {
+        let ConnectionAddr::Tcp(host, port) = connection_info.addr() else {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "controlled Redis proxy supports TCP Redis endpoints",

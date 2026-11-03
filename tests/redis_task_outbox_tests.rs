@@ -306,7 +306,7 @@ fn wires(url: &str, namespace: &str) -> Result<Vec<serde_json::Value>, Box<dyn E
         .ids
         .iter()
         .map(|entry| {
-            let wire: String = redis::from_redis_value(entry.map.get("wire").expect("provider wire field"))?;
+            let wire: String = redis::from_redis_value(entry.map.get("wire").expect("provider wire field").clone())?;
             Ok(serde_json::from_str(&wire)?)
         })
         .collect()
@@ -319,7 +319,7 @@ fn pending(url: &str, namespace: &str, group: &str) -> Result<u64, Box<dyn Error
         .arg(stream_key(namespace, "task.lifecycle"))
         .arg(group_name(namespace, "task.lifecycle", "outbox-consumer", Some(group)))
         .query(&mut connection)?;
-    Ok(redis::from_redis_value(&reply[0])?)
+    Ok(redis::from_redis_value(reply[0].clone())?)
 }
 
 /// Runs one consumer instance and waits until every current wire is ACKed.

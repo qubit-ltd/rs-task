@@ -74,7 +74,7 @@ qubit-event-bus = { path = "../rs-event-bus" }
 [dev-dependencies]
 proptest = "^1.11"
 qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "0.7" }
-redis = { version = "^0.32", git = "https://github.com/qubit-ltd/redis-rs.git", branch = "qubit/redis-0327-response-limit", default-features = false, features = ["streams"] }
+redis = { version = "2.0.0-rc.1", git = "https://github.com/qubit-ltd/redis-rs.git", branch = "qubit/redis-2-0-0-rc1-response-limit", default-features = false, features = ["streams"] }
 tokio = { version = "^1.54", features = ["macros", "rt-multi-thread", "time"] }
 
 [target.'cfg(windows)'.dependencies]
