@@ -75,6 +75,16 @@ type ProjectionResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 type ProjectionSnapshot = (Option<(u64, TaskState)>, Vec<u64>);
 const DEADLINE: Duration = Duration::from_secs(15);
 
+/// Converts a projection version to SQLite's signed integer representation.
+fn sqlite_integer_from_version(value: u64) -> ProjectionResult<i64> {
+    Ok(i64::try_from(value)?)
+}
+
+/// Converts a SQLite version to its unsigned projection representation.
+fn version_from_sqlite_integer(value: i64) -> ProjectionResult<u64> {
+    Ok(u64::try_from(value)?)
+}
+
 /// Widens a thread-safe projection error for the integration test result.
 fn test_error(error: Box<dyn Error + Send + Sync>) -> Box<dyn Error> {
     error
@@ -113,13 +123,14 @@ impl DurableProjection {
     ) -> ProjectionResult<()> {
         let transaction = self.connection.transaction()?;
         let id = event.task_id.to_padded_decimal();
-        let checkpoint: Option<u64> = transaction
+        let checkpoint: Option<i64> = transaction
             .query_row(
                 "SELECT highest_state_version FROM task_projection WHERE task_id = ?1",
                 [&id],
                 |row| row.get(0),
             )
             .optional()?;
+        let checkpoint = checkpoint.map(version_from_sqlite_integer).transpose()?;
         if checkpoint.is_some_and(|version| event.state_version <= version) {
             transaction.commit()?;
             return Ok(());
@@ -140,11 +151,15 @@ impl DurableProjection {
              ON CONFLICT(task_id) DO UPDATE SET
                highest_state_version = excluded.highest_state_version,
                state_json = excluded.state_json",
-            params![id, version, serde_json::to_string(&state)?],
+            params![
+                id,
+                sqlite_integer_from_version(version)?,
+                serde_json::to_string(&state)?
+            ],
         )?;
         transaction.execute(
             "INSERT INTO projection_effects (task_id, state_version) VALUES (?1, ?2)",
-            params![id, version],
+            params![id, sqlite_integer_from_version(version)?],
         )?;
         transaction.commit()?;
         Ok(())
@@ -154,7 +169,7 @@ impl DurableProjection {
     fn snapshot(path: &Path, id: TaskId) -> ProjectionResult<ProjectionSnapshot> {
         let connection = Connection::open(path)?;
         let id = id.to_padded_decimal();
-        let checkpoint: Option<(u64, String)> = connection
+        let checkpoint: Option<(i64, String)> = connection
             .query_row(
                 "SELECT highest_state_version, state_json FROM task_projection WHERE task_id = ?1",
                 [&id],
@@ -168,10 +183,18 @@ impl DurableProjection {
                  ORDER BY state_version",
         )?;
         let versions = statement
-            .query_map([&id], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+            .query_map([&id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(version_from_sqlite_integer)
+            .collect::<ProjectionResult<Vec<_>>>()?;
         let checkpoint = checkpoint
-            .map(|(version, json)| Ok::<_, serde_json::Error>((version, serde_json::from_str(&json)?)))
+            .map(|(version, json)| {
+                Ok::<_, Box<dyn Error + Send + Sync>>((
+                    version_from_sqlite_integer(version)?,
+                    serde_json::from_str(&json)?,
+                ))
+            })
             .transpose()?;
         Ok((checkpoint, versions))
     }

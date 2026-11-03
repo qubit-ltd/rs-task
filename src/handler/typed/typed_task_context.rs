@@ -127,7 +127,6 @@ impl TypedTaskContext {
     /// # Returns
     ///
     /// A builder that reports progress through this context's reporter.
-    #[must_use]
     #[inline]
     pub fn progress_builder(&self) -> AsyncProgressBuilder<'static> {
         AsyncProgress::builder_arc(Arc::clone(&self.progress_reporter))

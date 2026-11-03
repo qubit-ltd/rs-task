@@ -417,7 +417,10 @@ async fn test_quarantine_requires_current_owned_head_and_archives_atomically() {
     let original_created_at_ms: i64 = connection
         .query_row(
             "SELECT created_at_ms FROM task_event_outbox WHERE task_id=?1 AND state_version=?2",
-            params![head.task_id.to_padded_decimal(), head.state_version],
+            params![
+                head.task_id.to_padded_decimal(),
+                i64::try_from(head.state_version).expect("SQLite version range")
+            ],
             |row| row.get(0),
         )
         .expect("original event timestamp");
@@ -496,7 +499,7 @@ async fn test_quarantine_requires_current_owned_head_and_archives_atomically() {
         .await
         .expect("quarantine current head");
     assert_eq!(store.list_event_outbox(128).await.expect("remaining outbox").len(), 1);
-    let archived: (String, u64, String, String, i64, i64, String, String) = connection
+    let archived: (String, i64, String, String, i64, i64, String, String) = connection
         .query_row(
             "SELECT task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error FROM task_event_outbox_quarantine",
             [],
@@ -504,7 +507,10 @@ async fn test_quarantine_requires_current_owned_head_and_archives_atomically() {
         )
         .expect("archived event");
     assert_eq!(archived.0, head.task_id.to_padded_decimal());
-    assert_eq!(archived.1, head.state_version);
+    assert_eq!(
+        u64::try_from(archived.1).expect("nonnegative archived version"),
+        head.state_version
+    );
     assert_eq!(archived.2, head.event_id);
     assert_eq!(archived.3, head.event_json);
     assert_eq!(archived.4, original_created_at_ms);

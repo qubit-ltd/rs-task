@@ -21,6 +21,8 @@ use rusqlite::types::Value;
 use serde_json;
 
 use super::super::failure;
+use super::super::sqlite_i64_from_u64;
+use super::super::sqlite_u64_from_i64;
 use super::query_sql::build_encoded_history_query;
 use crate::event::TaskEvent;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
@@ -389,7 +391,7 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, u64>(3)?,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         )
@@ -397,6 +399,7 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
         .map_err(failure)?
         .ok_or(StoreError::NotFound)?;
     let (request_json, lifecycle_json, state_kind, state_version) = row;
+    let state_version = sqlite_u64_from_i64(state_version, "task state version")?;
     if state_kind != "Queued" || state_version != command.expected_state_version {
         return Err(StoreError::Conflict);
     }
@@ -425,11 +428,11 @@ pub(in crate::store::sqlite_task_store) fn start_encoded(
             ),
             params![
                 id_key,
-                lifecycle.state_version,
+                sqlite_i64_from_u64(lifecycle.state_version, "task state version")?,
                 lifecycle.attempt,
                 i64::try_from(command.started_at_ms).map_err(failure)?,
                 lifecycle_json,
-                command.expected_state_version,
+                sqlite_i64_from_u64(command.expected_state_version, "task state version")?,
             ],
         )
         .map_err(failure)?;
@@ -485,7 +488,7 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, u64>(2)?,
+                    row.get::<_, i64>(2)?,
                 ))
             },
         )
@@ -493,6 +496,7 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
         .map_err(failure)?
         .ok_or(StoreError::NotFound)?;
     let (request_json, lifecycle_json, state_version) = row;
+    let state_version = sqlite_u64_from_i64(state_version, "task state version")?;
     let retry_deadline = command
         .retry_not_before_ms
         .map(i64::try_from)
@@ -538,9 +542,9 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
             params![
                 id_key,
                 lifecycle.state.kind().as_str(),
-                lifecycle.state_version,
+                sqlite_i64_from_u64(lifecycle.state_version, "task state version")?,
                 lifecycle_json,
-                state_version,
+                sqlite_i64_from_u64(state_version, "task state version")?,
                 retry_deadline
             ],
         )
@@ -719,7 +723,7 @@ fn insert_event_outbox(transaction: &Transaction<'_>, summary: &TaskSummary) -> 
             ),
             params![
                 summary.id.to_padded_decimal(),
-                summary.state_version,
+                sqlite_i64_from_u64(summary.state_version, "outbox state version")?,
                 event_id,
                 json,
                 i64::try_from(now_ms()).map_err(failure)?

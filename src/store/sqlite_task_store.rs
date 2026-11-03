@@ -210,7 +210,7 @@ impl SqliteTaskStore {
                 .query_map([limit as i64], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                     ))
@@ -223,7 +223,7 @@ impl SqliteTaskStore {
                 ));
                 Ok(super::EventOutboxEntry {
                     task_id,
-                    state_version,
+                    state_version: sqlite_u64_from_i64(state_version, "outbox state version")?,
                     event_id,
                     event_json,
                 })
@@ -252,7 +252,10 @@ impl SqliteTaskStore {
             connection
                 .execute(
                     "DELETE FROM task_event_outbox WHERE task_id=?1 AND state_version=?2",
-                    params![id.to_padded_decimal(), version],
+                    params![
+                        id.to_padded_decimal(),
+                        sqlite_i64_from_u64(version, "outbox state version")?
+                    ],
                 )
                 .map_err(failure)?;
             Ok(())
@@ -305,7 +308,7 @@ impl SqliteTaskStore {
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
-                            row.get::<_, u64>(1)?,
+                            row.get::<_, i64>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
                             row.get::<_, i64>(4)?,
@@ -317,8 +320,9 @@ impl SqliteTaskStore {
                     other => failure(other),
                 })?;
             let (task_key, state_version, event_id, event_json, created_at_ms) = head;
+            let state_version_value = sqlite_u64_from_i64(state_version, "outbox state version")?;
             if task_key != expected_task_key
-                || state_version != expected_state_version
+                || state_version_value != expected_state_version
                 || event_id != expected_event_id
             {
                 return Err(StoreError::Conflict);
@@ -488,6 +492,42 @@ impl SqliteTaskStore {
 /// A store failure containing the original display diagnostic.
 fn failure(error: impl std::fmt::Display) -> StoreError {
     StoreError::Failure(error.to_string())
+}
+
+/// Converts an unsigned value to SQLite's signed integer representation.
+///
+/// # Parameters
+///
+/// * `value` - Unsigned value to store.
+/// * `field` - Persisted field name for error context.
+///
+/// # Returns
+///
+/// The value as a SQLite integer.
+///
+/// # Errors
+///
+/// Returns `Failure` if the value exceeds SQLite's signed integer range.
+pub(super) fn sqlite_i64_from_u64(value: u64, field: &str) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| failure(format!("{field} exceeds SQLite integer range")))
+}
+
+/// Converts a SQLite integer to its unsigned application representation.
+///
+/// # Parameters
+///
+/// * `value` - Signed value read from SQLite.
+/// * `field` - Persisted field name for error context.
+///
+/// # Returns
+///
+/// The value as an unsigned integer.
+///
+/// # Errors
+///
+/// Returns `Failure` if the SQLite value is negative.
+pub(super) fn sqlite_u64_from_i64(value: i64, field: &str) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| failure(format!("{field} is negative in SQLite")))
 }
 
 /// Reads the current lifecycle state or its durable post-prune checkpoint.
@@ -858,7 +898,11 @@ impl super::TaskStore for SqliteTaskStore {
                 owner_state.lock_file = Some(acquire_owner_lock(&database_path)?);
             }
             connection.execute("INSERT INTO metadata(key,value) VALUES('owner_epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1", []).map_err(failure)?;
-            let epoch = connection.query_row("SELECT value FROM metadata WHERE key='owner_epoch'", [], |row| row.get::<_, u64>(0)).map(OwnerEpoch).map_err(failure)?;
+            let epoch = connection
+                .query_row("SELECT value FROM metadata WHERE key='owner_epoch'", [], |row| row.get::<_, i64>(0))
+                .map_err(failure)
+                .and_then(|value| sqlite_u64_from_i64(value, "owner epoch"))
+                .map(OwnerEpoch)?;
             owner_state.epoch = Some(epoch);
             Ok(epoch)
         })
@@ -1007,8 +1051,24 @@ mod tests {
     use tokio::time;
 
     use super::SqliteTaskStore;
+    use super::sqlite_i64_from_u64;
+    use super::sqlite_u64_from_i64;
     use crate::store::StoreError;
     use crate::store::TaskStore;
+
+    #[test]
+    fn sqlite_integer_conversion_checks_signed_boundaries() {
+        assert_eq!(sqlite_i64_from_u64(i64::MAX as u64, "test value").unwrap(), i64::MAX);
+        assert_eq!(sqlite_u64_from_i64(i64::MAX, "test value").unwrap(), i64::MAX as u64);
+        assert!(matches!(
+            sqlite_i64_from_u64(u64::MAX, "test value"),
+            Err(StoreError::Failure(_))
+        ));
+        assert!(matches!(
+            sqlite_u64_from_i64(-1, "test value"),
+            Err(StoreError::Failure(_))
+        ));
+    }
 
     /// Creates a unique database path for one worker scheduling test.
     fn test_database_path() -> std::path::PathBuf {
@@ -1133,7 +1193,7 @@ mod tests {
         assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 1);
         assert_eq!(store.operation_slot.available_permits(), 0);
         let observer = Connection::open(&path).expect("independent SQLite reader opens");
-        let uncommitted: usize = observer
+        let uncommitted: i64 = observer
             .query_row("SELECT COUNT(*) FROM barrier_probe", [], |row| row.get(0))
             .expect("reader observes committed rows only");
         assert_eq!(uncommitted, 0, "the entered write has not committed");
@@ -1166,7 +1226,7 @@ mod tests {
         }
         assert_eq!(store.worker_counts.active.load(Ordering::Acquire), 0);
         assert_eq!(store.operation_slot.available_permits(), 1);
-        let committed: usize = observer
+        let committed: i64 = observer
             .query_row("SELECT COUNT(*) FROM barrier_probe", [], |row| row.get(0))
             .expect("reader observes the committed write");
         assert_eq!(committed, 1);
