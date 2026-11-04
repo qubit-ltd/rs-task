@@ -975,7 +975,7 @@ dependencies = [
  "qubit-event-bus",
  "qubit-id",
  "qubit-spi",
- "redis 2.0.0-rc.1 (git+https://github.com/qubit-ltd/redis-rs.git?rev=a668891e9fcfed32f8905c2fd729fa05c1732aa5)",
+ "redis",
  "rustls",
  "serde",
  "serde_json",
@@ -1102,7 +1102,7 @@ dependencies = [
  "qubit-model-id",
  "qubit-progress",
  "qubit-spi",
- "redis 2.0.0-rc.1 (git+https://github.com/qubit-ltd/redis-rs.git?branch=qubit%2Fredis-2-0-0-rc1-response-limit)",
+ "redis",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1176,21 +1176,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core",
-]
-
-[[package]]
-name = "redis"
-version = "2.0.0-rc.1"
-source = "git+https://github.com/qubit-ltd/redis-rs.git?branch=qubit%2Fredis-2-0-0-rc1-response-limit#a668891e9fcfed32f8905c2fd729fa05c1732aa5"
-dependencies = [
- "arcstr",
- "combine",
- "itoa",
- "percent-encoding",
- "ryu",
- "socket2",
- "url",
- "xxhash-rust",
 ]
 
 [[package]]
