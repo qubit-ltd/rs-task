@@ -975,7 +975,7 @@ dependencies = [
  "qubit-event-bus",
  "qubit-id",
  "qubit-spi",
- "redis",
+ "redis 2.0.0-rc.1 (git+https://github.com/qubit-ltd/redis-rs.git?rev=a668891e9fcfed32f8905c2fd729fa05c1732aa5)",
  "rustls",
  "serde",
  "serde_json",
@@ -1102,7 +1102,7 @@ dependencies = [
  "qubit-model-id",
  "qubit-progress",
  "qubit-spi",
- "redis",
+ "redis 2.0.0-rc.1 (git+https://github.com/qubit-ltd/redis-rs.git?branch=qubit%2Fredis-2-0-0-rc1-response-limit)",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1182,6 +1182,21 @@ dependencies = [
 name = "redis"
 version = "2.0.0-rc.1"
 source = "git+https://github.com/qubit-ltd/redis-rs.git?branch=qubit%2Fredis-2-0-0-rc1-response-limit#a668891e9fcfed32f8905c2fd729fa05c1732aa5"
+dependencies = [
+ "arcstr",
+ "combine",
+ "itoa",
+ "percent-encoding",
+ "ryu",
+ "socket2",
+ "url",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "redis"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/qubit-ltd/redis-rs.git?rev=a668891e9fcfed32f8905c2fd729fa05c1732aa5#a668891e9fcfed32f8905c2fd729fa05c1732aa5"
 dependencies = [
  "arcstr",
  "async-io",
