@@ -1062,6 +1062,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "qubit-redis"
+version = "2.0.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "199beeb16207c3d17f86e9cc8fb76d995dfed943f999276c6dbafc009d40bc2a"
+dependencies = [
+ "arcstr",
+ "combine",
+ "itoa",
+ "percent-encoding",
+ "ryu",
+ "socket2",
+ "url",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "qubit-retry"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1101,8 +1117,8 @@ dependencies = [
  "qubit-metadata",
  "qubit-model-id",
  "qubit-progress",
+ "qubit-redis",
  "qubit-spi",
- "redis",
  "rusqlite",
  "serde",
  "serde_json",
