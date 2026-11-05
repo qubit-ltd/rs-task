@@ -974,8 +974,8 @@ dependencies = [
  "async-lock",
  "qubit-event-bus",
  "qubit-id",
+ "qubit-redis",
  "qubit-spi",
- "redis",
  "rustls",
  "serde",
  "serde_json",
@@ -1063,17 +1063,32 @@ dependencies = [
 
 [[package]]
 name = "qubit-redis"
-version = "2.0.0-rc.1"
+version = "2.0.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "199beeb16207c3d17f86e9cc8fb76d995dfed943f999276c6dbafc009d40bc2a"
+checksum = "3023be358af328ef37d3a1d3ea97d0860e472aefed0408ad40ff8293ad70901e"
 dependencies = [
  "arcstr",
+ "async-io",
+ "async-lock",
+ "bytes",
+ "cfg-if",
  "combine",
+ "futures-rustls",
+ "futures-util",
  "itoa",
+ "log",
  "percent-encoding",
+ "pin-project-lite",
+ "rand",
+ "rustls",
  "ryu",
+ "smol",
+ "smol-timeout",
  "socket2",
+ "tokio",
+ "tokio-util",
  "url",
+ "webpki-roots",
  "xxhash-rust",
 ]
 
@@ -1192,36 +1207,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core",
-]
-
-[[package]]
-name = "redis"
-version = "2.0.0-rc.1"
-source = "git+https://github.com/qubit-ltd/redis-rs.git?rev=a668891e9fcfed32f8905c2fd729fa05c1732aa5#a668891e9fcfed32f8905c2fd729fa05c1732aa5"
-dependencies = [
- "arcstr",
- "async-io",
- "async-lock",
- "bytes",
- "cfg-if",
- "combine",
- "futures-rustls",
- "futures-util",
- "itoa",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "rand",
- "rustls",
- "ryu",
- "smol",
- "smol-timeout",
- "socket2",
- "tokio",
- "tokio-util",
- "url",
- "webpki-roots",
- "xxhash-rust",
 ]
 
 [[package]]
