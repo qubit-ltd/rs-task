@@ -330,7 +330,13 @@ fn consume_durable(url: &str, namespace: &str, group: &str, path: &Path, service
     let projection = Arc::new(std::sync::Mutex::new(
         DurableProjection::open(path).map_err(test_error)?,
     ));
-    let bus: EventBus = EventBusRegistry::discover()?.create(&config(url, namespace)?)?;
+    let mut bus_config = config(url, namespace)?;
+    let mut provider_options = bus_config.provider_options().clone();
+    // This assertion verifies the effect for every ordered lifecycle
+    // revision; do not let concurrent callback scheduling reorder them.
+    provider_options.insert("redis.max_unsettled_per_subscription".into(), "1".into());
+    bus_config = bus_config.with_provider_options(provider_options);
+    let bus: EventBus = EventBusRegistry::discover()?.create(&bus_config)?;
     let handle = tokio::runtime::Handle::current();
     let authoritative_service = service.clone();
     let (sender, receiver) = mpsc::channel();
