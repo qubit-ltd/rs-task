@@ -5,9 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "sqlite")]
 use std::env;
+#[cfg(feature = "sqlite")]
 use std::fs;
 use std::num::NonZeroUsize;
+#[cfg(feature = "sqlite")]
 use std::path::Path;
 
 use qubit_id::Id;
@@ -28,6 +31,7 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
 #[cfg(feature = "sqlite")]
 use rusqlite::Connection;
+#[cfg(feature = "sqlite")]
 use uuid::Uuid;
 
 fn request(category: &str, correlation_key: &str) -> StoredTaskRequest {

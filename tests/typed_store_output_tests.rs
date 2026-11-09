@@ -7,8 +7,11 @@
 // =============================================================================
 //! Public contract tests for typed task output storage.
 
+#[cfg(feature = "sqlite")]
 use std::env;
+#[cfg(feature = "sqlite")]
 use std::fs;
+#[cfg(feature = "sqlite")]
 use std::path::Path;
 
 use qubit_id::Id;
@@ -32,6 +35,7 @@ use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 #[cfg(feature = "sqlite")]
 use rusqlite::Connection;
+#[cfg(feature = "sqlite")]
 use uuid::Uuid;
 
 fn request() -> StoredTaskRequest {

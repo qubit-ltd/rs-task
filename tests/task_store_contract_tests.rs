@@ -9,7 +9,9 @@
 mod common;
 mod support;
 
+#[cfg(feature = "sqlite")]
 use std::env;
+#[cfg(feature = "sqlite")]
 use std::fs;
 use std::num::NonZeroUsize;
 
@@ -23,6 +25,7 @@ use qubit_task::model::StartCommand;
 use qubit_task::model::StoredPayload;
 use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskId;
+#[cfg(feature = "sqlite")]
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
 use qubit_task::model::TransitionCommand;
