@@ -32,7 +32,7 @@ pub(in crate::service) struct TaskProgressReporter {
     id: TaskId,
     /// Attempt number associated with the reporter's progress events.
     attempt: u32,
-    /// Serializes version allocation and advances only after successful writes.
+    /// Serializes version allocation and tracks the highest allocated version.
     progress_version: tokio::sync::Mutex<u64>,
 }
 
@@ -63,8 +63,10 @@ impl AsyncReporter for TaskProgressReporter {
     /// Persists one progress event before reporting success to the caller.
     ///
     /// The mutex keeps version allocation and persistence ordered across
-    /// concurrent operations that share this reporter. Failed writes do not
-    /// advance the next version.
+    /// concurrent operations that share this reporter. A version is consumed
+    /// before the store write starts and is not reused after failure or
+    /// cancellation, since an asynchronous store may commit before its future
+    /// is cancelled.
     ///
     /// # Parameters
     ///
@@ -93,15 +95,18 @@ impl AsyncReporter for TaskProgressReporter {
                 unix_time_ms(),
             );
 
+            // The store can commit in a spawned worker before this future is
+            // cancelled. Consume the version before awaiting so a later report
+            // cannot reuse a version that may already be durable.
+            *current_version = progress_version;
+
             // Await persistence so a successful report means the status query
             // can observe this snapshot. Event phases only describe progress;
             // task lifecycle transitions remain owned by the task service.
             self.store
                 .update_progress(command)
                 .await
-                .map(|_| {
-                    *current_version = progress_version;
-                })
+                .map(|_| ())
                 .map_err(ReporterError::new)
         })
     }
@@ -125,15 +130,26 @@ fn unix_time_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    #[cfg(feature = "sqlite")]
+    use std::time::SystemTime;
+    #[cfg(feature = "sqlite")]
+    use std::time::UNIX_EPOCH;
 
     use qubit_progress::AsyncProgress;
     use qubit_progress::Metric;
     use qubit_progress::MetricDelta;
     use qubit_progress::Stage;
+    #[cfg(feature = "sqlite")]
+    use uuid::Uuid;
 
     use super::TaskProgressReporter;
+    #[cfg(feature = "sqlite")]
+    use super::unix_time_ms;
     use crate::model::TaskState;
+    use crate::model::typed::ProgressCommand;
     use crate::model::typed::ResourceRequest;
     use crate::model::typed::StartCommand;
     use crate::model::typed::StoredPayload;
@@ -142,6 +158,143 @@ mod tests {
     use crate::store::MemoryTaskStore;
     use crate::store::StoreError;
     use crate::store::TaskStore;
+
+    /// Blocks a progress write after the inner store has committed it.
+    struct CommitGateStore {
+        inner: Arc<dyn TaskStore>,
+        armed: AtomicBool,
+        before_commit: AtomicBool,
+        fail_next: AtomicBool,
+        committed: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+    }
+
+    impl CommitGateStore {
+        fn new(inner: Arc<dyn TaskStore>) -> Self {
+            Self {
+                inner,
+                armed: AtomicBool::new(false),
+                before_commit: AtomicBool::new(false),
+                fail_next: AtomicBool::new(false),
+                committed: tokio::sync::Notify::new(),
+                release: tokio::sync::Semaphore::new(0),
+            }
+        }
+
+        fn arm(&self) {
+            self.armed.store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        fn release(&self) {
+            self.release.add_permits(1);
+        }
+
+        fn gate_before_commit(&self) {
+            self.before_commit.store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        fn fail_next(&self) {
+            self.fail_next.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    impl TaskStore for CommitGateStore {
+        fn capabilities(&self) -> crate::model::StoreCapabilities {
+            self.inner.capabilities()
+        }
+        fn accept_encoded<'a>(
+            &'a self,
+            id: TaskId,
+            request: crate::model::typed::StoredTaskRequest,
+        ) -> crate::store::TaskFuture<'a, Result<crate::model::typed::AcceptOutcome, StoreError>> {
+            self.inner.accept_encoded(id, request)
+        }
+        fn get_encoded_task<'a>(
+            &'a self,
+            id: TaskId,
+        ) -> crate::store::TaskFuture<'a, Result<Option<crate::model::typed::StoredTask>, StoreError>> {
+            self.inner.get_encoded_task(id)
+        }
+        fn get_state_checkpoint<'a>(
+            &'a self,
+            id: TaskId,
+        ) -> crate::store::TaskFuture<'a, Result<Option<crate::model::typed::TaskStateCheckpoint>, StoreError>>
+        {
+            self.inner.get_state_checkpoint(id)
+        }
+        fn start_encoded<'a>(
+            &'a self,
+            cmd: crate::model::typed::StartCommand,
+        ) -> crate::store::TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+            self.inner.start_encoded(cmd)
+        }
+        fn transition_encoded<'a>(
+            &'a self,
+            cmd: crate::model::typed::TransitionCommand,
+        ) -> crate::store::TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+            self.inner.transition_encoded(cmd)
+        }
+        fn update_progress<'a>(
+            &'a self,
+            cmd: ProgressCommand,
+        ) -> crate::store::TaskFuture<'a, Result<crate::model::typed::TaskSummary, StoreError>> {
+            Box::pin(async move {
+                if self.fail_next.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    return Err(StoreError::Failure("injected progress failure".into()));
+                }
+                if self.before_commit.load(std::sync::atomic::Ordering::Acquire)
+                    && self.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    self.committed.notify_one();
+                    self.release.acquire().await.expect("test gate remains open").forget();
+                }
+                let result = self.inner.update_progress(cmd).await;
+                if !self.before_commit.load(std::sync::atomic::Ordering::Acquire)
+                    && self.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    self.committed.notify_one();
+                    self.release.acquire().await.expect("test gate remains open").forget();
+                }
+                result
+            })
+        }
+        fn list_encoded<'a>(
+            &'a self,
+            q: crate::model::typed::TaskQuery,
+        ) -> crate::store::TaskFuture<'a, Result<crate::model::typed::TaskPage, StoreError>> {
+            self.inner.list_encoded(q)
+        }
+        fn list_ready_queued<'a>(
+            &'a self,
+            after: Option<crate::model::typed::TaskCursor>,
+            limit: NonZeroUsize,
+            now: u64,
+        ) -> crate::store::TaskFuture<'a, Result<crate::model::typed::TaskPage, StoreError>> {
+            self.inner.list_ready_queued(after, limit, now)
+        }
+        fn next_retry_deadline<'a>(
+            &'a self,
+            now: u64,
+        ) -> crate::store::TaskFuture<'a, Result<Option<u64>, StoreError>> {
+            self.inner.next_retry_deadline(now)
+        }
+        fn prune_terminal_before<'a>(
+            &'a self,
+            before: u64,
+            max: NonZeroUsize,
+        ) -> crate::store::TaskFuture<'a, Result<usize, StoreError>> {
+            self.inner.prune_terminal_before(before, max)
+        }
+        fn acquire_owner<'a>(&'a self) -> crate::store::TaskFuture<'a, Result<crate::model::OwnerEpoch, StoreError>> {
+            self.inner.acquire_owner()
+        }
+        fn release_owner<'a>(
+            &'a self,
+            epoch: crate::model::OwnerEpoch,
+        ) -> crate::store::TaskFuture<'a, Result<(), StoreError>> {
+            self.inner.release_owner(epoch)
+        }
+    }
 
     fn task_id(value: u64) -> TaskId {
         TaskId::from_id(qubit_id::Id::new(value))
@@ -183,6 +336,119 @@ mod tests {
             .await
             .expect("typed task starts");
         (store, id)
+    }
+
+    #[tokio::test]
+    async fn test_commit_gate_store_forwards_task_store_operations() {
+        let (inner, id) = running_task().await;
+        let inner: Arc<dyn TaskStore> = inner;
+        let store = CommitGateStore::new(inner);
+
+        assert!(!store.capabilities().restart_recovery);
+        let running = store.get_encoded_task(id).await.unwrap().unwrap();
+        assert_eq!(running.summary.state, TaskState::Running);
+        assert_eq!(
+            store.get_state_checkpoint(id).await.unwrap().unwrap().state_version,
+            running.summary.state_version
+        );
+        assert_eq!(
+            store
+                .list_encoded(crate::model::typed::TaskQuery::default())
+                .await
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+
+        let queued_id = task_id(411);
+        let queued = store.accept_encoded(queued_id, running.request).await.unwrap();
+        assert_eq!(
+            store
+                .list_ready_queued(None, NonZeroUsize::new(1).unwrap(), 2)
+                .await
+                .unwrap()
+                .records[0]
+                .id,
+            queued_id
+        );
+        let started = store
+            .start_encoded(StartCommand {
+                id: queued_id,
+                expected_state_version: queued.summary.state_version,
+                started_at_ms: 3,
+            })
+            .await
+            .unwrap();
+        store
+            .update_progress(ProgressCommand::new(id, 1, 1, None, Vec::new(), 4))
+            .await
+            .unwrap();
+        store
+            .transition_encoded(crate::model::typed::TransitionCommand {
+                id,
+                expected_state_version: running.summary.state_version,
+                expected_attempt: running.summary.attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Succeeded,
+                cancel_requested: false,
+                cancel_error: None,
+                finished_at_ms: Some(5),
+                output: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.next_retry_deadline(5).await.unwrap(), None);
+        assert_eq!(
+            store
+                .prune_terminal_before(6, NonZeroUsize::new(1).unwrap())
+                .await
+                .unwrap(),
+            1
+        );
+        let owner = store.acquire_owner().await.unwrap();
+        store.release_owner(owner).await.unwrap();
+        assert_eq!(started.attempt, 1);
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn sqlite_running_task() -> (Arc<dyn TaskStore>, TaskId, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "qubit-task-progress-control-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is after epoch")
+                .as_nanos()
+        ));
+        let store: Arc<dyn TaskStore> = Arc::new(crate::store::SqliteTaskStore::open(&path).expect("SQLite opens"));
+        let id = task_id(unix_time_ms());
+        let (source_store, _) = running_task().await;
+        let source = source_store.get_encoded_task(task_id(410)).await.unwrap().unwrap();
+        let accepted = store.accept_encoded(id, source.request).await.unwrap();
+        let started = store
+            .start_encoded(crate::model::typed::StartCommand {
+                id,
+                expected_state_version: accepted.summary.state_version,
+                started_at_ms: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.attempt, 1);
+        (store, id, path)
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn cleanup_sqlite(path: &std::path::Path) {
+        for suffix in ["", ".owner.lock", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_os_string();
+            file.push(suffix);
+            match std::fs::remove_file(std::path::PathBuf::from(file)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("failed to remove SQLite test artifact: {error}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -373,5 +639,242 @@ mod tests {
             .expect("task lookup succeeds")
             .expect("task is retained");
         assert_eq!(task.summary.progress, None);
+    }
+
+    async fn cancel_after_commit_scenario(inner: Arc<dyn TaskStore>, id: TaskId, before_commit: bool) {
+        let gate = Arc::new(CommitGateStore::new(inner.clone()));
+        if before_commit {
+            gate.gate_before_commit();
+        }
+        let reporter = Arc::new(TaskProgressReporter::new(gate.clone(), id, 1));
+        let mut progress = AsyncProgress::builder_arc(reporter)
+            .stage(Stage::new("initial", "Initial"))
+            .metric(Metric::new("items", "Items"))
+            .start_async()
+            .await
+            .expect("initial snapshot commits");
+
+        gate.arm();
+        progress
+            .set_stage(Stage::new("cancelled", "Cancelled"))
+            .expect("stage is valid");
+        {
+            let first = progress.report_async();
+            tokio::pin!(first);
+            tokio::select! {
+                result = &mut first => panic!("gated report returned before cancellation: {result:?}"),
+                result = tokio::time::timeout(std::time::Duration::from_secs(5), gate.committed.notified()) => {
+                    result.expect("first update commits and reaches the gate");
+                }
+            }
+        }
+
+        let committed = inner
+            .get_encoded_task(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .progress
+            .unwrap();
+        assert_eq!(committed.progress_version, if before_commit { 1 } else { 2 });
+        assert_eq!(
+            committed.stage.as_ref().map(|s| s.id.as_str()),
+            Some(if before_commit { "initial" } else { "cancelled" })
+        );
+        gate.release();
+
+        progress
+            .set_stage(Stage::new("second", "Second"))
+            .expect("stage is valid");
+        progress
+            .report_async()
+            .await
+            .expect("report after cancellation succeeds");
+        progress
+            .set_stage(Stage::new("third", "Third"))
+            .expect("stage is valid");
+        progress.report_async().await.expect("third report succeeds");
+        let final_progress = inner
+            .get_encoded_task(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .progress
+            .unwrap();
+        assert_eq!(final_progress.progress_version, 4);
+        assert_eq!(final_progress.stage.as_ref().map(|s| s.id.as_str()), Some("third"));
+        assert_eq!(final_progress.metrics[0].id, "items");
+        assert_eq!(final_progress.metrics[0].completed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_after_committed_progress_advances_version_memory() {
+        let (store, id) = running_task().await;
+        cancel_after_commit_scenario(store, id, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_cancel_before_progress_commit_leaves_snapshot_unchanged() {
+        let (store, id) = running_task().await;
+        cancel_after_commit_scenario(store, id, true).await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_cancel_before_progress_commit_leaves_sqlite_snapshot_unchanged() {
+        let (store, id, path) = sqlite_running_task().await;
+        cancel_after_commit_scenario(store.clone(), id, true).await;
+        drop(store);
+        cleanup_sqlite(&path);
+    }
+
+    #[tokio::test]
+    async fn test_reporter_advances_version_after_store_error_and_recovers() {
+        let (store, id) = running_task().await;
+        let gate = Arc::new(CommitGateStore::new(store.clone()));
+        let reporter = Arc::new(TaskProgressReporter::new(gate.clone(), id, 1));
+        let mut progress = AsyncProgress::builder_arc(reporter)
+            .stage(Stage::new("initial", "Initial"))
+            .metric(Metric::new("items", "Items"))
+            .start_async()
+            .await
+            .expect("initial snapshot commits");
+        gate.fail_next();
+        progress
+            .set_stage(Stage::new("failed", "Failed"))
+            .expect("stage is valid");
+        let error = progress
+            .report_async()
+            .await
+            .expect_err("injected store failure is returned");
+        let delivery = match error {
+            qubit_progress::EmissionError::Delivery(error) => error,
+            other => panic!("expected store delivery failure, got: {other:?}"),
+        };
+        assert!(
+            matches!(delivery.reporter_error().source_error().downcast_ref::<StoreError>(), Some(StoreError::Failure(message)) if message == "injected progress failure")
+        );
+
+        progress
+            .set_stage(Stage::new("recovered", "Recovered"))
+            .expect("stage is valid");
+        progress
+            .report_async()
+            .await
+            .expect("report after ordinary failure succeeds");
+        let snapshot = store
+            .get_encoded_task(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .progress
+            .unwrap();
+        assert_eq!(snapshot.progress_version, 3);
+        assert_eq!(
+            snapshot.stage.as_ref().map(|stage| stage.id.as_str()),
+            Some("recovered")
+        );
+        assert_eq!(snapshot.metrics[0].id, "items");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_reporter_advances_version_after_store_error_and_recovers() {
+        let (store, id, path) = sqlite_running_task().await;
+        let gate = Arc::new(CommitGateStore::new(store.clone()));
+        let reporter = Arc::new(TaskProgressReporter::new(gate.clone(), id, 1));
+        let mut progress = AsyncProgress::builder_arc(reporter)
+            .stage(Stage::new("initial", "Initial"))
+            .metric(Metric::new("items", "Items"))
+            .start_async()
+            .await
+            .expect("initial snapshot commits");
+
+        gate.fail_next();
+        progress
+            .set_stage(Stage::new("failed", "Failed"))
+            .expect("stage is valid");
+        let error = progress
+            .report_async()
+            .await
+            .expect_err("injected SQLite progress failure is returned");
+        let delivery = match error {
+            qubit_progress::EmissionError::Delivery(error) => error,
+            other => panic!("expected delivery error, got: {other:?}"),
+        };
+        assert!(matches!(
+            delivery
+                .reporter_error()
+                .source_error()
+                .downcast_ref::<StoreError>(),
+            Some(StoreError::Failure(message)) if message == "injected progress failure"
+        ));
+        let after_error = store
+            .get_encoded_task(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .progress
+            .unwrap();
+        assert_eq!(after_error.progress_version, 1);
+        assert_eq!(
+            after_error.stage.as_ref().map(|stage| stage.id.as_str()),
+            Some("initial")
+        );
+        assert_eq!(after_error.metrics[0].id, "items");
+        assert_eq!(after_error.metrics[0].completed, 0);
+
+        progress
+            .set_stage(Stage::new("recovered", "Recovered"))
+            .expect("stage is valid");
+        progress
+            .report_async()
+            .await
+            .expect("SQLite report after ordinary failure succeeds");
+        let recovered = store
+            .get_encoded_task(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .progress
+            .unwrap();
+        assert_eq!(recovered.progress_version, 3);
+        assert_eq!(
+            recovered.stage.as_ref().map(|stage| stage.id.as_str()),
+            Some("recovered")
+        );
+        assert_eq!(recovered.metrics[0].id, "items");
+        assert_eq!(recovered.metrics[0].completed, 0);
+        drop(store);
+        cleanup_sqlite(&path);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_cancel_after_committed_progress_advances_version_sqlite() {
+        let path = std::env::temp_dir().join(format!("qubit-task-progress-cancel-{}.sqlite", Uuid::new_v4()));
+        let store: Arc<dyn TaskStore> = Arc::new(crate::store::SqliteTaskStore::open(&path).expect("SQLite opens"));
+        let id = task_id(unix_time_ms());
+        let (base, _) = running_task().await;
+        // Reuse the valid running record setup, then use the same task ID in SQLite.
+        let source = base.get_encoded_task(task_id(410)).await.unwrap().unwrap();
+        let accepted = store.accept_encoded(id, source.request).await.unwrap();
+        let started = store
+            .start_encoded(crate::model::typed::StartCommand {
+                id,
+                expected_state_version: accepted.summary.state_version,
+                started_at_ms: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.attempt, 1);
+        cancel_after_commit_scenario(store.clone(), id, false).await;
+        drop(store);
+        cleanup_sqlite(&path);
     }
 }
