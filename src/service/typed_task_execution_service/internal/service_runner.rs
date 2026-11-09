@@ -23,6 +23,7 @@ use super::ExternalCancelResult;
 use super::InFlightGuard;
 use super::ShutdownOutcome;
 use super::TypedServiceCore;
+use super::diagnostics::bound_diagnostic;
 use super::diagnostics::bound_state_diagnostics;
 use super::resource_fairness::ResourceFairness;
 use crate::engine::EngineError;
@@ -404,7 +405,9 @@ impl ServiceRunner {
                                 retry_not_before_ms: None,
                                 state,
                                 cancel_requested: keep_cancel,
-                                cancel_error: summary.cancel_error.clone(),
+                                cancel_error: summary.cancel_error.clone().map(|message| {
+                                    bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES)
+                                }),
                                 finished_at_ms: None,
                                 output: None,
                             })
@@ -509,6 +512,7 @@ impl ServiceRunner {
         attempt: u32,
         message: String,
     ) -> ExternalCancelResult {
+        let message = bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
         loop {
             let task = match core.store.get_encoded_task(id).await {
                 Ok(Some(task)) => task,
@@ -1117,7 +1121,10 @@ impl ServiceRunner {
                     retry_not_before_ms: retry_deadline,
                     state: final_state,
                     cancel_requested: latest.summary.cancel_requested,
-                    cancel_error: latest.summary.cancel_error,
+                    cancel_error: latest
+                        .summary
+                        .cancel_error
+                        .map(|message| bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES)),
                     finished_at_ms: Some(now_ms()),
                     output: output.clone(),
                 })

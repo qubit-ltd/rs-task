@@ -35,6 +35,8 @@ use qubit_task::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::StartCommand;
 use qubit_task::model::StoredPayload;
 use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskId;
@@ -42,11 +44,19 @@ use qubit_task::model::TaskQuery;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskRunError;
 use qubit_task::model::TaskState;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::TransitionCommand;
 use qubit_task::service::CancelOutcome;
 use qubit_task::store::MemoryTaskStore;
+#[cfg(feature = "sqlite")]
+use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
+#[cfg(feature = "sqlite")]
+use rusqlite::Connection;
 use tokio::sync::Notify;
+#[cfg(feature = "sqlite")]
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counter(u32);
@@ -2288,6 +2298,290 @@ async fn test_external_cancel_retries_failed_hook() {
     assert_eq!(hook_calls.load(Ordering::Relaxed), 2);
 }
 
+#[derive(Clone, Copy)]
+enum LongHookFailure {
+    Error,
+    Panic,
+}
+
+struct CancelAwareHandler(Arc<tokio::sync::Notify>);
+
+impl TaskHandler<Counter> for CancelAwareHandler {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
+        let finished = Arc::clone(&self.0);
+        Box::pin(async move {
+            finished.notified().await;
+            Ok(TaskRunOutcome::Cancelled)
+        })
+    }
+}
+
+async fn run_long_cancel_hook_failure_case(
+    store: Arc<dyn TaskStore>,
+    id_seed: u64,
+    failure: LongHookFailure,
+    sqlite_path: Option<std::path::PathBuf>,
+) {
+    let hook_calls = Arc::new(AtomicU64::new(0));
+    let calls = Arc::clone(&hook_calls);
+    let handler_finished = Arc::new(tokio::sync::Notify::new());
+    let hook_finished = Arc::clone(&handler_finished);
+    let hook: task::ExternalCancellationHook = Arc::new(move |_, _| {
+        let call = calls.fetch_add(1, Ordering::Relaxed);
+        if call == 0 && matches!(failure, LongHookFailure::Panic) {
+            panic!("{}", "界🙂".repeat(2_000));
+        }
+        let hook_finished = Arc::clone(&hook_finished);
+        Box::pin(async move {
+            if call == 0 {
+                Err(TaskRunError {
+                    category: "must-not-be-persisted".into(),
+                    message: "界🙂".repeat(2_000),
+                    retryable: false,
+                })
+            } else if call == 1 {
+                Err(TaskRunError {
+                    category: "must-not-be-persisted".into(),
+                    message: "x".repeat(task::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES),
+                    retryable: false,
+                })
+            } else {
+                hook_finished.notify_one();
+                Ok(())
+            }
+        })
+    });
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(id_seed))));
+    builder
+        .handlers_mut()
+        .register_with_cancellation_hook::<Counter, _>(
+            descriptor(CancellationMode::ExternalHook),
+            Arc::new(CancelAwareHandler(handler_finished)),
+            "test",
+            hook,
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    for _ in 0..1_000 {
+        if service
+            .get(accepted.id)
+            .await
+            .unwrap()
+            .is_some_and(|summary| matches!(summary.state, TaskState::Running))
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let error_message = match service.cancel(accepted.id).await {
+        Err(task::service::TaskServiceError::ExternalCancellationFailed { message, .. }) => message,
+        result => panic!("expected bounded hook error, got {result:?}"),
+    };
+    assert!(error_message.len() <= task::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
+    assert!(error_message.is_char_boundary(error_message.len()));
+    assert!(error_message.starts_with("界🙂"));
+    assert!(error_message.ends_with("..."));
+    assert!(!error_message.contains("must-not-be-persisted"));
+    let summary = service.get(accepted.id).await.unwrap().unwrap();
+    assert_eq!(summary.cancel_error.as_deref(), Some(error_message.as_str()));
+    assert!(!summary.cancel_error.unwrap().contains("must-not-be-persisted"));
+    let exact_message = match service.cancel(accepted.id).await {
+        Err(task::service::TaskServiceError::ExternalCancellationFailed { message, .. }) => message,
+        result => panic!("expected exact-bound hook error, got {result:?}"),
+    };
+    assert_eq!(exact_message.len(), task::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
+    assert_eq!(
+        service.get(accepted.id).await.unwrap().unwrap().cancel_error.as_deref(),
+        Some(exact_message.as_str())
+    );
+    assert!(!exact_message.contains("must-not-be-persisted"));
+    assert_eq!(
+        service.cancel(accepted.id).await.unwrap(),
+        CancelOutcome::CancellationRequested
+    );
+    assert_eq!(service.get(accepted.id).await.unwrap().unwrap().cancel_error, None);
+    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Cancelled);
+    service.shutdown().await.unwrap();
+    drop(service);
+    if let Some(path) = sqlite_path {
+        let mut owner_lock = path.as_os_str().to_owned();
+        owner_lock.push(".owner.lock");
+        for file in [
+            path.clone(),
+            owner_lock.into(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_external_cancel_long_error_is_bounded_in_memory_store() {
+    run_long_cancel_hook_failure_case(Arc::new(MemoryTaskStore::new(16)), 709, LongHookFailure::Error, None).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_external_cancel_long_error_is_bounded_in_sqlite_store() {
+    let path = std::env::temp_dir().join(format!("rs-task-cancel-error-{}.sqlite", Uuid::new_v4()));
+    let store: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    run_long_cancel_hook_failure_case(store, 710, LongHookFailure::Error, Some(path)).await;
+}
+
+#[tokio::test]
+async fn test_external_cancel_long_panic_is_bounded_in_memory_store() {
+    run_long_cancel_hook_failure_case(Arc::new(MemoryTaskStore::new(16)), 711, LongHookFailure::Panic, None).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_external_cancel_long_panic_is_bounded_in_sqlite_store() {
+    let path = std::env::temp_dir().join(format!("rs-task-cancel-panic-{}.sqlite", Uuid::new_v4()));
+    let store: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    run_long_cancel_hook_failure_case(store, 712, LongHookFailure::Panic, Some(path)).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_recovery_normalizes_historical_long_cancel_error() {
+    let path = std::env::temp_dir().join(format!("rs-task-historical-cancel-{}.sqlite", Uuid::new_v4()));
+    let id = TaskId::from_id(id::Id::new(7_091));
+    let finishing_id = TaskId::from_id(id::Id::new(7_092));
+    let store = SqliteTaskStore::open(&path).expect("SQLite store opens");
+    let accepted = store
+        .accept_encoded(
+            id,
+            StoredTaskRequest {
+                kind_id: "test.typed-service".into(),
+                category: None,
+                payload: StoredPayload {
+                    type_id: ModelIdBuf::parse("test.TypedServicePayload").unwrap(),
+                    schema_version: 1,
+                    codec_id: "qubit_task.typed_service.u32".into(),
+                    bytes: vec![0; 4],
+                },
+                metadata: metadata::Metadata::new(),
+                resource_limit: ResourceRequest::default(),
+                correlation_key: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: 1,
+        })
+        .await
+        .unwrap();
+    store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Running,
+            cancel_requested: true,
+            cancel_error: Some("short diagnostic".into()),
+            finished_at_ms: None,
+            output: None,
+        })
+        .await
+        .unwrap();
+    store
+        .accept_encoded(
+            finishing_id,
+            StoredTaskRequest {
+                kind_id: "test.typed-service".into(),
+                category: None,
+                payload: StoredPayload {
+                    type_id: ModelIdBuf::parse("test.TypedServicePayload").unwrap(),
+                    schema_version: 1,
+                    codec_id: "qubit_task.typed_service.u32".into(),
+                    bytes: 42_u32.to_le_bytes().to_vec(),
+                },
+                metadata: metadata::Metadata::new(),
+                resource_limit: ResourceRequest::default(),
+                correlation_key: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    drop(store);
+
+    // Seed a historical row while no store owner is active. This reproduces
+    // data written before cancel_error gained a size limit.
+    let connection = Connection::open(&path).expect("historical database opens");
+    for historical_id in [id, finishing_id] {
+        let id_key = historical_id.to_padded_decimal();
+        let lifecycle: String = connection
+            .query_row("SELECT lifecycle_json FROM tasks WHERE id=?1", [&id_key], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut lifecycle: serde_json::Value = serde_json::from_str(&lifecycle).unwrap();
+        lifecycle["cancel_error"] = serde_json::Value::String("界🙂".repeat(2_000));
+        connection
+            .execute(
+                "UPDATE tasks SET lifecycle_json=?2 WHERE id=?1",
+                rusqlite::params![id_key, serde_json::to_string(&lifecycle).unwrap()],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let reopened = Arc::new(SqliteTaskStore::open(&path).expect("historical database reopens"));
+    let mut builder = TaskExecutionServiceBuilder::new(reopened, registry(), Arc::new(Ids(AtomicU64::new(7091))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let service = builder.build().await.expect("service recovers the historical row");
+    for historical_id in [id, finishing_id] {
+        let summary = if historical_id == finishing_id {
+            assert_eq!(wait_for_terminal(&service, historical_id).await, TaskState::Succeeded);
+            service.get(historical_id).await.unwrap().unwrap()
+        } else {
+            service.get(historical_id).await.unwrap().unwrap()
+        };
+        let diagnostic = summary.cancel_error.expect("historical hook diagnostic is retained");
+        assert!(diagnostic.len() <= task::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
+        assert!(diagnostic.is_char_boundary(diagnostic.len()));
+        assert!(diagnostic.starts_with("界🙂"));
+        assert!(diagnostic.ends_with("..."));
+        if historical_id == id {
+            assert!(matches!(summary.state, TaskState::Blocked { .. }));
+        } else {
+            assert_eq!(summary.state, TaskState::Succeeded);
+        }
+    }
+    service.shutdown().await.unwrap();
+    drop(service);
+    for file in [
+        path.clone(),
+        {
+            let mut owner_lock = path.as_os_str().to_owned();
+            owner_lock.push(".owner.lock");
+            owner_lock.into()
+        },
+        path.with_extension("sqlite-wal"),
+        path.with_extension("sqlite-shm"),
+    ] {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
 #[tokio::test]
 async fn test_external_cancel_terminal_race_preserves_terminal_state() {
     struct FinishWhenReleased(Arc<tokio::sync::Notify>);
@@ -2506,7 +2800,7 @@ async fn test_external_cancel_hook_panics_are_reported_and_retryable() {
     let calls = Arc::new(AtomicU64::new(0));
     let hook_calls = Arc::clone(&calls);
     let hook: task::ExternalCancellationHook = Arc::new(move |_, _| match hook_calls.fetch_add(1, Ordering::Relaxed) {
-        0 => panic!("hook factory failed"),
+        0 => panic!("{}", "界🙂".repeat(2_000)),
         1 => Box::pin(async {
             panic!("hook future failed");
             #[allow(unreachable_code)]
@@ -2538,16 +2832,17 @@ async fn test_external_cancel_hook_panics_are_reported_and_retryable() {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
 
-    assert!(matches!(
-        service.cancel(accepted.id).await,
-        Err(task::service::TaskServiceError::ExternalCancellationFailed {
-            message,
-            ..
-        }) if message == "hook factory failed"
-    ));
+    let factory_panic_message = match service.cancel(accepted.id).await {
+        Err(task::service::TaskServiceError::ExternalCancellationFailed { message, .. }) => message,
+        result => panic!("expected bounded factory panic, got {result:?}"),
+    };
+    assert!(factory_panic_message.len() <= task::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
+    assert!(factory_panic_message.is_char_boundary(factory_panic_message.len()));
+    assert!(factory_panic_message.starts_with("界🙂"));
+    assert!(factory_panic_message.ends_with("..."));
     assert_eq!(
         service.get(accepted.id).await.unwrap().unwrap().cancel_error.as_deref(),
-        Some("hook factory failed")
+        Some(factory_panic_message.as_str())
     );
     assert!(matches!(
         service.cancel(accepted.id).await,

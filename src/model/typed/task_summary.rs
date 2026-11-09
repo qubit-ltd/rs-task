@@ -84,7 +84,11 @@ pub struct TaskSummary {
     pub state: TaskState,
     /// Whether cancellation has been requested but not yet acknowledged.
     pub cancel_requested: bool,
-    /// Error from an external cancellation hook, if the hook failed.
+    /// Error from an external cancellation hook, if the hook failed. New
+    /// writes are limited to
+    /// [`crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES`] UTF-8
+    /// bytes. Historical records may contain longer values and remain
+    /// readable; the service normalizes such values on its next write.
     pub cancel_error: Option<String>,
     /// Revision of the task lifecycle state.
     pub state_version: u64,

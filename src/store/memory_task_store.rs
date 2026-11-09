@@ -443,6 +443,15 @@ impl super::TaskStore for MemoryTaskStore {
                 .state
                 .validate_diagnostics()
                 .map_err(StoreError::InvalidRequest)?;
+            if command
+                .cancel_error
+                .as_ref()
+                .is_some_and(|message| message.len() > crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES)
+            {
+                return Err(StoreError::InvalidRequest(
+                    "cancel error exceeds the diagnostic message limit",
+                ));
+            }
             validate_encoded_output(&command.state, command.output.as_ref())?;
             let mut state = self.state.lock();
             let (was_terminal, is_terminal, summary) = {

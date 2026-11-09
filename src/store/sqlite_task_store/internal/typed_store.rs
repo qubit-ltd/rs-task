@@ -468,6 +468,15 @@ pub(in crate::store::sqlite_task_store) fn transition_encoded(
     command: TransitionCommand,
     outbox_enabled: bool,
 ) -> Result<TaskSummary, StoreError> {
+    if command
+        .cancel_error
+        .as_ref()
+        .is_some_and(|message| message.len() > crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES)
+    {
+        return Err(StoreError::InvalidRequest(
+            "cancel error exceeds the diagnostic message limit",
+        ));
+    }
     command
         .state
         .validate_diagnostics()

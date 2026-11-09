@@ -22,6 +22,12 @@ pub const MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES: usize = 4 * 1024;
 /// store writes continue to enforce the same limits and may reject values
 /// that exceed them. When a service truncates a diagnostic, it keeps a valid
 /// UTF-8 prefix and may append `...` within the byte limit.
+/// External cancellation hook failures use the message limit for
+/// `TaskSummary.cancel_error`; service calls truncate hook messages while
+/// direct store transitions reject oversized values. The hook error's
+/// category is not persisted in `cancel_error`; only the bounded message is
+/// stored. Existing stored hook diagnostics remain readable even if they
+/// exceed the current limit.
 ///
 /// # Examples
 ///

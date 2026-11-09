@@ -54,7 +54,12 @@ pub struct TransitionCommand {
     pub state: TaskState,
     /// Whether an unacknowledged cancellation request remains outstanding.
     pub cancel_requested: bool,
-    /// Diagnostic from failed external cancellation, if any.
+    /// Diagnostic from failed external cancellation, if any. Direct stores
+    /// accept at most [`crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES`]
+    /// UTF-8 bytes;
+    /// service hook failures are truncated to that limit. Historical records
+    /// can exceed the limit and remain readable, but callers must normalize
+    /// them before writing another transition.
     pub cancel_error: Option<String>,
     /// Unix epoch milliseconds when terminal state was reached.
     pub finished_at_ms: Option<u64>,
