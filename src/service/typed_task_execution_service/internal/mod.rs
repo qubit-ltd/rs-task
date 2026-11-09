@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+mod diagnostics;
 mod external_cancel_entry;
 mod external_cancel_flight;
 mod external_cancel_result;

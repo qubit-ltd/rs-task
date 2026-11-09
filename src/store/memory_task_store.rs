@@ -615,6 +615,12 @@ impl super::TaskStore for MemoryTaskStore {
     /// are returned. A cursor is included when another eligible task exists.
     /// Rejects limits above the public task-query maximum.
     ///
+    /// The implementation scans all retained tasks while holding the store
+    /// lock, but keeps only the smallest `limit + 1` matching keys before it
+    /// clones summaries. Candidate-key storage is bounded by the page size
+    /// plus one, and at most `limit` summaries are cloned; this does not avoid
+    /// a full scan.
+    ///
     /// # Errors
     ///
     /// Returns `InvalidRequest` when `limit` exceeds 256.
@@ -640,24 +646,33 @@ impl super::TaskStore for MemoryTaskStore {
                 return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
             }
             let state = self.state.lock();
-            let mut records = state
-                .encoded_tasks
-                .values()
-                .filter(|task| {
-                    task.summary.state == TaskState::Queued
-                        && task
-                            .summary
-                            .retry_not_before_ms
-                            .is_none_or(|deadline| deadline <= now_ms)
-                        && after.is_none_or(|cursor| {
-                            (task.summary.accepted_at_ms, task.summary.id) > (cursor.accepted_at_ms, cursor.id)
-                        })
-                })
-                .map(|task| task.summary.clone())
+            let keep = limit.get() + 1;
+            let mut keys = BinaryHeap::with_capacity(keep);
+            for task in state.encoded_tasks.values() {
+                let summary = &task.summary;
+                if summary.state != TaskState::Queued
+                    || summary.retry_not_before_ms.is_some_and(|deadline| deadline > now_ms)
+                    || after.is_some_and(|cursor| {
+                        (summary.accepted_at_ms, summary.id) <= (cursor.accepted_at_ms, cursor.id)
+                    })
+                {
+                    continue;
+                }
+                let key = (summary.accepted_at_ms, summary.id);
+                if keys.len() < keep {
+                    keys.push(key);
+                } else if keys.peek().is_some_and(|largest| key < *largest) {
+                    keys.pop();
+                    keys.push(key);
+                }
+            }
+            let mut keys = keys.into_sorted_vec();
+            let has_more = keys.len() > limit.get();
+            keys.truncate(limit.get());
+            let records = keys
+                .into_iter()
+                .filter_map(|(_, id)| state.encoded_tasks.get(&id).map(|task| task.summary.clone()))
                 .collect::<Vec<_>>();
-            records.sort_unstable_by_key(|summary| (summary.accepted_at_ms, summary.id));
-            let has_more = records.len() > limit.get();
-            records.truncate(limit.get());
             let next = has_more.then(|| records.last().map(EncodedTaskCursor::from)).flatten();
             Ok(EncodedTaskPage { records, next })
         })
@@ -797,5 +812,65 @@ impl super::TaskStore for MemoryTaskStore {
             state.owner_epoch = None;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::super::TaskStore;
+    use super::EncodedTaskId;
+    use super::MemoryTaskStore;
+    use crate::model::typed::StoredTaskRequest;
+
+    /// Uses a fixed timestamp to verify numeric ID ordering for tied keys.
+    #[tokio::test]
+    async fn test_ready_queue_orders_equal_timestamps_by_numeric_id() {
+        let store = MemoryTaskStore::new(8);
+        for value in [3, 1, 2] {
+            let id = EncodedTaskId::from_id(qubit_id::Id::new(value));
+            let request = StoredTaskRequest {
+                kind_id: "test".to_owned(),
+                category: None,
+                payload: crate::model::typed::StoredPayload {
+                    type_id: qubit_model_id::ModelIdBuf::parse("test.Payload").expect("model ID is valid"),
+                    schema_version: 1,
+                    codec_id: "test.codec".to_owned(),
+                    bytes: Vec::new(),
+                },
+                metadata: Default::default(),
+                resource_limit: Default::default(),
+                correlation_key: None,
+                idempotency_key: None,
+            };
+            TaskStore::accept_encoded(&store, id, request)
+                .await
+                .expect("task is accepted");
+        }
+        {
+            let mut state = store.state.lock();
+            for task in state.encoded_tasks.values_mut() {
+                task.summary.accepted_at_ms = 5;
+            }
+        }
+
+        let page = TaskStore::list_ready_queued(
+            &store,
+            None,
+            NonZeroUsize::new(2).expect("page size is positive"),
+            u64::MAX,
+        )
+        .await
+        .expect("ready page succeeds");
+        let ids = page.records.into_iter().map(|summary| summary.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                EncodedTaskId::from_id(qubit_id::Id::new(1)),
+                EncodedTaskId::from_id(qubit_id::Id::new(2)),
+            ]
+        );
+        assert!(page.next.is_some());
     }
 }

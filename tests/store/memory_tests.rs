@@ -627,3 +627,126 @@ async fn test_memory_store_ready_queue_paginates_and_rejects_oversized_limit() {
         Err(StoreError::InvalidRequest("ready task page limit exceeds 256"))
     ));
 }
+
+/// Matches the due queued pages against an independent full-sort oracle.
+#[tokio_test]
+async fn test_ready_queue_bounded_selection_matches_sorted_oracle() {
+    let store = MemoryTaskStore::new(400);
+    for value in 1..=300 {
+        let accepted = TypedTaskStore::accept_encoded(&store, encoded_id(value), encoded_request(None, vec![1; 32]))
+            .await
+            .expect("queued task is accepted");
+        if value % 7 == 0 {
+            TypedTaskStore::start_encoded(
+                &store,
+                StartCommand {
+                    id: accepted.summary.id,
+                    expected_state_version: accepted.summary.state_version,
+                    started_at_ms: 10,
+                },
+            )
+            .await
+            .expect("selected task starts and is no longer queued");
+        } else if value % 5 == 0 {
+            let running = TypedTaskStore::start_encoded(
+                &store,
+                StartCommand {
+                    id: accepted.summary.id,
+                    expected_state_version: accepted.summary.state_version,
+                    started_at_ms: 10,
+                },
+            )
+            .await
+            .expect("task starts before it is requeued");
+            TypedTaskStore::transition_encoded(
+                &store,
+                EncodedTransitionCommand {
+                    id: running.id,
+                    expected_state_version: running.state_version,
+                    expected_attempt: running.attempt,
+                    retry_not_before_ms: Some(if value % 10 == 0 { 200 } else { 50 }),
+                    state: TaskState::Queued,
+                    cancel_requested: false,
+                    cancel_error: None,
+                    output: None,
+                    finished_at_ms: None,
+                },
+            )
+            .await
+            .expect("retry is requeued with its deadline");
+        } else if value % 11 == 0 {
+            let running = TypedTaskStore::start_encoded(
+                &store,
+                StartCommand {
+                    id: accepted.summary.id,
+                    expected_state_version: accepted.summary.state_version,
+                    started_at_ms: 10,
+                },
+            )
+            .await
+            .expect("task starts before it is blocked");
+            TypedTaskStore::transition_encoded(
+                &store,
+                EncodedTransitionCommand {
+                    id: running.id,
+                    expected_state_version: running.state_version,
+                    expected_attempt: running.attempt,
+                    retry_not_before_ms: None,
+                    state: TaskState::Blocked {
+                        reason: "missing handler".to_owned(),
+                    },
+                    cancel_requested: false,
+                    cancel_error: None,
+                    output: None,
+                    finished_at_ms: None,
+                },
+            )
+            .await
+            .expect("task becomes blocked and is no longer queued");
+        }
+    }
+
+    let now_ms = 100;
+    let mut oracle = Vec::new();
+    for value in 1..=300 {
+        let task = TypedTaskStore::get_encoded_task(&store, encoded_id(value))
+            .await
+            .expect("task lookup succeeds")
+            .expect("accepted task remains retained");
+        let summary = task.summary;
+        if summary.state == TaskState::Queued && summary.retry_not_before_ms.is_none_or(|deadline| deadline <= now_ms) {
+            oracle.push(summary);
+        }
+    }
+    oracle.sort_unstable_by_key(|summary| (summary.accepted_at_ms, summary.id));
+
+    for page_size in [1, 128, 256] {
+        let limit = NonZeroUsize::new(page_size).expect("page size is positive");
+        let mut cursor = None;
+        let mut actual = Vec::new();
+        loop {
+            let page = TypedTaskStore::list_ready_queued(&store, cursor, limit, now_ms)
+                .await
+                .expect("ready page succeeds");
+            actual.extend(page.records);
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(actual, oracle, "page size {page_size}");
+    }
+
+    if let Some(first) = oracle.first() {
+        let after = qubit_task::model::typed::TaskCursor::from(first);
+        let page = TypedTaskStore::list_ready_queued(
+            &store,
+            Some(after),
+            NonZeroUsize::new(128).expect("page size is positive"),
+            now_ms,
+        )
+        .await
+        .expect("exclusive after page succeeds");
+        assert_eq!(page.records, oracle[1..oracle.len().min(129)]);
+    }
+}

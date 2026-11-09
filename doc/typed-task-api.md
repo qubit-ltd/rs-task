@@ -1,6 +1,6 @@
 # Typed task API
 
-[简体中文](typed-task-api.zh_CN.md) · [User guide](user-guide.md) · [Migration to 0.10](migration.md)
+[简体中文](typed-task-api.zh_CN.md) · [User guide](user-guide.md) · [Migration to 0.11](migration.md)
 
 The typed API keeps application values typed until acceptance. Payload identity has three independent parts: `type_id` identifies the model, `schema_version` identifies its schema, and `codec_id` identifies the bytes encoding. A handler is registered by `kind_id`, accepts exactly one payload `type_id`, and declares the schema versions it supports. A codec can support many schema versions; schema compatibility belongs to the handler descriptor.
 
@@ -113,7 +113,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Runtime contracts
 
-`TaskStore` is the public typed persistence contract. `MemoryTaskStore` and `SqliteTaskStore` implement it directly; the former UUID `LegacyTaskStore` adapter and its `RecoveryPage`/`scan_unfinished` API are not part of 0.10. Open SQLite with `SqliteTaskStore::open(path)`. Typed schema v4 through v7 migrate in place and transactionally to v8, preserving tasks, active outbox rows, and quarantine records while adding terminal state checkpoints. Legacy UUID schemas are rejected without modification.
+`TaskStore` is the public typed persistence contract. `MemoryTaskStore` and `SqliteTaskStore` implement it directly; the former UUID `LegacyTaskStore` adapter and its `RecoveryPage`/`scan_unfinished` API are not part of the current public contract. Open SQLite with `SqliteTaskStore::open(path)`. Typed schema v4 through v7 migrate in place and transactionally to v8, preserving tasks, active outbox rows, and quarantine records while adding terminal state checkpoints. Legacy UUID schemas are rejected without modification.
 
 - `TaskId` wraps `rs-id::Id`; the service requires an injected `IdGenerator`. Snowflake cross-process uniqueness depends on distinct node IDs and clock conditions. `to_padded_decimal()` produces a fixed-width decimal key for stable lexical database ordering.
 - CPU slots, GPU devices and labels, optional memory/disk bytes, and custom integer units are admission quotas reserved for each attempt. They account for concurrent reservations; they do not pin CPUs, discover or isolate GPUs at the OS level, or enforce actual process memory/disk usage. A request above configured capacity is unsatisfiable. A temporarily unavailable request stays queued while the scheduler considers later resource-compatible work, so ordering is not strict FIFO.
@@ -124,6 +124,8 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 - Background store failures are latched: writes and scheduling stop, diagnostic reads remain available, and `shutdown()` returns the stored failure after draining active work. SQLite typed schema versions 4 through 7 migrate in place and transactionally to version 8; legacy UUID schemas still require explicit data mapping.
 - `TaskContext::progress_builder()` uses `rs-progress::AsyncReporter`. `report_async()` awaits persistence before returning. Current stage and metric snapshots appear on later task reads without changing lifecycle `state_version`; reporting errors are returned to the handler.
 - Typed history pages sort ascending by `(accepted_at_ms, numeric task id)`. `after` is an exclusive key cursor, not an offset; each query observes its own storage snapshot. `next` is present only when a lookahead row exists. Filters include state, business `category`, and correlation key. `kind_id` routes to a handler and is independent of `category`.
+
+Before persisting terminal-state diagnostics, the service limits `Failed.category` to 128 UTF-8 bytes and other terminal-state diagnostic fields to 4096 UTF-8 bytes. Over-limit text is shortened at a UTF-8 boundary to the longest prefix that fits with an appended `...`. Direct `TaskStore` writes still reject over-limit diagnostics. With panic unwinding enabled, a panic from an application payload decoder while preparing a task becomes that task's `Panicked` outcome; handler panics remain task-local as before. `panic=abort` cannot be caught.
 
 For durable lifecycle notifications, enable `event-bus`, register an application `TaskEvent` codec, and set `TaskExecutionServiceBuilder::event_bus`. The task state and SQLite outbox row are committed atomically, then replayed asynchronously. Until the provider reports `Accepted`, the row is retained and retried, so publication may be duplicated. After `Accepted`, the row is deleted; acceptance does not guarantee Redis persistence or consumer receipt, so notification delivery to consumers is not guaranteed at least once. This is distinct from at-least-once task handler execution. Deduplicate by `(TaskId, state_version)` and use task queries as the authority. Existing lifecycle states are not backfilled when the publisher is enabled. `MemoryTaskStore` does not support a persistent outbox. See the [user guide](user-guide.md#publish-lifecycle-changes) for setup boundaries and monitoring guidance.
 

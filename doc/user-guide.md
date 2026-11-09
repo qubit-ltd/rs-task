@@ -1,10 +1,10 @@
 # User guide
 
-[简体中文](user-guide.zh_CN.md) · [Migration to 0.10](migration.md) · [Typed task API](typed-task-api.md)
+[简体中文](user-guide.zh_CN.md) · [Migration to 0.11](migration.md) · [Typed task API](typed-task-api.md)
 
 `qubit-task` accepts typed, versioned payloads and runs them through registered handlers. This guide is now centered on the typed API; the former byte-oriented `TaskRequest`, `(task_type, handler_version)` routing, cursor-free query examples, and closure-oriented service API are no longer the public contract.
 
-For durable task history, open the SQLite backend with `SqliteTaskStore::open(path)`. It migrates typed schema v4 through v7 in place to v8 while preserving tasks, active outbox rows, and quarantine records; legacy UUID schemas are rejected without being rewritten. See the [0.10 migration guide](migration.md) before upgrading an existing database.
+For durable task history, open the SQLite backend with `SqliteTaskStore::open(path)`. It migrates typed schema v4 through v7 in place to v8 while preserving tasks, active outbox rows, and quarantine records; legacy UUID schemas are rejected without being rewritten. See the [0.11 migration guide](migration.md) before upgrading an existing database.
 
 ## Start here
 
@@ -25,6 +25,12 @@ The runnable typed examples are [`examples/task_service.rs`](../examples/task_se
 ## Features and limits
 
 The `sqlite` feature enables durable task history and recovery. Recovery is at-least-once: work interrupted after an external side effect may run again, so application effects need idempotency or transaction protection. The service schedules in one process; it does not provide distributed scheduling or exactly-once business effects.
+
+## Diagnostics and panics
+
+Before persisting terminal-state diagnostics, the service limits `Failed.category` to 128 UTF-8 bytes and other terminal-state diagnostic fields to 4096 UTF-8 bytes. When a value exceeds its limit, the service retains the longest UTF-8 prefix that fits and appends `...`. This keeps the stored text valid UTF-8 and within the byte limit; it can omit the end of the original message. Direct writes through `TaskStore` still strictly reject over-limit diagnostics.
+
+With the normal unwind panic strategy, a panic raised by an application payload decoder while the service prepares a task is recorded as that task's `Panicked` outcome; later tasks can continue and shutdown remains available. A panic in a handler remains isolated to its task as before. Panics cannot be caught when the process uses `panic=abort`.
 
 ## Publish lifecycle changes
 

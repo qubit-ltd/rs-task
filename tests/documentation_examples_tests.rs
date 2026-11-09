@@ -36,3 +36,20 @@ fn test_typed_task_guides_link_and_describe_lifecycle_events() {
         "Chinese user guide must document durable lifecycle publication"
     );
 }
+
+/// Keeps the current migration instructions tied to a compiled typed request.
+#[test]
+fn test_migration_guides_match_the_current_typed_request_contract() {
+    let english = include_str!("../doc/migration.md");
+    let chinese = include_str!("../doc/migration.zh_CN.md");
+    let fixture = include_str!("fixtures/doc-examples/src/typed_support.rs");
+
+    for guide in [english, chinese] {
+        assert!(guide.contains("TaskRequest::new(kind_id, schema_version, codec_id, data)"));
+        assert!(guide.contains("HasModelId"));
+        assert!(guide.contains("payload_type_id"));
+        assert!(guide.contains("schema_version") && guide.contains("codec_id"));
+    }
+    assert!(fixture.contains("impl HasModelId for ExamplePayload"));
+    assert!(fixture.contains("let mut request = TaskRequest::new("));
+}

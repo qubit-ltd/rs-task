@@ -862,14 +862,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "qubit-event-bus"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d8c315ee36bb4a5bc9caeb925fd05a61e02c54b2e9e44c379a1a6512d9a00c6"
+dependencies = [
+ "qubit-clock",
+ "qubit-id",
+ "qubit-retry",
+ "qubit-spi",
+ "thiserror",
+]
+
+[[package]]
 name = "qubit-event-bus-redis"
 version = "0.7.0"
 dependencies = [
  "async-lock",
- "qubit-event-bus",
+ "qubit-event-bus 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "qubit-id",
+ "qubit-redis",
  "qubit-spi",
- "redis",
  "rustls",
  "serde",
  "serde_json",
@@ -926,7 +939,7 @@ dependencies = [
  "qubit-budget 0.10.1",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact",
+ "qubit-redact 0.10.1",
  "qubit-value",
  "serde",
  "serde_json",
@@ -947,12 +960,52 @@ dependencies = [
 
 [[package]]
 name = "qubit-redact"
-version = "0.10.0"
+version = "0.10.1"
+dependencies = [
+ "qubit-budget 0.10.1",
+]
+
+[[package]]
+name = "qubit-redact"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c65d2bde4f93927eedadf7d86ab7d6303004dbb6995bbce63250297033bf342"
 dependencies = [
  "qubit-budget 0.10.1",
  "qubit-json",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "qubit-redis"
+version = "2.0.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3023be358af328ef37d3a1d3ea97d0860e472aefed0408ad40ff8293ad70901e"
+dependencies = [
+ "arcstr",
+ "async-io",
+ "async-lock",
+ "bytes",
+ "cfg-if",
+ "combine",
+ "futures-rustls",
+ "futures-util",
+ "itoa",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "rand",
+ "rustls",
+ "ryu",
+ "smol",
+ "smol-timeout",
+ "socket2",
+ "tokio",
+ "tokio-util",
+ "url",
+ "webpki-roots",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -988,7 +1041,7 @@ dependencies = [
  "parking_lot",
  "qubit-budget 0.10.1",
  "qubit-codec",
- "qubit-event-bus",
+ "qubit-event-bus 0.21.0",
  "qubit-id",
  "qubit-metadata",
  "qubit-model-id",
@@ -1008,7 +1061,7 @@ name = "qubit-task-doc-examples"
 version = "0.1.0"
 dependencies = [
  "qubit-codec",
- "qubit-event-bus",
+ "qubit-event-bus 0.21.0",
  "qubit-event-bus-redis",
  "qubit-id",
  "qubit-model-id",
@@ -1032,7 +1085,7 @@ dependencies = [
  "qubit-budget 0.10.1",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact",
+ "qubit-redact 0.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "thiserror",
@@ -1069,36 +1122,6 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
-
-[[package]]
-name = "redis"
-version = "2.0.0-rc.1"
-source = "git+https://github.com/qubit-ltd/redis-rs.git?rev=a668891e9fcfed32f8905c2fd729fa05c1732aa5#a668891e9fcfed32f8905c2fd729fa05c1732aa5"
-dependencies = [
- "arcstr",
- "async-io",
- "async-lock",
- "bytes",
- "cfg-if",
- "combine",
- "futures-rustls",
- "futures-util",
- "itoa",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "rand",
- "rustls",
- "ryu",
- "smol",
- "smol-timeout",
- "socket2",
- "tokio",
- "tokio-util",
- "url",
- "webpki-roots",
- "xxhash-rust",
-]
 
 [[package]]
 name = "redox_syscall"

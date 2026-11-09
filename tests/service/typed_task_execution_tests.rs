@@ -62,15 +62,27 @@ impl codec::ValueEncoder<Counter> for U32Codec {
     type Output = Vec<u8>;
     type Error = std::convert::Infallible;
     fn encode(&mut self, value: &Counter) -> Result<Vec<u8>, Self::Error> {
+        if value.0 == u32::MAX - 1 {
+            return Ok(vec![1, 2, 3]);
+        }
+        if value.0 == u32::MAX - 2 {
+            return Ok(vec![u8::MAX - 1; 4]);
+        }
         Ok(value.0.to_le_bytes().to_vec())
     }
 }
 
 impl codec::ValueDecoder<[u8]> for U32Codec {
     type Output = Counter;
-    type Error = std::array::TryFromSliceError;
+    type Error = std::io::Error;
     fn decode(&mut self, bytes: &[u8]) -> Result<Counter, Self::Error> {
-        let raw: [u8; 4] = bytes.try_into()?;
+        if bytes == [u8::MAX; 4] {
+            panic!("controlled decoder panic");
+        }
+        if bytes == [u8::MAX - 1; 4] {
+            return Err(std::io::Error::other("decode failure ".repeat(500)));
+        }
+        let raw: [u8; 4] = bytes.try_into().map_err(std::io::Error::other)?;
         Ok(Counter(u32::from_le_bytes(raw)))
     }
 }
@@ -185,6 +197,36 @@ impl TaskHandler<Counter> for RetryOnceHandler {
                 Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput {
                     summary: b"retried".to_vec(),
                 }))
+            }
+        })
+    }
+}
+
+struct LongDiagnosticHandler;
+
+impl TaskHandler<Counter> for LongDiagnosticHandler {
+    fn run<'a>(&'a self, value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
+        Box::pin(async move {
+            match value.0 {
+                46 => panic!("controlled handler panic"),
+                43 => Err(TaskRunError {
+                    category: "c".repeat(129),
+                    message: "category is too long".into(),
+                    retryable: false,
+                }),
+                44 => Err(TaskRunError {
+                    category: "long_message".into(),
+                    message: "界🙂".repeat(2000),
+                    retryable: false,
+                }),
+                45 => Err(TaskRunError {
+                    category: "retryable_".repeat(14),
+                    message: "retry after long diagnostic".into(),
+                    retryable: true,
+                }),
+                _ => Ok(TaskRunOutcome::Succeeded(task::model::TaskOutput {
+                    summary: b"ok".to_vec(),
+                })),
             }
         })
     }
@@ -710,6 +752,12 @@ fn request() -> TaskRequest<Counter> {
     request
 }
 
+fn request_with(value: Counter) -> TaskRequest<Counter> {
+    let mut request = request();
+    request.payload.data = value;
+    request
+}
+
 async fn wait_for_terminal(service: &task::TaskExecutionService, id: task::model::TaskId) -> TaskState {
     for _ in 0..1000 {
         if let Some(summary) = service.get(id).await.unwrap()
@@ -720,6 +768,131 @@ async fn wait_for_terminal(service: &task::TaskExecutionService, id: task::model
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
     panic!("typed task did not reach a terminal state")
+}
+
+async fn long_diagnostics_do_not_fault_service(store: Arc<dyn TaskStore>) {
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(18001))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(LongDiagnosticHandler),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    for value in [43, 44] {
+        let accepted = service
+            .submit(request_with(Counter(value)))
+            .await
+            .expect("long diagnostic request is accepted");
+        let state = wait_for_terminal(&service, accepted.id).await;
+        let TaskState::Failed { category, message } = state else {
+            panic!("long diagnostic task should fail, got {state:?}");
+        };
+        assert!(category.len() <= 128);
+        assert!(message.len() <= 4096);
+        assert!(category.is_char_boundary(category.len()));
+        assert!(message.is_char_boundary(message.len()));
+    }
+    let retry = service
+        .submit(request_with(Counter(45)))
+        .await
+        .expect("retryable request is accepted");
+    let queued_retry = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(summary) = service.get(retry.id).await.unwrap()
+                && summary.state == TaskState::Queued
+                && summary.attempt == 1
+                && summary.retry_not_before_ms.is_some()
+            {
+                break summary;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("diagnostic truncation preserves retry scheduling");
+    assert_eq!(queued_retry.attempt, 1);
+    assert!(matches!(
+        wait_for_terminal(&service, retry.id).await,
+        TaskState::Failed { .. }
+    ));
+    assert_eq!(service.get(retry.id).await.unwrap().unwrap().attempt, 3);
+    let next = service
+        .submit(request_with(Counter(42)))
+        .await
+        .expect("later request is accepted");
+    assert_eq!(wait_for_terminal(&service, next.id).await, TaskState::Succeeded);
+    service.shutdown().await.expect("service shuts down normally");
+}
+
+#[tokio::test]
+async fn test_long_diagnostics_do_not_fault_service_memory() {
+    long_diagnostics_do_not_fault_service(Arc::new(MemoryTaskStore::new(16))).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_long_diagnostics_do_not_fault_service_sqlite() {
+    let path = std::env::temp_dir().join(format!("qubit-task-long-diagnostics-{}.sqlite", std::process::id()));
+    let store = Arc::new(task::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    long_diagnostics_do_not_fault_service(store).await;
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn test_decoder_panic_is_task_local() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(18101))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(LongDiagnosticHandler),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    let decode_error = service
+        .submit(request_with(Counter(u32::MAX - 1)))
+        .await
+        .expect("decode error payload is accepted");
+    let decode_state = wait_for_terminal(&service, decode_error.id).await;
+    assert!(matches!(
+        decode_state,
+        TaskState::Failed { category, .. } if category == "payload_decode"
+    ));
+    let long_decode_error = service
+        .submit(request_with(Counter(u32::MAX - 2)))
+        .await
+        .expect("long decode error payload is accepted");
+    let long_decode_state = wait_for_terminal(&service, long_decode_error.id).await;
+    let TaskState::Failed { category, message } = long_decode_state else {
+        panic!("long decoder error should fail the task, got {long_decode_state:?}");
+    };
+    assert_eq!(category, "payload_decode");
+    assert_eq!(message.len(), 4096);
+    assert!(message.ends_with("..."));
+    assert!(message.is_char_boundary(message.len()));
+    let panic_task = service
+        .submit(request_with(Counter(u32::MAX)))
+        .await
+        .expect("panic payload is accepted");
+    let panic_state = wait_for_terminal(&service, panic_task.id).await;
+    assert!(matches!(panic_state, TaskState::Panicked { .. }), "got {panic_state:?}");
+    let handler_panic = service
+        .submit(request_with(Counter(46)))
+        .await
+        .expect("handler panic payload is accepted");
+    assert!(matches!(
+        wait_for_terminal(&service, handler_panic.id).await,
+        TaskState::Panicked { .. }
+    ));
+    let normal = service
+        .submit(request_with(Counter(42)))
+        .await
+        .expect("subsequent request is accepted");
+    assert_eq!(wait_for_terminal(&service, normal.id).await, TaskState::Succeeded);
+    service.shutdown().await.expect("decoder panic does not fault shutdown");
 }
 
 #[test]

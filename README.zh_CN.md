@@ -196,7 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - [用户指南](doc/user-guide.zh_CN.md)
 - [详细设计](doc/task_execution_service_design.md)
-- [0.10 迁移指南](doc/migration.zh_CN.md)
+- [0.11 迁移指南](doc/migration.zh_CN.md)
 - [API 文档](https://docs.rs/qubit-task)
 
 ## 任务通知投递
@@ -211,8 +211,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 检查
 
+请在仓库根目录运行项目检查：
+
 ```bash
+cargo test
 cargo test --all-features
-./.infra/bin/align-ci.sh
 ./.infra/bin/ci-check.sh
+./.infra/bin/coverage.sh
 ```
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE) 许可。
+
+## 贡献
+
+贡献代码请遵循仓库的 CI 格式和验证规则。提交前运行 `./.infra/bin/align-ci.sh`，使文件格式与 CI 保持一致，再执行上面的相关检查。
+
+## 作者
+
+Haixing Hu · [qubit-ltd/rs-task](https://github.com/qubit-ltd/rs-task)

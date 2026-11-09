@@ -18,7 +18,10 @@ pub const MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES: usize = 4 * 1024;
 ///
 /// Set `retryable` only when repeating the operation is safe under the
 /// application's idempotency and side-effect rules. Persisted category and
-/// message strings are byte-bounded by the service.
+/// message strings are byte-bounded by the service before persistence. Direct
+/// store writes continue to enforce the same limits and may reject values
+/// that exceed them. When a service truncates a diagnostic, it keeps a valid
+/// UTF-8 prefix and may append `...` within the byte limit.
 ///
 /// # Examples
 ///

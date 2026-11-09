@@ -23,6 +23,7 @@ use super::ExternalCancelResult;
 use super::InFlightGuard;
 use super::ShutdownOutcome;
 use super::TypedServiceCore;
+use super::diagnostics::bound_state_diagnostics;
 use super::resource_fairness::ResourceFairness;
 use crate::engine::EngineError;
 use crate::engine::TypedResourceReservation;
@@ -912,19 +913,34 @@ impl ServiceRunner {
         if !matches!(task.summary.state, TaskState::Running) {
             return;
         }
-        let prepared = match prepare_handler(
-            &self.core.handlers,
-            &self.core.codecs,
-            &running.kind_id,
-            task.request.payload,
-        ) {
-            Ok(prepared) => prepared,
-            Err(message) => {
+        let preparation = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            prepare_handler(
+                &self.core.handlers,
+                &self.core.codecs,
+                &running.kind_id,
+                task.request.payload,
+            )
+        }));
+        let prepared = match preparation {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(message)) => {
                 self.finish(
                     &running,
                     TaskState::Failed {
                         category: "payload_decode".into(),
                         message,
+                    },
+                    None,
+                    false,
+                )
+                .await;
+                return;
+            }
+            Err(_) => {
+                self.finish(
+                    &running,
+                    TaskState::Panicked {
+                        message: "typed task payload decoder panicked".into(),
                     },
                     None,
                     false,
@@ -1022,7 +1038,7 @@ impl ServiceRunner {
                 expected_state_version: summary.state_version,
                 expected_attempt: summary.attempt,
                 retry_not_before_ms: None,
-                state: TaskState::Blocked { reason: reason.into() },
+                state: bound_state_diagnostics(TaskState::Blocked { reason: reason.into() }),
                 cancel_requested: false,
                 cancel_error: None,
                 finished_at_ms: None,
@@ -1055,6 +1071,7 @@ impl ServiceRunner {
     /// - `output`: Optional output produced by the attempt.
     /// - `retryable`: Whether retry policy may schedule another attempt.
     async fn finish(&self, started: &TaskSummary, state: TaskState, output: Option<TaskOutput>, retryable: bool) {
+        let state = bound_state_diagnostics(state);
         let mut conflicted_version = None;
         loop {
             let latest = match self.core.store.get_encoded_task(started.id).await {

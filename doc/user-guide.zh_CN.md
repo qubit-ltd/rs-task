@@ -1,10 +1,10 @@
 # 用户指南
 
-[English](user-guide.md) · [0.10 迁移指南](migration.zh_CN.md) · [带类型任务 API](typed-task-api.zh_CN.md)
+[English](user-guide.md) · [0.11 迁移指南](migration.zh_CN.md) · [带类型任务 API](typed-task-api.zh_CN.md)
 
 `qubit-task` 接受带类型和版本的 payload，并将任务交给已注册的处理器执行。本指南以 typed API 为准；旧的字节数组 `TaskRequest`、按 `(task_type, handler_version)` 路由、旧查询示例和闭包式服务 API 已不再是公开契约。
 
-需要持久化任务历史时，使用 `SqliteTaskStore::open(path)` 打开 SQLite 后端。它会将 typed schema v4 到 v7 原位迁移到 v8，并保留任务、活动 outbox 行和隔离归档记录；旧 UUID schema 会被拒绝且不会被改写。升级已有数据库前请先阅读[0.10 迁移指南](migration.zh_CN.md)。
+需要持久化任务历史时，使用 `SqliteTaskStore::open(path)` 打开 SQLite 后端。它会将 typed schema v4 到 v7 原位迁移到 v8，并保留任务、活动 outbox 行和隔离归档记录；旧 UUID schema 会被拒绝且不会被改写。升级已有数据库前请先阅读[0.11 迁移指南](migration.zh_CN.md)。
 
 ## 从这里开始
 
@@ -25,6 +25,12 @@
 ## Features 与边界
 
 `sqlite` feature 提供持久化任务历史与恢复。恢复采用至少一次语义：若任务在外部副作用完成后、终态写入前中断，恢复后可能再次运行，因此应用副作用需要幂等性或事务保护。服务只在单进程内调度，不提供分布式调度或业务副作用恰好一次保证。
+
+## 诊断信息与 panic
+
+service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。超限时会保留能够放入上限的最长 UTF-8 前缀，并追加 `...`。这样保存的文本仍是有效 UTF-8 且不超过字节上限，但可能省略原消息末尾。直接通过 `TaskStore` 写入时，超限诊断仍会被严格拒绝。
+
+启用 panic unwind 时，应用 payload decoder 在 service 准备任务时发生 panic，会记为该任务的 `Panicked` 终态；后续任务仍可执行，service 仍可关闭。handler panic 和此前一样限制在对应任务内。进程采用 `panic=abort` 时无法捕获 panic。
 
 ## 发布任务生命周期变化
 

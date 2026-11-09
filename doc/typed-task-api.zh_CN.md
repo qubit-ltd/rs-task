@@ -1,6 +1,6 @@
 # 带类型的任务 API
 
-[English](typed-task-api.md) · [用户指南](user-guide.zh_CN.md) · [0.10 迁移指南](migration.zh_CN.md)
+[English](typed-task-api.md) · [用户指南](user-guide.zh_CN.md) · [0.11 迁移指南](migration.zh_CN.md)
 
 带类型 API 会在接纳请求前保留应用值的类型。Payload 身份分成三个独立字段：`type_id` 标识模型，`schema_version` 标识 schema 版本，`codec_id` 标识字节编码。处理器按 `kind_id` 注册，只接受一个 payload `type_id`，并声明所支持的 schema 版本集合。一个 codec 可以支持多个 schema 版本；兼容范围属于处理器描述符。
 
@@ -113,7 +113,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 运行契约
 
-`TaskStore` 是公开的带类型持久化契约，由 `MemoryTaskStore` 和 `SqliteTaskStore` 直接实现。旧 UUID 适配层 `LegacyTaskStore` 及其 `RecoveryPage`/`scan_unfinished` API 不属于 0.10。使用 `SqliteTaskStore::open(path)` 打开 SQLite；typed schema v4 到 v7 会在原数据库中通过事务迁移到 v8，保留任务、活动 outbox 行和隔离归档记录，并新增终态状态检查点。旧 UUID schema 会被拒绝且不作修改。
+`TaskStore` 是公开的带类型持久化契约，由 `MemoryTaskStore` 和 `SqliteTaskStore` 直接实现。旧 UUID 适配层 `LegacyTaskStore` 及其 `RecoveryPage`/`scan_unfinished` API 不属于当前公开契约。使用 `SqliteTaskStore::open(path)` 打开 SQLite；typed schema v4 到 v7 会在原数据库中通过事务迁移到 v8，保留任务、活动 outbox 行和隔离归档记录，并新增终态状态检查点。旧 UUID schema 会被拒绝且不作修改。
 
 - `TaskId` 包装 `rs-id::Id`；service 要求显式注入 `IdGenerator`。Snowflake 跨进程唯一性依赖节点 ID 不重复和时钟条件。`to_padded_decimal()` 输出定长十进制字符串，用于数据库字典序稳定排序。
 - CPU slot、GPU 设备和标签、可选 memory/disk 字节数、自定义整数单位都是每次执行的接纳配额。它们限制并发预留量，不会绑核、在 OS 层发现或隔离 GPU，也不会限制进程实际内存或磁盘使用。超过配置容量的请求不可满足；暂时拿不到资源的任务会保留在队列中，调度器继续检查后续资源匹配的任务，因此不保证严格 FIFO。
@@ -124,6 +124,8 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 - 后台存储故障会被锁存：停止写入和调度，保留诊断读取；`shutdown()` 排空活跃工作后返回存储故障。SQLite typed schema v4 到 v7 会在原数据库中通过事务迁移到 v8；旧 UUID schema 仍需显式映射数据。
 - `TaskContext::progress_builder()` 使用 `rs-progress::AsyncReporter`。`report_async()` 等待进度持久化后才返回。后续查询可看到 stage 和 metric 快照，但它们不会改变生命周期 `state_version`；上报错误会返回处理器。
 - typed 历史页按 `(accepted_at_ms, 数值 task id)` 升序排序。`after` 是排他键游标，不是 offset；每次查询读取自己的存储快照。只有存在 lookahead 记录时才有 `next`。过滤器包括 state、业务 `category` 和 correlation key；`kind_id` 用于处理器路由，与 `category` 独立。
+
+service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。文本超限时，会在 UTF-8 字符边界截短，保留能够连同 `...` 放入上限的最长前缀。直接通过 `TaskStore` 写入时，超限诊断仍会被拒绝。启用 panic unwind 时，应用 payload decoder 在准备任务时发生 panic，会成为该任务的 `Panicked` 终态；handler panic 和此前一样限制在对应任务内。`panic=abort` 无法捕获。
 
 需要持久生命周期通知时，启用 `event-bus`、注册应用提供的 `TaskEvent` codec，并设置 `TaskExecutionServiceBuilder::event_bus`。任务状态和 SQLite outbox 行会在同一事务中提交，再由后台异步重放。provider 确认 `Accepted` 前，outbox 行会保留并重试，因此发布可能重复；收到 `Accepted` 后，该行会被删除。接纳不保证 Redis 已持久化或消费者已收到，因此不保证通知至少一次送达。这与任务 handler 的至少一次执行不同。消费者应按 `(TaskId, state_version)` 去重，并以任务查询为准。启用 publisher 不会补发此前已提交的历史状态。`MemoryTaskStore` 不支持持久 outbox。配置边界和监控方法见[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。
 

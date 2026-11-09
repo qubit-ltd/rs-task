@@ -2,7 +2,7 @@
 
 [English design document](task_execution_service_design.en.md)
 
-本文面向 `qubit-task` 0.10。带类型 SQLite 存储使用 `SqliteTaskStore::open` 打开，typed schema v4 到 v7 会在事务中原位迁移到 v8；旧 UUID schema 会被拒绝且不作修改。升级步骤见[迁移指南](migration.zh_CN.md)。
+本文面向 `qubit-task` 0.11。带类型 SQLite 存储使用 `SqliteTaskStore::open` 打开，typed schema v4 到 v7 会在事务中原位迁移到 v8；旧 UUID schema 会被拒绝且不作修改。升级步骤见[迁移指南](migration.zh_CN.md)。
 
 本文描述当前的 typed task API。旧的字节数组 request、精确 `(task_type, handler_version)` 路由、本地闭包提交和旧服务 builder 属于历史实现细节，不再构成公开契约。
 
@@ -41,6 +41,8 @@
 ## 可靠性边界
 
 SQLite 持久化支持进程重启恢复，执行语义为至少一次。若任务在外部副作用完成后、结果保存前崩溃，恢复后 handler 可能再次执行，因此应用必须让副作用幂等，或用自己的事务策略保护它们。调度只在进程内进行；本 crate 不提供分布式调度、强制中断任意代码或业务副作用恰好一次保证。
+
+service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。文本超限时，会在 UTF-8 字符边界截短，保留能够连同 `...` 放入上限的最长前缀；直接通过 `TaskStore` 写入时，超限诊断仍会被拒绝。启用 panic unwind 时，应用 payload decoder 在准备任务时发生 panic，会记为该任务的 `Panicked` 终态，service 可继续调度后续任务。handler future panic 和此前一样限制在对应任务内。进程采用 `panic=abort` 时无法捕获 panic。
 
 后台调度或结果写入遇到存储故障时会锁存故障并停止新写入；诊断读取仍会访问 store。显式调用 `shutdown().await` 会停止调度，等待活跃处理器和通知排空，尝试释放 owner，并返回共享结果（包括已锁存的故障）。并发等待者看到同一次释放尝试的结果；取消其中一个等待者不会取消 supervisor 的排空。若 owner 释放暂时失败，之后显式调用 `shutdown()` 会重试。若释放时发生 panic，supervisor 会向等待者返回 `StoreUnavailable`，并将仍持有 owner 的 guard 交给清理 worker。最后一个外部 service 句柄被丢弃时也会异步请求同样的排空，但 `Drop` 不等待、不返回结果。若处理器始终不结束，owner 可能一直被占用。
 

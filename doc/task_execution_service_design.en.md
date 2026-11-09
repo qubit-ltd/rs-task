@@ -2,7 +2,7 @@
 
 [中文设计文档](task_execution_service_design.md)
 
-This design targets `qubit-task` 0.10. Open the typed SQLite store with `SqliteTaskStore::open`; typed schema versions 4 through 7 migrate transactionally in place to version 8. Legacy UUID schemas are rejected without modification. See the [migration guide](migration.md) for upgrade steps.
+This design targets `qubit-task` 0.11. Open the typed SQLite store with `SqliteTaskStore::open`; typed schema versions 4 through 7 migrate transactionally in place to version 8. Legacy UUID schemas are rejected without modification. See the [migration guide](migration.md) for upgrade steps.
 
 This document describes the current typed task API. The former byte-oriented request, exact `(task_type, handler_version)` routing, local-closure submission, and legacy service builder are historical implementation details and are not the public contract.
 
@@ -41,6 +41,8 @@ History pages sort ascending by `(accepted_at_ms, numeric task id)`. The exclusi
 ## Reliability boundaries
 
 SQLite persistence supports process restart recovery with at-least-once execution. A crash after an external side effect but before its result is stored can cause the handler to run again, so applications must make effects idempotent or protect them with their own transaction strategy. Scheduling is process-local; the crate does not provide distributed scheduling, forced interruption of arbitrary code, or exactly-once business effects.
+
+Before persisting terminal-state diagnostics, the service limits `Failed.category` to 128 UTF-8 bytes and other terminal-state diagnostic fields to 4096 UTF-8 bytes. If text exceeds its limit, it keeps the longest UTF-8 prefix that fits with an appended `...`; direct `TaskStore` writes continue to reject over-limit diagnostics. With panic unwinding enabled, a panic from an application payload decoder while preparing a task is recorded as that task's `Panicked` outcome, and the service can continue dispatching later tasks. A panic from the handler future remains isolated to its task as before. `panic=abort` cannot be caught.
 
 Store failures in background scheduling and finalization are latched. New writes stop, while diagnostic reads continue to use the store. Explicit `shutdown().await` stops dispatch, waits for active handlers and the notification drain, attempts owner release, and returns the shared result, including any stored failure. Concurrent waiters observe the same release attempt; cancelling one waiter does not cancel the supervisor's drain. A later explicit call retries a transient owner-release failure. If release panics, the supervisor resolves waiters with `StoreUnavailable` and hands the still-armed guard to the cleanup worker. Dropping the last external service handle requests the same drain asynchronously, but `Drop` does not wait or return an outcome. A handler that never finishes can keep the owner held.
 

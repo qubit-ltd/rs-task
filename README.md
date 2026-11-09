@@ -197,7 +197,7 @@ With the optional `event-bus` feature, configure `TaskExecutionServiceBuilder::e
 
 - [User guide](doc/user-guide.md)
 - [Detailed design](doc/task_execution_service_design.en.md)
-- [Migration guide to 0.10](doc/migration.md)
+- [Migration guide to 0.11](doc/migration.md)
 - [API reference](https://docs.rs/qubit-task)
 
 ## Task notification delivery
@@ -210,10 +210,25 @@ The scheduler scans ready queued work in keyset order. A task waiting for a temp
 
 Call `shutdown().await` when the caller needs to wait for active handlers and the notification drain, release store ownership, and receive the shared shutdown result, including errors. Dropping the last external service handle requests the same drain asynchronously; `Drop` does not wait or return its result. Cancelling a shutdown waiter does not cancel the drain. A handler that never finishes can keep ownership held. If owner release panics, waiters receive `StoreUnavailable` and the still-armed guard is handed to the cleanup worker; after a transient owner-release error, a later explicit `shutdown()` retries release. Cancelling a `build()` future after ownership is acquired also leaves release to the prestarted cleanup worker. That cleanup is eventual, so an immediate second build may briefly report an owner conflict.
 
-## Checks
+## Testing
+
+Run the project checks from the repository root:
 
 ```bash
+cargo test
 cargo test --all-features
-./.infra/bin/align-ci.sh
 ./.infra/bin/ci-check.sh
+./.infra/bin/coverage.sh
 ```
+
+## License
+
+This project is licensed under the [Apache License, Version 2.0](LICENSE).
+
+## Contributing
+
+Contributions should follow the repository's CI formatting and validation rules. Run `./.infra/bin/align-ci.sh` to align files with CI before submitting a change, then run the relevant checks above.
+
+## Author
+
+Haixing Hu · [qubit-ltd/rs-task](https://github.com/qubit-ltd/rs-task)
