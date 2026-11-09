@@ -46,6 +46,7 @@ use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::StartCommand;
 use qubit_task::model::StoreCapabilities;
+use qubit_task::model::StoredPayload;
 use qubit_task::model::StoredTask;
 use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskCursor;
@@ -150,12 +151,49 @@ struct ReadyScanGate {
     completed: Notify,
 }
 
+struct ReadyScanRelease {
+    gate: Arc<ReadyScanGate>,
+    released: bool,
+}
+
+impl ReadyScanRelease {
+    fn new(gate: Arc<ReadyScanGate>) -> Self {
+        Self { gate, released: false }
+    }
+
+    fn release(&mut self) {
+        self.gate.release.add_permits(1);
+        self.released = true;
+    }
+}
+
+impl Drop for ReadyScanRelease {
+    fn drop(&mut self) {
+        if !self.released {
+            self.gate.release.add_permits(1);
+        }
+    }
+}
+
 #[derive(Default)]
 struct StartTrace {
     ids: Mutex<Vec<TaskId>>,
     changed: Notify,
     conflicts: Mutex<Vec<TaskId>>,
     ready_scans: Mutex<Vec<Option<TaskCursor>>>,
+    pending_scan_time: Mutex<Option<u64>>,
+    scan_deadline_pairs: Mutex<Vec<ScanDeadlinePair>>,
+    deadline_changed: Notify,
+    ready_scan_changed: Notify,
+    blocked_transitions: AtomicUsize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScanDeadlinePair {
+    scan_now_ms: Option<u64>,
+    deadline_now_ms: u64,
+    next_retry_deadline_ms: Option<u64>,
+    blocked_transition_count: usize,
 }
 
 struct StartCasGate {
@@ -165,10 +203,253 @@ struct StartCasGate {
 }
 
 struct GatedReadyStore {
-    inner: MemoryTaskStore,
+    inner: Arc<dyn TaskStore>,
     gate: Arc<ReadyScanGate>,
     start_gate: Option<Arc<StartCasGate>>,
     trace: Option<Arc<StartTrace>>,
+}
+
+fn test_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_millis() as u64
+}
+
+async fn retry_deadline_crossing_boundary(store: Arc<dyn TaskStore>, id: TaskId) -> Result<(), String> {
+    let gate = Arc::new(ReadyScanGate {
+        armed: AtomicBool::new(false),
+        reached: Notify::new(),
+        release: Semaphore::new(0),
+        completed: Notify::new(),
+    });
+    let trace = Arc::new(StartTrace::default());
+    let gated_store = Arc::new(GatedReadyStore {
+        inner: Arc::clone(&store),
+        gate: Arc::clone(&gate),
+        start_gate: None,
+        trace: Some(Arc::clone(&trace)),
+    });
+    let started_handler = Arc::new(Notify::new());
+    let handler_release = Arc::new(Semaphore::new(1));
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+    let mut builder = TaskExecutionServiceBuilder::new(gated_store, codecs, Arc::new(Ids(AtomicU64::new(9000))))
+        .capacity(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        });
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&started_handler),
+                release: handler_release,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .expect("handler registration");
+    let service = builder.build().await.expect("service build");
+    if wait_for_deadline_queries(&trace, 2).await.is_err() {
+        let _ = service.shutdown().await;
+        return Err("startup scheduler notifications were not drained".into());
+    }
+
+    let reached = gate.reached.notified();
+    tokio::pin!(reached);
+    reached.as_mut().enable();
+    gate.armed.store(true, Ordering::Release);
+    let mut wake_request = TaskRequest::new(
+        "test.unregistered-wakeup",
+        1,
+        ValueCodecId::new("qubit_task.typed_resource_tests.u32"),
+        Counter(7),
+    );
+    wake_request.resource_limit = ResourceRequest::default();
+    if let Err(error) = service.submit(wake_request).await {
+        let _ = service.shutdown().await;
+        return Err(format!("wake task submit failed: {error}"));
+    }
+    if tokio::time::timeout(Duration::from_secs(2), reached).await.is_err() {
+        gate.release.add_permits(1);
+        let _ = service.shutdown().await;
+        return Err("scheduler did not reach the gated ready scan".into());
+    }
+    let mut gate_release = ReadyScanRelease::new(Arc::clone(&gate));
+    let scan_time = trace
+        .pending_scan_time
+        .lock()
+        .expect("pending scan-time lock")
+        .expect("gated scan time is recorded");
+    let retry_deadline = scan_time.saturating_add(250);
+    let now = test_now_ms();
+    let accepted = store
+        .accept_encoded(
+            id,
+            StoredTaskRequest {
+                kind_id: "test.resource-reservation".into(),
+                category: None,
+                payload: StoredPayload {
+                    type_id: ModelIdBuf::parse("test.ResourceReservationPayload").expect("model ID"),
+                    schema_version: 1,
+                    codec_id: "qubit_task.typed_resource_tests.u32".into(),
+                    bytes: 7_u32.to_le_bytes().to_vec(),
+                },
+                metadata: qubit_metadata::Metadata::new(),
+                resource_limit: ResourceRequest::default(),
+                correlation_key: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .expect("retry task is accepted")
+        .summary;
+    let started = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: accepted.state_version,
+            started_at_ms: now,
+        })
+        .await
+        .expect("first attempt is started");
+    store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: started.state_version,
+            expected_attempt: started.attempt,
+            retry_not_before_ms: Some(retry_deadline),
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: None,
+            output: None,
+        })
+        .await
+        .expect("failed attempt is queued for a timed retry");
+    assert!(scan_time < retry_deadline, "the gated scan precedes the retry deadline");
+    tokio::time::sleep(Duration::from_millis(retry_deadline.saturating_sub(test_now_ms()) + 10)).await;
+    gate_release.release();
+
+    let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(summary) = service.get(id).await.expect("retry task query succeeds")
+                && summary.state.is_terminal()
+            {
+                break summary.state;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    service
+        .shutdown()
+        .await
+        .map_err(|error| format!("service shutdown failed: {error}"))?;
+    let terminal = terminal.map_err(|_| "retry did not become ready without an external notification".to_owned())?;
+    if terminal != TaskState::Succeeded {
+        return Err(format!("retry reached {terminal:?}, expected Succeeded"));
+    }
+    let pair = wait_for_scan_deadline_pair(&trace, |pair| {
+        pair.scan_now_ms == Some(scan_time) && pair.next_retry_deadline_ms == Some(retry_deadline)
+    })
+    .await;
+    assert_eq!(
+        pair.scan_now_ms,
+        Some(pair.deadline_now_ms),
+        "scan and deadline lookup share one time sample"
+    );
+    Ok(())
+}
+
+async fn wait_for_deadline_queries(trace: &StartTrace, count: usize) -> Result<(), ()> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let changed = trace.deadline_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if trace
+                .scan_deadline_pairs
+                .lock()
+                .expect("scan/deadline trace lock")
+                .len()
+                >= count
+            {
+                return;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .map_err(|_| ())
+}
+
+async fn wait_for_scan_deadline_pair(
+    trace: &StartTrace,
+    predicate: impl Fn(&ScanDeadlinePair) -> bool,
+) -> ScanDeadlinePair {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let changed = trace.deadline_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(pair) = trace
+                .scan_deadline_pairs
+                .lock()
+                .expect("scan/deadline trace lock")
+                .iter()
+                .copied()
+                .find(|pair| predicate(pair))
+            {
+                return pair;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .expect("scheduler does not record the expected scan/deadline pair")
+}
+
+fn ready_scan_count(trace: &StartTrace) -> usize {
+    trace.ready_scans.lock().expect("ready scan trace lock").len()
+}
+
+async fn assert_no_additional_ready_scan(trace: &StartTrace, baseline: usize) {
+    let additional = tokio::time::timeout(Duration::from_millis(100), async {
+        loop {
+            let changed = trace.ready_scan_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if ready_scan_count(trace) > baseline {
+                return;
+            }
+            changed.await;
+        }
+    })
+    .await;
+    assert!(additional.is_err(), "scheduler performed another ready scan while idle");
+}
+
+#[tokio::test]
+async fn test_retry_deadline_crossing_scan_boundary_is_not_lost_memory() {
+    retry_deadline_crossing_boundary(Arc::new(MemoryTaskStore::new(8)), TaskId::from_id(Id::new(9901)))
+        .await
+        .expect("retry deadline crossing remains scheduled");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_retry_deadline_crossing_scan_boundary_is_not_lost_sqlite() {
+    let path = std::env::temp_dir().join(format!("qubit-task-retry-boundary-{}.sqlite", test_now_ms()));
+    let store: Arc<dyn TaskStore> =
+        Arc::new(qubit_task::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    let result = retry_deadline_crossing_boundary(store.clone(), TaskId::from_id(Id::new(test_now_ms()))).await;
+    drop(store);
+    for suffix in ["", ".owner.lock", "-wal", "-shm"] {
+        let mut file = path.as_os_str().to_os_string();
+        file.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(file));
+    }
+    result.expect("retry deadline crossing remains scheduled");
 }
 
 impl TaskStore for GatedReadyStore {
@@ -221,7 +502,17 @@ impl TaskStore for GatedReadyStore {
         })
     }
     fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
-        self.inner.transition_encoded(command)
+        Box::pin(async move {
+            let is_blocked = matches!(&command.state, TaskState::Blocked { .. });
+            let result = self.inner.transition_encoded(command).await;
+            if is_blocked
+                && result.is_ok()
+                && let Some(trace) = &self.trace
+            {
+                trace.blocked_transitions.fetch_add(1, Ordering::AcqRel);
+            }
+            result
+        })
     }
     fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.update_progress(command)
@@ -236,6 +527,12 @@ impl TaskStore for GatedReadyStore {
         now_ms: u64,
     ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         Box::pin(async move {
+            if let Some(trace) = &self.trace {
+                *trace
+                    .pending_scan_time
+                    .lock()
+                    .expect("pending scan-time lock is not poisoned") = Some(now_ms);
+            }
             if self.gate.armed.swap(false, Ordering::AcqRel) {
                 self.gate.reached.notify_one();
                 self.gate
@@ -251,13 +548,38 @@ impl TaskStore for GatedReadyStore {
                     .lock()
                     .expect("ready scan trace lock is not poisoned")
                     .push(after);
+                trace.ready_scan_changed.notify_waiters();
             }
             self.inner.list_ready_queued(after, limit, now_ms).await
         })
     }
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
+            let scan_now_ms = self.trace.as_ref().map(|trace| {
+                trace
+                    .pending_scan_time
+                    .lock()
+                    .expect("pending scan-time lock is not poisoned")
+                    .take()
+            });
             let result = self.inner.next_retry_deadline(now_ms).await;
+            if let Some(trace) = &self.trace {
+                let next_retry_deadline_ms = match &result {
+                    Ok(deadline) => *deadline,
+                    Err(_) => None,
+                };
+                trace
+                    .scan_deadline_pairs
+                    .lock()
+                    .expect("scan/deadline trace lock is not poisoned")
+                    .push(ScanDeadlinePair {
+                        scan_now_ms: scan_now_ms.flatten(),
+                        deadline_now_ms: now_ms,
+                        next_retry_deadline_ms,
+                        blocked_transition_count: trace.blocked_transitions.load(Ordering::Acquire),
+                    });
+                trace.deadline_changed.notify_waiters();
+            }
             self.gate.completed.notify_waiters();
             result
         })
@@ -327,7 +649,7 @@ async fn bypass_fixture(
     });
     let trace = Arc::new(StartTrace::default());
     let store = Arc::new(GatedReadyStore {
-        inner: MemoryTaskStore::new(8),
+        inner: Arc::new(MemoryTaskStore::new(8)),
         gate: Arc::clone(&gate),
         start_gate: None,
         trace: Some(Arc::clone(&trace)),
@@ -407,16 +729,25 @@ impl TaskHandler<Counter> for GatedHandler {
 
 #[tokio::test]
 async fn test_typed_resource_request_above_capacity_is_blocked() {
-    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
-    let mut builder = TaskExecutionServiceBuilder::new(
-        Arc::new(MemoryTaskStore::new(8)),
-        codecs,
-        Arc::new(Ids(AtomicU64::new(1))),
-    )
-    .capacity(ResourceCapacity {
-        cpu_slots: 1,
-        ..ResourceCapacity::default()
+    let gate = Arc::new(ReadyScanGate {
+        armed: AtomicBool::new(false),
+        reached: Notify::new(),
+        release: Semaphore::new(0),
+        completed: Notify::new(),
     });
+    let trace = Arc::new(StartTrace::default());
+    let store = Arc::new(GatedReadyStore {
+        inner: Arc::new(MemoryTaskStore::new(8)),
+        gate,
+        start_gate: None,
+        trace: Some(Arc::clone(&trace)),
+    });
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(1)))).capacity(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        });
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -429,6 +760,9 @@ async fn test_typed_resource_request_above_capacity_is_blocked() {
         )
         .unwrap();
     let service = builder.build().await.unwrap();
+    wait_for_deadline_queries(&trace, 2)
+        .await
+        .expect("startup scheduler scans drain");
 
     let accepted = service.submit(request(2)).await.unwrap();
     let state = wait_for(&service, accepted.id, |state| {
@@ -436,7 +770,102 @@ async fn test_typed_resource_request_above_capacity_is_blocked() {
     })
     .await;
     assert!(matches!(state, TaskState::Blocked { .. }));
-    service.shutdown().await.unwrap();
+    let blocked_scan = wait_for_scan_deadline_pair(&trace, |pair| pair.blocked_transition_count > 0).await;
+    assert_eq!(
+        blocked_scan.next_retry_deadline_ms, None,
+        "resource-insufficient task has no retry deadline"
+    );
+    let scans_before_shutdown = ready_scan_count(&trace);
+    assert_no_additional_ready_scan(&trace, scans_before_shutdown).await;
+    let shutdown = tokio::spawn(async move { service.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(2), shutdown)
+        .await
+        .expect("shutdown notification wakes idle scheduler")
+        .expect("shutdown task joins")
+        .expect("service shuts down");
+    assert_eq!(
+        ready_scan_count(&trace),
+        scans_before_shutdown,
+        "shutdown wake does not trigger a ready scan"
+    );
+}
+
+#[tokio::test]
+async fn test_scheduler_waits_without_scanning_when_max_running_is_full() {
+    let gate = Arc::new(ReadyScanGate {
+        armed: AtomicBool::new(false),
+        reached: Notify::new(),
+        release: Semaphore::new(0),
+        completed: Notify::new(),
+    });
+    let trace = Arc::new(StartTrace::default());
+    let store = Arc::new(GatedReadyStore {
+        inner: Arc::new(MemoryTaskStore::new(8)),
+        gate,
+        start_gate: None,
+        trace: Some(Arc::clone(&trace)),
+    });
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(50))))
+        .max_running_tasks(NonZeroUsize::new(1).expect("nonzero limit"))
+        .capacity(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        });
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .expect("handler registration");
+    let service = builder.build().await.expect("service builds");
+    wait_for_deadline_queries(&trace, 2)
+        .await
+        .expect("startup scheduler scans drain");
+    let first = service.submit(request(1)).await.expect("first task accepted");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("first handler starts");
+    let second = service.submit(request(1)).await.expect("second task accepted");
+    let full_scan = wait_for_scan_deadline_pair(&trace, |pair| pair.scan_now_ms.is_none()).await;
+    assert_eq!(
+        full_scan.next_retry_deadline_ms, None,
+        "max-running-full scheduler has no retry deadline"
+    );
+    let scans_before_shutdown = ready_scan_count(&trace);
+    assert_no_additional_ready_scan(&trace, scans_before_shutdown).await;
+
+    let shutdown = service.shutdown();
+    tokio::pin!(shutdown);
+    assert!(
+        futures::poll!(shutdown.as_mut()).is_pending(),
+        "shutdown waits for the running handler"
+    );
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), shutdown)
+        .await
+        .expect("shutdown notification wakes scheduler")
+        .expect("service shuts down");
+    assert_eq!(
+        ready_scan_count(&trace),
+        scans_before_shutdown,
+        "shutdown wake does not trigger a ready scan"
+    );
+    assert!(matches!(
+        service.get(first.id).await.unwrap().unwrap().state,
+        TaskState::Succeeded
+    ));
+    assert!(matches!(
+        service.get(second.id).await.unwrap().unwrap().state,
+        TaskState::Queued
+    ));
 }
 
 #[tokio::test]
@@ -876,7 +1305,7 @@ async fn test_resource_release_during_ready_scan_is_not_lost() {
         completed: Notify::new(),
     });
     let store = Arc::new(GatedReadyStore {
-        inner: MemoryTaskStore::new(8),
+        inner: Arc::new(MemoryTaskStore::new(8)),
         gate: Arc::clone(&gate),
         start_gate: None,
         trace: None,
@@ -938,7 +1367,7 @@ async fn test_cancel_during_start_cas_releases_reservation_without_running_handl
         release: Semaphore::new(0),
     });
     let store = Arc::new(GatedReadyStore {
-        inner: MemoryTaskStore::new(8),
+        inner: Arc::new(MemoryTaskStore::new(8)),
         gate: ready_gate,
         start_gate: Some(Arc::clone(&start_gate)),
         trace: None,

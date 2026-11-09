@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -189,6 +190,22 @@ impl TaskHandler<Counter> for RetryOnceHandler {
     }
 }
 
+struct RetryableFailureHandler(Arc<AtomicU64>);
+
+impl TaskHandler<Counter> for RetryableFailureHandler {
+    fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
+        let calls = Arc::clone(&self.0);
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::AcqRel);
+            Err(TaskRunError {
+                category: "temporary".into(),
+                message: "retry me".into(),
+                retryable: true,
+            })
+        })
+    }
+}
+
 struct ParallelismHandler {
     active: AtomicU64,
     maximum: AtomicU64,
@@ -220,7 +237,7 @@ impl TaskHandler<Counter> for GatedHandler {
 }
 
 struct FailingListStore {
-    inner: Arc<MemoryTaskStore>,
+    inner: Arc<dyn TaskStore>,
     fail_next_list: std::sync::atomic::AtomicBool,
     fail_next_query: std::sync::atomic::AtomicBool,
     fail_next_get: std::sync::atomic::AtomicBool,
@@ -229,11 +246,49 @@ struct FailingListStore {
     fail_next_transition: std::sync::atomic::AtomicBool,
     fail_next_release: std::sync::atomic::AtomicBool,
     panic_next_release: std::sync::atomic::AtomicBool,
+    transition_gate: Option<Arc<TransitionCasGate>>,
+}
+
+struct TransitionCasGate {
+    armed: AtomicBool,
+    reached: Notify,
+    release: tokio::sync::Semaphore,
+}
+
+struct TransitionGateRelease {
+    gate: Arc<TransitionCasGate>,
+    released: bool,
+}
+
+impl TransitionGateRelease {
+    fn new(gate: Arc<TransitionCasGate>) -> Self {
+        Self { gate, released: false }
+    }
+
+    fn release(&mut self) {
+        self.gate.release.add_permits(1);
+        self.released = true;
+    }
+}
+
+impl Drop for TransitionGateRelease {
+    fn drop(&mut self) {
+        if !self.released {
+            self.gate.release.add_permits(1);
+        }
+    }
 }
 
 fn failing_store() -> Arc<FailingListStore> {
+    failing_store_with_inner(Arc::new(MemoryTaskStore::new(32)), None)
+}
+
+fn failing_store_with_inner(
+    inner: Arc<dyn TaskStore>,
+    transition_gate: Option<Arc<TransitionCasGate>>,
+) -> Arc<FailingListStore> {
     Arc::new(FailingListStore {
-        inner: Arc::new(MemoryTaskStore::new(32)),
+        inner,
         fail_next_list: std::sync::atomic::AtomicBool::new(false),
         fail_next_query: std::sync::atomic::AtomicBool::new(false),
         fail_next_get: std::sync::atomic::AtomicBool::new(false),
@@ -242,6 +297,7 @@ fn failing_store() -> Arc<FailingListStore> {
         fail_next_transition: std::sync::atomic::AtomicBool::new(false),
         fail_next_release: std::sync::atomic::AtomicBool::new(false),
         panic_next_release: std::sync::atomic::AtomicBool::new(false),
+        transition_gate,
     })
 }
 
@@ -310,7 +366,20 @@ impl TaskStore for FailingListStore {
         &'a self,
         command: task::model::TransitionCommand,
     ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
-        if self.fail_next_transition.swap(false, Ordering::AcqRel) {
+        if let Some(gate) = &self.transition_gate
+            && (command.state.is_terminal() || matches!(&command.state, TaskState::Queued))
+            && gate.armed.swap(false, Ordering::AcqRel)
+        {
+            Box::pin(async move {
+                gate.reached.notify_one();
+                gate.release
+                    .acquire()
+                    .await
+                    .expect("final transition gate remains open")
+                    .forget();
+                self.inner.transition_encoded(command).await
+            })
+        } else if self.fail_next_transition.swap(false, Ordering::AcqRel) {
             Box::pin(async { Err(task::store::StoreError::Failure("injected transition failure".into())) })
         } else {
             self.inner.transition_encoded(command)
@@ -1129,6 +1198,233 @@ async fn test_typed_service_latches_finalizer_transition_failure() {
         Err(task::service::TaskServiceError::StoreUnavailable(message))
             if message.contains("injected transition failure")
     ));
+}
+
+async fn finish_retries_after_cancel_revision(inner: Arc<dyn TaskStore>) -> Result<(), String> {
+    let gate = Arc::new(TransitionCasGate {
+        armed: AtomicBool::new(true),
+        reached: Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let store = failing_store_with_inner(inner, Some(Arc::clone(&gate)));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1582))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let service = builder
+        .build()
+        .await
+        .map_err(|error| format!("service build failed: {error}"))?;
+    let accepted = service
+        .submit(request())
+        .await
+        .map_err(|error| format!("task submit failed: {error}"))?;
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(2), gate.reached.notified()).await;
+    if reached.is_err() {
+        gate.release.add_permits(1);
+        let _ = service.shutdown().await;
+        return Err("handler final transition did not reach its gate".into());
+    }
+    let mut gate_release = TransitionGateRelease::new(Arc::clone(&gate));
+    let cancel_result = service.cancel(accepted.id).await;
+    gate_release.release();
+    let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown()).await;
+    let summary = service
+        .get(accepted.id)
+        .await
+        .map_err(|error| format!("task lookup failed: {error}"))?
+        .ok_or_else(|| "task disappeared after finalization".to_owned())?;
+    shutdown_result
+        .map_err(|_| "shutdown did not complete after the final transition was released".to_owned())?
+        .map_err(|error| format!("shutdown failed: {error}"))?;
+    if !matches!(cancel_result, Ok(CancelOutcome::CancellationRequested)) {
+        return Err(format!("cancel returned {cancel_result:?}"));
+    }
+    if summary.state != TaskState::Succeeded {
+        return Err(format!("final state is {:?}, expected Succeeded", summary.state));
+    }
+    if summary.attempt != 1 || summary.output.as_ref().map(|output| output.summary.as_slice()) != Some(b"typed-result")
+    {
+        return Err("completion result or attempt was not preserved".into());
+    }
+    if !summary.cancel_requested {
+        return Err("latest cancellation request was not retained".into());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_finish_retries_after_cooperative_cancel_revision_memory() {
+    finish_retries_after_cancel_revision(Arc::new(MemoryTaskStore::new(16)))
+        .await
+        .expect("completion is reconciled after a cooperative cancellation revision");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_finish_retries_after_cooperative_cancel_revision_sqlite() {
+    let path = std::env::temp_dir().join(format!("qubit-task-finish-cancel-{}.sqlite", uuid::Uuid::new_v4()));
+    let store: Arc<dyn TaskStore> = Arc::new(task::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    let result = finish_retries_after_cancel_revision(store.clone()).await;
+    drop(store);
+    for suffix in ["", ".owner.lock", "-wal", "-shm"] {
+        let mut file = path.as_os_str().to_os_string();
+        file.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(file));
+    }
+    result.expect("completion is reconciled after a cooperative cancellation revision");
+}
+
+#[tokio::test]
+async fn test_retryable_finish_observes_latest_cancel_request() {
+    let gate = Arc::new(TransitionCasGate {
+        armed: AtomicBool::new(true),
+        reached: Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let store = failing_store_with_inner(Arc::new(MemoryTaskStore::new(16)), Some(Arc::clone(&gate)));
+    let calls = Arc::new(AtomicU64::new(0));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1583))))
+        .max_attempts(NonZeroU32::new(3).expect("positive attempt limit"));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(RetryableFailureHandler(Arc::clone(&calls))),
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(2), gate.reached.notified()).await;
+    if reached.is_err() {
+        gate.release.add_permits(1);
+        let _ = service.shutdown().await;
+        panic!("retry transition did not reach its gate");
+    }
+    let mut gate_release = TransitionGateRelease::new(Arc::clone(&gate));
+    let cancel = service.cancel(accepted.id).await;
+    gate_release.release();
+    service.shutdown().await.expect("shutdown completes after finalization");
+    let summary = service.get(accepted.id).await.unwrap().unwrap();
+    assert!(matches!(cancel, Ok(CancelOutcome::CancellationRequested)));
+    assert!(matches!(summary.state, TaskState::Failed { .. }));
+    assert_eq!(summary.attempt, 1, "latest cancellation prevents a second attempt");
+    assert!(summary.cancel_requested);
+    assert_eq!(calls.load(Ordering::Acquire), 1, "the handler is not retried");
+}
+
+#[tokio::test]
+async fn test_finish_preserves_external_cancel_hook_failure_diagnostic() {
+    let gate = Arc::new(TransitionCasGate {
+        armed: AtomicBool::new(true),
+        reached: Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let store = failing_store_with_inner(Arc::new(MemoryTaskStore::new(16)), Some(Arc::clone(&gate)));
+    let hook: task::ExternalCancellationHook = Arc::new(|_, _| {
+        Box::pin(async {
+            Err(TaskRunError {
+                category: "remote".into(),
+                message: "remote cancel failed".into(),
+                retryable: false,
+            })
+        })
+    });
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1584))));
+    builder
+        .handlers_mut()
+        .register_with_cancellation_hook::<Counter, _>(
+            descriptor(CancellationMode::ExternalHook),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+            "test",
+            hook,
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(2), gate.reached.notified()).await;
+    if reached.is_err() {
+        gate.release.add_permits(1);
+        let _ = service.shutdown().await;
+        panic!("completion did not reach its gate");
+    }
+    let mut gate_release = TransitionGateRelease::new(Arc::clone(&gate));
+    let cancel = service.cancel(accepted.id).await;
+    gate_release.release();
+    service.shutdown().await.expect("shutdown completes after finalization");
+    let summary = service.get(accepted.id).await.unwrap().unwrap();
+    assert!(matches!(
+        cancel,
+        Err(task::service::TaskServiceError::ExternalCancellationFailed { message, .. })
+            if message == "remote cancel failed"
+    ));
+    assert_eq!(summary.state, TaskState::Succeeded);
+    assert_eq!(summary.cancel_error.as_deref(), Some("remote cancel failed"));
+    assert_eq!(summary.output.unwrap().summary, b"typed-result");
+}
+
+#[tokio::test]
+async fn test_finish_preserves_competing_terminal_transition() {
+    let gate = Arc::new(TransitionCasGate {
+        armed: AtomicBool::new(true),
+        reached: Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let inner = Arc::new(MemoryTaskStore::new(16));
+    let store = failing_store_with_inner(inner.clone(), Some(Arc::clone(&gate)));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1585))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service.submit(request()).await.unwrap();
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(2), gate.reached.notified()).await;
+    if reached.is_err() {
+        gate.release.add_permits(1);
+        let _ = service.shutdown().await;
+        panic!("completion did not reach its gate");
+    }
+    let mut gate_release = TransitionGateRelease::new(Arc::clone(&gate));
+    let latest = inner
+        .get_encoded_task(accepted.id)
+        .await
+        .unwrap()
+        .expect("running task exists")
+        .summary;
+    inner
+        .transition_encoded(task::model::TransitionCommand {
+            id: accepted.id,
+            expected_state_version: latest.state_version,
+            expected_attempt: latest.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Cancelled,
+            cancel_requested: true,
+            cancel_error: None,
+            finished_at_ms: Some(1),
+            output: None,
+        })
+        .await
+        .expect("competing terminal state commits");
+    gate_release.release();
+    service.shutdown().await.expect("shutdown completes after finalization");
+    assert_eq!(
+        service.get(accepted.id).await.unwrap().unwrap().state,
+        TaskState::Cancelled
+    );
 }
 
 #[tokio::test]

@@ -433,9 +433,9 @@ impl ServiceRunner {
             let notified = self.core.scheduler_changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            let scan_now_ms = now_ms();
             if self.core.in_flight.load(Ordering::Acquire) < self.core.max_running_tasks {
-                let now = now_ms();
-                match self.scan_ready_pages(now, &mut fairness).await {
+                match self.scan_ready_pages(scan_now_ms, &mut fairness).await {
                     Ok(true) => {
                         fairness = ResourceFairness::default();
                         continue 'scheduler;
@@ -447,7 +447,7 @@ impl ServiceRunner {
                     }
                 }
             }
-            let retry_at = match self.core.store.next_retry_deadline(now_ms()).await {
+            let retry_at = match self.core.store.next_retry_deadline(scan_now_ms).await {
                 Ok(deadline) => deadline,
                 Err(error) => {
                     self.latch_fault(error);
@@ -1044,8 +1044,9 @@ impl ServiceRunner {
     /// Persists the final attempt state, scheduling a retry when policy
     /// permits.
     ///
-    /// A newer terminal transition wins; other unexpected store failures latch
-    /// a service fault rather than being silently discarded.
+    /// Competing revisions are reread and reconciled while the same attempt
+    /// remains running. A newer terminal transition wins; unexpected store
+    /// failures and invalid attempt states latch a service fault.
     ///
     /// # Parameters
     ///
@@ -1054,59 +1055,74 @@ impl ServiceRunner {
     /// - `output`: Optional output produced by the attempt.
     /// - `retryable`: Whether retry policy may schedule another attempt.
     async fn finish(&self, started: &TaskSummary, state: TaskState, output: Option<TaskOutput>, retryable: bool) {
-        let latest = match self.core.store.get_encoded_task(started.id).await {
-            Ok(Some(latest)) => latest,
-            Ok(None) => {
-                self.latch_fault("task disappeared while finalizing");
-                return;
-            }
-            Err(error) => {
-                self.latch_fault(error);
-                return;
-            }
-        };
-        if latest.summary.state.is_terminal() {
-            self.core
-                .external_cancellations
-                .lock()
-                .remove(&(started.id, started.attempt));
-            return;
-        }
-        let retry = retryable && !latest.summary.cancel_requested && started.attempt < self.core.max_attempts;
-        let retry_deadline = retry.then(|| {
-            let delay = self.core.retry_policy.delay_for_attempt(started.attempt);
-            now_ms().saturating_add(delay.as_millis().min(u64::MAX as u128) as u64)
-        });
-        let final_state = if retry { TaskState::Queued } else { state };
-        match self
-            .core
-            .store
-            .transition_encoded(TransitionCommand {
-                id: started.id,
-                expected_state_version: latest.summary.state_version,
-                expected_attempt: started.attempt,
-                retry_not_before_ms: retry_deadline,
-                state: final_state,
-                cancel_requested: latest.summary.cancel_requested,
-                cancel_error: latest.summary.cancel_error,
-                finished_at_ms: Some(now_ms()),
-                output,
-            })
-            .await
-        {
-            Ok(_updated) => {
+        let mut conflicted_version = None;
+        loop {
+            let latest = match self.core.store.get_encoded_task(started.id).await {
+                Ok(Some(latest)) => latest,
+                Ok(None) => {
+                    self.latch_fault("task disappeared while finalizing");
+                    return;
+                }
+                Err(error) => {
+                    self.latch_fault(error);
+                    return;
+                }
+            };
+            if latest.summary.state.is_terminal() {
                 self.core
                     .external_cancellations
                     .lock()
                     .remove(&(started.id, started.attempt));
-                #[cfg(feature = "event-bus")]
-                self.notify_notifications();
+                return;
             }
-            Err(crate::store::StoreError::Conflict) => {
-                self.check_competing_transition(started.id, latest.summary.state_version)
-                    .await
+            if conflicted_version.take() == Some(latest.summary.state_version) {
+                self.latch_fault("task lifecycle compare-and-set conflicted without a competing revision");
+                return;
             }
-            Err(error) => self.latch_fault(error),
+            if latest.summary.attempt != started.attempt || !matches!(latest.summary.state, TaskState::Running) {
+                self.latch_fault("task attempt changed while finalizing");
+                return;
+            }
+
+            let retry = retryable && !latest.summary.cancel_requested && started.attempt < self.core.max_attempts;
+            let retry_deadline = retry.then(|| {
+                let delay = self.core.retry_policy.delay_for_attempt(started.attempt);
+                now_ms().saturating_add(delay.as_millis().min(u64::MAX as u128) as u64)
+            });
+            let final_state = if retry { TaskState::Queued } else { state.clone() };
+            match self
+                .core
+                .store
+                .transition_encoded(TransitionCommand {
+                    id: started.id,
+                    expected_state_version: latest.summary.state_version,
+                    expected_attempt: started.attempt,
+                    retry_not_before_ms: retry_deadline,
+                    state: final_state,
+                    cancel_requested: latest.summary.cancel_requested,
+                    cancel_error: latest.summary.cancel_error,
+                    finished_at_ms: Some(now_ms()),
+                    output: output.clone(),
+                })
+                .await
+            {
+                Ok(_updated) => {
+                    self.core
+                        .external_cancellations
+                        .lock()
+                        .remove(&(started.id, started.attempt));
+                    #[cfg(feature = "event-bus")]
+                    self.notify_notifications();
+                    return;
+                }
+                Err(crate::store::StoreError::Conflict) => {
+                    conflicted_version = Some(latest.summary.state_version);
+                }
+                Err(error) => {
+                    self.latch_fault(error);
+                    return;
+                }
+            }
         }
     }
 
