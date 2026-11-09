@@ -35,10 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         codec_registry()?,
         Arc::new(FixtureIds::new(1)),
     );
-    builder.handlers_mut().register::<FixturePayload, _>(
-        descriptor("fixture")?,
-        Arc::new(FixtureHandler),
-    )?;
+    builder
+        .handlers_mut()
+        .register::<FixturePayload, _>(descriptor("fixture")?, Arc::new(FixtureHandler))?;
     let service = builder.build().await?;
     let accepted = service
         .submit(request(
@@ -53,11 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Polls the service until the task reaches a terminal state or the deadline expires.
-async fn wait_for_terminal(
-    service: &TaskExecutionService,
-    id: TaskId,
-) -> Result<TaskSummary, Box<dyn Error>> {
+/// Polls the service until the task reaches a terminal state or the deadline
+/// expires.
+async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> Result<TaskSummary, Box<dyn Error>> {
     for _ in 0..1_000 {
         if let Some(summary) = service.get(id).await? {
             if summary.state.is_terminal() {

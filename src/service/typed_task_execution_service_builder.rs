@@ -95,6 +95,12 @@ impl TypedTaskExecutionServiceBuilder {
     ///
     /// Snowflake generators used across processes must have distinct node IDs
     /// and a shared, appropriate clock configuration.
+    ///
+    /// # Parameters
+    ///
+    /// * `store` - Durable task store used for acceptance and lifecycle state.
+    /// * `codecs` - Registry for encoding and decoding typed request values.
+    /// * `id_generator` - Generator used to assign task identifiers.
     #[must_use = "the builder must be configured and built to create a service"]
     pub fn new(
         store: Arc<dyn TaskStore>,
@@ -124,6 +130,10 @@ impl TypedTaskExecutionServiceBuilder {
     }
 
     /// Sets the local scheduler's CPU/GPU/memory/disk reservation capacity.
+    ///
+    /// # Parameters
+    ///
+    /// * `capacity` - Resource capacity available to local task attempts.
     #[must_use = "the returned builder contains the updated capacity"]
     #[inline]
     pub fn capacity(mut self, capacity: ResourceCapacity) -> Self {
@@ -132,6 +142,10 @@ impl TypedTaskExecutionServiceBuilder {
     }
 
     /// Sets the maximum number of concurrently running handler tasks.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Non-zero maximum number of concurrent handlers.
     #[must_use = "the returned builder contains the updated limit"]
     #[inline]
     pub fn max_running_tasks(mut self, limit: std::num::NonZeroUsize) -> Self {
@@ -142,6 +156,11 @@ impl TypedTaskExecutionServiceBuilder {
     /// Sets the scheduler's bounded queued-summary scan page size (1–256).
     /// Values above 256 are capped; the non-zero argument prevents an empty
     /// scan.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Non-zero queued-summary scan page size; values above 256 are
+    ///   capped.
     #[must_use = "the returned builder contains the updated page size"]
     #[inline]
     pub fn scan_page_size(mut self, limit: std::num::NonZeroUsize) -> Self {
@@ -152,6 +171,11 @@ impl TypedTaskExecutionServiceBuilder {
     /// Limits successful newer starts while an older ready task awaits
     /// resources. The default is 32. Once reached, the scheduler gives the
     /// older task priority until it starts or leaves the ready queue.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Non-zero count of successful newer starts allowed to bypass
+    ///   an older resource-blocked task.
     #[must_use = "the returned builder contains the updated bypass limit"]
     #[inline]
     pub fn max_resource_bypasses(mut self, limit: std::num::NonZeroUsize) -> Self {
@@ -160,6 +184,10 @@ impl TypedTaskExecutionServiceBuilder {
     }
 
     /// Sets the maximum number of attempts for a retryable handler failure.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Non-zero maximum attempt count.
     #[must_use = "the returned builder contains the updated attempt limit"]
     #[inline]
     pub fn max_attempts(mut self, limit: std::num::NonZeroU32) -> Self {
@@ -168,6 +196,10 @@ impl TypedTaskExecutionServiceBuilder {
     }
 
     /// Sets the exponential delay used for persisted retries.
+    ///
+    /// # Parameters
+    ///
+    /// * `policy` - Retry delay policy persisted with retryable failures.
     #[must_use = "the returned builder contains the updated retry policy"]
     #[inline]
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
@@ -179,6 +211,10 @@ impl TypedTaskExecutionServiceBuilder {
     /// The store must support a persistent outbox; register a `TaskEvent` codec
     /// in the supplied bus for encoded providers. Failed publications remain
     /// durable.
+    ///
+    /// # Parameters
+    ///
+    /// * `bus` - Event bus used to publish committed lifecycle events.
     #[cfg(feature = "event-bus")]
     #[must_use = "the returned builder has lifecycle publication enabled"]
     #[inline]
@@ -190,6 +226,11 @@ impl TypedTaskExecutionServiceBuilder {
     /// Sets the maximum notification drain duration during shutdown (default 5
     /// seconds). Expiry leaves pending events durable and reports
     /// `NotificationClose`.
+    ///
+    /// # Parameters
+    ///
+    /// * `timeout` - Maximum duration allowed to drain notifications at
+    ///   shutdown.
     #[cfg(feature = "event-bus")]
     #[must_use = "the returned builder contains the updated timeout"]
     #[inline]

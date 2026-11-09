@@ -54,6 +54,11 @@ impl TaskCursor {
 impl From<&TaskSummary> for TaskCursor {
     /// Copies the acceptance position from a task summary into a cursor.
     ///
+    /// # Parameters
+    ///
+    /// * `summary` - Task summary whose acceptance timestamp and ID define the
+    ///   cursor position.
+    ///
     /// # Returns
     ///
     /// A cursor containing the summary's acceptance timestamp and task ID.

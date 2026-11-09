@@ -26,10 +26,9 @@ use qubit_task::model::TaskState;
 use qubit_task::model::TaskStateKind;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
-use qubit_task::store::TaskStore;
-
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
+use qubit_task::store::TaskStore;
 
 /// Owns one temporary database namespace and removes it when the fixture exits.
 #[cfg(feature = "sqlite")]
@@ -55,8 +54,7 @@ impl SqliteFixture {
 #[cfg(feature = "sqlite")]
 impl Drop for SqliteFixture {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.directory)
-            .expect("remove this fixture's disposable database directory");
+        std::fs::remove_dir_all(&self.directory).expect("remove this fixture's disposable database directory");
     }
 }
 
@@ -75,10 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn exercise_store(
-    store: Arc<dyn TaskStore>,
-    id: TaskId,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn exercise_store(store: Arc<dyn TaskStore>, id: TaskId) -> Result<(), Box<dyn std::error::Error>> {
     let owner = store.acquire_owner().await?;
     let request = stored_request();
     let accepted = store.accept_encoded(id, request.clone()).await?;

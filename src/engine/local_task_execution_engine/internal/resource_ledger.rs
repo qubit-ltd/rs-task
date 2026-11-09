@@ -47,6 +47,12 @@ pub(in crate::engine::local_task_execution_engine) fn release_reservation(token:
 ///
 /// Borrowed set entries avoid cloning identifiers while replacing repeated
 /// linear scans of the reservation list with average constant-time lookups.
+///
+/// # Parameters
+///
+/// * `usage_gpus` - Mutable aggregate list from which the released
+///   reservation's GPU identifiers are removed.
+/// * `reserved_gpus` - GPU identifiers held by the released reservation.
 fn remove_reserved_gpus(usage_gpus: &mut Vec<String>, reserved_gpus: &[String]) {
     let reserved_gpus: HashSet<&str> = reserved_gpus.iter().map(String::as_str).collect();
     usage_gpus.retain(|id| !reserved_gpus.contains(id.as_str()));

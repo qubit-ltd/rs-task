@@ -37,7 +37,10 @@ use thiserror::Error;
 pub enum HandlerDispatchError {
     /// No typed handler is registered under the requested kind.
     #[error("no handler is registered for kind_id `{0}`")]
-    MissingHandler(String),
+    MissingHandler(
+        /// Kind identifier for which no handler was registered.
+        String,
+    ),
     /// The stored payload model does not match the handler's declared model.
     #[error("payload type_id `{actual}` does not match handler type_id `{expected}`")]
     PayloadTypeMismatch {
@@ -48,10 +51,16 @@ pub enum HandlerDispatchError {
     },
     /// The stored schema version is not accepted by the handler.
     #[error("payload schema version {0} is not accepted by this handler")]
-    UnsupportedSchemaVersion(u32),
+    UnsupportedSchemaVersion(
+        /// Schema version stored in the task payload.
+        u32,
+    ),
     /// No bytes codec with this stable ID is available.
     #[error("no bytes codec is registered for `{0}`")]
-    MissingCodec(String),
+    MissingCodec(
+        /// Stable identifier of the unavailable codec.
+        String,
+    ),
     /// The codec decoded a value whose Rust type differs from the handler's T.
     #[error("codec decoded Rust type {actual:?}; handler expects {expected}")]
     DecodedValueTypeMismatch {
@@ -62,5 +71,9 @@ pub enum HandlerDispatchError {
     },
     /// The selected codec failed while decoding the payload bytes.
     #[error("payload bytes codec failed: {0}")]
-    Codec(#[from] ValueCodecExecutionError),
+    Codec(
+        /// Error returned by the selected payload codec.
+        #[from]
+        ValueCodecExecutionError,
+    ),
 }

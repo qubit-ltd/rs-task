@@ -13,10 +13,16 @@ pub(in crate::service::typed_task_execution_service) enum ShutdownOutcome {
     /// Shutdown completed and the store owner was released.
     Complete,
     /// Store ownership could not be released or a service fault was latched.
-    StoreUnavailable(String),
+    StoreUnavailable(
+        /// Store release or latched service fault diagnostic.
+        String,
+    ),
     /// The publisher failed to drain before shutdown completed.
     #[cfg(feature = "event-bus")]
-    NotificationClose(String),
+    NotificationClose(
+        /// Publisher drain failure diagnostic.
+        String,
+    ),
 }
 
 impl ShutdownOutcome {

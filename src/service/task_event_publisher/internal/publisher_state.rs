@@ -56,6 +56,12 @@ pub(in crate::service::task_event_publisher) struct PublisherState {
 
 impl PublisherState {
     /// Creates shared state for one owned publisher worker.
+    ///
+    /// # Parameters
+    ///
+    /// * `store` - Task store that owns the durable event outbox.
+    /// * `bus` - Event bus used to publish lifecycle snapshots.
+    /// * `topic` - Validated destination for lifecycle events.
     #[must_use]
     pub(in crate::service::task_event_publisher) fn new(
         store: Arc<dyn TaskStore>,
@@ -86,6 +92,10 @@ impl PublisherState {
     /// - `controls`: Receives quarantine requests from the owning service. The
     ///   publisher worker receives this channel from the service that starts
     ///   its lifecycle.
+    ///
+    /// # Parameters
+    ///
+    /// * `controls` - Receiver for quarantine requests from the owning service.
     pub(in crate::service::task_event_publisher) async fn run(&self, mut controls: mpsc::Receiver<QuarantineCommand>) {
         let mut backoff = Duration::from_millis(25);
         loop {
@@ -171,6 +181,12 @@ impl PublisherState {
     ///
     /// `true` if quarantine removed the failed head; otherwise, `false` after
     /// the retry delay or shutdown signal.
+    ///
+    /// # Parameters
+    ///
+    /// * `delay` - Backoff duration before another outbox read.
+    /// * `controls` - Receiver for quarantine requests that can interrupt the
+    ///   delay.
     #[must_use]
     async fn wait_after_failure(&self, delay: Duration, controls: &mut mpsc::Receiver<QuarantineCommand>) -> bool {
         let deadline = tokio::time::Instant::now() + delay;
@@ -198,6 +214,10 @@ impl PublisherState {
     ///
     /// `true` if at least one queued request quarantined the head; otherwise,
     /// `false`.
+    ///
+    /// # Parameters
+    ///
+    /// * `controls` - Receiver whose queued quarantine requests are processed.
     #[must_use]
     async fn process_queued_controls(&self, controls: &mut mpsc::Receiver<QuarantineCommand>) -> bool {
         let mut quarantined = false;
@@ -215,6 +235,10 @@ impl PublisherState {
     /// # Returns
     ///
     /// `true` if the request removed the failed head; otherwise, `false`.
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Quarantine request to validate and apply.
     #[must_use]
     async fn process_control(&self, command: QuarantineCommand) -> bool {
         let expected = (
@@ -250,6 +274,10 @@ impl PublisherState {
     }
 
     /// Clears the retained failure when the store now exposes a different head.
+    ///
+    /// # Parameters
+    ///
+    /// * `entry` - Current outbox head compared with the retained failure.
     fn clear_failure_if_head_changed(&self, entry: &EventOutboxEntry) {
         let mut failure = self.failure.lock();
         if failure.as_ref().is_some_and(|current| {
@@ -262,6 +290,10 @@ impl PublisherState {
     }
 
     /// Clears the retained failure when it belongs to the published entry.
+    ///
+    /// # Parameters
+    ///
+    /// * `entry` - Published outbox entry matched against the retained failure.
     fn clear_failure_for(&self, entry: &EventOutboxEntry) {
         let mut failure = self.failure.lock();
         if failure.as_ref().is_some_and(|current| {
@@ -282,6 +314,10 @@ impl PublisherState {
     /// Returns an error if the stored event cannot be decoded, the bus rejects
     /// admission, or the store cannot mark the event as published. In each
     /// case, the outbox row remains available for replay.
+    ///
+    /// # Parameters
+    ///
+    /// * `entry` - Immutable outbox snapshot to decode and publish.
     async fn publish(&self, entry: &EventOutboxEntry) -> Result<(), String> {
         let event: TaskEvent = serde_json::from_str(&entry.event_json).map_err(|error| error.to_string())?;
         let event_id = EventId::new(&entry.event_id).map_err(|error| error.to_string())?;

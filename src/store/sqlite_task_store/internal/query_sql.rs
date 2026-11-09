@@ -97,6 +97,12 @@ pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
 /// `has_predicate` is updated after appending so subsequent fragments use
 /// `AND`; `fragment` is a static SQL fragment whose values must be bound
 /// separately.
+///
+/// # Parameters
+///
+/// * `sql` - SQL statement being assembled.
+/// * `has_predicate` - Tracks whether a `WHERE` clause has already been added.
+/// * `fragment` - Static predicate SQL to append.
 fn append_predicate(sql: &mut String, has_predicate: &mut bool, fragment: &'static str) {
     sql.push_str(if *has_predicate { " AND " } else { " WHERE " });
     sql.push_str(fragment);
@@ -106,6 +112,11 @@ fn append_predicate(sql: &mut String, has_predicate: &mut bool, fragment: &'stat
 /// Stores a SQLite value and returns its one-based numbered placeholder.
 ///
 /// The placeholder number follows the value's position in `params`.
+///
+/// # Parameters
+///
+/// * `params` - Bound values whose length determines the next placeholder.
+/// * `value` - SQLite value to append to the bound values.
 #[must_use]
 fn bind_value(params: &mut Vec<Value>, value: Value) -> String {
     params.push(value);
@@ -119,6 +130,12 @@ fn bind_value(params: &mut Vec<Value>, value: Value) -> String {
 ///
 /// Returns `StoreError::InvalidRequest` with `overflow_message` if the
 /// timestamp exceeds the range of `i64`.
+///
+/// # Parameters
+///
+/// * `params` - Bound values receiving the converted timestamp.
+/// * `timestamp` - Unsigned timestamp to convert and bind.
+/// * `overflow_message` - Error message used if the timestamp exceeds `i64`.
 fn bind_timestamp(
     params: &mut Vec<Value>,
     timestamp: u64,
@@ -129,6 +146,11 @@ fn bind_timestamp(
 }
 
 /// Binds owned text as a SQLite text value and returns its placeholder.
+///
+/// # Parameters
+///
+/// * `params` - Bound values receiving the text.
+/// * `value` - Owned text value to bind.
 #[must_use]
 #[inline]
 fn bind_text(params: &mut Vec<Value>, value: String) -> String {

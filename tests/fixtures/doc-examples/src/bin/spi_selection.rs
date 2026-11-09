@@ -15,7 +15,6 @@ use std::sync::Arc;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::store::MemoryTaskStore;
-
 use typed_support::SequentialIds;
 
 #[tokio::main]

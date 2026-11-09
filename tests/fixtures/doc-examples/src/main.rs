@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use qubit_event_bus::AsyncEventBusRegistry;
-use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::EventBusConfig;
-use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::RequiredCapabilities;
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::spi::PublishGuarantee;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
@@ -74,8 +74,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     })
     .await??;
     service.shutdown().await?;
-    let _ = bus
-        .shutdown(ShutdownMode::Immediate)
-        .await?;
+    let _ = bus.shutdown(ShutdownMode::Immediate).await?;
     Ok(())
 }

@@ -19,6 +19,11 @@ use crate::handler::typed::TypedTaskHandler;
 use crate::model::typed::StoredPayload;
 
 /// Adapts a typed handler to the registry's type-erased dispatch interface.
+///
+/// # Type Parameters
+///
+/// * `T` is the handler's decoded payload type.
+/// * `H` is the typed handler implementation.
 pub(in crate::handler::typed::typed_task_handler_registry) struct TypedAdapter<T, H> {
     /// Descriptor used to validate the payload before decoding.
     pub(in crate::handler::typed::typed_task_handler_registry) descriptor: TaskHandlerDescriptor,

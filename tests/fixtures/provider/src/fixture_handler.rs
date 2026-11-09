@@ -79,11 +79,7 @@ pub struct FixtureHandler;
 
 impl TaskHandler<FixturePayload> for FixtureHandler {
     /// Completes the fixture request successfully without performing work.
-    fn run<'a>(
-        &'a self,
-        _payload: FixturePayload,
-        _context: TaskContext,
-    ) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(&'a self, _payload: FixturePayload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
@@ -131,11 +127,10 @@ pub static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new
 ///
 /// # Errors
 ///
-/// Returns an error if the static codec registration cannot form a valid registry.
+/// Returns an error if the static codec registration cannot form a valid
+/// registry.
 pub fn codec_registry() -> Result<Arc<ValueBytesCodecRegistry>, Box<dyn Error>> {
-    Ok(Arc::new(
-        ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?,
-    ))
+    Ok(Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?))
 }
 
 /// Describes the fixture handler for the supplied routing identifier.
@@ -172,11 +167,7 @@ pub fn descriptor(kind_id: &str) -> Result<TaskHandlerDescriptor, Box<dyn Error>
 ///
 /// A request configured with schema version one and the fixture JSON codec.
 #[must_use]
-pub fn request(
-    kind_id: &str,
-    payload: Value,
-    idempotency_key: String,
-) -> TaskRequest<FixturePayload> {
+pub fn request(kind_id: &str, payload: Value, idempotency_key: String) -> TaskRequest<FixturePayload> {
     let mut request = TaskRequest::new(
         kind_id,
         1,

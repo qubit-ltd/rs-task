@@ -30,10 +30,17 @@ use crate::store::StoreError;
 pub enum TaskServiceError {
     /// ID generation failed before task acceptance.
     #[error("task ID generation failed: {0}")]
-    IdGeneration(#[from] IdGenerationError),
+    IdGeneration(
+        /// Error returned by the task ID generator.
+        #[from]
+        IdGenerationError,
+    ),
     /// Encoding or validating a typed task request failed.
     #[error("typed task request failed: {0}")]
-    TypedRequest(String),
+    TypedRequest(
+        /// Diagnostic describing the request encoding or validation failure.
+        String,
+    ),
     /// The selected store failed an operation.
     #[error(transparent)]
     Store(

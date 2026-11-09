@@ -12,7 +12,10 @@ use super::ExternalCancelFlight;
 /// Tracks an external cancellation hook for one task attempt.
 pub(in crate::service::typed_task_execution_service) enum ExternalCancelEntry {
     /// An external cancellation attempt shared by concurrent callers.
-    InFlight(Arc<ExternalCancelFlight>),
+    InFlight(
+        /// Shared state and result for the active hook attempt.
+        Arc<ExternalCancelFlight>,
+    ),
     /// The cancellation hook succeeded for this attempt.
     Succeeded,
 }

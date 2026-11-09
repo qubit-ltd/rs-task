@@ -646,6 +646,12 @@ pub(in crate::store::sqlite_task_store) fn update_progress(
 }
 
 /// Builds the public summary from its independently stored request and state.
+///
+/// # Parameters
+///
+/// * `id` - Decimal task identifier read from storage.
+/// * `request_json` - Serialized immutable request attributes.
+/// * `lifecycle_json` - Serialized mutable lifecycle fields.
 fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Result<TaskSummary, StoreError> {
     let request: StoredRequestInfo = serde_json::from_str(request_json).map_err(failure)?;
     let lifecycle: StoredTypedLifecycle = serde_json::from_str(lifecycle_json).map_err(failure)?;
@@ -678,6 +684,11 @@ fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Resul
 
 /// Checks that output is only attached to successful tasks and stays within the
 /// summary limit.
+///
+/// # Parameters
+///
+/// * `state` - Lifecycle state the output would accompany.
+/// * `output` - Optional output snapshot to validate.
 fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Result<(), StoreError> {
     if output.is_some() && state != &TaskState::Succeeded {
         return Err(StoreError::InvalidRequest(
@@ -704,6 +715,11 @@ fn now_ms() -> u64 {
 /// Inserts the immutable notification before committing its lifecycle mutation.
 /// Snapshots larger than 128 KiB or SQLite failures roll back the surrounding
 /// transaction.
+///
+/// # Parameters
+///
+/// * `transaction` - SQLite transaction containing the lifecycle mutation.
+/// * `summary` - Committed task summary to snapshot in the outbox.
 fn insert_event_outbox(transaction: &Transaction<'_>, summary: &TaskSummary) -> Result<(), StoreError> {
     let event = TaskEvent::from_typed_summary(summary);
     let json = serde_json::to_string(&event).map_err(failure)?;

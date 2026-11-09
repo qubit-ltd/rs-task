@@ -41,6 +41,10 @@ pub(super) struct StoredRequestInfo {
 impl From<&StoredTaskRequest> for StoredRequestInfo {
     /// Copies immutable request attributes while leaving payload bytes in their
     /// own column.
+    ///
+    /// # Parameters
+    ///
+    /// * `request` - Request whose immutable attributes are copied.
     fn from(request: &StoredTaskRequest) -> Self {
         Self {
             kind_id: request.kind_id.clone(),
@@ -59,6 +63,11 @@ impl From<&StoredTaskRequest> for StoredRequestInfo {
 impl StoredRequestInfo {
     /// Reconstructs a typed request by pairing these attributes with stored
     /// payload bytes.
+    ///
+    /// # Parameters
+    ///
+    /// * `bytes` - Encoded payload bytes loaded from the separate payload
+    ///   column.
     pub(super) fn into_request(self, bytes: Vec<u8>) -> Result<StoredTaskRequest, StoreError> {
         let type_id = self.payload_type_id.as_str().try_into().map_err(failure)?;
         Ok(StoredTaskRequest {

@@ -154,6 +154,11 @@ impl MemoryTaskStore {
 ///
 /// Returns an invalid-request error when output accompanies a non-success
 /// state or its summary exceeds the limit.
+///
+/// # Parameters
+///
+/// * `state` - Lifecycle state the output would accompany.
+/// * `output` - Optional output snapshot to validate.
 fn validate_encoded_output(state: &TaskState, output: Option<&TaskOutput>) -> Result<(), StoreError> {
     if output.is_some() && state != &TaskState::Succeeded {
         return Err(StoreError::InvalidRequest(
@@ -208,6 +213,11 @@ impl super::TaskStore for MemoryTaskStore {
     /// index, `IdempotencyConflict` for a key reused with different content,
     /// `DuplicateTask` for an existing ID, or
     /// `UnfinishedRecordLimitExceeded` when the unfinished limit is reached.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identifier assigned to the request being accepted.
+    /// * `request` - Encoded request and metadata to retain.
     ///
     /// # Returns
     ///
@@ -322,6 +332,10 @@ impl super::TaskStore for MemoryTaskStore {
     ///
     /// Returns the stored request and summary, or `None` when the task is not
     /// retained.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identifier of the retained task to retrieve.
     fn get_encoded_task<'a>(&'a self, id: EncodedTaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         Box::pin(async move { Ok(self.state.lock().encoded_tasks.get(&id).cloned()) })
     }
@@ -339,6 +353,10 @@ impl super::TaskStore for MemoryTaskStore {
     /// # Returns
     ///
     /// Returns the current checkpoint, or `None` when no task is retained.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identifier of the task whose current checkpoint is requested.
     fn get_state_checkpoint<'a>(
         &'a self,
         id: EncodedTaskId,
@@ -366,6 +384,11 @@ impl super::TaskStore for MemoryTaskStore {
     /// # Returns
     ///
     /// Returns the updated summary after the attempt starts.
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Start request containing the task, expected revision, and
+    ///   start time.
     fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();
@@ -409,6 +432,11 @@ impl super::TaskStore for MemoryTaskStore {
     /// # Returns
     ///
     /// Returns the summary after the transition is applied.
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Requested lifecycle transition and its expected revision
+    ///   and attempt.
     fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             command
@@ -485,6 +513,10 @@ impl super::TaskStore for MemoryTaskStore {
     /// # Returns
     ///
     /// Returns the summary containing the new progress snapshot.
+    ///
+    /// # Parameters
+    ///
+    /// * `command` - Progress snapshot and expected task attempt/version.
     fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let snapshot = TaskProgressSnapshot::from_command(command.clone())
@@ -520,6 +552,10 @@ impl super::TaskStore for MemoryTaskStore {
     ///
     /// Returns the matching page and, when more records remain, its next
     /// cursor.
+    ///
+    /// # Parameters
+    ///
+    /// * `query` - Filters, exclusive cursor, and requested page size.
     fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
         Box::pin(async move {
             let page_size = query.checked_page_size()?;
@@ -587,6 +623,12 @@ impl super::TaskStore for MemoryTaskStore {
     ///
     /// Returns eligible queued summaries and a cursor when another page
     /// remains.
+    ///
+    /// # Parameters
+    ///
+    /// * `after` - Optional exclusive position after which to list tasks.
+    /// * `limit` - Non-zero maximum number of summaries to return, up to 256.
+    /// * `now_ms` - Current time used to determine retry eligibility.
     fn list_ready_queued<'a>(
         &'a self,
         after: Option<TaskCursor>,
@@ -632,6 +674,10 @@ impl super::TaskStore for MemoryTaskStore {
     /// # Returns
     ///
     /// Returns the earliest future retry deadline, or `None` if there is none.
+    ///
+    /// # Parameters
+    ///
+    /// * `now_ms` - Current time; only deadlines strictly later are returned.
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
             Ok(self
@@ -658,6 +704,11 @@ impl super::TaskStore for MemoryTaskStore {
     /// # Returns
     ///
     /// Returns the number of records removed.
+    ///
+    /// # Parameters
+    ///
+    /// * `finished_before_ms` - Exclusive completion-time cutoff.
+    /// * `max_rows` - Non-zero upper bound on the number of records to remove.
     fn prune_terminal_before<'a>(
         &'a self,
         finished_before_ms: u64,
@@ -733,6 +784,10 @@ impl super::TaskStore for MemoryTaskStore {
     /// # Returns
     ///
     /// Returns `Ok(())` after ownership is released.
+    ///
+    /// # Parameters
+    ///
+    /// * `epoch` - Ownership epoch that must match the current owner.
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();

@@ -67,6 +67,10 @@ pub struct TaskEvent {
 
 impl From<&TaskSummary> for TaskEvent {
     /// Converts a persisted typed summary into its event snapshot.
+    ///
+    /// # Parameters
+    ///
+    /// * `summary` - Persisted typed summary to convert.
     fn from(summary: &TaskSummary) -> Self {
         Self::from_typed_summary(summary)
     }

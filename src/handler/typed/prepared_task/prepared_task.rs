@@ -23,7 +23,7 @@ type RunPrepared = Box<dyn FnOnce(TypedTaskContext) -> TaskFuture<'static, TaskR
 /// attempt while ensuring the handler can be invoked at most once.
 #[must_use = "a prepared task must be run to start its handler"]
 pub struct PreparedTask {
-    /// Type-erased handler adapter invoked when this task attempt starts.
+    /// Type-erased adapter that starts the validated handler attempt.
     run: RunPrepared,
 }
 
@@ -56,6 +56,15 @@ impl PreparedTask {
 }
 
 impl Debug for PreparedTask {
+    /// Formats the prepared task without exposing its type-erased handler.
+    ///
+    /// # Parameters
+    ///
+    /// - `formatter`: Formatter that receives the debug representation.
+    ///
+    /// # Returns
+    ///
+    /// Formatting result from the supplied formatter.
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("PreparedTask").finish_non_exhaustive()
     }

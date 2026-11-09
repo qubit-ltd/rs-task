@@ -14,7 +14,13 @@ pub(in crate::service::typed_task_execution_service) enum ExternalCancelResult {
     /// The task attempt ended before the hook result could be applied.
     AlreadyTerminal,
     /// The hook failed and its error was persisted.
-    HookFailed(String),
+    HookFailed(
+        /// Diagnostic returned by the cancellation hook.
+        String,
+    ),
     /// A store or service operation failed while processing the hook.
-    ServiceFailed(String),
+    ServiceFailed(
+        /// Diagnostic for the failed store or service operation.
+        String,
+    ),
 }

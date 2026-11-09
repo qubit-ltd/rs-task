@@ -65,11 +65,7 @@ struct WorkerHandler {
 }
 
 impl TaskHandler<WorkerPayload> for WorkerHandler {
-    fn run<'a>(
-        &'a self,
-        _payload: WorkerPayload,
-        context: TaskContext,
-    ) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(&'a self, _payload: WorkerPayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
             self.started
                 .send(context.task_id())
@@ -104,15 +100,15 @@ impl ValueDecoder<[u8]> for JsonValueCodec {
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
-    ValueBytesCodecDescriptor::of::<JsonValueCodec, WorkerPayload>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonValueCodec, WorkerPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("fixture.crash_worker.json"),
     &JSON_DESCRIPTOR,
     ValueCodecRegistrationSource::new("qubit-task", "crash-worker", "fixture", 1),
 );
 
-/// Generates distinct deterministic IDs for tasks created by the fixture service.
+/// Generates distinct deterministic IDs for tasks created by the fixture
+/// service.
 struct WorkerIds(AtomicU64);
 
 impl IdGenerator<Id, IdGenerationError> for WorkerIds {
@@ -162,10 +158,7 @@ fn arguments() -> Result<(PathBuf, String, TaskId, usize), Box<dyn std::error::E
         || (mode != "queued" && count != 1)
         || arguments.next().is_some()
     {
-        return Err(
-            "expected a new absolute database path, valid mode, UUID, and 1..=513 queued rows"
-                .into(),
-        );
+        return Err("expected a new absolute database path, valid mode, UUID, and 1..=513 queued rows".into());
     }
     Ok((path, mode, id, count))
 }
@@ -231,7 +224,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if mode == "terminal" {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if service.get(id).await?.is_some_and(|summary| summary.state.is_terminal()) {
+                if service
+                    .get(id)
+                    .await?
+                    .is_some_and(|summary| summary.state.is_terminal())
+                {
                     return Ok::<(), TaskServiceError>(());
                 }
                 tokio::task::yield_now().await;

@@ -23,28 +23,25 @@ use qubit_task::model::ResourceCapacity;
 use qubit_task::model::TaskState;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
-
+use typed_support::SequentialIds;
 use typed_support::register_handler;
 use typed_support::request;
-use typed_support::SequentialIds;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let path = temp_dir().join(format!(
-        "qubit-task-typed-recovery-{}.sqlite",
-        id()
-    ));
+    let path = temp_dir().join(format!("qubit-task-typed-recovery-{}.sqlite", id()));
     let store = Arc::new(SqliteTaskStore::open(&path)?);
     let codecs = Arc::new(typed_support::codecs()?);
     let ids = Arc::new(SequentialIds::new(500));
-    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, ids)
-        .capacity(ResourceCapacity {
-            cpu_slots: 1,
-            ..ResourceCapacity::default()
-        });
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, ids).capacity(ResourceCapacity {
+        cpu_slots: 1,
+        ..ResourceCapacity::default()
+    });
     register_handler(&mut builder)?;
     let service = builder.build().await?;
-    let accepted = service.submit(request(serde_json::json!({"rows": 4}), "import-4")).await?;
+    let accepted = service
+        .submit(request(serde_json::json!({"rows": 4}), "import-4"))
+        .await?;
     service.shutdown().await?;
     drop(service);
 

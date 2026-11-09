@@ -259,6 +259,11 @@ impl TypedTaskExecutionService {
     /// * `request` - Typed request containing routing, payload, and scheduling
     ///   metadata.
     ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Request payload type, which supplies model identity and is safe
+    ///   to share across threads for the duration of submission.
+    ///
     /// # Returns
     ///
     /// The accepted task summary, including its assigned identity and initial
@@ -656,6 +661,11 @@ impl TypedTaskExecutionService {
 
     /// Shares an existing external cancellation hook or starts the task
     /// attempt's hook.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Task ID and attempt identifying the cancellation operation.
+    /// * `kind_id` - Registered task kind whose external hook is invoked.
     fn start_or_join_external_cancel(&self, key: (TaskId, u32), kind_id: &str) -> Option<Arc<ExternalCancelFlight>> {
         let (flight, start) = {
             let mut entries = self.core.external_cancellations.lock();
@@ -692,6 +702,12 @@ impl TypedTaskExecutionService {
     }
 
     /// Waits for the shared external hook and maps its outcome for this caller.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Task ID associated with the cancellation hook.
+    /// * `attempt` - Attempt number associated with the hook.
+    /// * `flight` - Shared result channel for the in-flight hook.
     async fn wait_external_cancel(
         id: TaskId,
         attempt: u32,
@@ -733,6 +749,13 @@ fn now_ms() -> u64 {
 ///
 /// Returns the prepared task on success, or the handler/codec error rendered as
 /// a string when the registered handler cannot accept the payload.
+///
+/// # Parameters
+///
+/// * `handlers` - Registry used to resolve the task kind.
+/// * `codecs` - Registry used to decode the stored payload.
+/// * `kind_id` - Task kind identifier to resolve.
+/// * `payload` - Encoded payload stored with the task.
 fn prepare_handler(
     handlers: &TypedTaskHandlerRegistry,
     codecs: &ValueBytesCodecRegistry,
