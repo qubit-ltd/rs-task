@@ -10,14 +10,13 @@
 
 #![cfg(feature = "event-bus")]
 
+mod support;
+
 use std::collections::HashMap;
 use std::error::Error;
-use std::net::TcpListener;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 
 use qubit_event_bus::DeliveryError;
@@ -47,59 +46,9 @@ use qubit_spi::ProviderSelection;
 use qubit_task::event::TaskEvent;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
-use redis::Client;
 use serde_json as json;
+use support::redis_server::RedisServer;
 use tokio::test as tokio_test;
-
-struct RedisContainer {
-    container_id: String,
-    url: String,
-}
-
-impl RedisContainer {
-    fn start() -> Result<Self, Box<dyn Error>> {
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let port_mapping = format!("127.0.0.1:{port}:6379");
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "-p",
-                port_mapping.as_str(),
-                "redis:7-alpine",
-                "redis-server",
-                "--appendonly",
-                "yes",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into());
-        }
-        let container_id = String::from_utf8(output.stdout)?.trim().to_owned();
-        let server = Self {
-            container_id,
-            url: format!("redis://127.0.0.1:{port}/"),
-        };
-        for _ in 0..50 {
-            if Client::open(server.url.as_str())
-                .and_then(|client| client.get_connection())
-                .is_ok()
-            {
-                return Ok(server);
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        Err("Redis container did not become ready".into())
-    }
-}
-
-impl Drop for RedisContainer {
-    fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["rm", "-f", self.container_id.as_str()])
-            .output();
-    }
-}
 
 /// JSON v1 codec accepting only v1 and historical absent schema identifiers.
 struct TaskEventJsonCodec {
@@ -170,8 +119,8 @@ fn create_event_bus(url: &str, namespace: &str, register_task_codec: bool) -> Re
 
 #[tokio_test(flavor = "multi_thread")]
 async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result<(), Box<dyn Error>> {
-    let redis = RedisContainer::start()?;
-    let bus = create_event_bus(&redis.url, "task-redis-integration", true)?;
+    let redis = RedisServer::start()?;
+    let bus = create_event_bus(redis.url(), "task-redis-integration", true)?;
     let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
     let (sender, receiver) = mpsc::channel();
     let subscription = bus.subscribe(
@@ -232,8 +181,8 @@ async fn test_task_lifecycle_snapshots_publish_and_consume_via_redis() -> Result
 
 #[test]
 fn test_redis_facade_rejects_task_event_subscription_without_codec() -> Result<(), Box<dyn Error>> {
-    let redis = RedisContainer::start()?;
-    let bus = create_event_bus(&redis.url, "task-redis-no-codec", false)?;
+    let redis = RedisServer::start()?;
+    let bus = create_event_bus(redis.url(), "task-redis-no-codec", false)?;
     let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
     let result = bus.subscribe(
         SubscribeRequest::builder()
@@ -381,8 +330,8 @@ fn test_task_event_consumer_duplicate_and_stale_versions_converge_locally() -> R
 /// Verifies the identical consumer policy through the Redis transport.
 #[test]
 fn test_task_event_consumer_duplicate_and_stale_versions_converge_via_redis() -> Result<(), Box<dyn Error>> {
-    let redis = RedisContainer::start()?;
-    let bus = create_event_bus(&redis.url, "task-consumer-convergence", true)?;
+    let redis = RedisServer::start()?;
+    let bus = create_event_bus(redis.url(), "task-consumer-convergence", true)?;
     let request = SubscribeRequest::builder()
         .subscriber_id(SubscriberId::new("projection-consumer")?)
         .topic(Topic::<TaskEvent>::new("task.lifecycle")?)

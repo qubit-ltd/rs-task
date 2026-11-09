@@ -10,6 +10,7 @@
 #![cfg(all(feature = "sqlite", feature = "event-bus"))]
 
 mod redis_task_outbox_support;
+mod support;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -19,6 +20,12 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use outbox_support::controlled_redis::proxy::ControlledRedis;
+use outbox_support::interrupt_before_mark::InterruptBeforeMark;
+use outbox_support::redis_server::RedisServer;
+use outbox_support::task_event_codec::TaskEventJsonCodec;
+use outbox_support::temporary_database::TemporaryDatabase;
+use outbox_support::typed_support;
 use qubit_event_bus::AsyncEventBus;
 use qubit_event_bus::DeliveryError;
 use qubit_event_bus::EventBus;
@@ -59,16 +66,10 @@ use qubit_task::service::TaskServiceError;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
-use redis_task_outbox_support::support;
+use redis_task_outbox_support::support as outbox_support;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
-use support::controlled_redis::proxy::ControlledRedis;
-use support::interrupt_before_mark::InterruptBeforeMark;
-use support::redis_server::RedisServer;
-use support::task_event_codec::TaskEventJsonCodec;
-use support::temporary_database::TemporaryDatabase;
-use support::typed_support;
 
 type TestResult = Result<(), Box<dyn Error>>;
 type ProjectionResult<T> = Result<T, Box<dyn Error + Send + Sync>>;

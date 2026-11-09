@@ -8,6 +8,9 @@
 // Shared across separate integration-test crates; some test targets only use a
 // subset.
 #[allow(dead_code)]
+pub mod redis_server;
+
+#[allow(dead_code)]
 pub mod store_contract;
 
 #[cfg(feature = "event-bus")]

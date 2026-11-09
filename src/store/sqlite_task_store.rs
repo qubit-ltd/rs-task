@@ -59,7 +59,6 @@ use crate::model::typed::TransitionCommand;
 
 mod internal;
 #[cfg(test)]
-#[path = "../tests/store/sqlite_task_store/owner_lock_tests.rs"]
 mod owner_lock_tests;
 
 /// SQLite-backed history with an exclusive OS lock for one active service
@@ -1057,7 +1056,7 @@ mod tests {
     use crate::store::TaskStore;
 
     #[test]
-    fn sqlite_integer_conversion_checks_signed_boundaries() {
+    fn test_sqlite_integer_conversion_checks_signed_boundaries() {
         assert_eq!(sqlite_i64_from_u64(i64::MAX as u64, "test value").unwrap(), i64::MAX);
         assert_eq!(sqlite_u64_from_i64(i64::MAX, "test value").unwrap(), i64::MAX as u64);
         assert!(matches!(
@@ -1071,7 +1070,7 @@ mod tests {
     }
 
     /// Creates a unique database path for one worker scheduling test.
-    fn test_database_path() -> std::path::PathBuf {
+    fn unique_database_path_for_worker_test() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "qubit-task-sqlite-worker-{}-{}.sqlite",
             std::process::id(),
@@ -1094,7 +1093,7 @@ mod tests {
 
     #[tokio_crate::test]
     async fn test_blocking_worker_peak_is_bounded_to_one() {
-        let path = test_database_path();
+        let path = unique_database_path_for_worker_test();
         let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
         let (started_sender, started_receiver) = oneshot::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
@@ -1153,7 +1152,7 @@ mod tests {
     /// worker counters and a second connection observe the actual store path.
     #[tokio_crate::test]
     async fn test_cancelled_write_caller_keeps_owner_until_transaction_commits() {
-        let path = test_database_path();
+        let path = unique_database_path_for_worker_test();
         let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
         let epoch = store.acquire_owner().await.expect("store acquires owner");
         store
@@ -1243,7 +1242,7 @@ mod tests {
 
     #[tokio_crate::test]
     async fn test_run_waits_for_its_single_operation_slot() {
-        let path = test_database_path();
+        let path = unique_database_path_for_worker_test();
         let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
         let permit = store
             .operation_slot
@@ -1282,7 +1281,7 @@ mod tests {
 
     #[tokio_crate::test]
     async fn test_cancelled_slot_waiter_does_not_block_later_operations() {
-        let path = test_database_path();
+        let path = unique_database_path_for_worker_test();
         let store = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
         let permit = store
             .operation_slot

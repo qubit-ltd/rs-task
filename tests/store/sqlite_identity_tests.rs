@@ -9,8 +9,10 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use qubit_task::model::OwnerEpoch;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
+use qubit_task::store::TaskStore;
 
 fn test_directory() -> PathBuf {
     PathBuf::from(format!(
@@ -78,6 +80,47 @@ fn test_database_identity_rejects_hard_link_aliases() {
         "hard-link aliases are rejected because they bypass the owner lock"
     );
 
+    drop(store);
+    std::fs::remove_dir_all(directory).expect("test directory is removed");
+}
+
+#[tokio::test]
+async fn test_repeated_owner_acquisition_is_rejected() {
+    let directory = test_directory();
+    let path = directory.join("tasks.sqlite");
+    let store = SqliteTaskStore::open(&path).expect("database opens");
+    let epoch = store.acquire_owner().await.expect("owner is acquired");
+
+    assert!(
+        matches!(store.acquire_owner().await, Err(StoreError::OwnerConflict)),
+        "a store cannot acquire a second owner epoch"
+    );
+
+    store.release_owner(epoch).await.expect("owner is released");
+    drop(store);
+    std::fs::remove_dir_all(directory).expect("test directory is removed");
+}
+
+#[tokio::test]
+async fn test_stale_owner_release_keeps_the_database_locked() {
+    let directory = test_directory();
+    let path = directory.join("tasks.sqlite");
+    let store = SqliteTaskStore::open(&path).expect("database opens");
+    let epoch = store.acquire_owner().await.expect("owner is acquired");
+
+    assert!(
+        matches!(
+            store.release_owner(OwnerEpoch(epoch.0.saturating_add(1))).await,
+            Err(StoreError::OwnerConflict)
+        ),
+        "a stale epoch cannot release the held owner lock"
+    );
+    assert!(
+        matches!(SqliteTaskStore::open(&path), Err(StoreError::OwnerConflict)),
+        "stale release keeps the lock held"
+    );
+
+    store.release_owner(epoch).await.expect("matching owner releases lock");
     drop(store);
     std::fs::remove_dir_all(directory).expect("test directory is removed");
 }

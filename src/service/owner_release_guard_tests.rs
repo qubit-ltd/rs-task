@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -16,6 +17,7 @@ use tokio::sync::Semaphore;
 
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
+use crate::model::TaskStateCheckpoint;
 use crate::model::typed::AcceptOutcome;
 use crate::model::typed::ProgressCommand;
 use crate::model::typed::StartCommand;
@@ -74,40 +76,25 @@ impl TaskStore for GatedReleaseStore {
     ) -> TaskFuture<'a, Result<AcceptOutcome, StoreError>> {
         self.inner.accept_encoded(id, request)
     }
-    fn get_encoded_task<'a>(
-        &'a self,
-        id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+    fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         self.inner.get_encoded_task(id)
     }
     fn get_state_checkpoint<'a>(
         &'a self,
         id: TaskId,
-    ) -> TaskFuture<'a, Result<Option<crate::model::TaskStateCheckpoint>, StoreError>> {
+    ) -> TaskFuture<'a, Result<Option<TaskStateCheckpoint>, StoreError>> {
         self.inner.get_state_checkpoint(id)
     }
-    fn start_encoded<'a>(
-        &'a self,
-        command: StartCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.start_encoded(command)
     }
-    fn transition_encoded<'a>(
-        &'a self,
-        command: TransitionCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn transition_encoded<'a>(&'a self, command: TransitionCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.transition_encoded(command)
     }
-    fn update_progress<'a>(
-        &'a self,
-        command: ProgressCommand,
-    ) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
+    fn update_progress<'a>(&'a self, command: ProgressCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         self.inner.update_progress(command)
     }
-    fn list_encoded<'a>(
-        &'a self,
-        query: TaskQuery,
-    ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
+    fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.inner.list_encoded(query)
     }
     fn list_ready_queued<'a>(
@@ -118,10 +105,7 @@ impl TaskStore for GatedReleaseStore {
     ) -> TaskFuture<'a, Result<TaskPage, StoreError>> {
         self.inner.list_ready_queued(after, limit, now_ms)
     }
-    fn next_retry_deadline<'a>(
-        &'a self,
-        now_ms: u64,
-    ) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         self.inner.next_retry_deadline(now_ms)
     }
     fn prune_terminal_before<'a>(
@@ -258,10 +242,9 @@ async fn test_pending_release_does_not_block_other_cleanup() {
     let other_epoch = other.acquire_owner().await.expect("other owner acquired");
     let other_store: Arc<dyn TaskStore> = other.clone();
     drop(OwnerReleaseGuard::new(other_store, other_epoch, worker));
-    let other_released =
-        tokio::time::timeout(Duration::from_secs(2), other.release_finished.notified())
-            .await
-            .is_ok();
+    let other_released = tokio::time::timeout(Duration::from_secs(2), other.release_finished.notified())
+        .await
+        .is_ok();
     blocked.resume.add_permits(1);
     assert!(
         other_released,

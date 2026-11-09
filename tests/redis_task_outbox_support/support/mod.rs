@@ -12,10 +12,8 @@
 pub mod controlled_redis;
 #[path = "interrupt_before_mark.rs"]
 pub mod interrupt_before_mark;
-#[path = "redis_server.rs"]
-pub mod redis_server;
-#[path = "../../fixtures/doc-examples/src/task_event_codec.rs"]
-pub mod task_event_codec;
+pub use crate::support::redis_server;
+pub use crate::support::task_event_codec;
 #[path = "temporary_database.rs"]
 pub mod temporary_database;
 #[path = "../../fixtures/doc-examples/src/typed_support.rs"]
