@@ -19,8 +19,44 @@ The runnable typed examples are [`examples/task_service.rs`](../examples/task_se
 - **Payload compatibility:** `Payload<T>` binds `type_id`, `schema_version`, and `codec_id` to the value. A handler accepts one payload type ID and an explicit set of schema versions. A codec may serve multiple schema versions.
 - **Resource admission:** CPU, GPU, memory, disk, and custom units are concurrency quotas. They reserve capacity inside the execution engine; they do not pin CPUs, isolate GPUs, or enforce operating-system memory or disk use.
 - **Lifecycle and cancellation:** queued tasks can be cancelled directly. A running handler must declare cooperative cancellation or an external cancellation hook; a request alone cannot force arbitrary code to stop. External hook failures remain queryable and can be retried by calling `cancel()` again while the task is running. Concurrent calls share one hook, caller cancellation does not stop it, and `shutdown()` waits for it. Make hooks idempotent for each (`TaskId`, attempt).
-- **Progress:** handlers report through `rs-progress::AsyncReporter`. `report_async()` awaits persistence, and subsequent task reads include stage and metric snapshots.
+- **Progress:** handlers report through `rs-progress::AsyncReporter`. `report_async()` awaits persistence, and subsequent task reads include stage and metric snapshots. A version is allocated before the store await and is never reused after an error or cancellation; version gaps are valid because progress versions are separate from lifecycle `state_version`.
 - **History:** typed pages sort by `(accepted_at_ms, numeric task id)` ascending. The exclusive `after` cursor is a keyset cursor; every query sees its own storage snapshot.
+
+## Start and shut down the service
+
+Build the service during application startup and keep its handle for as long as the application accepts work. On application shutdown, first stop the application's own request or message intake, then await `service.shutdown()` and handle its result. Stopping that intake is application logic; the crate does not expose an application server stop method.
+
+Shutdown stops new task submissions and scheduler dispatch, waits for running handlers and external cancellation hooks, drains the notification publisher up to its configured timeout, and then releases store ownership. Queued tasks are left queued for a later service instance; shutdown does not run every queued task. A handler or cancellation hook that never returns can keep shutdown waiting indefinitely. Dropping the final service handle requests the same drain asynchronously, but `Drop` cannot wait for or report its result.
+
+Bound the time the application waits without treating a timeout as proof that shutdown finished:
+
+```rust,no_run
+use std::time::Duration;
+use tokio::time::timeout;
+use qubit_task::service::TaskServiceError;
+use qubit_task::TaskExecutionService;
+
+async fn stop_tasks(service: &TaskExecutionService) {
+    match timeout(Duration::from_secs(30), service.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(TaskServiceError::NotificationClose(error))) => {
+            eprintln!("notification drain failed: {error}");
+            // Inspect the durable outbox backlog and alert the operator.
+        }
+        Ok(Err(TaskServiceError::StoreUnavailable(error))) => {
+            eprintln!("task service or owner release failed: {error}");
+            // After a transient release failure is addressed, call shutdown again.
+        }
+        Ok(Err(error)) => eprintln!("task service shutdown failed: {error}"),
+        Err(_) => {
+            eprintln!("shutdown is still draining; retain the service handle");
+            // The supervisor continues. Await shutdown again when appropriate.
+        }
+    }
+}
+```
+
+Cancelling or timing out a `shutdown()` waiter does not cancel the supervisor drain. Keep the handle and await `shutdown()` again after a slow handler or hook finishes. A timeout does not guarantee store ownership has been released, so do not build a replacement service on that assumption. Open a replacement service or store only after shutdown reports that ownership was released: `Ok(())` confirms complete shutdown, and `NotificationClose` reports a notification error after owner release succeeds. A later explicit `shutdown()` retries a transient owner-release failure. For a `NotificationClose` error, inspect the durable outbox backlog because remaining notification rows are available for a later service instance. If owner release panics, waiters receive `StoreUnavailable` and the still-armed owner guard is handed to the cleanup worker. Treat a latched store fault separately from a transient release error.
 
 ## Features and limits
 
@@ -31,6 +67,8 @@ The `sqlite` feature enables durable task history and recovery. Recovery is at-l
 Before persisting terminal-state diagnostics, the service limits `Failed.category` to 128 UTF-8 bytes and other terminal-state diagnostic fields to 4096 UTF-8 bytes. When a value exceeds its limit, the service retains the longest UTF-8 prefix that fits and appends `...`. This keeps the stored text valid UTF-8 and within the byte limit; it can omit the end of the original message. Direct writes through `TaskStore` still strictly reject over-limit diagnostics.
 
 With the normal unwind panic strategy, a panic raised by an application payload decoder while the service prepares a task is recorded as that task's `Panicked` outcome; later tasks can continue and shutdown remains available. A panic in a handler remains isolated to its task as before. Panics cannot be caught when the process uses `panic=abort`.
+
+External cancellation hook error messages are limited to 4096 UTF-8 bytes before the service returns or stores them. Direct `TaskStore` transitions that write a longer `cancel_error` return `InvalidRequest`; applications that need the full text should store it in their own diagnostic system. Existing SQLite rows with longer values remain readable, and the service shortens them when recovery or task finalization next writes the row. A cancelled or failed progress report also consumes its allocated version; the underlying asynchronous store may already have committed it, so a later report uses a higher version and leaves a gap.
 
 ## Publish lifecycle changes
 

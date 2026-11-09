@@ -19,8 +19,44 @@
 - **Payload 兼容性：** `Payload<T>` 将 `type_id`、`schema_version` 和 `codec_id` 与值绑定。一个处理器只接受一种 payload type ID，并显式声明支持的 schema 版本。一个 codec 可以服务多个 schema 版本。
 - **资源准入：** CPU、GPU、内存、磁盘和自定义单位是并发配额，由执行引擎内部预留；它们不会固定 CPU、隔离 GPU，也不会强制限制操作系统层面的内存或磁盘使用。
 - **生命周期与取消：** 排队中的任务可直接取消。运行中的处理器必须声明协作式取消能力或外部取消 hook；取消请求本身无法强行停止任意代码。外部 hook 失败会保留可查询诊断，任务仍在运行时可再次调用 `cancel()` 重试。同一 attempt 的并发调用共享一次 hook，取消调用方不会停止 hook，`shutdown()` 会等待 hook 完成。hook 应对每个 (`TaskId`, attempt) 幂等。
-- **进度：** 处理器通过 `rs-progress::AsyncReporter` 汇报进度。`report_async()` 等待持久化完成，之后读取任务会包含阶段和指标快照。
+- **进度：** 处理器通过 `rs-progress::AsyncReporter` 汇报进度。`report_async()` 等待持久化完成，之后读取任务会包含阶段和指标快照。版本在等待存储前分配；报告失败或取消后不会复用，允许出现版本空洞。进度版本与生命周期 `state_version` 相互独立。
 - **历史：** typed 分页按 `(accepted_at_ms, numeric task id)` 升序排列。排他性的 `after` 游标是 keyset 游标；每次查询读取各自的存储快照。
+
+## 启动与关闭服务
+
+在应用启动时构建服务，并在应用继续接收工作期间保留 service 句柄。应用退出时，先停止应用自己的请求或消息入口，再等待 `service.shutdown()` 并处理返回结果。关闭应用入口属于应用职责；crate 不提供应用服务器的停止 API。
+
+关闭会停止新的任务提交和调度器派发，等待运行中的 handler 与外部取消 hook，按配置的超时时间排空通知 publisher，最后释放 store ownership。排队任务会留在队列中，供后续服务实例处理；shutdown 不会运行所有排队任务。若 handler 或取消 hook 始终不返回，shutdown 可能一直等待。丢弃最后一个 service 句柄也会异步请求同样的排空，但 `Drop` 不会等待或返回结果。
+
+可以限制应用等待时间，但不能把超时当作关闭已经完成的证明：
+
+```rust,no_run
+use std::time::Duration;
+use tokio::time::timeout;
+use qubit_task::service::TaskServiceError;
+use qubit_task::TaskExecutionService;
+
+async fn stop_tasks(service: &TaskExecutionService) {
+    match timeout(Duration::from_secs(30), service.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(TaskServiceError::NotificationClose(error))) => {
+            eprintln!("通知排空失败：{error}");
+            // 检查持久 outbox 积压并通知运维人员。
+        }
+        Ok(Err(TaskServiceError::StoreUnavailable(error))) => {
+            eprintln!("任务服务或 owner 释放失败：{error}");
+            // 处理暂时性释放故障后，再次调用 shutdown。
+        }
+        Ok(Err(error)) => eprintln!("任务服务关闭失败：{error}"),
+        Err(_) => {
+            eprintln!("关闭仍在排空；保留 service 句柄");
+            // supervisor 会继续运行；适当时再次等待 shutdown。
+        }
+    }
+}
+```
+
+取消或超时某个 `shutdown()` 等待者不会取消 supervisor 的排空。保留句柄，并在慢速 handler 或 hook 结束后再次等待 `shutdown()`。超时不能保证 store ownership 已释放，因此不能据此认定可以立即构建替代服务。只有在 shutdown 结果确认 owner 已释放后，才打开替代 service 或 store：`Ok(())` 表示关闭完成；`NotificationClose` 表示通知关闭出错，但 owner 已成功释放。owner 暂时释放失败时，之后显式调用 `shutdown()` 会重试。遇到 `NotificationClose` 时，检查持久 outbox 积压，未发送的通知行可由后续服务实例继续处理。若 owner 释放时发生 panic，等待者会收到 `StoreUnavailable`，仍持有 owner 的 guard 会交给清理 worker。锁存的 store 故障应与暂时性释放错误分别判断。
 
 ## Features 与边界
 
@@ -31,6 +67,8 @@
 service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。超限时会保留能够放入上限的最长 UTF-8 前缀，并追加 `...`。这样保存的文本仍是有效 UTF-8 且不超过字节上限，但可能省略原消息末尾。直接通过 `TaskStore` 写入时，超限诊断仍会被严格拒绝。
 
 启用 panic unwind 时，应用 payload decoder 在 service 准备任务时发生 panic，会记为该任务的 `Panicked` 终态；后续任务仍可执行，service 仍可关闭。handler panic 和此前一样限制在对应任务内。进程采用 `panic=abort` 时无法捕获 panic。
+
+外部取消 hook 的错误消息会在 service 返回或保存前限制为 4096 个 UTF-8 字节。直接通过 `TaskStore` transition 写入更长的 `cancel_error` 会返回 `InvalidRequest`；需要保留完整文本时，应由应用写入自己的诊断系统。已有 SQLite 长诊断仍可读取；服务在 recovery 或任务结束时再次写入该行，会先缩短诊断。进度报告失败或被取消时，已分配的版本仍会消耗；底层异步存储可能已经提交，因此后续报告会使用更大的版本并留下空洞。
 
 ## 发布任务生命周期变化
 

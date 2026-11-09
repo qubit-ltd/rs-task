@@ -122,10 +122,10 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 - handler 的 `TaskRunError.retryable` 决定是否重试。默认 `max_attempts` 为 3，`RetryPolicy` 延迟从 1 秒增长到 60 秒。queued 状态和 `retry_not_before_ms` 一起保存，重启恢复仍遵守截止时间。不可重试错误、panic、取消和超过尝试上限都会结束任务。
 - 调用 `resume_blocked(id, expected_state_version)` 可在修复配置并使用兼容 handler 或 codec 重启服务后重新排队。状态版本冲突时先重新读取摘要；存在待处理取消时不能恢复。
 - 后台存储故障会被锁存：停止写入和调度，保留诊断读取；`shutdown()` 排空活跃工作后返回存储故障。SQLite typed schema v4 到 v7 会在原数据库中通过事务迁移到 v8；旧 UUID schema 仍需显式映射数据。
-- `TaskContext::progress_builder()` 使用 `rs-progress::AsyncReporter`。`report_async()` 等待进度持久化后才返回。后续查询可看到 stage 和 metric 快照，但它们不会改变生命周期 `state_version`；上报错误会返回处理器。
+- `TaskContext::progress_builder()` 使用 `rs-progress::AsyncReporter`。`report_async()` 等待进度持久化后才返回。后续查询可看到 stage 和 metric 快照，但它们不会改变生命周期 `state_version`；上报错误会返回处理器。Reporter 在等待 store 前分配下一个进度版本，失败或取消后不会复用。取消等待时，异步 store 可能已经提交，因此后续版本允许出现空洞；进度版本与生命周期 `state_version` 独立。
 - typed 历史页按 `(accepted_at_ms, 数值 task id)` 升序排序。`after` 是排他键游标，不是 offset；每次查询读取自己的存储快照。只有存在 lookahead 记录时才有 `next`。过滤器包括 state、业务 `category` 和 correlation key；`kind_id` 用于处理器路由，与 `category` 独立。
 
-service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。文本超限时，会在 UTF-8 字符边界截短，保留能够连同 `...` 放入上限的最长前缀。直接通过 `TaskStore` 写入时，超限诊断仍会被拒绝。启用 panic unwind 时，应用 payload decoder 在准备任务时发生 panic，会成为该任务的 `Panicked` 终态；handler panic 和此前一样限制在对应任务内。`panic=abort` 无法捕获。
+service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。文本超限时，会在 UTF-8 字符边界截短，保留能够连同 `...` 放入上限的最长前缀。直接通过 `TaskStore` 写入时，超限诊断仍会被拒绝。service 返回的外部取消 hook 消息也限制为 4096 个 UTF-8 字节；直接 transition 写入更长的 `cancel_error` 会返回 `InvalidRequest`。已有 SQLite 长 hook 诊断仍可读取，service 在 recovery 或结束任务时再次写入该行会先规范化；需要保留完整文本时应由应用写入自己的诊断系统。启用 panic unwind 时，应用 payload decoder 在准备任务时发生 panic，会成为该任务的 `Panicked` 终态；handler panic 和此前一样限制在对应任务内。`panic=abort` 无法捕获。
 
 需要持久生命周期通知时，启用 `event-bus`、注册应用提供的 `TaskEvent` codec，并设置 `TaskExecutionServiceBuilder::event_bus`。任务状态和 SQLite outbox 行会在同一事务中提交，再由后台异步重放。provider 确认 `Accepted` 前，outbox 行会保留并重试，因此发布可能重复；收到 `Accepted` 后，该行会被删除。接纳不保证 Redis 已持久化或消费者已收到，因此不保证通知至少一次送达。这与任务 handler 的至少一次执行不同。消费者应按 `(TaskId, state_version)` 去重，并以任务查询为准。启用 publisher 不会补发此前已提交的历史状态。`MemoryTaskStore` 不支持持久 outbox。配置边界和监控方法见[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。
 
@@ -137,4 +137,4 @@ service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UT
 
 `submit()` 会把预期的容量和重复请求拒绝映射为 `TaskServiceError::SubmissionCapacityExceeded`、`UnfinishedTaskLimitExceeded`、`IdempotencyConflict` 或 `DuplicateTaskId`。这些拒绝只影响当前请求，服务仍可继续使用。其他 store 故障仍按操作性错误处理，并可能使服务进入锁存不可用状态。
 
-运行中任务使用 `CancellationMode::ExternalHook` 时，`cancel()` 会先持久化取消请求，再启动由服务托管的 hook 操作。同一 task `attempt` 的并发调用共享该操作；取消或中止等待 `cancel()` 的调用方不会停止 hook，`shutdown()` 会等待 hook 完成。hook 失败时，`cancel()` 返回 `TaskServiceError::ExternalCancellationFailed`，错误信息保存在 `TaskSummary.cancel_error`；任务仍在运行时，可再次调用 `cancel()` 重试。重试成功会清除该诊断，但 handler 仍负责报告最终状态。请确保 hook 对每个 (`TaskId`, `attempt`) 幂等，因为外部副作用可能已成功、但确认回执丢失。
+运行中任务使用 `CancellationMode::ExternalHook` 时，`cancel()` 会先持久化取消请求，再启动由服务托管的 hook 操作。同一 task `attempt` 的并发调用共享该操作；取消或中止等待 `cancel()` 的调用方不会停止 hook，`shutdown()` 会等待 hook 完成。hook 失败时，`cancel()` 返回 `TaskServiceError::ExternalCancellationFailed`，错误信息保存在 `TaskSummary.cancel_error`，上限为 4096 个 UTF-8 字节；任务仍在运行时，可再次调用 `cancel()` 重试。重试成功会清除该诊断，但 handler 仍负责报告最终状态。请确保 hook 对每个 (`TaskId`, `attempt`) 幂等，因为外部副作用可能已成功、但确认回执丢失。

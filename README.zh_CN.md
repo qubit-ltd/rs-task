@@ -21,7 +21,7 @@
 - `category` 用于应用侧任务分类和查询。
 - `Payload<T>` 将带类型的值与 `type_id`、`schema_version`、`codec_id` 绑定。
 
-[带类型任务 API 指南](doc/typed-task-api.zh_CN.md)提供完整示例，以及处理器注册、codec 复用、资源配额、取消、进度汇报、metadata 限额和 keyset 分页契约。可运行示例见 [`examples/task_service.rs`](examples/task_service.rs) 和 [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs)。
+[带类型任务 API 指南](doc/typed-task-api.zh_CN.md)提供完整示例，以及处理器注册、codec 复用、资源配额、取消、进度汇报、metadata 限额和 keyset 分页契约。[用户指南的启动与关闭步骤](doc/user-guide.zh_CN.md#启动与关闭服务)说明应用侧操作。可运行示例见 [`examples/task_service.rs`](examples/task_service.rs) 和 [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs)。
 
 ## 安装
 
@@ -207,7 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 调度器按 keyset 顺序扫描可运行的排队任务。较早的任务暂时拿不到资源时，资源可用的后续任务可以先启动。默认允许后续任务成功越过 32 次；可用 `TaskExecutionServiceBuilder::max_resource_bypasses` 配置正整数上限。达到上限后，调度器优先等待较早的任务，期间其他不相关资源可能空置。计数只存在于当前进程，重启后清零。该策略不保证严格 FIFO，也不保证等待时间有上界。应用可调用 `TaskStore::prune_terminal_before(finished_before_ms, max_rows)` 显式清理一批旧终态任务。SQLite 会跳过仍有活动 outbox 行的任务，并在删除前保存一条最小终态检查点，供通知缺口时查询当前状态；检查点会随终态清理持续增长。清理会释放幂等键供后续复用，Queued 和 Blocked 任务会保留。
 
-需要等待运行中的处理器、通知排空和 store owner 释放，并获取关闭结果（包括错误）时，显式调用 `shutdown().await`；并发等待者共享同一次关闭结果。最后一个外部 service 句柄被丢弃时也会异步请求排空，但 `Drop` 不等待、不返回结果。取消某个 `shutdown()` 等待者不会取消排空。若处理器始终不结束，owner 也可能一直无法释放。owner 释放时若发生 panic，等待者会收到 `StoreUnavailable`，仍持有 owner 的 guard 会交给清理 worker；若释放只是暂时失败，之后显式调用 `shutdown()` 会重试。取得 owner 后取消 `build()` future，也会由预先启动的清理 worker 最终释放；因此紧接着再次 build 时，可能短暂遇到 owner 冲突。
+先停止应用自己的请求或消息入口，再调用 `shutdown().await`。关闭会等待活跃 handler 和 hook、排空通知、释放 store owner 并返回结果；queued 任务留待后续恢复。丢弃最后一个 service 句柄只会异步请求排空；取消关闭等待者不会取消 drain。超时不能证明 owner 已释放，处理器始终不结束时可能一直占用 owner。等待 shutdown 结果确认 owner 已释放后，再打开替代服务；通知关闭错误后应检查持久 outbox。owner 释放 panic 时，等待者收到 `StoreUnavailable`，仍持有 owner 的 guard 会交给清理 worker；暂时性 owner 释放错误可通过之后显式调用 `shutdown()` 重试。决定何时构建替代服务前，请先看[用户指南的关闭步骤](doc/user-guide.zh_CN.md#启动与关闭服务)。
 
 ## 检查
 

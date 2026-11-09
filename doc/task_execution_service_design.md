@@ -34,7 +34,7 @@
 
 ## 进度与历史
 
-处理器通过 task context 中的 `rs-progress::AsyncReporter` 汇报进度。`report_async()` 等待进度快照持久化完成；后续任务查询会读到当前阶段和指标值。进度更新不会推进任务生命周期 state version。
+处理器通过 task context 中的 `rs-progress::AsyncReporter` 汇报进度。`report_async()` 等待进度快照持久化完成；后续任务查询会读到当前阶段和指标值。进度更新不会推进任务生命周期 state version。Reporter 在等待 store 前分配每个进度版本；报告失败或取消后不会复用。异步 store 可能在取消到达调用方前已经提交，因此允许出现版本空洞；进度版本与生命周期 `state_version` 相互独立。
 
 历史页按 `(accepted_at_ms, numeric task id)` 升序排列。排他的 `after` 游标包含这个排序键，而不是偏移量。每次查询读取各自的 store 快照；并发插入不会让游标变成快照 token。过滤条件包括生命周期状态、`category` 和 correlation key。`kind_id` 与 category 过滤保持独立。
 
@@ -42,9 +42,9 @@
 
 SQLite 持久化支持进程重启恢复，执行语义为至少一次。若任务在外部副作用完成后、结果保存前崩溃，恢复后 handler 可能再次执行，因此应用必须让副作用幂等，或用自己的事务策略保护它们。调度只在进程内进行；本 crate 不提供分布式调度、强制中断任意代码或业务副作用恰好一次保证。
 
-service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。文本超限时，会在 UTF-8 字符边界截短，保留能够连同 `...` 放入上限的最长前缀；直接通过 `TaskStore` 写入时，超限诊断仍会被拒绝。启用 panic unwind 时，应用 payload decoder 在准备任务时发生 panic，会记为该任务的 `Panicked` 终态，service 可继续调度后续任务。handler future panic 和此前一样限制在对应任务内。进程采用 `panic=abort` 时无法捕获 panic。
+service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。文本超限时，会在 UTF-8 字符边界截短，保留能够连同 `...` 放入上限的最长前缀；直接通过 `TaskStore` 写入时，超限诊断仍会被拒绝。外部取消 hook 消息在 service 返回或保存前也限制为 4096 个 UTF-8 字节；直接 transition 写入更长的 `cancel_error` 会返回 `InvalidRequest`。已有 SQLite 长 hook 诊断仍可读取，service 在 recovery 或完成任务时再次写入该行会先规范化；需要保留完整文本时应由应用保存到自己的诊断系统。启用 panic unwind 时，应用 payload decoder 在准备任务时发生 panic，会记为该任务的 `Panicked` 终态，service 可继续调度后续任务。handler future panic 和此前一样限制在对应任务内。进程采用 `panic=abort` 时无法捕获 panic。
 
-后台调度或结果写入遇到存储故障时会锁存故障并停止新写入；诊断读取仍会访问 store。显式调用 `shutdown().await` 会停止调度，等待活跃处理器和通知排空，尝试释放 owner，并返回共享结果（包括已锁存的故障）。并发等待者看到同一次释放尝试的结果；取消其中一个等待者不会取消 supervisor 的排空。若 owner 释放暂时失败，之后显式调用 `shutdown()` 会重试。若释放时发生 panic，supervisor 会向等待者返回 `StoreUnavailable`，并将仍持有 owner 的 guard 交给清理 worker。最后一个外部 service 句柄被丢弃时也会异步请求同样的排空，但 `Drop` 不等待、不返回结果。若处理器始终不结束，owner 可能一直被占用。
+后台调度或结果写入遇到存储故障时会锁存故障并停止新写入；诊断读取仍会访问 store。应用应先停止自己的请求或消息入口，再等待 `shutdown()`；crate 不控制该入口。关闭会停止服务接纳和调度，等待活跃 handler 与取消 hook，按配置的超时时间排空通知 publisher，释放 owner 并返回共享结果（包括已锁存的故障）。Queued 任务会留在 store 中供后续恢复。并发等待者看到同一次释放尝试的结果；取消或超时其中一个等待者不会取消 supervisor 的排空。超时不能证明 owner 已释放，因此应保留 service 句柄，不能据此假定可构建替代服务。若 owner 释放暂时失败，之后显式调用 `shutdown()` 会重试。若释放时发生 panic，supervisor 会向等待者返回 `StoreUnavailable`，并将仍持有 owner 的 guard 交给清理 worker。最后一个外部 service 句柄被丢弃时也会异步请求同样的排空，但 `Drop` 不等待、不返回结果。若 handler 或 hook 始终不结束，shutdown 可能一直等待。通知关闭错误会在 owner 释放成功后返回；应检查持久 outbox 中留待后续服务处理的行。
 
 配置 `TaskExecutionServiceBuilder::event_bus` 后，服务会启用 store outbox，并在任务恢复后启动异步 publisher。每个生命周期快照与任务状态迁移写入同一个 SQLite 事务。provider 确认接纳前，outbox 行会保留并重试，因此发布可能重复；收到 `Accepted` 后才删除该行。`Accepted` 不保证 Redis 已持久化或消费者已收到：若 Redis 在持久化前故障，SQLite 行已删除的通知仍会丢失，因此不能承诺通知至少一次送达。该语义与任务 handler 的至少一次执行不同。此功能要求 store 提供持久 outbox，`MemoryTaskStore` 不具备此能力，也不适合作为 durable 配置。outbox 启用前提交的状态不会在启动时回填。
 
