@@ -1139,8 +1139,8 @@ async fn test_retryable_handler_error_is_persisted_and_retried_after_deadline() 
     let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1201))))
         .retry_policy(
             task::service::RetryPolicy::new(
-                std::time::Duration::from_millis(80),
-                std::time::Duration::from_millis(80),
+                std::time::Duration::from_nanos(1_000_001),
+                std::time::Duration::from_nanos(1_000_001),
             )
             .unwrap(),
         );

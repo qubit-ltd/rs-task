@@ -1106,10 +1106,8 @@ impl ServiceRunner {
             }
 
             let retry = retryable && !latest.summary.cancel_requested && started.attempt < self.core.max_attempts;
-            let retry_deadline = retry.then(|| {
-                let delay = self.core.retry_policy.delay_for_attempt(started.attempt);
-                now_ms().saturating_add(delay.as_millis().min(u64::MAX as u128) as u64)
-            });
+            let retry_deadline = retry
+                .then(|| now_ms().saturating_add(self.core.retry_policy.delay_millis_for_attempt(started.attempt)));
             let final_state = if retry { TaskState::Queued } else { state.clone() };
             match self
                 .core
