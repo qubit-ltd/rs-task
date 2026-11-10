@@ -22,7 +22,7 @@ The public API keeps these identifiers separate:
 - `category` classifies tasks for application queries.
 - `Payload<T>` binds a typed value to `type_id`, `schema_version`, and `codec_id`.
 
-The [typed task API guide](doc/typed-task-api.md) contains the complete example and contracts for handler registration, codec reuse, resource quotas, cancellation, progress reporting, metadata limits, and keyset pagination. The [user guide](doc/user-guide.md#start-and-shut-down-the-service) covers application startup and shutdown operations. Runnable examples are [`examples/task_service.rs`](examples/task_service.rs) and [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs).
+The [typed task API guide](doc/typed-task-api.md) contains the complete example and contracts for handler registration, codec reuse, resource quotas, cancellation, progress reporting, metadata limits, and keyset pagination. The [user guide](doc/user-guide.md#start-and-shut-down-the-service) covers application startup and shutdown operations, and its [history and quarantine maintenance section](doc/user-guide.md#maintain-history-and-quarantine-archives) documents bounded archive cleanup. Runnable examples are [`examples/task_service.rs`](examples/task_service.rs) and [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs).
 
 ## Installation
 

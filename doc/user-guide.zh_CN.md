@@ -144,4 +144,55 @@ WHERE task_id = ?1 AND state_version = ?2;
 
 不要为了绕过正常网络重试而隔离记录。SQLite schema v8 中的归档不受终态任务清理影响；归档保留期限由应用管理。清理会跳过仍有活动 outbox 行的任务，并在删除任务前原子保存终态状态检查点。检查点不会自动过期，其数量和磁盘占用会随清理任务增加。SQLite 在终态检查点存在期间保留已清理任务的 ID；`MemoryTaskStore` 不保留已清理身份。
 
+### 维护历史与隔离归档
+
+规划清理前，记录 `task_event_outbox`、终态任务、`task_event_outbox_quarantine` 和 `task_terminal_checkpoints` 的数量，以及各表相关时间字段的最早值；同时记录 `PRAGMA page_count`、`PRAGMA freelist_count` 和 `PRAGMA page_size` 作为数据库整体指标。COUNT 可能扫描大表，记录数也不等于磁盘字节数；应按实际负载选择观察频率。
+
+维护窗口开始时，先停止应用的请求和消息入口，等待服务 shutdown 并确认 owner 已释放，再关闭数据库连接并停止所有可能重新打开该文件的进程。shutdown 超时不能证明 owner 已释放。确保没有其他服务或维护程序争用数据库。使用 SQLite backup API 或 `sqlite3` 的 `.backup` 创建一致备份，验证备份能够打开并读取；WAL 活跃时不要只复制主数据库文件。备份归档应满足应用审计保留期限。
+
+备份验证后，操作员可以删除早于应用所选保留 cutoff 的 quarantine 行。通过 `sqlite3` 的 `.parameter set` 或 Python 参数绑定实际值；不要拼接输入，也不要硬编码业务保留期限。cutoff 是排他的，选择顺序按时间、任务 ID 和状态版本稳定排序。活动 outbox 行、tasks 和 checkpoints 不受影响。默认保留 checkpoints，且没有自动过期。
+
+SQLite 会把负数 `LIMIT` 当作无限制。必须在开启事务前验证输入，并在同一 connection 上逐条执行语句，这样 `changes()` 才对应本批结果。任何异常都应 rollback；否则 commit 后继续下一批，直到删除数为零。
+
+```python
+if type(cutoff_ms) is not int or not 0 <= cutoff_ms <= 2**63 - 1:
+    raise ValueError("cutoff_ms must be a nonnegative SQLite integer")
+if type(batch_size) is not int or not 1 <= batch_size <= 2**63 - 1:
+    raise ValueError("batch_size must be a positive SQLite integer")
+
+try:
+    connection.execute("BEGIN IMMEDIATE;")
+    connection.execute(
+        "DELETE FROM task_event_outbox_quarantine "
+        "WHERE (task_id, state_version) IN ("
+        "SELECT task_id, state_version FROM task_event_outbox_quarantine "
+        "WHERE quarantined_at_ms < :cutoff_ms "
+        "ORDER BY quarantined_at_ms, task_id, state_version LIMIT :batch_size)",
+        {"cutoff_ms": cutoff_ms, "batch_size": batch_size},
+    )
+    deleted_rows = connection.execute("SELECT changes() AS deleted_rows").fetchone()[0]
+    connection.execute("COMMIT;")
+except Exception:
+    connection.execute("ROLLBACK;")
+    raise
+```
+
+每批执行一次上述事务，然后使用应用选定的 cutoff 重复操作，直到 `deleted_rows` 为零。对应 SQL 如下：
+
+```sql
+BEGIN IMMEDIATE;
+DELETE FROM task_event_outbox_quarantine
+WHERE (task_id, state_version) IN (
+    SELECT task_id, state_version
+    FROM task_event_outbox_quarantine
+    WHERE quarantined_at_ms < :cutoff_ms
+    ORDER BY quarantined_at_ms, task_id, state_version
+    LIMIT :batch_size
+);
+SELECT changes() AS deleted_rows;
+COMMIT;
+```
+
+失败时 rollback 本批并先调查；不要自动推进 cutoff，也不要继续清理尚未归档的数据。删除只会让页面可复用，不一定缩小文件。只有在明确维护窗口、备份已验证且确认剩余空间充足时才显式运行 `VACUUM`；它可能需要大量空间并阻塞数据库操作。本指南不提供删除 checkpoint 的 SQL，也不设默认保留期限。checkpoint 保存对账状态和已用任务 ID；应通过容量规划与外部归档策略管理其增长，而非日常删除。
+
 更多背景见[详细设计](task_execution_service_design.md)、[迁移指南](migration.zh_CN.md)和 [API 文档](https://docs.rs/qubit-task)。

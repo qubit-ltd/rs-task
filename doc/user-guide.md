@@ -144,4 +144,55 @@ WHERE task_id = ?1 AND state_version = ?2;
 
 Do not quarantine a record merely to bypass normal network retries. SQLite schema v8 retains archived rows independently of terminal task pruning; database retention is managed by the application. Pruning skips tasks with active outbox rows and atomically stores a terminal state checkpoint before removing the task. Checkpoints are not automatically expired, so their count and disk use grow with pruned tasks. SQLite reserves each pruned task ID while its checkpoint exists; `MemoryTaskStore` does not retain pruned identities.
 
+### Maintain history and quarantine archives
+
+Before planning cleanup, record counts for `task_event_outbox`, terminal tasks, `task_event_outbox_quarantine`, and `task_terminal_checkpoints`, plus each table's oldest relevant timestamp. Record `PRAGMA page_count`, `PRAGMA freelist_count`, and `PRAGMA page_size` as database-level indicators. Counts can scan large tables and do not measure disk bytes; choose an observation cadence for the workload.
+
+For a maintenance window, stop the application's request and message intake, await service shutdown and confirm its owner was released, then close database connections and stop every process that could reopen the file. A shutdown timeout is not proof that the owner was released. Ensure no other service or maintenance process can contend for the database. Create a consistent backup with SQLite's backup API or `sqlite3` `.backup`; verify it opens and can be read. Do not copy only the main database file while WAL is active. Keep the archive for the application's audit retention period.
+
+After backup verification, an operator may delete only quarantine rows older than the application's chosen retention cutoff. Bind the actual values with `sqlite3` `.parameter set` or Python parameters; never interpolate input or hard-code a business retention period. The cutoff is exclusive, and selection is stable by timestamp, task ID, and state version. Active outbox rows, tasks, and checkpoints are untouched. Checkpoints remain by default and there is no automatic expiry.
+
+SQLite treats a negative `LIMIT` as unlimited. Validate inputs before opening the transaction, and execute each statement on the same connection so `changes()` reports this batch. On any exception, roll back; otherwise commit and repeat until zero rows are deleted.
+
+```python
+if type(cutoff_ms) is not int or not 0 <= cutoff_ms <= 2**63 - 1:
+    raise ValueError("cutoff_ms must be a nonnegative SQLite integer")
+if type(batch_size) is not int or not 1 <= batch_size <= 2**63 - 1:
+    raise ValueError("batch_size must be a positive SQLite integer")
+
+try:
+    connection.execute("BEGIN IMMEDIATE;")
+    connection.execute(
+        "DELETE FROM task_event_outbox_quarantine "
+        "WHERE (task_id, state_version) IN ("
+        "SELECT task_id, state_version FROM task_event_outbox_quarantine "
+        "WHERE quarantined_at_ms < :cutoff_ms "
+        "ORDER BY quarantined_at_ms, task_id, state_version LIMIT :batch_size)",
+        {"cutoff_ms": cutoff_ms, "batch_size": batch_size},
+    )
+    deleted_rows = connection.execute("SELECT changes() AS deleted_rows").fetchone()[0]
+    connection.execute("COMMIT;")
+except Exception:
+    connection.execute("ROLLBACK;")
+    raise
+```
+
+Use this transaction once per batch, then repeat with the same application-selected cutoff until `deleted_rows` is zero. The equivalent SQL is:
+
+```sql
+BEGIN IMMEDIATE;
+DELETE FROM task_event_outbox_quarantine
+WHERE (task_id, state_version) IN (
+    SELECT task_id, state_version
+    FROM task_event_outbox_quarantine
+    WHERE quarantined_at_ms < :cutoff_ms
+    ORDER BY quarantined_at_ms, task_id, state_version
+    LIMIT :batch_size
+);
+SELECT changes() AS deleted_rows;
+COMMIT;
+```
+
+On failure, roll back the batch and investigate before retrying; do not advance the cutoff automatically or continue past data that has not been archived. Deletion makes pages reusable but does not necessarily shrink the file. Run `VACUUM` only explicitly, in a maintenance window, after a verified backup and after confirming sufficient free space; it can require substantial space and block database work. There is no checkpoint deletion SQL or default retention duration. Checkpoints preserve reconciliation state and used task IDs, so plan their growth through capacity and external archive policy rather than routine deletion.
+
 See the [detailed design](task_execution_service_design.en.md), [migration guide](migration.md), and [API reference](https://docs.rs/qubit-task) for more context.

@@ -6,6 +6,8 @@ This design targets `qubit-task` 0.11. Open the typed SQLite store with `SqliteT
 
 This document describes the current typed task API. The former byte-oriented request, exact `(task_type, handler_version)` routing, local-closure submission, and legacy service builder are historical implementation details and are not the public contract.
 
+For capacity observation and explicit, bounded quarantine cleanup, see the [history and quarantine maintenance guide](user-guide.md#maintain-history-and-quarantine-archives).
+
 ## Model and routing
 
 Each task has a stable `TaskId` wrapping `rs-id::Id`. The application injects an `IdGenerator` that must produce IDs unique across process restarts; Snowflake-style generators need distinct node IDs across processes and suitable clock configuration.

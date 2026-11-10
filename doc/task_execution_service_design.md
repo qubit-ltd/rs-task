@@ -6,6 +6,8 @@
 
 本文描述当前的 typed task API。旧的字节数组 request、精确 `(task_type, handler_version)` 路由、本地闭包提交和旧服务 builder 属于历史实现细节，不再构成公开契约。
 
+容量观察与显式的有界归档清理步骤见[历史与隔离归档维护指南](user-guide.zh_CN.md#维护历史与隔离归档)。
+
 ## 模型与路由
 
 每个任务都有一个稳定的 `TaskId`，它包装 `rs-id::Id`。应用注入 `IdGenerator`，且必须保证任务 ID 跨进程重启唯一；跨进程使用 Snowflake 类生成器时，各进程必须使用不同节点编号，并配置合适的时钟条件。
