@@ -255,21 +255,27 @@ impl super::TaskStore for MemoryTaskStore {
                 });
             }
             let requested_bytes = request.payload.bytes.len();
-            let reclaimable_bytes = state
-                .encoded_terminal_order
-                .iter()
-                .filter_map(|terminal_id| state.encoded_tasks.get(terminal_id))
-                .map(|task| task.request.payload.bytes.len())
-                .sum::<usize>();
-            let minimum_retained = state.retained_payload_bytes.saturating_sub(reclaimable_bytes);
-            if minimum_retained
+            let fits = state
+                .retained_payload_bytes
                 .checked_add(requested_bytes)
-                .is_none_or(|total| total > self.max_payload_bytes)
-            {
-                return Err(StoreError::CapacityExceeded {
-                    requested_bytes,
-                    available_bytes: self.max_payload_bytes.saturating_sub(minimum_retained),
-                });
+                .is_some_and(|total| total <= self.max_payload_bytes);
+            if !fits {
+                let reclaimable_bytes = state
+                    .encoded_terminal_order
+                    .iter()
+                    .filter_map(|terminal_id| state.encoded_tasks.get(terminal_id))
+                    .map(|task| task.request.payload.bytes.len())
+                    .sum::<usize>();
+                let minimum_retained = state.retained_payload_bytes.saturating_sub(reclaimable_bytes);
+                if minimum_retained
+                    .checked_add(requested_bytes)
+                    .is_none_or(|total| total > self.max_payload_bytes)
+                {
+                    return Err(StoreError::CapacityExceeded {
+                        requested_bytes,
+                        available_bytes: self.max_payload_bytes.saturating_sub(minimum_retained),
+                    });
+                }
             }
             while state.retained_payload_bytes > self.max_payload_bytes - requested_bytes {
                 if !state.evict_oldest_encoded_terminal() {

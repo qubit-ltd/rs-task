@@ -126,6 +126,40 @@ async fn test_memory_store_encoded_acceptance_obeys_payload_and_unfinished_limit
 }
 
 #[tokio_test]
+async fn test_memory_store_payload_rejection_preserves_retained_tasks() {
+    let store = MemoryTaskStore::with_payload_budget(8, NonZeroUsize::new(4).expect("payload budget is positive"));
+    let first = TypedTaskStore::accept_encoded(&store, encoded_id(200), encoded_request(None, vec![1, 2]))
+        .await
+        .expect("first payload is accepted");
+    let second = TypedTaskStore::accept_encoded(&store, encoded_id(201), encoded_request(None, vec![3, 4]))
+        .await
+        .expect("payload exactly filling the remaining budget is accepted");
+
+    assert!(matches!(
+        TypedTaskStore::accept_encoded(&store, encoded_id(202), encoded_request(None, vec![5])).await,
+        Err(StoreError::CapacityExceeded {
+            requested_bytes: 1,
+            available_bytes: 0,
+        })
+    ));
+
+    for expected in [&first, &second] {
+        let retained = TypedTaskStore::get_encoded_task(&store, expected.summary.id)
+            .await
+            .expect("task lookup succeeds")
+            .expect("capacity rejection preserves the existing task");
+        assert_eq!(retained.summary.state, TaskState::Queued);
+        assert_eq!(retained.request.payload.bytes.len(), 2);
+    }
+    assert!(
+        TypedTaskStore::get_encoded_task(&store, encoded_id(202))
+            .await
+            .expect("task lookup succeeds")
+            .is_none()
+    );
+}
+
+#[tokio_test]
 async fn test_memory_store_encoded_acceptance_evicts_terminal_legacy_payloads() {
     let store = MemoryTaskStore::with_payload_budget(1, NonZeroUsize::new(6).expect("payload budget is positive"));
     let terminal = TypedTaskStore::accept_encoded(&store, encoded_id(98), encoded_request(None, vec![1, 2, 3]))

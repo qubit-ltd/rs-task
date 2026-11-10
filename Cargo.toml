@@ -41,6 +41,10 @@ name = "sqlite_history"
 harness = false
 required-features = ["sqlite"]
 
+[[bench]]
+name = "memory_accept"
+harness = false
+
 [dependencies]
 futures = "^0.3"
 fs2 = { version = "^0.4", optional = true }
