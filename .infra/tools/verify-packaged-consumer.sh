@@ -4,8 +4,27 @@ set -euo pipefail
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 manifest="$project_root/Cargo.toml"
 source_cargo_home=${CARGO_HOME:-${HOME:?HOME must be set}/.cargo}
+package_identity=$(python3 - "$manifest" <<'PY'
+import re
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    package = tomllib.load(source).get("package", {})
+name = package.get("name")
+version = package.get("version")
+component = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+if not isinstance(name, str) or not component.fullmatch(name) or name in {".", ".."}:
+    raise SystemExit("Cargo package name is not a safe filename component")
+if not isinstance(version, str) or not component.fullmatch(version) or version in {".", ".."}:
+    raise SystemExit("Cargo package version is not a safe filename component")
+print(f"{name}\t{version}")
+PY
+)
+IFS=$'\t' read -r package_name package_version <<< "$package_identity"
 workspace=$(mktemp -d /tmp/rs-task-packaged-consumer.XXXXXXXX)
-package_target=/tmp/superpowers-rs-task-gc6n4m1u/package-target
+package_target="$workspace/package-target"
+consumer_target="$workspace/consumer-target"
 
 validate_workspace() {
     local resolved
@@ -181,33 +200,41 @@ cargo package --manifest-path "$manifest" \
     --target-dir "$package_target" \
     --locked --allow-dirty --all-features
 
-archive="$package_target/package/qubit-task-0.8.0.crate"
+archive="$package_target/package/$package_name-$package_version.crate"
 [[ -f "$archive" ]] || { printf 'Packaged archive not found: %s\n' "$archive" >&2; exit 1; }
 mkdir "$workspace/unpacked"
 tar -xzf "$archive" -C "$workspace/unpacked"
-package_dir="$workspace/unpacked/qubit-task-0.8.0"
+package_dir="$workspace/unpacked/$package_name-$package_version"
 [[ -f "$package_dir/Cargo.toml" ]] || { printf 'Invalid package archive: %s\n' "$archive" >&2; exit 1; }
+python3 - "$manifest" "$package_dir/Cargo.toml" <<'PY'
+import sys
+import tomllib
+
+def identity(path):
+    with open(path, "rb") as source:
+        package = tomllib.load(source).get("package", {})
+    return package.get("name"), package.get("version")
+
+source_identity = identity(sys.argv[1])
+archive_identity = identity(sys.argv[2])
+if source_identity != archive_identity:
+    raise SystemExit(f"Packaged archive identity mismatch: expected {source_identity!r}, got {archive_identity!r}")
+print(f"Validated packaged archive identity: {archive_identity[0]} {archive_identity[1]}")
+PY
 
 all_features_consumer="$workspace/all-features-consumer"
 mkdir "$all_features_consumer"
 command cp -R "$project_root/tests/fixtures/all-features-consumer/." "$all_features_consumer"
-python3 - "$all_features_consumer/Cargo.toml" "$package_dir" <<'PY'
-import pathlib
-import sys
-
-manifest = pathlib.Path(sys.argv[1])
-package = pathlib.Path(sys.argv[2])
-text = manifest.read_text()
-text = text.replace('path = "../../.."', f'path = "{package}"')
-manifest.write_text(text)
-PY
+python3 "$project_root/.infra/tools/packaged_consumer_manifest.py" \
+    "$all_features_consumer/Cargo.toml" "$package_dir"
 cd "$all_features_consumer"
 # Resolve this separate all-feature package from the audited registry, never a sibling checkout.
 cargo generate-lockfile --manifest-path Cargo.toml
-cargo check --manifest-path Cargo.toml --locked --all-features
+cargo check --manifest-path Cargo.toml --target-dir "$consumer_target" --locked --all-features
 cargo metadata --manifest-path Cargo.toml --locked --format-version 1 > "$workspace/all-features-metadata.json"
-python3 - "$workspace/all-features-metadata.json" <<'PY'
+python3 - "$workspace/all-features-metadata.json" "$package_name" "$package_version" "$package_dir" "$all_features_consumer/Cargo.toml" <<'PY'
 import json
+import os
 import sys
 from urllib.parse import urlsplit
 
@@ -224,15 +251,36 @@ def redact_source(value):
 
 with open(sys.argv[1], encoding="utf-8") as metadata_file:
     metadata = json.load(metadata_file)
+name, version, package_dir, consumer_manifest = sys.argv[2:]
+package_dir = os.path.realpath(package_dir)
+consumer_manifest = os.path.realpath(consumer_manifest)
+matches = [package for package in metadata["packages"] if package.get("name") == name]
+if len(matches) != 1:
+    raise SystemExit(f"Expected exactly one {name!r} package in consumer metadata, found {len(matches)}")
+task = matches[0]
+if task.get("version") != version:
+    raise SystemExit(f"Consumer resolved {name} {task.get('version')!r}, expected {version!r}")
+if task.get("source") is not None:
+    raise SystemExit(f"Consumer resolved {name} from a non-local source")
+if os.path.realpath(task.get("manifest_path", "")) != os.path.join(package_dir, "Cargo.toml"):
+    raise SystemExit(f"Consumer {name} manifest_path does not point into this run's unpacked package")
+for package in metadata["packages"]:
+    if os.path.realpath(package.get("manifest_path", "")) == consumer_manifest or package is task:
+        continue
+    source = package.get("source")
+    if not isinstance(source, str) or not source.startswith("registry+"):
+        raise SystemExit(f"Consumer dependency {package.get('name')!r} did not resolve from a registry")
 sources = sorted({
     redact_source(dependency["source"])
     for package in metadata["packages"]
     for dependency in package["dependencies"]
-    if dependency.get("source", "").startswith("registry+")
+    if isinstance(dependency.get("source"), str) and dependency["source"].startswith("registry+")
 })
 if not sources:
     raise SystemExit("No registry dependencies were resolved for the all-features packaged consumer")
 print("All-features consumer registry sources:")
 for source in sources:
     print(f"  {source}")
+print(f"Validated packaged consumer: {name} {version} from {task['manifest_path']}")
 PY
+printf 'Packaged all-features consumer verification passed.\n'
