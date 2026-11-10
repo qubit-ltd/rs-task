@@ -29,7 +29,12 @@ The [typed task API guide](doc/typed-task-api.md) contains the complete example 
 ```toml
 [dependencies]
 qubit-task = { version = "0.11", features = ["sqlite"] }
-tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
+qubit-codec = { version = "0.17", features = ["registry"] }
+qubit-id = { version = "0.7", features = ["serde"] }
+qubit-model-id = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "time"] }
 ```
 
 The `sqlite` feature enables durable task history and recovery. The scheduler scans queued summaries in bounded pages and runs at most `max_running_tasks` handlers concurrently. A handler error is retried only when `retryable` is true, with a persisted deadline; positive delays are rounded up to whole milliseconds for that deadline. The default is three attempts with exponential delay from one to sixty seconds. `resume_blocked` requeues a blocked task using its observed state version after configuration is repaired. Recovery is at-least-once: a task interrupted after an external side effect may run again, so application effects need idempotency or transaction protection. Scheduling is process-local; distributed scheduling and exactly-once business effects are outside the crate's guarantees.

@@ -28,7 +28,12 @@
 ```toml
 [dependencies]
 qubit-task = { version = "0.11", features = ["sqlite"] }
-tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
+qubit-codec = { version = "0.17", features = ["registry"] }
+qubit-id = { version = "0.7", features = ["serde"] }
+qubit-model-id = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "time"] }
 ```
 
 ## 快速开始

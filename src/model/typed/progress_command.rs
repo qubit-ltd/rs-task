@@ -14,7 +14,9 @@ use super::TaskId;
 ///
 /// `progress_version` is independent from the task lifecycle state revision.
 /// A store accepts this command only for the matching running attempt and when
-/// the supplied progress version is newer than the currently stored one.
+/// the supplied progress version is positive and newer than the currently
+/// stored one. An empty attempt has a version-zero baseline, so the first
+/// accepted update must use version 1 or greater; gaps are allowed.
 ///
 /// # Examples
 ///
@@ -41,7 +43,8 @@ pub struct ProgressCommand {
     pub id: TaskId,
     /// Attempt whose progress is being reported.
     pub expected_attempt: u32,
-    /// Monotonically increasing version within this attempt.
+    /// Positive, monotonically increasing version within this attempt. The
+    /// empty baseline is zero, so the first update must use at least 1.
     pub progress_version: u64,
     /// Current optional execution stage.
     pub stage: Option<Stage>,
@@ -58,8 +61,8 @@ impl ProgressCommand {
     ///
     /// - `id`: stable identifier of the task being updated.
     /// - `expected_attempt`: running attempt that produced this update.
-    /// - `progress_version`: monotonically increasing version within that
-    ///   attempt.
+    /// - `progress_version`: positive, monotonically increasing version within
+    ///   that attempt; the empty baseline is zero and gaps are allowed.
     /// - `stage`: optional current execution stage.
     /// - `metrics`: immutable metric snapshots produced by the progress
     ///   operation.

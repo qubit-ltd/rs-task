@@ -123,6 +123,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 - 调用 `resume_blocked(id, expected_state_version)` 可在修复配置并使用兼容 handler 或 codec 重启服务后重新排队。状态版本冲突时先重新读取摘要；存在待处理取消时不能恢复。
 - 后台存储故障会被锁存：停止写入和调度，保留诊断读取；`shutdown()` 排空活跃工作后返回存储故障。SQLite typed schema v4 到 v7 会在原数据库中通过事务迁移到 v8；旧 UUID schema 仍需显式映射数据。
 - `TaskContext::progress_builder()` 使用 `rs-progress::AsyncReporter`。`report_async()` 等待进度持久化后才返回。后续查询可看到 stage 和 metric 快照，但它们不会改变生命周期 `state_version`；上报错误会返回处理器。Reporter 在等待 store 前分配下一个进度版本，失败或取消后不会复用。取消等待时，异步 store 可能已经提交，因此后续版本允许出现空洞；进度版本与生命周期 `state_version` 独立。
+- 每个运行 attempt 的空进度基线为版本 `0`；首次 `TaskStore::update_progress` 必须使用正版本（通常为 `1`）。同一 attempt 内版本必须严格递增，但允许跳号。此前直接向 `MemoryTaskStore` 写入版本 `0` 的调用方应改为从 `1` 开始；内置 reporter 已遵循此规则。
 - typed 历史页按 `(accepted_at_ms, 数值 task id)` 升序排序。`after` 是排他键游标，不是 offset；每次查询读取自己的存储快照。只有存在 lookahead 记录时才有 `next`。过滤器包括 state、业务 `category` 和 correlation key；`kind_id` 用于处理器路由，与 `category` 独立。
 
 service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UTF-8 字节，并将其他终态诊断字段限制为 4096 个 UTF-8 字节。文本超限时，会在 UTF-8 字符边界截短，保留能够连同 `...` 放入上限的最长前缀。直接通过 `TaskStore` 写入时，超限诊断仍会被拒绝。service 返回的外部取消 hook 消息也限制为 4096 个 UTF-8 字节；直接 transition 写入更长的 `cancel_error` 会返回 `InvalidRequest`。已有 SQLite 长 hook 诊断仍可读取，service 在 recovery 或结束任务时再次写入该行会先规范化；需要保留完整文本时应由应用写入自己的诊断系统。启用 panic unwind 时，应用 payload decoder 在准备任务时发生 panic，会成为该任务的 `Panicked` 终态；handler panic 和此前一样限制在对应任务内。`panic=abort` 无法捕获。

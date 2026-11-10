@@ -278,8 +278,9 @@ pub trait TaskStore: Send + Sync {
         command: TypedTransitionCommand,
     ) -> TaskFuture<'a, Result<TypedTaskSummary, StoreError>>;
 
-    /// Persists progress for the matching running attempt and newer progress
-    /// version.
+    /// Persists progress for the matching running attempt and a positive,
+    /// newer progress version. An attempt starts at version zero, so its first
+    /// update must be at least 1; gaps between versions are allowed.
     ///
     /// # Parameters
     ///
@@ -291,7 +292,8 @@ pub trait TaskStore: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns `Conflict` when the attempt or progress version is stale,
+    /// Returns `Conflict` when the attempt or progress version is stale or
+    /// zero,
     /// `NotFound` when the task is absent, or an error for invalid data or
     /// persistence failure.
     fn update_progress<'a>(

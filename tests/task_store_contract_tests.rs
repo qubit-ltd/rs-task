@@ -543,6 +543,28 @@ async fn test_sqlite_duplicate_generated_identity_does_not_fault_service() {
 
 #[cfg(feature = "sqlite")]
 #[tokio_test]
+async fn test_sqlite_terminal_prune_rejects_cutoff_above_integer_range() {
+    let path = env::temp_dir().join(format!("rs-task-prune-cutoff-{}.sqlite", Uuid::new_v4()));
+    let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
+    assert!(matches!(
+        store
+            .prune_terminal_before(u64::MAX, NonZeroUsize::new(1).unwrap())
+            .await,
+        Err(qubit_task::store::StoreError::InvalidRequest(_))
+    ));
+    drop(store);
+    for file in [
+        &path,
+        &sqlite_paths::owner_lock_path(&path),
+        &path.with_extension("sqlite-wal"),
+        &path.with_extension("sqlite-shm"),
+    ] {
+        let _ = fs::remove_file(file);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio_test]
 async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
     let path = env::temp_dir().join(format!("rs-task-prune-atomic-{}.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
@@ -602,11 +624,14 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
             ids[1].to_padded_decimal(),
         ))
         .unwrap();
+    let error = store
+        .prune_terminal_before(i64::MAX as u64, NonZeroUsize::new(2).unwrap())
+        .await
+        .expect_err("the injected trigger aborts the prune transaction");
     assert!(
-        store
-            .prune_terminal_before(u64::MAX, NonZeroUsize::new(2).unwrap())
-            .await
-            .is_err()
+        matches!(error, qubit_task::store::StoreError::Failure(ref message)
+            if message.contains("injected prune failure")),
+        "expected the injected prune failure, got {error:?}"
     );
     for id in ids {
         assert!(
@@ -629,6 +654,25 @@ async fn test_sqlite_terminal_prune_rolls_back_when_a_delete_fails() {
             )
             .unwrap();
         assert_eq!(staged_checkpoints, 0, "transaction rollback removes staged checkpoints");
+    }
+    blocker.execute_batch("DROP TRIGGER fail_second_prune_delete;").unwrap();
+    assert_eq!(
+        store
+            .prune_terminal_before(i64::MAX as u64, NonZeroUsize::new(2).unwrap())
+            .await
+            .expect("prune succeeds after removing the injected failure"),
+        2
+    );
+    for id in ids {
+        assert!(store.get_encoded_task(id).await.unwrap().is_none());
+        let checkpoint = store
+            .get_state_checkpoint(id)
+            .await
+            .unwrap()
+            .expect("successful prune retains the terminal checkpoint");
+        assert_eq!(checkpoint.id, id);
+        assert_eq!(checkpoint.state_version, 2);
+        assert_eq!(checkpoint.state, TaskState::Succeeded);
     }
     drop(blocker);
     drop(store);

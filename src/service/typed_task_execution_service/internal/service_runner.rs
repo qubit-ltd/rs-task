@@ -38,6 +38,67 @@ use crate::model::typed::TaskSummary;
 use crate::model::typed::TransitionCommand;
 use crate::service::TaskServiceError;
 
+#[cfg(test)]
+struct SchedulerStopGateRegistration {
+    store_identity: usize,
+    gate: std::sync::Arc<SchedulerStopGate>,
+}
+
+#[cfg(test)]
+static SCHEDULER_STOP_GATE: std::sync::OnceLock<parking_lot::Mutex<Option<SchedulerStopGateRegistration>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct SchedulerStopGate {
+    pause_next: std::sync::atomic::AtomicBool,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    shutdown_notified: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+async fn scheduler_stop_gate(core: &std::sync::Arc<TypedServiceCore>) {
+    let store_identity = std::sync::Arc::as_ptr(&core.store) as *const () as usize;
+    let gate = SCHEDULER_STOP_GATE
+        .get_or_init(Default::default)
+        .lock()
+        .as_ref()
+        .filter(|registration| registration.store_identity == store_identity)
+        .map(|registration| std::sync::Arc::clone(&registration.gate));
+    if let Some(gate) = gate.filter(|gate| gate.pause_next.swap(false, Ordering::AcqRel)) {
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+fn scheduler_shutdown_notified(core: &std::sync::Arc<TypedServiceCore>) {
+    let store_identity = std::sync::Arc::as_ptr(&core.store) as *const () as usize;
+    let gate = SCHEDULER_STOP_GATE
+        .get_or_init(Default::default)
+        .lock()
+        .as_ref()
+        .filter(|registration| registration.store_identity == store_identity)
+        .map(|registration| std::sync::Arc::clone(&registration.gate));
+    if let Some(gate) = gate {
+        gate.shutdown_notified.notify_one();
+    }
+}
+
+#[cfg(test)]
+fn scheduler_wait_completed(core: &std::sync::Arc<TypedServiceCore>) {
+    let store_identity = std::sync::Arc::as_ptr(&core.store) as *const () as usize;
+    let gate = SCHEDULER_STOP_GATE
+        .get_or_init(Default::default)
+        .lock()
+        .as_ref()
+        .filter(|registration| registration.store_identity == store_identity)
+        .map(|registration| std::sync::Arc::clone(&registration.gate));
+    if let Some(gate) = gate {
+        gate.pause_next.store(true, Ordering::Release);
+    }
+}
+
 /// Keeps shared service state available to background workers.
 #[derive(Clone)]
 pub(in crate::service::typed_task_execution_service) struct ServiceRunner {
@@ -431,12 +492,24 @@ impl ServiceRunner {
     pub(in crate::service::typed_task_execution_service) async fn scheduler_loop(&self) {
         let mut fairness = ResourceFairness::default();
         'scheduler: loop {
-            if self.core.shutting_down.load(Ordering::Acquire) || self.core.fault.lock().is_some() {
-                return;
+            #[cfg(test)]
+            {
+                // Model the old pre-registration stop check so the test gate
+                // stays between that check and waiter registration.
+                if self.core.shutting_down.load(Ordering::Acquire) || self.core.fault.lock().is_some() {
+                    return;
+                }
+                scheduler_stop_gate(&self.core).await;
             }
+            // Register before inspecting the stop state. `notify_waiters` does
+            // not retain a permit, so checking first can miss shutdown when
+            // both shutdown notifications land before this waiter is enabled.
             let notified = self.core.scheduler_changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if self.core.shutting_down.load(Ordering::Acquire) || self.core.fault.lock().is_some() {
+                return;
+            }
             let scan_now_ms = now_ms();
             if self.core.in_flight.load(Ordering::Acquire) < self.core.max_running_tasks {
                 match self.scan_ready_pages(scan_now_ms, &mut fairness).await {
@@ -451,6 +524,9 @@ impl ServiceRunner {
                     }
                 }
             }
+            if self.core.shutting_down.load(Ordering::Acquire) || self.core.fault.lock().is_some() {
+                return;
+            }
             let retry_at = match self.core.store.next_retry_deadline(scan_now_ms).await {
                 Ok(deadline) => deadline,
                 Err(error) => {
@@ -458,12 +534,17 @@ impl ServiceRunner {
                     return;
                 }
             };
+            if self.core.shutting_down.load(Ordering::Acquire) || self.core.fault.lock().is_some() {
+                return;
+            }
             if let Some(retry_at) = retry_at {
                 let wait = std::time::Duration::from_millis(retry_at.saturating_sub(now_ms()));
                 let _ = tokio::time::timeout(wait, notified).await;
             } else {
                 notified.await;
             }
+            #[cfg(test)]
+            scheduler_wait_completed(&self.core);
         }
     }
 
@@ -567,6 +648,8 @@ impl ServiceRunner {
     async fn stop_scheduler_and_wait(&self) {
         let admission = self.core.admission.write().await;
         self.core.scheduler_changed.notify_waiters();
+        #[cfg(test)]
+        scheduler_shutdown_notified(&self.core);
         drop(admission);
         loop {
             let notified = self.core.scheduler_stopped_changed.notified();
@@ -1162,5 +1245,85 @@ impl ServiceRunner {
             Ok(None) => self.latch_fault("task disappeared after lifecycle compare-and-set conflict"),
             Err(error) => self.latch_fault(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduler_shutdown_tests {
+    use qubit_codec::ValueBytesCodecRegistry;
+    use qubit_id::Id;
+    use qubit_id::IdGenerationError;
+    use qubit_id::IdGenerator;
+
+    use super::SCHEDULER_STOP_GATE;
+    use super::SchedulerStopGate;
+    use super::SchedulerStopGateRegistration;
+
+    struct SchedulerStopGateCleanup(usize);
+
+    impl Drop for SchedulerStopGateCleanup {
+        fn drop(&mut self) {
+            let mut slot = SCHEDULER_STOP_GATE.get_or_init(Default::default).lock();
+            if slot
+                .as_ref()
+                .is_some_and(|registration| registration.store_identity == self.0)
+            {
+                *slot = None;
+            }
+        }
+    }
+
+    struct TestIds;
+
+    impl IdGenerator<Id, IdGenerationError> for TestIds {
+        fn generate(&self) -> Result<Id, IdGenerationError> {
+            Ok(Id::new(1))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_shutdown_during_stop_check_registration_window_exits() {
+        let gate = std::sync::Arc::new(SchedulerStopGate {
+            pause_next: std::sync::atomic::AtomicBool::new(false),
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            shutdown_notified: tokio::sync::Notify::new(),
+        });
+        let store = std::sync::Arc::new(crate::store::MemoryTaskStore::new(4));
+        let store_identity = std::sync::Arc::as_ptr(&store) as usize;
+        *SCHEDULER_STOP_GATE.get_or_init(Default::default).lock() = Some(SchedulerStopGateRegistration {
+            store_identity,
+            gate: std::sync::Arc::clone(&gate),
+        });
+        let _cleanup = SchedulerStopGateCleanup(store_identity);
+        let service = crate::service::TaskExecutionServiceBuilder::new(
+            store,
+            std::sync::Arc::new(ValueBytesCodecRegistry::empty()),
+            std::sync::Arc::new(TestIds),
+        )
+        .build()
+        .await
+        .expect("service starts");
+        let reached = tokio::time::timeout(std::time::Duration::from_secs(2), gate.reached.notified()).await;
+        if reached.is_err() {
+            gate.release.notify_one();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown()).await;
+            panic!("scheduler reaches deterministic stop-check gate");
+        }
+        let shutdown_service = service.clone();
+        let shutdown = tokio::spawn(async move { shutdown_service.shutdown().await });
+        let shutdown_notified =
+            tokio::time::timeout(std::time::Duration::from_secs(2), gate.shutdown_notified.notified()).await;
+        if shutdown_notified.is_err() {
+            gate.release.notify_one();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), shutdown).await;
+            panic!("shutdown supervisor notifies scheduler while it is gated");
+        }
+        gate.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown supervisor completes")
+            .expect("shutdown task completes")
+            .expect("shutdown succeeds");
     }
 }

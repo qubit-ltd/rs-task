@@ -540,6 +540,7 @@ impl super::TaskStore for MemoryTaskStore {
             let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
             if !matches!(task.summary.state, TaskState::Running)
                 || task.summary.attempt != command.expected_attempt
+                || command.progress_version == 0
                 || task
                     .summary
                     .progress

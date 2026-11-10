@@ -10,6 +10,7 @@ use std::num::NonZeroUsize;
 use qubit_id::Id;
 use qubit_metadata::Metadata;
 use qubit_model_id::ModelIdBuf;
+use qubit_task::model::ProgressCommand;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::StartCommand;
 use qubit_task::model::StoredPayload;
@@ -200,6 +201,145 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
         .expect("retry attempt starts after its deadline");
     assert_eq!(restarted.attempt, 2);
     assert_eq!(restarted.retry_not_before_ms, None);
+    check_progress_contract(store).await;
+}
+
+/// Checks that progress versions start above the empty zero baseline and are
+/// scoped to each running attempt for every store implementation.
+async fn check_progress_contract(store: &dyn TaskStore) {
+    let id = TaskId::from_id(Id::new(107));
+    let accepted = store
+        .accept_encoded(id, request(None, &[7]))
+        .await
+        .expect("progress contract task is accepted");
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: accepted.summary.accepted_at_ms,
+        })
+        .await
+        .expect("progress contract task starts");
+    let lifecycle_version = running.state_version;
+
+    assert!(matches!(
+        store
+            .update_progress(ProgressCommand::new(id, running.attempt, 0, None, Vec::new(), 1))
+            .await,
+        Err(StoreError::Conflict)
+    ));
+    let empty = store
+        .get_encoded_task(id)
+        .await
+        .expect("task after zero rejection is readable")
+        .expect("task remains after zero rejection");
+    assert!(empty.summary.progress.is_none());
+    assert_eq!(empty.summary.state_version, lifecycle_version);
+
+    let first = store
+        .update_progress(ProgressCommand::new(id, running.attempt, 1, None, Vec::new(), 2))
+        .await
+        .expect("first positive progress version is accepted");
+    assert_eq!(
+        first.progress.as_ref().map(|progress| progress.progress_version),
+        Some(1)
+    );
+    assert_eq!(first.state_version, lifecycle_version);
+
+    for rejected_version in [1, 0] {
+        assert!(matches!(
+            store
+                .update_progress(ProgressCommand::new(
+                    id,
+                    running.attempt,
+                    rejected_version,
+                    None,
+                    Vec::new(),
+                    3,
+                ))
+                .await,
+            Err(StoreError::Conflict)
+        ));
+        let unchanged = store
+            .get_encoded_task(id)
+            .await
+            .expect("task after stale progress rejection is readable")
+            .expect("task remains after stale progress rejection");
+        assert_eq!(unchanged.summary.progress, first.progress);
+        assert_eq!(unchanged.summary.state_version, lifecycle_version);
+    }
+
+    let skipped = store
+        .update_progress(ProgressCommand::new(id, running.attempt, 3, None, Vec::new(), 4))
+        .await
+        .expect("progress versions may skip ahead");
+    assert_eq!(
+        skipped.progress.as_ref().map(|progress| progress.progress_version),
+        Some(3)
+    );
+    assert_eq!(skipped.state_version, lifecycle_version);
+
+    let queued = store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: skipped.state_version,
+            expected_attempt: running.attempt,
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            retry_not_before_ms: Some(skipped.accepted_at_ms),
+            finished_at_ms: None,
+            output: None,
+        })
+        .await
+        .expect("task retries into the queue");
+    let restarted = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: queued.state_version,
+            started_at_ms: queued.accepted_at_ms,
+        })
+        .await
+        .expect("second progress attempt starts");
+    assert_eq!(restarted.attempt, running.attempt + 1);
+    assert!(restarted.progress.is_none(), "retry clears prior progress");
+    assert!(matches!(
+        store
+            .update_progress(ProgressCommand::new(id, restarted.attempt, 0, None, Vec::new(), 5))
+            .await,
+        Err(StoreError::Conflict)
+    ));
+    let unchanged = store
+        .get_encoded_task(id)
+        .await
+        .expect("task after retry zero-version rejection is readable")
+        .expect("task remains after retry zero-version rejection");
+    assert!(unchanged.summary.progress.is_none());
+    assert_eq!(unchanged.summary.state_version, restarted.state_version);
+    let second_attempt = store
+        .update_progress(ProgressCommand::new(id, restarted.attempt, 1, None, Vec::new(), 6))
+        .await
+        .expect("new attempt accepts progress version one");
+    assert_eq!(
+        second_attempt
+            .progress
+            .as_ref()
+            .map(|progress| progress.progress_version),
+        Some(1)
+    );
+    assert!(matches!(
+        store
+            .update_progress(ProgressCommand::new(id, running.attempt, 2, None, Vec::new(), 7))
+            .await,
+        Err(StoreError::Conflict)
+    ));
+    let unchanged = store
+        .get_encoded_task(id)
+        .await
+        .expect("task after old-attempt rejection is readable")
+        .expect("task remains after old-attempt rejection");
+    assert_eq!(unchanged.summary.progress, second_attempt.progress);
+    assert_eq!(unchanged.summary.state_version, second_attempt.state_version);
 }
 
 /// Checks bounded terminal pruning, cutoff equality, bookkeeping, and key
