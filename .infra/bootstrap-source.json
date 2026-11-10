@@ -1,7 +1,7 @@
 {
   "config_sources": {
     "rs-infra-ci": "sha256:2cc68b5ab050769382d7e9af468cb60b2261fb8e387d0ced9974c8d068964271",
-    "rs-infra-dependency": "sha256:6eb6c1f3e19b16789ddc28032418518919de455a2228889652c0e5faa13abbf8",
+    "rs-infra-dependency": "sha256:66ef1c9a2069fc0f52e71f645667a9609192b8b998cf65fd09b75b105d2fa91d",
     "rs-infra-style": "sha256:f5ebba934dfcd04bb4b7a3847f27b8a73dcab28afbfe7cb2a9c2e884ebc4564c",
     "rs-infra-tools": "sha256:b52fdcc1a8382533f3f5f56d0f458fca1e30baa853f6acb394d913ec32972166"
   },
@@ -16,7 +16,7 @@
     },
     ".infra/bin/cargo-update.sh": {
       "executable": true,
-      "sha256": "59e802477aaa12792c103b6bee39620ce1c825cecccc3c535456d61a2a8e8d0a"
+      "sha256": "b85eb162fa0116f83528cdb64148520cd7a2a686af88726eb656fbe18f8a4690"
     },
     ".infra/bin/ci-check.sh": {
       "executable": true,
@@ -42,13 +42,17 @@
       "executable": true,
       "sha256": "60643a95b295ec0c49b2bf74ea11bc8be55908adaee5d1655cd3124b325cd686"
     },
+    ".infra/bin/style-analyze.sh": {
+      "executable": true,
+      "sha256": "4513262dde94ebae330cf2537047918fb82ffd0ca601da330aae830f484529c6"
+    },
     ".infra/bin/style-check.sh": {
       "executable": true,
       "sha256": "0e322756544a21a3be83b2510b39590b008c52604fce0942ad7f1a6e563799a0"
     },
     ".infra/bin/update-dependencies-by-prefix.sh": {
       "executable": true,
-      "sha256": "d4ac94580d20a0c25daa76056665f0a2a9562e0699c64e9594a556d1357bb5dc"
+      "sha256": "adf032c27b0894f0b762cb534851086595f17ce69ece9f0838076f55ecccbb9c"
     },
     ".infra/bootstrap-check.py": {
       "executable": true,
@@ -56,7 +60,7 @@
     },
     ".infra/bootstrap.sh": {
       "executable": true,
-      "sha256": "6131691e74a841974d404d1ee572194acdb31f40cdf0d499cb4050c8beba8a6c"
+      "sha256": "efb236dddf9f03c929071b1b86afffe827542d9cc7b44dc31f2de927c9265f39"
     },
     ".infra/dependency/policy.toml": {
       "executable": false,
@@ -70,13 +74,33 @@
       "executable": false,
       "sha256": "12e485afeb8290d005a611aaeded42c82990cae865faaa182530f19dbaafe002"
     },
+    ".infra/dependency/policy/baselines/v2026.11.05.txt": {
+      "executable": false,
+      "sha256": "522ef98e1846635978ea811d886327d6352308a71ce73e31e5bc8f4dd38408f0"
+    },
+    ".infra/dependency/policy/baselines/v2026.11.08.txt": {
+      "executable": false,
+      "sha256": "8b06df05501e5dc3874a33f6ed1ddd10e16e6ebf8912e19542c398db2d5f096c"
+    },
+    ".infra/dependency/policy/baselines/v2026.11.09.txt": {
+      "executable": false,
+      "sha256": "422e593d2b90c7219f1c9647b1cbaffb0d8b45f5327103b1bdc11d7caf9163e7"
+    },
     ".infra/dependency/policy/current.toml": {
       "executable": false,
-      "sha256": "8cf39f46b11ae3b04392a90427634587487d84f39296be1655c0acf249718ce6"
+      "sha256": "b917bc85f8d0e4a1310b69c1d43fb168d38229058320799c62c43fd8f1d507b4"
+    },
+    ".infra/lib/style_analyze.py": {
+      "executable": true,
+      "sha256": "dd9cf2fd7e0071ea6520eacc0e915916f90b605603748c5d25c45c1e5776eb17"
     },
     ".infra/pages/pages.json": {
       "executable": false,
       "sha256": "0464afed8ddf2e1634e08fa67415ae75b449e5c7befb0f09f4a037800bae05d3"
+    },
+    ".infra/style/.gitignore": {
+      "executable": false,
+      "sha256": "7c86a231bb68d71b6f343929e1a7dbdc492713b07b23e4bc3affe11af4abd71b"
     },
     ".infra/style/rustfmt.toml": {
       "executable": false,
@@ -88,11 +112,11 @@
     },
     "update-infra.sh": {
       "executable": true,
-      "sha256": "dedff33d2155f8e59c8405b73b4cf896e1b0150ac17cb121cc4d0a705630f8db"
+      "sha256": "e32ec3e600a5095ed7a95e5f6d0c30abf1d9f5b0647952fe43d2c60c1c92ad4a"
     }
   },
-  "package_sha256": "0a2a76d24b82ec2fe0f44d8a58fe368749a594db4c8b6643abafc5e5fa82c3a9",
+  "package_sha256": "e053c57885bfe51630328a7b94cad190a5c9c7b38942a9ad7739096a0fc18729",
   "schema": 1,
   "source_repository": "https://github.com/qubit-ltd/rs-infra-tools.git",
-  "source_revision": "94ed5ac57b4c30e688f640b6008be248cb3a05b6"
+  "source_revision": "9a37b1849ea1ae49c3182b0a3bfd43f451a8827c"
 }
