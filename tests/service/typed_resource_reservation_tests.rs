@@ -186,6 +186,12 @@ struct StartTrace {
     deadline_changed: Notify,
     ready_scan_changed: Notify,
     blocked_transitions: AtomicUsize,
+    yield_probe: Mutex<Option<Arc<YieldProbe>>>,
+}
+
+struct YieldProbe {
+    first_page_returned: Notify,
+    observed_page_count: AtomicUsize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -533,7 +539,7 @@ impl TaskStore for GatedReadyStore {
                     .lock()
                     .expect("pending scan-time lock is not poisoned") = Some(now_ms);
             }
-            if self.gate.armed.swap(false, Ordering::AcqRel) {
+            if after.is_none() && self.gate.armed.swap(false, Ordering::AcqRel) {
                 self.gate.reached.notify_one();
                 self.gate
                     .release
@@ -550,7 +556,19 @@ impl TaskStore for GatedReadyStore {
                     .push(after);
                 trace.ready_scan_changed.notify_waiters();
             }
-            self.inner.list_ready_queued(after, limit, now_ms).await
+            let page = self.inner.list_ready_queued(after, limit, now_ms).await?;
+            if after.is_none()
+                && page.next.is_some()
+                && let Some(trace) = &self.trace
+                && let Some(probe) = trace
+                    .yield_probe
+                    .lock()
+                    .expect("yield-probe lock is not poisoned")
+                    .as_ref()
+            {
+                probe.first_page_returned.notify_one();
+            }
+            Ok(page)
         })
     }
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
@@ -725,6 +743,174 @@ impl TaskHandler<Counter> for GatedHandler {
             Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
         })
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_ready_scan_yields_between_pages_and_honors_shutdown() {
+    const TIMEOUT: Duration = Duration::from_secs(2);
+    let gate = Arc::new(ReadyScanGate {
+        armed: AtomicBool::new(false),
+        reached: Notify::new(),
+        release: Semaphore::new(0),
+        completed: Notify::new(),
+    });
+    let trace = Arc::new(StartTrace::default());
+    let store = Arc::new(GatedReadyStore {
+        inner: Arc::new(MemoryTaskStore::new(16)),
+        gate: Arc::clone(&gate),
+        start_gate: None,
+        trace: Some(Arc::clone(&trace)),
+    });
+    let started = Arc::new(Notify::new());
+    let handler_release = Arc::new(Semaphore::new(0));
+    let mut builder = TaskExecutionServiceBuilder::new(
+        store,
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap()),
+        Arc::new(Ids(AtomicU64::new(40_000))),
+    )
+    .capacity(ResourceCapacity {
+        cpu_slots: 1,
+        ..ResourceCapacity::default()
+    })
+    .max_running_tasks(NonZeroUsize::new(2).expect("positive run limit"))
+    .scan_page_size(NonZeroUsize::new(2).expect("positive page size"))
+    .max_resource_bypasses(NonZeroUsize::new(1).expect("positive bypass limit"));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&started),
+                release: Arc::clone(&handler_release),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .expect("handler registration");
+    let service = builder.build().await.expect("service builds");
+    wait_for_deadline_queries(&trace, 2)
+        .await
+        .expect("startup scheduler scans drain");
+    let running = service
+        .submit(request_resources(1, 0))
+        .await
+        .expect("running task accepted");
+    if tokio::time::timeout(TIMEOUT, started.notified()).await.is_err() {
+        handler_release.add_permits(1);
+        let _ = tokio::time::timeout(TIMEOUT, service.shutdown()).await;
+        panic!("first handler starts");
+    }
+
+    let scans_before_queue = ready_scan_count(&trace);
+    gate.armed.store(true, Ordering::Release);
+    let waiting_tasks = vec![
+        service
+            .submit(request_resources(1, 0))
+            .await
+            .expect("first waiting task accepted"),
+        service
+            .submit(request_resources(1, 0))
+            .await
+            .expect("second waiting task accepted"),
+        service
+            .submit(request_resources(1, 0))
+            .await
+            .expect("third waiting task accepted"),
+        service
+            .submit(request_resources(1, 0))
+            .await
+            .expect("fourth waiting task accepted"),
+        service
+            .submit(request_resources(1, 0))
+            .await
+            .expect("fifth waiting task accepted"),
+    ];
+    if tokio::time::timeout(TIMEOUT, gate.reached.notified()).await.is_err() {
+        gate.release.add_permits(1);
+        handler_release.add_permits(1);
+        let _ = tokio::time::timeout(TIMEOUT, service.shutdown()).await;
+        panic!("queued scan reaches its gate before paging");
+    }
+
+    let probe = Arc::new(YieldProbe {
+        first_page_returned: Notify::new(),
+        observed_page_count: AtomicUsize::new(0),
+    });
+    *trace.yield_probe.lock().expect("yield-probe lock is not poisoned") = Some(Arc::clone(&probe));
+    let probe_trace = Arc::clone(&trace);
+    let probe_task = Arc::clone(&probe);
+    let probe_service = service.clone();
+    let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
+    let mut probe_worker = tokio::spawn(async move {
+        probe_task.first_page_returned.notified().await;
+        probe_task
+            .observed_page_count
+            .store(ready_scan_count(&probe_trace), Ordering::Release);
+        let shutdown = probe_service.shutdown();
+        tokio::pin!(shutdown);
+        let shutdown_was_requested = futures::poll!(shutdown.as_mut()).is_pending();
+        let _ = probe_tx.send(shutdown_was_requested);
+        shutdown.await
+    });
+
+    let mut scan_gate_release = ReadyScanRelease::new(Arc::clone(&gate));
+    scan_gate_release.release();
+    let shutdown_request_observed = tokio::time::timeout(TIMEOUT, probe_rx).await;
+    let queued_while_resource_held = {
+        let mut all_queued = true;
+        for task in &waiting_tasks {
+            all_queued &= service
+                .get(task.id)
+                .await
+                .expect("task lookup")
+                .is_some_and(|summary| matches!(summary.state, TaskState::Queued));
+        }
+        all_queued
+    };
+    let shutdown = service.shutdown();
+    tokio::pin!(shutdown);
+    let _ = futures::poll!(shutdown.as_mut());
+    handler_release.add_permits(1);
+    let shutdown_result = tokio::time::timeout(TIMEOUT, shutdown).await;
+    let probe_result = tokio::time::timeout(TIMEOUT, &mut probe_worker).await;
+    if probe_result.is_err() {
+        probe_worker.abort();
+        let _ = probe_worker.await;
+    }
+    let only_running_task_started =
+        trace.ids.lock().expect("start trace lock is not poisoned").as_slice() == [running.id];
+    let observed_pages = probe.observed_page_count.load(Ordering::Acquire);
+    let scans_after_shutdown = ready_scan_count(&trace);
+
+    assert!(
+        matches!(shutdown_request_observed, Ok(Ok(true))),
+        "probe requested shutdown while the scan was between pages"
+    );
+    assert!(
+        matches!(shutdown_result, Ok(Ok(()))),
+        "shutdown drains the running handler"
+    );
+    assert!(
+        matches!(probe_result, Ok(Ok(Ok(())))),
+        "probe task completes after shutdown"
+    );
+    assert_eq!(
+        observed_pages,
+        scans_before_queue + 1,
+        "probe runs after page one and before the next page is read"
+    );
+    assert_eq!(
+        scans_after_shutdown,
+        scans_before_queue + 1,
+        "shutdown observed at the page boundary stops the remaining scan"
+    );
+    assert!(
+        queued_while_resource_held,
+        "resource pressure leaves queued tasks queued"
+    );
+    assert!(
+        only_running_task_started,
+        "blocked tasks do not exceed the configured bypass count"
+    );
 }
 
 #[tokio::test]

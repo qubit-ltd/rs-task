@@ -110,6 +110,9 @@ impl DurableProjection {
                 task_id TEXT NOT NULL,
                 state_version INTEGER NOT NULL,
                 PRIMARY KEY (task_id, state_version)
+            );
+            CREATE TABLE IF NOT EXISTS projection_tracking (
+                task_id TEXT PRIMARY KEY
             );",
         )?;
         Ok(Self { connection })
@@ -122,9 +125,9 @@ impl DurableProjection {
         event: &TaskEvent,
         authoritative: impl FnOnce(TaskId) -> ProjectionResult<(u64, TaskState)>,
     ) -> ProjectionResult<()> {
-        let transaction = self.connection.transaction()?;
         let id = event.task_id.to_padded_decimal();
-        let checkpoint: Option<i64> = transaction
+        let checkpoint: Option<i64> = self
+            .connection
             .query_row(
                 "SELECT highest_state_version FROM task_projection WHERE task_id = ?1",
                 [&id],
@@ -133,7 +136,6 @@ impl DurableProjection {
             .optional()?;
         let checkpoint = checkpoint.map(version_from_sqlite_integer).transpose()?;
         if checkpoint.is_some_and(|version| event.state_version <= version) {
-            transaction.commit()?;
             return Ok(());
         }
         let next = checkpoint.map_or(0, |version| version + 1);
@@ -146,24 +148,98 @@ impl DurableProjection {
             }
             (version, state)
         };
-        transaction.execute(
-            "INSERT INTO task_projection (task_id, highest_state_version, state_json)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(task_id) DO UPDATE SET
-               highest_state_version = excluded.highest_state_version,
-               state_json = excluded.state_json",
-            params![
-                id,
-                sqlite_integer_from_version(version)?,
-                serde_json::to_string(&state)?
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO projection_effects (task_id, state_version) VALUES (?1, ?2)",
-            params![id, sqlite_integer_from_version(version)?],
-        )?;
+        self.commit_snapshot(event.task_id, version, state).map(|_| ())
+    }
+
+    /// Applies a refreshed authoritative checkpoint after re-reading the
+    /// consumer version inside the write transaction. Only an advancing
+    /// checkpoint records a business effect.
+    fn commit_snapshot(&mut self, task_id: TaskId, version: u64, state: TaskState) -> ProjectionResult<bool> {
+        let transaction = self.connection.transaction()?;
+        let id = task_id.to_padded_decimal();
+        let current: Option<(i64, String)> = transaction
+            .query_row(
+                "SELECT highest_state_version, state_json FROM task_projection WHERE task_id = ?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let current = current
+            .map(|(version, json)| {
+                Ok::<_, Box<dyn Error + Send + Sync>>((
+                    version_from_sqlite_integer(version)?,
+                    serde_json::from_str::<TaskState>(&json)?,
+                ))
+            })
+            .transpose()?;
+        let advanced = current.as_ref().is_none_or(|(current, _)| version > *current);
+        if advanced {
+            transaction.execute(
+                "INSERT INTO task_projection (task_id, highest_state_version, state_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(task_id) DO UPDATE SET
+                   highest_state_version = excluded.highest_state_version,
+                   state_json = excluded.state_json",
+                params![
+                    id,
+                    sqlite_integer_from_version(version)?,
+                    serde_json::to_string(&state)?
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO projection_effects (task_id, state_version) VALUES (?1, ?2)",
+                params![id, sqlite_integer_from_version(version)?],
+            )?;
+        }
+        let projected_state = if advanced {
+            state
+        } else {
+            current.expect("existing projection").1
+        };
+        let terminal = projected_state.is_terminal();
         transaction.commit()?;
+        if terminal {
+            // Retire only after the terminal projection and effect commit.
+            // If this deletion fails, the next pass is version-idempotent.
+            self.connection
+                .execute("DELETE FROM projection_tracking WHERE task_id = ?1", [&id])?;
+        }
+        Ok(advanced)
+    }
+
+    /// Persists an application-owned task ID for periodic reconciliation.
+    fn track(&mut self, task_id: TaskId) -> ProjectionResult<()> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO projection_tracking (task_id) VALUES (?1)",
+            [task_id.to_padded_decimal()],
+        )?;
         Ok(())
+    }
+
+    /// Refreshes one tracked task. The authoritative read is outside the
+    /// transaction; the consumer version is checked again before any writes.
+    fn reconcile(
+        &mut self,
+        task_id: TaskId,
+        authoritative: impl FnOnce(TaskId) -> ProjectionResult<Option<(u64, TaskState)>>,
+    ) -> ProjectionResult<bool> {
+        if !self.is_tracked(task_id)? {
+            return Ok(false);
+        }
+        let Some((version, state)) = authoritative(task_id)? else {
+            return Err(std::io::Error::other("task service has no state checkpoint").into());
+        };
+        self.commit_snapshot(task_id, version, state)
+    }
+
+    /// Returns whether an application-owned reconciliation record remains.
+    fn is_tracked(&self, task_id: TaskId) -> ProjectionResult<bool> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM projection_tracking WHERE task_id = ?1",
+            [task_id.to_padded_decimal()],
+            |row| row.get(0),
+        )?;
+        Ok(count != 0)
     }
 
     /// Reads the committed state and effect versions from a fresh connection.
@@ -549,6 +625,106 @@ async fn test_pruned_terminal_task_is_projected_from_state_checkpoint() -> TestR
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_reconcile_missing_terminal_notification() -> TestResult {
+    let redis = RedisServer::start()?;
+    let namespace = "typed-outbox-reconcile-tail";
+    let database = TemporaryDatabase::new();
+    let projection_database = TemporaryDatabase::new();
+    let store = Arc::new(SqliteTaskStore::open(database.path())?);
+    let bus = producer(redis.url(), namespace).await?;
+    let (service, mut started) = service(store, bus.clone(), Duration::from_secs(5)).await?;
+    let accepted = service
+        .submit(typed_support::request(serde_json::json!({}), "reconcile-tail"))
+        .await?;
+    let mut projection = DurableProjection::open(projection_database.path()).map_err(test_error)?;
+    projection.track(accepted.id).map_err(test_error)?;
+    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(accepted.id));
+    assert_eq!(terminal(&service, accepted.id).await?, TaskState::Succeeded);
+    service.shutdown().await?;
+    let _report = bus.shutdown(ShutdownMode::Immediate).await?;
+
+    let running_event_id = format!("task:{}:1", accepted.id);
+    let mut redis_connection = redis::Client::open(redis.url())?.get_connection()?;
+    let stream_entries: redis::streams::StreamRangeReply = redis::cmd("XRANGE")
+        .arg(stream_key(namespace, "task.lifecycle"))
+        .arg("-")
+        .arg("+")
+        .query(&mut redis_connection)?;
+    for entry in stream_entries.ids {
+        let wire: String = redis::from_redis_value(entry.map.get("wire").expect("provider wire field").clone())?;
+        let event: serde_json::Value = serde_json::from_str(&wire)?;
+        if event["event_id"].as_str() != Some(running_event_id.as_str()) {
+            redis::cmd("XDEL")
+                .arg(stream_key(namespace, "task.lifecycle"))
+                .arg(entry.id)
+                .query::<i64>(&mut redis_connection)?;
+        }
+    }
+    let records = wires(redis.url(), namespace)?;
+    assert_eq!(records.len(), 1, "only the early Running notification remains");
+    let consumer: EventBus = EventBusRegistry::discover()?.create(&config(redis.url(), namespace)?)?;
+    let (sender, receiver) = mpsc::channel();
+    let subscription = consumer.subscribe(
+        SubscribeRequest::builder()
+            .subscriber_id(SubscriberId::new("reconcile-consumer")?)
+            .consumer_group(ConsumerGroup::new("reconcile-tail")?)
+            .topic(Topic::<TaskEvent>::new("task.lifecycle")?)
+            .durability(SubscriptionDurability::Durable)
+            .start_position(StartPosition::Earliest)
+            .build()?,
+        move |delivery| {
+            let event = delivery.payload();
+            let retained = (event.task_id == accepted.id && event.state == TaskState::Running).then(|| event.clone());
+            let _ = sender.send(retained);
+            Ok::<(), DeliveryError>(())
+        },
+    )?;
+    let mut running = None;
+    for _ in 0..records.len() {
+        if let Some(event) = receiver.recv_timeout(DEADLINE)? {
+            running = Some(event);
+        }
+    }
+    subscription.cancel()?;
+    let _report = consumer.shutdown(ShutdownMode::Immediate)?;
+    let running = running.expect("the real stream contains the early Running notification");
+    projection
+        .commit_snapshot(running.task_id, running.state_version, running.state.clone())
+        .map_err(test_error)?;
+    let before_reconcile = DurableProjection::snapshot(projection_database.path(), accepted.id).map_err(test_error)?;
+    assert_eq!(before_reconcile, (Some((1, TaskState::Running)), vec![1]));
+    assert!(projection.is_tracked(accepted.id).map_err(test_error)?);
+    drop(projection);
+
+    // The terminal wire record was removed before creating the consumer group.
+    // No terminal delivery or later event can trigger version-gap refresh.
+    let latest = service
+        .get_state_checkpoint(accepted.id)
+        .await?
+        .expect("terminal checkpoint");
+    let mut reopened = DurableProjection::open(projection_database.path()).map_err(test_error)?;
+    assert!(
+        reopened
+            .reconcile(accepted.id, |_| Ok(Some((latest.state_version, latest.state.clone()))))
+            .map_err(test_error)?
+    );
+    let terminal_snapshot = DurableProjection::snapshot(projection_database.path(), accepted.id).map_err(test_error)?;
+    assert_eq!(terminal_snapshot, (Some((2, TaskState::Succeeded)), vec![1, 2]));
+    assert!(!reopened.is_tracked(accepted.id).map_err(test_error)?);
+    assert!(
+        !reopened
+            .reconcile(accepted.id, |_| panic!("retired task must not be queried again"))
+            .map_err(test_error)?,
+        "a retired task must be skipped without querying or repeating its business effect"
+    );
+    assert_eq!(
+        DurableProjection::snapshot(projection_database.path(), accepted.id).map_err(test_error)?,
+        terminal_snapshot
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_redis_outage_retains_committed_events_until_restart() -> TestResult {
     let mut redis = RedisServer::start()?;
     let namespace = "typed-outbox-outage";
@@ -828,6 +1004,69 @@ fn test_durable_projection_refreshes_first_and_intermediate_version_gaps() -> Te
         DurableProjection::snapshot(database.path(), jump_id).map_err(test_error)?,
         (Some((3, TaskState::Succeeded)), vec![1, 3])
     );
+    Ok(())
+}
+
+#[test]
+fn test_reconcile_failure_missing_and_behind_checkpoint_keep_tracking() -> TestResult {
+    let database = TemporaryDatabase::new();
+    let id = TaskId::from_id(qubit_id::Id::new(309));
+    let mut projection = DurableProjection::open(database.path()).map_err(test_error)?;
+    projection.track(id).map_err(test_error)?;
+    projection
+        .apply(&projection_event(id, 0, TaskState::Queued), |_| {
+            panic!("version zero needs no service lookup")
+        })
+        .map_err(test_error)?;
+    let before = DurableProjection::snapshot(database.path(), id).map_err(test_error)?;
+    assert!(
+        projection
+            .reconcile(id, |_| Err(std::io::Error::other("query failed").into()))
+            .is_err()
+    );
+    assert!(projection.reconcile(id, |_| Ok(None)).is_err());
+    assert!(
+        !projection
+            .reconcile(id, |_| Ok(Some((0, TaskState::Queued))))
+            .map_err(test_error)?
+    );
+    assert!(projection.is_tracked(id).map_err(test_error)?);
+    assert_eq!(
+        DurableProjection::snapshot(database.path(), id).map_err(test_error)?,
+        before
+    );
+    Ok(())
+}
+
+#[test]
+fn test_reconcile_rechecks_version_after_competing_event_commit() -> TestResult {
+    let database = TemporaryDatabase::new();
+    let id = TaskId::from_id(qubit_id::Id::new(310));
+    let mut projection = DurableProjection::open(database.path()).map_err(test_error)?;
+    projection.track(id).map_err(test_error)?;
+    projection
+        .apply(&projection_event(id, 0, TaskState::Queued), |_| {
+            panic!("version zero needs no service lookup")
+        })
+        .map_err(test_error)?;
+
+    // The query callback runs before reconcile opens its transaction. A
+    // competing event commits while the query is in flight; the older
+    // checkpoint must not overwrite it or repeat its effect.
+    assert!(
+        !projection
+            .reconcile(id, |_| {
+                let mut competing = DurableProjection::open(database.path())?;
+                competing.commit_snapshot(id, 2, TaskState::Succeeded)?;
+                Ok(Some((1, TaskState::Running)))
+            })
+            .map_err(test_error)?
+    );
+    assert_eq!(
+        DurableProjection::snapshot(database.path(), id).map_err(test_error)?,
+        (Some((2, TaskState::Succeeded)), vec![0, 2])
+    );
+    assert!(!projection.is_tracked(id).map_err(test_error)?);
     Ok(())
 }
 

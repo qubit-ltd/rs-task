@@ -9,10 +9,13 @@
 mod internal;
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
+use std::ops::Bound::Excluded;
+use std::ops::Bound::Unbounded;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -138,6 +141,9 @@ impl MemoryTaskStore {
                 owner_epoch: None,
                 last_owner_epoch: 0,
                 encoded_tasks: BTreeMap::new(),
+                queued_order: BTreeSet::new(),
+                #[cfg(test)]
+                ready_scan_visits: std::cell::Cell::new(0),
                 encoded_idempotency: HashMap::new(),
                 encoded_terminal_order: VecDeque::new(),
                 retained_payload_bytes: 0,
@@ -320,6 +326,7 @@ impl super::TaskStore for MemoryTaskStore {
                     summary: summary.clone(),
                 },
             );
+            state.queued_order.insert((now, id));
             state.unfinished_records += 1;
             Ok(EncodedAcceptOutcome { summary, created: true })
         })
@@ -398,28 +405,36 @@ impl super::TaskStore for MemoryTaskStore {
     fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();
-            let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
-            if task.summary.state_version != command.expected_state_version
-                || !matches!(task.summary.state, TaskState::Queued)
-            {
-                return Err(StoreError::Conflict);
-            }
-            task.summary.state_version = task
-                .summary
-                .state_version
-                .checked_add(1)
-                .ok_or(StoreError::Failure("task state version overflow".to_owned()))?;
-            task.summary.attempt = task
-                .summary
-                .attempt
-                .checked_add(1)
-                .ok_or(StoreError::Failure("task attempt counter overflow".to_owned()))?;
-            task.summary.state = TaskState::Running;
-            task.summary.retry_not_before_ms = None;
-            task.summary.started_at_ms = Some(command.started_at_ms);
-            task.summary.finished_at_ms = None;
-            task.summary.progress = None;
-            Ok(task.summary.clone())
+            let (summary, queued_key) = {
+                let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
+                if task.summary.state_version != command.expected_state_version
+                    || !matches!(task.summary.state, TaskState::Queued)
+                {
+                    return Err(StoreError::Conflict);
+                }
+                let next_version = task
+                    .summary
+                    .state_version
+                    .checked_add(1)
+                    .ok_or(StoreError::Failure("task state version overflow".to_owned()))?;
+                let next_attempt = task
+                    .summary
+                    .attempt
+                    .checked_add(1)
+                    .ok_or(StoreError::Failure("task attempt counter overflow".to_owned()))?;
+                let queued_key = (task.summary.accepted_at_ms, command.id);
+                task.summary.state_version = next_version;
+                task.summary.attempt = next_attempt;
+                task.summary.state = TaskState::Running;
+                task.summary.retry_not_before_ms = None;
+                task.summary.started_at_ms = Some(command.started_at_ms);
+                task.summary.finished_at_ms = None;
+                task.summary.progress = None;
+                (task.summary.clone(), queued_key)
+            };
+            let removed = state.queued_order.remove(&queued_key);
+            debug_assert!(removed, "queued record must have an order index entry");
+            Ok(summary)
         })
     }
 
@@ -460,7 +475,7 @@ impl super::TaskStore for MemoryTaskStore {
             }
             validate_encoded_output(&command.state, command.output.as_ref())?;
             let mut state = self.state.lock();
-            let (was_terminal, is_terminal, summary) = {
+            let (was_terminal, is_terminal, was_queued, is_queued, accepted_at_ms, summary) = {
                 let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
                 let terminal_cancel_annotation = task.summary.state.is_terminal()
                     && task.summary.state == command.state
@@ -484,13 +499,17 @@ impl super::TaskStore for MemoryTaskStore {
                 }
                 let was_terminal = task.summary.state.is_terminal();
                 let is_terminal = command.state.is_terminal();
-                task.summary.state = command.state;
-                task.summary.retry_not_before_ms = command.retry_not_before_ms;
-                task.summary.state_version = task
+                let was_queued = task.summary.state == TaskState::Queued;
+                let is_queued = command.state == TaskState::Queued;
+                let next_version = task
                     .summary
                     .state_version
                     .checked_add(1)
                     .ok_or(StoreError::Failure("task state version overflow".to_owned()))?;
+                let accepted_at_ms = task.summary.accepted_at_ms;
+                task.summary.state = command.state;
+                task.summary.retry_not_before_ms = command.retry_not_before_ms;
+                task.summary.state_version = next_version;
                 task.summary.cancel_requested = command.cancel_requested;
                 task.summary.cancel_error = command.cancel_error;
                 if let Some(output) = command.output {
@@ -499,8 +518,22 @@ impl super::TaskStore for MemoryTaskStore {
                 if is_terminal && command.finished_at_ms.is_some() {
                     task.summary.finished_at_ms = command.finished_at_ms;
                 }
-                (was_terminal, is_terminal, task.summary.clone())
+                (
+                    was_terminal,
+                    is_terminal,
+                    was_queued,
+                    is_queued,
+                    accepted_at_ms,
+                    task.summary.clone(),
+                )
             };
+            if was_queued {
+                let removed = state.queued_order.remove(&(accepted_at_ms, command.id));
+                debug_assert!(removed, "queued record must have an order index entry");
+            }
+            if is_queued {
+                state.queued_order.insert((accepted_at_ms, command.id));
+            }
             if !was_terminal && is_terminal {
                 state.unfinished_records = state.unfinished_records.saturating_sub(1);
                 state.encoded_terminal_order.push_back(command.id);
@@ -631,11 +664,9 @@ impl super::TaskStore for MemoryTaskStore {
     /// are returned. A cursor is included when another eligible task exists.
     /// Rejects limits above the public task-query maximum.
     ///
-    /// The implementation scans all retained tasks while holding the store
-    /// lock, but keeps only the smallest `limit + 1` matching keys before it
-    /// clones summaries. Candidate-key storage is bounded by the page size
-    /// plus one, and at most `limit` summaries are cloned; this does not avoid
-    /// a full scan.
+    /// The implementation scans queued-order keys after the exclusive cursor,
+    /// stopping after finding `limit + 1` due tasks. Future retries are
+    /// skipped, and at most `limit` summaries are cloned.
     ///
     /// # Errors
     ///
@@ -663,31 +694,45 @@ impl super::TaskStore for MemoryTaskStore {
             }
             let state = self.state.lock();
             let keep = limit.get() + 1;
-            let mut keys = BinaryHeap::with_capacity(keep);
-            for task in state.encoded_tasks.values() {
+            let lower = after
+                .map(|cursor| Excluded((cursor.accepted_at_ms, cursor.id)))
+                .unwrap_or(Unbounded);
+            let mut keys = Vec::with_capacity(keep);
+            #[cfg(test)]
+            state.ready_scan_visits.set(0);
+            for key in state.queued_order.range((lower, Unbounded)) {
+                #[cfg(test)]
+                state.ready_scan_visits.set(state.ready_scan_visits.get() + 1);
+                let task = state
+                    .encoded_tasks
+                    .get(&key.1)
+                    .expect("queued order entry has a retained task");
                 let summary = &task.summary;
-                if summary.state != TaskState::Queued
-                    || summary.retry_not_before_ms.is_some_and(|deadline| deadline > now_ms)
-                    || after.is_some_and(|cursor| {
-                        (summary.accepted_at_ms, summary.id) <= (cursor.accepted_at_ms, cursor.id)
-                    })
-                {
+                debug_assert_eq!(
+                    summary.state,
+                    TaskState::Queued,
+                    "queued order contains only queued tasks"
+                );
+                if summary.retry_not_before_ms.is_some_and(|deadline| deadline > now_ms) {
                     continue;
                 }
-                let key = (summary.accepted_at_ms, summary.id);
-                if keys.len() < keep {
-                    keys.push(key);
-                } else if keys.peek().is_some_and(|largest| key < *largest) {
-                    keys.pop();
-                    keys.push(key);
+                keys.push(*key);
+                if keys.len() == keep {
+                    break;
                 }
             }
-            let mut keys = keys.into_sorted_vec();
             let has_more = keys.len() > limit.get();
             keys.truncate(limit.get());
             let records = keys
                 .into_iter()
-                .filter_map(|(_, id)| state.encoded_tasks.get(&id).map(|task| task.summary.clone()))
+                .map(|(_, id)| {
+                    state
+                        .encoded_tasks
+                        .get(&id)
+                        .expect("queued order entry has a retained task")
+                        .summary
+                        .clone()
+                })
                 .collect::<Vec<_>>();
             let next = has_more.then(|| records.last().map(EncodedTaskCursor::from)).flatten();
             Ok(EncodedTaskPage { records, next })
@@ -711,12 +756,16 @@ impl super::TaskStore for MemoryTaskStore {
     /// * `now_ms` - Current time; only deadlines strictly later are returned.
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
-            Ok(self
-                .state
-                .lock()
-                .encoded_tasks
-                .values()
-                .filter(|task| task.summary.state == TaskState::Queued)
+            let state = self.state.lock();
+            Ok(state
+                .queued_order
+                .iter()
+                .map(|(_, id)| {
+                    state
+                        .encoded_tasks
+                        .get(id)
+                        .expect("queued order entry has a retained task")
+                })
                 .filter_map(|task| task.summary.retry_not_before_ms)
                 .filter(|deadline| *deadline > now_ms)
                 .min())
@@ -838,7 +887,11 @@ mod tests {
     use super::super::TaskStore;
     use super::EncodedTaskId;
     use super::MemoryTaskStore;
+    use crate::model::TaskState;
+    use crate::model::typed::AcceptOutcome;
+    use crate::model::typed::StartCommand;
     use crate::model::typed::StoredTaskRequest;
+    use crate::model::typed::TransitionCommand;
 
     /// Uses a fixed timestamp to verify numeric ID ordering for tied keys.
     #[tokio::test]
@@ -866,9 +919,18 @@ mod tests {
         }
         {
             let mut state = store.state.lock();
-            for task in state.encoded_tasks.values_mut() {
-                task.summary.accepted_at_ms = 5;
-            }
+            let keys = state
+                .encoded_tasks
+                .iter_mut()
+                .map(|(id, task)| {
+                    task.summary.accepted_at_ms = 5;
+                    (*id, task.summary.accepted_at_ms)
+                })
+                .collect::<Vec<_>>();
+            state.queued_order.clear();
+            state
+                .queued_order
+                .extend(keys.into_iter().map(|(id, accepted_at_ms)| (accepted_at_ms, id)));
         }
 
         let page = TaskStore::list_ready_queued(
@@ -888,5 +950,330 @@ mod tests {
             ]
         );
         assert!(page.next.is_some());
+    }
+
+    /// A ready page visits queued records only, even when terminal history is
+    /// retained.
+    #[tokio::test]
+    async fn test_ready_queue_scan_skips_terminal_history() {
+        let store = MemoryTaskStore::new(32);
+        let request = || StoredTaskRequest {
+            kind_id: "test".to_owned(),
+            category: None,
+            payload: crate::model::typed::StoredPayload {
+                type_id: qubit_model_id::ModelIdBuf::parse("test.Payload").expect("model ID is valid"),
+                schema_version: 1,
+                codec_id: "test.codec".to_owned(),
+                bytes: Vec::new(),
+            },
+            metadata: Default::default(),
+            resource_limit: Default::default(),
+            correlation_key: None,
+            idempotency_key: None,
+        };
+        for value in 1..=12 {
+            let id = EncodedTaskId::from_id(qubit_id::Id::new(value));
+            let accepted = TaskStore::accept_encoded(&store, id, request())
+                .await
+                .expect("task accepted");
+            let running = TaskStore::start_encoded(
+                &store,
+                super::StartCommand {
+                    id,
+                    expected_state_version: accepted.summary.state_version,
+                    started_at_ms: 1,
+                },
+            )
+            .await
+            .expect("task starts");
+            TaskStore::transition_encoded(
+                &store,
+                TransitionCommand {
+                    id,
+                    expected_state_version: running.state_version,
+                    expected_attempt: running.attempt,
+                    retry_not_before_ms: None,
+                    state: TaskState::Succeeded,
+                    cancel_requested: false,
+                    cancel_error: None,
+                    output: None,
+                    finished_at_ms: Some(2),
+                },
+            )
+            .await
+            .expect("task finishes");
+        }
+        for value in 13..=14 {
+            let id = EncodedTaskId::from_id(qubit_id::Id::new(value));
+            TaskStore::accept_encoded(&store, id, request())
+                .await
+                .expect("queued task accepted");
+        }
+
+        let page = TaskStore::list_ready_queued(
+            &store,
+            None,
+            NonZeroUsize::new(1).expect("positive page size"),
+            u64::MAX,
+        )
+        .await
+        .expect("ready page succeeds");
+        assert_eq!(page.records.len(), 1);
+        assert!(page.next.is_some());
+        assert_eq!(store.state.lock().ready_scan_visits.get(), 2);
+    }
+
+    fn assert_queued_index_matches_records(store: &MemoryTaskStore) {
+        let state = store.state.lock();
+        let expected = state
+            .encoded_tasks
+            .values()
+            .filter(|task| task.summary.state == TaskState::Queued)
+            .map(|task| (task.summary.accepted_at_ms, task.summary.id))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(state.queued_order, expected);
+    }
+
+    fn lifecycle_request(id: u64) -> StoredTaskRequest {
+        StoredTaskRequest {
+            kind_id: "test.lifecycle".to_owned(),
+            category: None,
+            payload: crate::model::typed::StoredPayload {
+                type_id: qubit_model_id::ModelIdBuf::parse("test.Payload").expect("model ID is valid"),
+                schema_version: 1,
+                codec_id: "test.codec".to_owned(),
+                bytes: Vec::new(),
+            },
+            metadata: Default::default(),
+            resource_limit: Default::default(),
+            correlation_key: None,
+            idempotency_key: Some(format!("lifecycle-{id}")),
+        }
+    }
+
+    /// Maintains queued order across retries, blocking, cancellation,
+    /// retention, and prune.
+    #[tokio::test]
+    async fn test_queued_index_tracks_lifecycle_and_removal_paths() {
+        let store = MemoryTaskStore::new(2);
+        let id1 = EncodedTaskId::from_id(qubit_id::Id::new(1));
+        let id2 = EncodedTaskId::from_id(qubit_id::Id::new(2));
+        let first = TaskStore::accept_encoded(&store, id1, lifecycle_request(1))
+            .await
+            .expect("accept succeeds");
+        assert_queued_index_matches_records(&store);
+        let replay = TaskStore::accept_encoded(
+            &store,
+            EncodedTaskId::from_id(qubit_id::Id::new(99)),
+            lifecycle_request(1),
+        )
+        .await
+        .expect("idempotent replay succeeds");
+        assert!(matches!(replay, AcceptOutcome { created: false, .. }));
+        assert_queued_index_matches_records(&store);
+
+        let started1 = TaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id: id1,
+                expected_state_version: first.summary.state_version,
+                started_at_ms: 10,
+            },
+        )
+        .await
+        .expect("first task starts");
+        assert_queued_index_matches_records(&store);
+        let retry1 = TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: id1,
+                expected_state_version: started1.state_version,
+                expected_attempt: started1.attempt,
+                retry_not_before_ms: Some(100),
+                state: TaskState::Queued,
+                cancel_requested: false,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: None,
+            },
+        )
+        .await
+        .expect("first task is requeued for retry");
+        assert_queued_index_matches_records(&store);
+        assert_eq!(
+            TaskStore::next_retry_deadline(&store, 0)
+                .await
+                .expect("retry deadline lookup succeeds"),
+            Some(100)
+        );
+
+        let accepted2 = TaskStore::accept_encoded(&store, id2, lifecycle_request(2))
+            .await
+            .expect("second task accepted");
+        assert_queued_index_matches_records(&store);
+        let started2 = TaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id: id2,
+                expected_state_version: accepted2.summary.state_version,
+                started_at_ms: 11,
+            },
+        )
+        .await
+        .expect("second task starts");
+        let blocked2 = TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: id2,
+                expected_state_version: started2.state_version,
+                expected_attempt: started2.attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Blocked {
+                    reason: "pause".to_owned(),
+                },
+                cancel_requested: false,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: None,
+            },
+        )
+        .await
+        .expect("second task blocks");
+        assert_queued_index_matches_records(&store);
+        let resumed2 = TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: id2,
+                expected_state_version: blocked2.state_version,
+                expected_attempt: blocked2.attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Queued,
+                cancel_requested: false,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: None,
+            },
+        )
+        .await
+        .expect("blocked task resumes into queue");
+        assert_queued_index_matches_records(&store);
+
+        let cancelled1 = TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: id1,
+                expected_state_version: retry1.state_version,
+                expected_attempt: retry1.attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Cancelled,
+                cancel_requested: true,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: Some(20),
+            },
+        )
+        .await
+        .expect("queued task cancels");
+        assert_eq!(cancelled1.state, TaskState::Cancelled);
+        assert_queued_index_matches_records(&store);
+        assert_eq!(
+            TaskStore::next_retry_deadline(&store, 0)
+                .await
+                .expect("terminal task is skipped"),
+            None
+        );
+
+        let finished2 = TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: id2,
+                expected_state_version: resumed2.state_version,
+                expected_attempt: resumed2.attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Cancelled,
+                cancel_requested: true,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: Some(21),
+            },
+        )
+        .await
+        .expect("resumed queued task cancels");
+        assert_queued_index_matches_records(&store);
+
+        // Force terminal history eviction through the same removal helper.
+        let id3 = EncodedTaskId::from_id(qubit_id::Id::new(3));
+        let accepted3 = TaskStore::accept_encoded(&store, id3, lifecycle_request(3))
+            .await
+            .expect("third accepted");
+        let started3 = TaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id: id3,
+                expected_state_version: accepted3.summary.state_version,
+                started_at_ms: 22,
+            },
+        )
+        .await
+        .expect("third starts");
+        TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: id3,
+                expected_state_version: started3.state_version,
+                expected_attempt: started3.attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Succeeded,
+                cancel_requested: false,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: Some(23),
+            },
+        )
+        .await
+        .expect("third finishes and evicts oldest history");
+        assert_queued_index_matches_records(&store);
+        assert!(
+            TaskStore::get_encoded_task(&store, id1)
+                .await
+                .expect("lookup succeeds")
+                .is_none()
+        );
+
+        let id4 = EncodedTaskId::from_id(qubit_id::Id::new(4));
+        let accepted4 = TaskStore::accept_encoded(&store, id4, lifecycle_request(4))
+            .await
+            .expect("fourth accepted");
+        let started4 = TaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id: id4,
+                expected_state_version: accepted4.summary.state_version,
+                started_at_ms: 24,
+            },
+        )
+        .await
+        .expect("fourth starts");
+        TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: id4,
+                expected_state_version: started4.state_version,
+                expected_attempt: started4.attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Succeeded,
+                cancel_requested: false,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: Some(25),
+            },
+        )
+        .await
+        .expect("fourth finishes");
+        TaskStore::prune_terminal_before(&store, 26, NonZeroUsize::new(1).expect("positive prune limit"))
+            .await
+            .expect("pruning succeeds");
+        assert_queued_index_matches_records(&store);
+        assert_eq!(finished2.state, TaskState::Cancelled);
     }
 }

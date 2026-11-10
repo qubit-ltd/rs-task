@@ -105,6 +105,8 @@ publisher 启用后，每次生命周期状态提交都会与对应 outbox 行�
 
 在以 `TaskId` 为键的持久表中保存每个任务已处理的最高 `state_version` 和业务投影状态。一个 SQLite 事务内先读取 checkpoint，再决定是否修改业务投影。事件版本不高于 checkpoint 时直接忽略；首次收到版本 0 可以直接应用，首次收到高于 0 的版本，或后续事件跳过一个及以上版本时，必须调用 `TaskExecutionService::get_state_checkpoint` 查询权威当前状态和版本。返回 `None`、查询出错或检查点版本低于通知版本，都不能安全应用：回滚事务且不得 ACK；返回会重新入队的 handler 错误，让消息保留在 pending 状态等待 Retry。检查点只能恢复最新状态，不能重放缺失的每次状态迁移及其业务副作用。其他情况下，将选定状态、消费者 checkpoint 和业务副作用写入同一事务后再提交。`tests/redis_task_outbox_tests.rs` 中的集成回归会关闭并重建 SQLite 消费者，再重放 Redis 中的重复记录。
 
+版本缺口处理只有在后续事件到达时才会触发。provider 已回复接纳后，通知仍可能丢失；此时投影停在 `Running`，而后续也没有事件提示缺少终态。若应用需要有界地修复这类尾部丢失，应把每个已接纳的 `TaskId` 登记在应用自己的持久跟踪表中，并在业务设定的陈旧阈值后分批核对。先在 consumer 写事务外查询 `get_state_checkpoint`；事务内重新读取最新 consumer 版本，仅当检查点版本更高时，才连同业务副作用一起写入。查询失败、返回 `None` 或版本落后时，保留该 ID 以便重试，并记录可重试诊断。只有终态投影提交后才退役跟踪。重复对账或与新事件竞争时，不得覆盖更新的版本，也不能重复业务副作用。该应用显式执行的循环不会在库内增加定时器，也不会为从未收到的消息伪造 ACK。它只能修复当前投影，无法重建每次丢失的状态迁移或其副作用，也不承诺 exactly-once 处理。`test_reconcile_missing_terminal_notification` 演示了终态通知丢失、没有后续事件、重开消费者数据库后进行幂等对账的场景。
+
 只有事务提交成功后，handler 才返回成功并由 bus ACK。事务或服务查询失败时，返回配置为重新入队（`FailureDirective::Requeue`）的 handler 错误，让 Redis 消息留在 pending 状态等待 Retry。不能先 ACK 再补写 checkpoint。publisher 产生的稳定 `EventId` 仅供关联重复 wire 记录；Redis provider 不会按 `EventId` 去重。跨进程重启防止业务副作用重复依靠消费者的持久任务版本检查。
 
 关闭时 worker 会持续排空，直到 outbox 清空或 `notification_shutdown_timeout` 到期。超时会返回错误，尚未发送的行仍保留在 SQLite，供下次启动重放。运维时应监控 SQLite outbox 行数和最老行年龄，并结合 Redis stream 的 `XLEN` 与 consumer group 的 `XPENDING`，区分 publisher 堵塞、stream 积压和消费者未确认等情况。

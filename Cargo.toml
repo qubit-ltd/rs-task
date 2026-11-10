@@ -45,6 +45,10 @@ required-features = ["sqlite"]
 name = "memory_accept"
 harness = false
 
+[[bench]]
+name = "memory_ready_scan"
+harness = false
+
 [dependencies]
 futures = "^0.3"
 fs2 = { version = "^0.4", optional = true }

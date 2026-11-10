@@ -1,0 +1,423 @@
+Raw output from `cargo bench --locked --bench memory_ready_scan` and `cargo bench --locked --bench memory_accept` on the baseline commit `924fdf2` and the indexed implementation. Every command completed with exit code 0. The benchmark method and summary are in [memory-ready-scan-benchmark.md](memory-ready-scan-benchmark.md).
+
+## Ready-scan baseline
+
+```text
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling libc v0.2.191
+   Compiling cfg-if v1.0.5
+   Compiling pin-project-lite v0.2.17
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.15
+   Compiling futures-core v0.3.34
+   Compiling fastrand v2.5.0
+   Compiling futures-io v0.3.34
+   Compiling parking v2.2.1
+   Compiling thiserror v2.0.21
+   Compiling stable_deref_trait v1.2.1
+   Compiling crossbeam-utils v0.8.23
+   Compiling hashbrown v0.17.1
+   Compiling serde_core v1.0.229
+   Compiling rustix v1.1.6
+   Compiling autocfg v1.5.1
+   Compiling rand_core v0.10.1
+   Compiling memchr v2.8.3
+   Compiling object v0.39.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling slab v0.4.12
+   Compiling bitflags v2.13.2
+   Compiling smallvec v1.16.5
+   Compiling getrandom v0.4.3
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling writeable v0.6.4
+   Compiling itoa v1.0.19
+   Compiling serde_json v1.0.154
+   Compiling litemap v0.8.3
+   Compiling utf_types v1.0.0
+   Compiling futures-sink v0.3.34
+   Compiling icu_properties_data v2.4.0
+   Compiling icu_normalizer_data v2.4.0
+   Compiling parking_lot_core v0.9.12
+   Compiling qubit-utils v0.3.3
+   Compiling async-task v4.7.1
+   Compiling zeroize v1.9.1
+   Compiling atomic-waker v1.1.2
+   Compiling once_cell v1.21.4
+   Compiling scopeguard v1.2.0
+   Compiling futures-task v0.3.34
+   Compiling untrusted v0.9.0
+   Compiling rustls v0.23.46
+   Compiling inventory v0.3.25
+   Compiling cpufeatures v0.3.1
+   Compiling bytes v1.12.1
+   Compiling percent-encoding v2.3.2
+   Compiling subtle v2.6.1
+   Compiling quick-error v1.2.3
+   Compiling xxhash-rust v0.8.19
+   Compiling ryu v1.0.23
+   Compiling fnv v1.0.7
+   Compiling bit-vec v0.10.1
+   Compiling event-listener v5.4.2
+   Compiling log v0.4.35
+   Compiling lock_api v0.4.14
+   Compiling arcstr v1.2.0
+   Compiling qubit-fast-cas v0.3.3
+   Compiling regex-syntax v0.8.11
+   Compiling cc v1.11.1
+   Compiling chacha20 v0.10.2
+   Compiling rand_xorshift v0.5.0
+   Compiling core_detect v1.0.0
+   Compiling unarray v0.1.4
+   Compiling qubit-model-id v0.1.0 (/data/working/qubit/rust-common/rs-model-metadata/model-id)
+   Compiling futures-lite v2.6.1
+   Compiling piper v0.2.5
+   Compiling futures-channel v0.3.34
+   Compiling form_urlencoded v1.2.2
+   Compiling rustls-pki-types v1.15.1
+   Compiling qubit-progress v0.9.3
+   Compiling qubit-io v0.19.4
+   Compiling event-listener-strategy v0.5.4
+   Compiling async-io v2.6.0
+   Compiling num-traits v0.2.19
+   Compiling utf8_iter v1.1.0
+   Compiling bit-set v0.11.1
+   Compiling async-lock v3.5.0
+   Compiling concurrent-queue v2.5.0
+   Compiling webpki-roots v1.0.11
+   Compiling qubit-collections v0.2.4
+   Compiling async-channel v2.5.0
+   Compiling syn v3.0.10
+   Compiling blocking v1.7.0
+   Compiling async-executor v1.14.1
+   Compiling async-fs v2.2.0
+   Compiling ring v0.17.14
+   Compiling stacker v0.1.25
+   Compiling errno v0.3.14
+   Compiling getrandom v0.2.17
+   Compiling wait-timeout v0.2.1
+   Compiling socket2 v0.6.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling rand v0.10.3
+   Compiling parking_lot v0.12.5
+   Compiling uuid v1.29.2
+   Compiling ar_archive_writer v0.5.3
+   Compiling synstructure v0.14.0
+   Compiling psm v0.1.32
+   Compiling thiserror-impl v2.0.21
+   Compiling zerovec-derive v0.11.7
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling futures-macro v0.3.34
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling tokio v1.54.1
+   Compiling futures-util v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.4
+   Compiling qubit-clock v0.13.5
+   Compiling qubit-spi v0.14.2
+   Compiling qubit-codec v0.17.4
+   Compiling zerovec v0.11.9
+   Compiling zerotrie v0.2.5
+   Compiling polling v3.11.0
+   Compiling tempfile v3.27.0
+   Compiling qubit-budget v0.10.2
+   Compiling rusty-fork v0.3.1
+   Compiling tinystr v0.8.5
+   Compiling potential_utf v0.1.6
+   Compiling icu_collections v2.4.0
+   Compiling proptest v1.12.0
+   Compiling icu_locale_core v2.4.0
+   Compiling async-signal v0.2.14
+   Compiling async-net v2.0.0
+   Compiling smol-timeout v0.6.1
+   Compiling qubit-retry v0.26.2
+   Compiling async-process v2.5.0
+   Compiling smol v2.0.2
+   Compiling icu_provider v2.4.0
+   Compiling icu_normalizer v2.4.0
+   Compiling icu_properties v2.4.0
+   Compiling qubit-json v0.12.2
+   Compiling qubit-id v0.7.5
+   Compiling tokio-util v0.7.20
+   Compiling qubit-event-bus v0.21.0 (/data/working/qubit/rust-common/rs-event-bus)
+   Compiling combine v4.6.9
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling qubit-datatype v0.15.3
+   Compiling qubit-redact v0.10.1
+   Compiling qubit-value v0.13.0
+   Compiling rustls-webpki v0.103.16
+   Compiling qubit-metadata v0.7.0 (/data/working/qubit/rust-common/rs-metadata)
+   Compiling qubit-task v0.11.0 (/data/working/qubit/rust-common/rs-task-baseline-20261110)
+   Compiling futures-rustls v0.26.0
+   Compiling qubit-redis v2.0.0-rc.2
+   Compiling qubit-event-bus-redis v0.7.0 (/data/working/qubit/rust-common/rs-event-bus-redis)
+    Finished `bench` profile [optimized] target(s) in 38.60s
+     Running benches/memory_ready_scan.rs (target/release/deps/memory_ready_scan-135e09eee614be1f)
+memory_ready_scan mode=release target=x86_64-linux available_cpus=56 runtime_workers=4 page=128 warmups=3 samples=9 payload_bytes=64 budget_bytes=67108864 sizes=[0, 256, 4096, 32768]
+history=0 queued=0 page=128 baseline_entry_visits=0 indexed_entry_visits=0 samples_ns=[188, 201, 205, 210, 212, 217, 223, 223, 230] median_ns=212 p95_ns=230 concurrent_probe_samples_ns=[311, 354, 448, 617, 640, 717, 720, 940, 1600] concurrent_probe_median_ns=640 concurrent_probe_p95_ns=1600
+history=0 queued=256 page=128 baseline_entry_visits=512 indexed_entry_visits=257 samples_ns=[98601, 99181, 99412, 100525, 100991, 150966, 171659, 173921, 186326] median_ns=100991 p95_ns=186326 concurrent_probe_samples_ns=[1279, 1898, 2257, 2400, 2510, 3400, 3742, 4273, 10101] concurrent_probe_median_ns=2510 concurrent_probe_p95_ns=10101
+history=0 queued=4096 page=128 baseline_entry_visits=131072 indexed_entry_visits=4127 samples_ns=[6766903, 6781262, 6821452, 7264286, 8055991, 8095085, 8858499, 9944671, 15264943] median_ns=8055991 p95_ns=15264943 concurrent_probe_samples_ns=[5026, 6998, 7140, 8884, 10168, 11045, 17179, 2934452, 3804898] concurrent_probe_median_ns=10168 concurrent_probe_p95_ns=3804898
+history=0 queued=32768 page=128 baseline_entry_visits=8388608 indexed_entry_visits=33023 samples_ns=[128335184, 128750018, 128909514, 130361439, 131152272, 131670832, 132604312, 133115609, 149145062] median_ns=131152272 p95_ns=149145062 concurrent_probe_samples_ns=[2659, 2821, 2868, 2983, 3153, 3167, 3558, 3591, 5860] concurrent_probe_median_ns=3153 concurrent_probe_p95_ns=5860
+history=256 queued=0 page=128 baseline_entry_visits=256 indexed_entry_visits=0 samples_ns=[1860, 1893, 1893, 1897, 1897, 1904, 1934, 1940, 1974] median_ns=1897 p95_ns=1974 concurrent_probe_samples_ns=[877, 1676, 1700, 1803, 2023, 2103, 3415, 5497, 6910] concurrent_probe_median_ns=2023 concurrent_probe_p95_ns=6910
+history=256 queued=256 page=128 baseline_entry_visits=1024 indexed_entry_visits=257 samples_ns=[237652, 238425, 238688, 238802, 238942, 239112, 249236, 249452, 252329] median_ns=238942 p95_ns=252329 concurrent_probe_samples_ns=[2086, 2090, 2196, 2287, 2576, 2590, 2730, 3100, 4583] concurrent_probe_median_ns=2576 concurrent_probe_p95_ns=4583
+history=256 queued=4096 page=128 baseline_entry_visits=139264 indexed_entry_visits=4127 samples_ns=[3454879, 3475491, 3797264, 4023697, 4379746, 4484642, 4680762, 5138023, 5643264] median_ns=4379746 p95_ns=5643264 concurrent_probe_samples_ns=[2589, 2745, 2933, 3002, 3100, 3197, 3206, 4090, 9140] concurrent_probe_median_ns=3100 concurrent_probe_p95_ns=9140
+history=256 queued=32768 page=128 baseline_entry_visits=8454144 indexed_entry_visits=33023 samples_ns=[126165992, 126710806, 126724827, 127109834, 127406053, 127513702, 127662053, 128627778, 129266792] median_ns=127406053 p95_ns=129266792 concurrent_probe_samples_ns=[3004, 3221, 3392, 3509, 3516, 3557, 3792, 3839, 5205] concurrent_probe_median_ns=3516 concurrent_probe_p95_ns=5205
+history=4096 queued=0 page=128 baseline_entry_visits=4096 indexed_entry_visits=0 samples_ns=[46657, 46866, 46946, 46979, 47003, 47040, 47070, 47153, 47303] median_ns=47003 p95_ns=47303 concurrent_probe_samples_ns=[2086, 2187, 2327, 2420, 2463, 2664, 3491, 4957, 5737] concurrent_probe_median_ns=2463 concurrent_probe_p95_ns=5737
+history=4096 queued=256 page=128 baseline_entry_visits=8704 indexed_entry_visits=257 samples_ns=[296986, 297781, 298136, 308191, 319081, 319364, 320133, 330561, 360452] median_ns=319081 p95_ns=360452 concurrent_probe_samples_ns=[2023, 2035, 2085, 2130, 2132, 2407, 2440, 2550, 4607] concurrent_probe_median_ns=2132 concurrent_probe_p95_ns=4607
+history=4096 queued=4096 page=128 baseline_entry_visits=262144 indexed_entry_visits=4127 samples_ns=[4221797, 4241598, 4253410, 4284548, 4335709, 4340550, 4356816, 4677888, 5113778] median_ns=4335709 p95_ns=5113778 concurrent_probe_samples_ns=[1355, 1431, 1448, 1548, 1570, 1690, 1895, 2116, 3234] concurrent_probe_median_ns=1570 concurrent_probe_p95_ns=3234
+history=4096 queued=32768 page=128 baseline_entry_visits=9437184 indexed_entry_visits=33023 samples_ns=[136823234, 149589302, 151475319, 173510741, 193753696, 219384938, 286964290, 302455298, 322686729] median_ns=193753696 p95_ns=322686729 concurrent_probe_samples_ns=[3210, 3291, 3328, 3496, 3518, 3533, 3615, 3652, 3903] concurrent_probe_median_ns=3518 concurrent_probe_p95_ns=3903
+history=32768 queued=0 page=128 baseline_entry_visits=32768 indexed_entry_visits=0 samples_ns=[225994, 226143, 226532, 226620, 226885, 232885, 252240, 252582, 257541] median_ns=226885 p95_ns=257541 concurrent_probe_samples_ns=[1469, 2275, 2297, 2860, 3290, 4674, 4750, 4806, 5134] concurrent_probe_median_ns=3290 concurrent_probe_p95_ns=5134
+history=32768 queued=256 page=128 baseline_entry_visits=66048 indexed_entry_visits=257 samples_ns=[564608, 565792, 566188, 566228, 570279, 571618, 572357, 572485, 577409] median_ns=570279 p95_ns=577409 concurrent_probe_samples_ns=[1270, 1275, 1276, 1281, 1335, 1360, 1504, 1519, 4030] concurrent_probe_median_ns=1335 concurrent_probe_p95_ns=4030
+history=32768 queued=4096 page=128 baseline_entry_visits=1179648 indexed_entry_visits=4127 samples_ns=[11287688, 11335990, 11409174, 11412854, 11419351, 11424029, 11427625, 11492113, 11771658] median_ns=11419351 p95_ns=11771658 concurrent_probe_samples_ns=[2808, 2972, 3031, 3086, 3086, 3257, 3365, 3649, 3653] concurrent_probe_median_ns=3086 concurrent_probe_p95_ns=3653
+history=32768 queued=32768 page=128 baseline_entry_visits=16777216 indexed_entry_visits=33023 samples_ns=[201245299, 241453079, 253391672, 260569973, 267325723, 281682135, 299746165, 300208061, 307426023] median_ns=267325723 p95_ns=307426023 concurrent_probe_samples_ns=[3298, 3365, 3429, 3573, 3645, 3830, 3854, 3976, 4114] concurrent_probe_median_ns=3645 concurrent_probe_p95_ns=4114
+
+```
+
+## Ready-scan indexed
+
+```text
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling libc v0.2.191
+   Compiling cfg-if v1.0.5
+   Compiling pin-project-lite v0.2.17
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.15
+   Compiling futures-core v0.3.34
+   Compiling fastrand v2.5.0
+   Compiling futures-io v0.3.34
+   Compiling parking v2.2.1
+   Compiling thiserror v2.0.21
+   Compiling stable_deref_trait v1.2.1
+   Compiling crossbeam-utils v0.8.23
+   Compiling rustix v1.1.6
+   Compiling hashbrown v0.17.1
+   Compiling autocfg v1.5.1
+   Compiling serde_core v1.0.229
+   Compiling bitflags v2.13.2
+   Compiling object v0.39.1
+   Compiling slab v0.4.12
+   Compiling rand_core v0.10.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling memchr v2.8.3
+   Compiling getrandom v0.4.3
+   Compiling smallvec v1.16.5
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling itoa v1.0.19
+   Compiling litemap v0.8.3
+   Compiling futures-sink v0.3.34
+   Compiling writeable v0.6.4
+   Compiling serde_json v1.0.154
+   Compiling utf_types v1.0.0
+   Compiling qubit-utils v0.3.3
+   Compiling icu_normalizer_data v2.4.0
+   Compiling icu_properties_data v2.4.0
+   Compiling parking_lot_core v0.9.12
+   Compiling async-task v4.7.1
+   Compiling scopeguard v1.2.0
+   Compiling atomic-waker v1.1.2
+   Compiling once_cell v1.21.4
+   Compiling zeroize v1.9.1
+   Compiling futures-task v0.3.34
+   Compiling untrusted v0.9.0
+   Compiling rustls v0.23.46
+   Compiling inventory v0.3.25
+   Compiling cpufeatures v0.3.1
+   Compiling bytes v1.12.1
+   Compiling subtle v2.6.1
+   Compiling percent-encoding v2.3.2
+   Compiling quick-error v1.2.3
+   Compiling bit-vec v0.10.1
+   Compiling arcstr v1.2.0
+   Compiling xxhash-rust v0.8.19
+   Compiling qubit-fast-cas v0.3.3
+   Compiling ryu v1.0.23
+   Compiling event-listener v5.4.2
+   Compiling lock_api v0.4.14
+   Compiling fnv v1.0.7
+   Compiling cc v1.11.1
+   Compiling log v0.4.35
+   Compiling core_detect v1.0.0
+   Compiling qubit-model-id v0.1.0 (/data/working/qubit/rust-common/rs-model-metadata/model-id)
+   Compiling futures-channel v0.3.34
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.11
+   Compiling futures-lite v2.6.1
+   Compiling piper v0.2.5
+   Compiling chacha20 v0.10.2
+   Compiling form_urlencoded v1.2.2
+   Compiling qubit-progress v0.9.3
+   Compiling rand_xorshift v0.5.0
+   Compiling qubit-io v0.19.4
+   Compiling rustls-pki-types v1.15.1
+   Compiling bit-set v0.11.1
+   Compiling async-io v2.6.0
+   Compiling num-traits v0.2.19
+   Compiling utf8_iter v1.1.0
+   Compiling event-listener-strategy v0.5.4
+   Compiling async-lock v3.5.0
+   Compiling concurrent-queue v2.5.0
+   Compiling webpki-roots v1.0.11
+   Compiling async-channel v2.5.0
+   Compiling qubit-collections v0.2.4
+   Compiling syn v3.0.10
+   Compiling blocking v1.7.0
+   Compiling async-executor v1.14.1
+   Compiling async-fs v2.2.0
+   Compiling stacker v0.1.25
+   Compiling ring v0.17.14
+   Compiling getrandom v0.2.17
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.5
+   Compiling wait-timeout v0.2.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling rand v0.10.3
+   Compiling parking_lot v0.12.5
+   Compiling uuid v1.29.2
+   Compiling synstructure v0.14.0
+   Compiling ar_archive_writer v0.5.3
+   Compiling zerofrom-derive v0.1.8
+   Compiling thiserror-impl v2.0.21
+   Compiling yoke-derive v0.8.4
+   Compiling zerovec-derive v0.11.7
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling futures-macro v0.3.34
+   Compiling tokio-macros v2.7.2
+   Compiling psm v0.1.32
+   Compiling tokio v1.54.1
+   Compiling futures-util v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.4
+   Compiling qubit-clock v0.13.5
+   Compiling qubit-spi v0.14.2
+   Compiling qubit-codec v0.17.4
+   Compiling zerovec v0.11.9
+   Compiling zerotrie v0.2.5
+   Compiling polling v3.11.0
+   Compiling tempfile v3.27.0
+   Compiling qubit-budget v0.10.2
+   Compiling rusty-fork v0.3.1
+   Compiling tinystr v0.8.5
+   Compiling potential_utf v0.1.6
+   Compiling proptest v1.12.0
+   Compiling icu_collections v2.4.0
+   Compiling icu_locale_core v2.4.0
+   Compiling qubit-retry v0.26.2
+   Compiling async-signal v0.2.14
+   Compiling async-net v2.0.0
+   Compiling smol-timeout v0.6.1
+   Compiling async-process v2.5.0
+   Compiling smol v2.0.2
+   Compiling qubit-json v0.12.2
+   Compiling qubit-id v0.7.5
+   Compiling icu_provider v2.4.0
+   Compiling tokio-util v0.7.20
+   Compiling qubit-event-bus v0.21.0 (/data/working/qubit/rust-common/rs-event-bus)
+   Compiling icu_normalizer v2.4.0
+   Compiling icu_properties v2.4.0
+   Compiling futures-executor v0.3.34
+   Compiling combine v4.6.9
+   Compiling futures v0.3.34
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling qubit-datatype v0.15.3
+   Compiling qubit-redact v0.10.1
+   Compiling url v2.5.8
+   Compiling qubit-value v0.13.0
+   Compiling rustls-webpki v0.103.16
+   Compiling qubit-metadata v0.7.0 (/data/working/qubit/rust-common/rs-metadata)
+   Compiling qubit-task v0.11.0 (/data/working/qubit/rust-common/rs-task-worktree-20261110)
+   Compiling futures-rustls v0.26.0
+   Compiling qubit-redis v2.0.0-rc.2
+   Compiling qubit-event-bus-redis v0.7.0 (/data/working/qubit/rust-common/rs-event-bus-redis)
+    Finished `bench` profile [optimized] target(s) in 34.91s
+     Running benches/memory_ready_scan.rs (target/release/deps/memory_ready_scan-135e09eee614be1f)
+memory_ready_scan mode=release target=x86_64-linux available_cpus=56 runtime_workers=4 page=128 warmups=3 samples=9 payload_bytes=64 budget_bytes=67108864 sizes=[0, 256, 4096, 32768]
+history=0 queued=0 page=128 baseline_entry_visits=0 indexed_entry_visits=0 samples_ns=[156, 157, 157, 158, 158, 158, 159, 162, 173] median_ns=158 p95_ns=173 concurrent_probe_samples_ns=[453, 470, 497, 707, 737, 773, 1733, 1990, 2143] concurrent_probe_median_ns=737 concurrent_probe_p95_ns=2143
+history=0 queued=256 page=128 baseline_entry_visits=512 indexed_entry_visits=257 samples_ns=[86015, 86250, 86376, 86401, 86521, 86894, 87032, 88523, 96285] median_ns=86521 p95_ns=96285 concurrent_probe_samples_ns=[1370, 1432, 1452, 1523, 1555, 1713, 1862, 1890, 3533] concurrent_probe_median_ns=1555 concurrent_probe_p95_ns=3533
+history=0 queued=4096 page=128 baseline_entry_visits=131072 indexed_entry_visits=4127 samples_ns=[1563100, 1565328, 1566232, 1566489, 1567870, 1568527, 1570614, 1575250, 1581038] median_ns=1567870 p95_ns=1581038 concurrent_probe_samples_ns=[1845, 2108, 2116, 2248, 2420, 2475, 2727, 2905, 3645] concurrent_probe_median_ns=2420 concurrent_probe_p95_ns=3645
+history=0 queued=32768 page=128 baseline_entry_visits=8388608 indexed_entry_visits=33023 samples_ns=[20508008, 20653800, 20687126, 20705320, 20712409, 20772152, 20782020, 20793060, 20918702] median_ns=20712409 p95_ns=20918702 concurrent_probe_samples_ns=[3325, 3342, 3346, 3459, 3640, 3802, 3818, 4032, 4567] concurrent_probe_median_ns=3640 concurrent_probe_p95_ns=4567
+history=256 queued=0 page=128 baseline_entry_visits=256 indexed_entry_visits=0 samples_ns=[261, 266, 268, 269, 270, 270, 270, 277, 331] median_ns=270 p95_ns=331 concurrent_probe_samples_ns=[854, 867, 933, 1088, 1132, 2961, 3336, 4256, 6227] concurrent_probe_median_ns=1132 concurrent_probe_p95_ns=6227
+history=256 queued=256 page=128 baseline_entry_visits=1024 indexed_entry_visits=257 samples_ns=[108271, 108461, 108608, 108963, 109490, 109562, 109704, 110041, 117242] median_ns=109490 p95_ns=117242 concurrent_probe_samples_ns=[1400, 1505, 1541, 1568, 1568, 1635, 1662, 1760, 2587] concurrent_probe_median_ns=1568 concurrent_probe_p95_ns=2587
+history=256 queued=4096 page=128 baseline_entry_visits=139264 indexed_entry_visits=4127 samples_ns=[1601063, 1602275, 1603497, 1633171, 1635438, 1658033, 1672024, 2733672, 2766687] median_ns=1635438 p95_ns=2766687 concurrent_probe_samples_ns=[2844, 2944, 3043, 3377, 3433, 3880, 4487, 4750, 5647] concurrent_probe_median_ns=3433 concurrent_probe_p95_ns=5647
+history=256 queued=32768 page=128 baseline_entry_visits=8454144 indexed_entry_visits=33023 samples_ns=[21000148, 21259827, 21339640, 21449758, 21499646, 21603296, 21615835, 21827239, 21932666] median_ns=21499646 p95_ns=21932666 concurrent_probe_samples_ns=[3398, 3760, 3842, 3915, 4409, 4421, 4513, 4625, 4650] concurrent_probe_median_ns=4409 concurrent_probe_p95_ns=4650
+history=4096 queued=0 page=128 baseline_entry_visits=4096 indexed_entry_visits=0 samples_ns=[420, 424, 425, 425, 429, 431, 480, 500, 541] median_ns=429 p95_ns=541 concurrent_probe_samples_ns=[1000, 1060, 1068, 1078, 1275, 1643, 1931, 3974, 4061] concurrent_probe_median_ns=1275 concurrent_probe_p95_ns=4061
+history=4096 queued=256 page=128 baseline_entry_visits=8704 indexed_entry_visits=257 samples_ns=[211534, 211719, 211807, 211901, 212141, 212402, 212507, 219159, 222327] median_ns=212141 p95_ns=222327 concurrent_probe_samples_ns=[1130, 1168, 1192, 1268, 1290, 1297, 1355, 1553, 2558] concurrent_probe_median_ns=1290 concurrent_probe_p95_ns=2558
+history=4096 queued=4096 page=128 baseline_entry_visits=262144 indexed_entry_visits=4127 samples_ns=[1566847, 1841463, 1860063, 1917279, 1936385, 2071227, 2224484, 2225154, 2343158] median_ns=1936385 p95_ns=2343158 concurrent_probe_samples_ns=[2313, 2345, 2588, 2675, 3160, 3170, 3207, 3283, 4980] concurrent_probe_median_ns=3160 concurrent_probe_p95_ns=4980
+history=4096 queued=32768 page=128 baseline_entry_visits=9437184 indexed_entry_visits=33023 samples_ns=[20833998, 20941083, 21097857, 21101528, 21461662, 21530429, 21726111, 23865830, 40845673] median_ns=21461662 p95_ns=40845673 concurrent_probe_samples_ns=[5410, 5643, 5785, 5977, 6282, 6323, 7934, 8000, 16370] concurrent_probe_median_ns=6282 concurrent_probe_p95_ns=16370
+history=32768 queued=0 page=128 baseline_entry_visits=32768 indexed_entry_visits=0 samples_ns=[193, 196, 196, 196, 197, 198, 219, 226, 325] median_ns=197 p95_ns=325 concurrent_probe_samples_ns=[1496, 1586, 1649, 2012, 2350, 4392, 5400, 6272, 8040] concurrent_probe_median_ns=2350 concurrent_probe_p95_ns=8040
+history=32768 queued=256 page=128 baseline_entry_visits=66048 indexed_entry_visits=257 samples_ns=[103072, 103588, 103875, 110804, 113005, 114331, 116557, 119364, 140058] median_ns=113005 p95_ns=140058 concurrent_probe_samples_ns=[2185, 2195, 2195, 2195, 2201, 2275, 2292, 2417, 8295] concurrent_probe_median_ns=2201 concurrent_probe_p95_ns=8295
+history=32768 queued=4096 page=128 baseline_entry_visits=1179648 indexed_entry_visits=4127 samples_ns=[1640112, 1645232, 1658563, 1714320, 1718449, 1755906, 1768763, 1779797, 1887239] median_ns=1718449 p95_ns=1887239 concurrent_probe_samples_ns=[1735, 1758, 1851, 2734, 2822, 3135, 3308, 4191, 8041] concurrent_probe_median_ns=2822 concurrent_probe_p95_ns=8041
+history=32768 queued=32768 page=128 baseline_entry_visits=16777216 indexed_entry_visits=33023 samples_ns=[37003890, 39921187, 41797112, 42164340, 42324326, 42542108, 43501829, 44119791, 45115720] median_ns=42324326 p95_ns=45115720 concurrent_probe_samples_ns=[7963, 8039, 8504, 8664, 9201, 9249, 9345, 9492, 21144603] concurrent_probe_median_ns=9201 concurrent_probe_p95_ns=21144603
+
+```
+
+## Acceptance baseline run 1
+
+```text
+   Compiling qubit-task v0.11.0 (/data/working/qubit/rust-common/rs-task-baseline-20261110)
+    Finished `bench` profile [optimized] target(s) in 1.29s
+     Running benches/memory_accept.rs (target/release/deps/memory_accept-940921d138088c7d)
+memory_accept mode=release target=x86_64-linux workers=56 batch=128 warmup_batches=3 measured_batches=9 payload_bytes=64 budget_bytes=67108864
+history=0 samples=9 min_ns_per_accept=790 median_ns_per_accept=828 p95_ns_per_accept=1747 max_ns_per_accept=1747
+history=256 samples=9 min_ns_per_accept=922 median_ns_per_accept=930 p95_ns_per_accept=1467 max_ns_per_accept=1467
+history=4096 samples=9 min_ns_per_accept=1161 median_ns_per_accept=1190 p95_ns_per_accept=1246 max_ns_per_accept=1246
+history=32768 samples=9 min_ns_per_accept=1381 median_ns_per_accept=2264 p95_ns_per_accept=2553 max_ns_per_accept=2553
+
+```
+
+## Acceptance baseline run 2
+
+```text
+   Compiling qubit-metadata v0.7.0 (/data/working/qubit/rust-common/rs-metadata)
+   Compiling qubit-task v0.11.0 (/data/working/qubit/rust-common/rs-task-baseline-20261110)
+    Finished `bench` profile [optimized] target(s) in 6.39s
+     Running benches/memory_accept.rs (target/release/deps/memory_accept-940921d138088c7d)
+memory_accept mode=release target=x86_64-linux workers=56 batch=128 warmup_batches=3 measured_batches=9 payload_bytes=64 budget_bytes=67108864
+history=0 samples=9 min_ns_per_accept=974 median_ns_per_accept=1078 p95_ns_per_accept=1139 max_ns_per_accept=1139
+history=256 samples=9 min_ns_per_accept=900 median_ns_per_accept=928 p95_ns_per_accept=1096 max_ns_per_accept=1096
+history=4096 samples=9 min_ns_per_accept=909 median_ns_per_accept=922 p95_ns_per_accept=938 max_ns_per_accept=938
+history=32768 samples=9 min_ns_per_accept=1051 median_ns_per_accept=1129 p95_ns_per_accept=1228 max_ns_per_accept=1228
+
+```
+
+## Acceptance indexed run 1
+
+```text
+   Compiling qubit-task v0.11.0 (/data/working/qubit/rust-common/rs-task-worktree-20261110)
+    Finished `bench` profile [optimized] target(s) in 0.81s
+     Running benches/memory_accept.rs (target/release/deps/memory_accept-940921d138088c7d)
+memory_accept mode=release target=x86_64-linux workers=56 batch=128 warmup_batches=3 measured_batches=9 payload_bytes=64 budget_bytes=67108864
+history=0 samples=9 min_ns_per_accept=1163 median_ns_per_accept=1215 p95_ns_per_accept=1365 max_ns_per_accept=1365
+history=256 samples=9 min_ns_per_accept=1013 median_ns_per_accept=1096 p95_ns_per_accept=1234 max_ns_per_accept=1234
+history=4096 samples=9 min_ns_per_accept=1061 median_ns_per_accept=1084 p95_ns_per_accept=1434 max_ns_per_accept=1434
+history=32768 samples=9 min_ns_per_accept=1245 median_ns_per_accept=1304 p95_ns_per_accept=1399 max_ns_per_accept=1399
+
+```
+
+## Acceptance indexed run 2
+
+```text
+   Compiling qubit-metadata v0.7.0 (/data/working/qubit/rust-common/rs-metadata)
+   Compiling qubit-task v0.11.0 (/data/working/qubit/rust-common/rs-task-worktree-20261110)
+    Finished `bench` profile [optimized] target(s) in 5.67s
+     Running benches/memory_accept.rs (target/release/deps/memory_accept-940921d138088c7d)
+memory_accept mode=release target=x86_64-linux workers=56 batch=128 warmup_batches=3 measured_batches=9 payload_bytes=64 budget_bytes=67108864
+history=0 samples=9 min_ns_per_accept=1156 median_ns_per_accept=1205 p95_ns_per_accept=1275 max_ns_per_accept=1275
+history=256 samples=9 min_ns_per_accept=1018 median_ns_per_accept=1088 p95_ns_per_accept=1229 max_ns_per_accept=1229
+history=4096 samples=9 min_ns_per_accept=1047 median_ns_per_accept=1064 p95_ns_per_accept=1150 max_ns_per_accept=1150
+history=32768 samples=9 min_ns_per_accept=1266 median_ns_per_accept=1301 p95_ns_per_accept=1974 max_ns_per_accept=1974
+
+```

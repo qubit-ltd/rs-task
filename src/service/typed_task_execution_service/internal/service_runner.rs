@@ -49,6 +49,40 @@ static SCHEDULER_STOP_GATE: std::sync::OnceLock<parking_lot::Mutex<Option<Schedu
     std::sync::OnceLock::new();
 
 #[cfg(test)]
+struct ExternalCancelGateRegistration {
+    store_identity: usize,
+    gate: std::sync::Arc<ExternalCancelSuccessGate>,
+}
+
+#[cfg(test)]
+static EXTERNAL_CANCEL_SUCCESS_GATE: std::sync::OnceLock<parking_lot::Mutex<Option<ExternalCancelGateRegistration>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct ExternalCancelSuccessGate {
+    pause_next: std::sync::atomic::AtomicBool,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    finish_handler: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+async fn external_cancel_success_gate(core: &std::sync::Arc<TypedServiceCore>) {
+    let store_identity = std::sync::Arc::as_ptr(&core.store) as *const () as usize;
+    let gate = EXTERNAL_CANCEL_SUCCESS_GATE
+        .get_or_init(Default::default)
+        .lock()
+        .as_ref()
+        .filter(|registration| registration.store_identity == store_identity)
+        .map(|registration| std::sync::Arc::clone(&registration.gate));
+    if let Some(gate) = gate.filter(|gate| gate.pause_next.swap(false, Ordering::AcqRel)) {
+        gate.reached.notify_one();
+        gate.finish_handler.notify_one();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), gate.release.notified()).await;
+    }
+}
+
+#[cfg(test)]
 struct SchedulerStopGate {
     pause_next: std::sync::atomic::AtomicBool,
     reached: tokio::sync::Notify,
@@ -255,14 +289,22 @@ impl ServiceRunner {
             }
         }
         .await;
-        match &result {
-            ExternalCancelResult::Success => {
-                core.external_cancellations
-                    .lock()
-                    .insert(key, ExternalCancelEntry::Succeeded);
-            }
-            _ => {
-                core.external_cancellations.lock().remove(&key);
+        #[cfg(test)]
+        if matches!(result, ExternalCancelResult::Success) {
+            external_cancel_success_gate(&core).await;
+        }
+        {
+            let mut entries = core.external_cancellations.lock();
+            if matches!(entries.get(&key), Some(ExternalCancelEntry::InFlight(current)) if Arc::ptr_eq(current, &flight))
+            {
+                match &result {
+                    ExternalCancelResult::Success => {
+                        entries.insert(key, ExternalCancelEntry::Succeeded);
+                    }
+                    _ => {
+                        entries.remove(&key);
+                    }
+                }
             }
         }
         if let ExternalCancelResult::ServiceFailed(message) = &result {
@@ -886,6 +928,7 @@ impl ServiceRunner {
                 completed_scan = true;
                 break;
             }
+            tokio::task::yield_now().await;
         }
         Ok(completed_scan && !saw_anchor && fairness.anchor.is_some())
     }
@@ -1325,5 +1368,216 @@ mod scheduler_shutdown_tests {
             .expect("shutdown supervisor completes")
             .expect("shutdown task completes")
             .expect("shutdown succeeds");
+    }
+}
+
+#[cfg(test)]
+mod external_cancel_race_tests {
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use qubit_codec::ValueBytesCodecDescriptor;
+    use qubit_codec::ValueBytesCodecRegistry;
+    use qubit_codec::ValueCodecId;
+    use qubit_codec::ValueCodecRegistration;
+    use qubit_codec::ValueCodecRegistrationSource;
+    use qubit_id::Id;
+    use qubit_id::IdGenerationError;
+    use qubit_id::IdGenerator;
+    use qubit_model_id::HasModelId;
+    use qubit_model_id::ModelIdBuf;
+
+    use super::EXTERNAL_CANCEL_SUCCESS_GATE;
+    use super::ExternalCancelGateRegistration;
+    use super::ExternalCancelSuccessGate;
+    use crate::handler::TaskHandler;
+    use crate::handler::TaskRunOutcome;
+    use crate::handler::typed::CancellationMode;
+    use crate::handler::typed::TaskHandlerDescriptor;
+    use crate::handler::typed::TypedTaskContext;
+    use crate::model::TaskState;
+    use crate::model::typed::TaskRequest;
+    use crate::store::MemoryTaskStore;
+    use crate::store::TaskFuture;
+
+    #[derive(Clone)]
+    struct Payload;
+
+    impl HasModelId for Payload {
+        const MODEL_ID: qubit_model_id::ModelId = qubit_model_id::ModelId::new("test.ExternalCancelRacePayload");
+    }
+
+    #[derive(Default)]
+    struct PayloadCodec;
+
+    impl qubit_codec::ValueEncoder<Payload> for PayloadCodec {
+        type Output = Vec<u8>;
+        type Error = std::convert::Infallible;
+
+        fn encode(&mut self, _value: &Payload) -> Result<Vec<u8>, Self::Error> {
+            Ok(vec![])
+        }
+    }
+
+    impl qubit_codec::ValueDecoder<[u8]> for PayloadCodec {
+        type Output = Payload;
+        type Error = std::io::Error;
+
+        fn decode(&mut self, _bytes: &[u8]) -> Result<Payload, Self::Error> {
+            Ok(Payload)
+        }
+    }
+
+    static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<PayloadCodec, Payload>();
+    static CODEC_REGISTRATION: ValueCodecRegistration<ValueBytesCodecDescriptor> = ValueCodecRegistration::new(
+        ValueCodecId::new("test.external_cancel_race.codec"),
+        &CODEC_DESCRIPTOR,
+        ValueCodecRegistrationSource::new("qubit-task", "service_runner", "unit-test", 1),
+    );
+
+    struct TestIds(AtomicU64);
+
+    impl IdGenerator<Id, IdGenerationError> for TestIds {
+        fn generate(&self) -> Result<Id, IdGenerationError> {
+            Ok(Id::new(self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
+        }
+    }
+
+    struct FinishWhenGateReached(Arc<tokio::sync::Notify>);
+
+    impl TaskHandler<Payload> for FinishWhenGateReached {
+        fn run<'a>(
+            &'a self,
+            _payload: Payload,
+            _context: TypedTaskContext,
+        ) -> TaskFuture<'a, crate::handler::TaskRunResult> {
+            let gate_reached = Arc::clone(&self.0);
+            Box::pin(async move {
+                gate_reached.notified().await;
+                Ok(TaskRunOutcome::Cancelled)
+            })
+        }
+    }
+
+    struct GateCleanup(usize);
+
+    impl Drop for GateCleanup {
+        fn drop(&mut self) {
+            let mut registration = EXTERNAL_CANCEL_SUCCESS_GATE.get_or_init(Default::default).lock();
+            if registration
+                .as_ref()
+                .is_some_and(|entry| entry.store_identity == self.0)
+            {
+                *registration = None;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_external_cancel_success_after_finish_does_not_reinsert_cache() {
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+        let store = Arc::new(MemoryTaskStore::new(8));
+        let store_identity = Arc::as_ptr(&store) as usize;
+        let gate = Arc::new(ExternalCancelSuccessGate {
+            pause_next: std::sync::atomic::AtomicBool::new(true),
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            finish_handler: Arc::new(tokio::sync::Notify::new()),
+        });
+        *EXTERNAL_CANCEL_SUCCESS_GATE.get_or_init(Default::default).lock() = Some(ExternalCancelGateRegistration {
+            store_identity,
+            gate: Arc::clone(&gate),
+        });
+        let _cleanup = GateCleanup(store_identity);
+        let hook: crate::handler::typed::ExternalCancellationHook =
+            Arc::new(move |_, _| Box::pin(async move { Ok(()) }));
+        let mut builder = crate::service::TaskExecutionServiceBuilder::new(
+            store,
+            Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap()),
+            Arc::new(TestIds(AtomicU64::new(701))),
+        )
+        .max_running_tasks(NonZeroUsize::new(1).unwrap());
+        builder
+            .handlers_mut()
+            .register_with_cancellation_hook::<Payload, _>(
+                TaskHandlerDescriptor {
+                    kind_id: "test.external-cancel-race".into(),
+                    payload_type_id: ModelIdBuf::parse("test.ExternalCancelRacePayload").unwrap(),
+                    accepted_schema_versions: vec![1],
+                    cancellation_mode: CancellationMode::ExternalHook,
+                },
+                Arc::new(FinishWhenGateReached(Arc::clone(&gate.finish_handler))),
+                "unit-test",
+                hook,
+            )
+            .unwrap();
+        let service = builder.build().await.expect("service starts");
+        let mut request = TaskRequest::new(
+            "test.external-cancel-race",
+            1,
+            ValueCodecId::new("test.external_cancel_race.codec"),
+            Payload,
+        );
+        request.resource_limit.cpu_slots = 1;
+        let accepted = service.submit(request).await.expect("task submits");
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                if service
+                    .get(accepted.id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|s| s.state == TaskState::Running)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handler starts");
+        let cancel_service = service.clone();
+        let cancel = tokio::spawn(async move { cancel_service.cancel(accepted.id).await });
+        if tokio::time::timeout(TIMEOUT, gate.reached.notified()).await.is_err() {
+            gate.release.notify_one();
+            gate.finish_handler.notify_one();
+            let _ = tokio::time::timeout(TIMEOUT, cancel).await;
+            let _ = tokio::time::timeout(TIMEOUT, service.shutdown()).await;
+            panic!("successful external cancel reaches pre-cache-update gate");
+        }
+        let key = (accepted.id, 1);
+        let finish = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                let summary = service.get(accepted.id).await.unwrap().unwrap();
+                let cache_is_empty = !service.core.external_cancellations.lock().contains_key(&key);
+                if summary.state.is_terminal() && cache_is_empty {
+                    break summary;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if finish.is_err() {
+            gate.release.notify_one();
+            gate.finish_handler.notify_one();
+            let _ = tokio::time::timeout(TIMEOUT, cancel).await;
+            let _ = tokio::time::timeout(TIMEOUT, service.shutdown()).await;
+            panic!("handler finishes while success path is gated");
+        }
+        assert!(!service.core.external_cancellations.lock().contains_key(&key));
+        gate.release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(TIMEOUT, cancel)
+                .await
+                .expect("external cancellation flight resolves")
+                .expect("cancel task joins")
+                .expect("external cancel succeeds"),
+            crate::service::CancelOutcome::CancellationRequested,
+        );
+        assert!(!service.core.external_cancellations.lock().contains_key(&key));
+        tokio::time::timeout(TIMEOUT, service.shutdown())
+            .await
+            .expect("service shutdown completes")
+            .expect("service shuts down");
     }
 }

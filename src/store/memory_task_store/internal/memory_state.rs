@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -21,6 +22,11 @@ pub(in crate::store::memory_task_store) struct MemoryState {
     pub(in crate::store::memory_task_store) last_owner_epoch: u64,
     /// Encoded tasks retained by the new typed request path.
     pub(in crate::store::memory_task_store) encoded_tasks: BTreeMap<EncodedTaskId, StoredTask>,
+    /// Queued task IDs in acceptance order.
+    pub(in crate::store::memory_task_store) queued_order: BTreeSet<(u64, EncodedTaskId)>,
+    /// Test-only count of entries visited by the last ready scan.
+    #[cfg(test)]
+    pub(in crate::store::memory_task_store) ready_scan_visits: std::cell::Cell<usize>,
     /// Encoded idempotency keys mapped to their task IDs.
     pub(in crate::store::memory_task_store) encoded_idempotency: HashMap<String, EncodedTaskId>,
     /// Encoded terminal task IDs in eviction order.
@@ -65,6 +71,9 @@ impl MemoryState {
     /// task is retained, none of the indexes or accounting fields are changed.
     pub(in crate::store::memory_task_store) fn remove_encoded_task(&mut self, id: EncodedTaskId) -> Option<StoredTask> {
         let task = self.encoded_tasks.remove(&id)?;
+        if task.summary.state == crate::model::TaskState::Queued {
+            self.queued_order.remove(&(task.summary.accepted_at_ms, id));
+        }
         self.retained_payload_bytes -= task.request.payload.bytes.len();
         if !task.summary.state.is_terminal() {
             debug_assert!(self.unfinished_records > 0);
