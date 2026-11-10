@@ -5,6 +5,7 @@
 ../rs-event-bus	https://github.com/qubit-ltd/rs-event-bus	35f9442f7053173b43c100aba5d52ea2b7f33ae3
 ../rs-event-bus-redis	https://github.com/qubit-ltd/rs-event-bus-redis	8eb3c5174644cff88e72d1f591e2618f6e0e4c22
 ../rs-id	https://github.com/qubit-ltd/rs-id	main
+../rs-metadata	https://github.com/qubit-ltd/rs-metadata	main
 ../rs-model-metadata	https://github.com/qubit-ltd/rs-model-metadata	main
 ../rs-progress	https://github.com/qubit-ltd/rs-progress	main
 ../rs-redact	https://github.com/qubit-ltd/rs-redact	main
