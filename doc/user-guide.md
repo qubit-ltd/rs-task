@@ -14,7 +14,7 @@ The runnable typed examples are [`examples/task_service.rs`](../examples/task_se
 
 ## Main concepts
 
-- **Task identity:** each accepted task has an `rs-id::Id` wrapped by `TaskId`. Inject an `IdGenerator`; Snowflake generators need distinct node IDs across processes and suitable clock configuration. Synchronous generation runs on Tokio's blocking pool. Cancelling submission does not stop an already-started generator call, so it may consume an ID without accepting a task; uncancelled submissions remain part of the shutdown admission boundary. Custom generators should return eventually and must not depend on executor-local state. Runtime shutdown can wait for a blocking call; this adds scheduling overhead but provides no hard timeout or unlimited-concurrency guarantee.
+- **Task identity:** each accepted task has an `rs-id::Id` wrapped by `TaskId`. Inject an `IdGenerator` that produces IDs unique across process restarts; Snowflake generators need distinct node IDs across processes and suitable clock configuration. Synchronous generation runs on Tokio's blocking pool. Cancelling submission does not stop an already-started generator call, so it may consume an ID without accepting a task; uncancelled submissions remain part of the shutdown admission boundary. Custom generators should return eventually and must not depend on executor-local state. Runtime shutdown can wait for a blocking call; this adds scheduling overhead but provides no hard timeout or unlimited-concurrency guarantee.
 - **Routing and classification:** `kind_id` chooses a handler. `category` is an independent business filter for queries.
 - **Payload compatibility:** `Payload<T>` binds `type_id`, `schema_version`, and `codec_id` to the value. A handler accepts one payload type ID and an explicit set of schema versions. A codec may serve multiple schema versions.
 - **Resource admission:** CPU, GPU, memory, disk, and custom units are concurrency quotas. They reserve capacity inside the execution engine; they do not pin CPUs, isolate GPUs, or enforce operating-system memory or disk use.
@@ -140,6 +140,6 @@ FROM task_event_outbox_quarantine
 WHERE task_id = ?1 AND state_version = ?2;
 ```
 
-Do not quarantine a record merely to bypass normal network retries. SQLite schema v8 retains archived rows independently of terminal task pruning; database retention is managed by the application. Pruning skips tasks with active outbox rows and atomically stores a terminal state checkpoint before removing the task. Checkpoints are not automatically expired, so their count and disk use grow with pruned tasks.
+Do not quarantine a record merely to bypass normal network retries. SQLite schema v8 retains archived rows independently of terminal task pruning; database retention is managed by the application. Pruning skips tasks with active outbox rows and atomically stores a terminal state checkpoint before removing the task. Checkpoints are not automatically expired, so their count and disk use grow with pruned tasks. SQLite reserves each pruned task ID while its checkpoint exists; `MemoryTaskStore` does not retain pruned identities.
 
 See the [detailed design](task_execution_service_design.en.md), [migration guide](migration.md), and [API reference](https://docs.rs/qubit-task) for more context.

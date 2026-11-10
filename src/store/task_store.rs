@@ -176,7 +176,10 @@ pub trait TaskStore: Send + Sync {
     ///
     /// # Parameters
     ///
-    /// * `id` - Stable task identity assigned to this acceptance.
+    /// * `id` - Stable task identity assigned to this acceptance. The
+    ///   application must avoid reusing IDs across process restarts. SQLite
+    ///   also treats a retained terminal checkpoint as an existing identity
+    ///   after its task row is pruned.
     /// * `request` - Encoded request and metadata produced by the codec
     ///   registry.
     ///
@@ -187,8 +190,9 @@ pub trait TaskStore: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error if the identity conflicts with existing work, the
-    /// request exceeds store limits, or persistence fails.
+    /// Returns [`StoreError::DuplicateTask`] if the identity conflicts with
+    /// existing work or a retained SQLite terminal checkpoint, or another
+    /// error if the request exceeds store limits or persistence fails.
     fn accept_encoded<'a>(
         &'a self,
         id: TypedTaskId,

@@ -94,13 +94,16 @@ impl TypedTaskExecutionServiceBuilder {
     /// Creates a builder with a store, byte codec registry, and ID generator.
     ///
     /// Snowflake generators used across processes must have distinct node IDs
-    /// and a shared, appropriate clock configuration.
+    /// and a shared, appropriate clock configuration. The generator must keep
+    /// task IDs unique across process restarts; SQLite rejects reuse while a
+    /// terminal checkpoint for that ID remains.
     ///
     /// # Parameters
     ///
     /// * `store` - Durable task store used for acceptance and lifecycle state.
     /// * `codecs` - Registry for encoding and decoding typed request values.
-    /// * `id_generator` - Generator used to assign task identifiers.
+    /// * `id_generator` - Generator used to assign task identifiers uniquely
+    ///   across process restarts.
     #[must_use = "the builder must be configured and built to create a service"]
     pub fn new(
         store: Arc<dyn TaskStore>,

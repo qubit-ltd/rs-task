@@ -41,13 +41,13 @@ let store = SqliteTaskStore::open("tasks.sqlite")?;
 
 公开的 `TaskStore` 是带类型的持久化契约，由 `MemoryTaskStore` 和 `SqliteTaskStore` 直接实现。自定义实现应使用当前 `qubit_task::model` 类型，并按所实现的方法提供带类型任务接纳、任务和摘要读取、带预期状态版本的生命周期迁移、进度更新、keyset 历史查询、owner fence 与终态清理。outbox 隔离能力有默认实现，会返回 `UnsupportedCapability`；自定义 store 还必须实现必需的 `get_state_checkpoint` 方法，在权威状态不可用时返回 `None`；自定义 store 只有实现原子归档并删除操作后，才支持操作员隔离。移除依赖旧 UUID 请求和恢复类型的适配层；`LegacyTaskStore`、`RecoveryPage` 和 `scan_unfinished` 不属于当前公开契约。
 
-任务身份使用 `TaskId`，处理器路由使用 `kind_id`，应用筛选使用 `category`；`Payload<T>` 负责绑定带类型 payload 的 `type_id`、`schema_version` 和 `codec_id`。历史分页采用排他 keyset 游标，顺序为 `(accepted_at_ms, numeric TaskId)`，不是 offset。完整流程和当前方法说明见[带类型任务 API 指南](typed-task-api.zh_CN.md)。
+任务身份使用 `TaskId`，处理器路由使用 `kind_id`，应用筛选使用 `category`；`Payload<T>` 负责绑定带类型 payload 的 `type_id`、`schema_version` 和 `codec_id`。历史分页采用排他 keyset 游标，顺序为 `(accepted_at_ms, numeric TaskId)`，不是 offset。注入的 ID generator 必须保证跨进程重启唯一：SQLite 会在终态检查点存在期间拒绝复用，`MemoryTaskStore` 清理后会释放 ID。清理后可复用幂等键，但不能因此复用原 `TaskId`。持久化重试期限时，正延迟会向上取整到整毫秒，最多增加不足 1 毫秒，但不代表实际墙钟等待保证。已有唯一 ID generator 的应用无需迁移；检查点仍存在时复用 ID 会得到 `DuplicateTaskId`，不会自动修复历史冲突。完整流程和当前方法说明见[带类型任务 API 指南](typed-task-api.zh_CN.md)。
 
 ## 保留通知投递边界
 
 启用生命周期通知时，SQLite 会在同一事务中写入任务状态迁移和 outbox 行。provider 接纳前，记录会保留并重试，因此可能重复发布；收到 `Accepted` 后，outbox 行会被删除。该响应不保证 Redis 已持久化或消费者已收到通知，因此不承诺消费者至少一次收到通知。这与任务 handler 的至少一次执行恢复不同。消费者应按 `(TaskId, state_version)` 去重，并在版本缺口时调用 `TaskExecutionService::get_state_checkpoint` 查询权威当前状态。结果为 `None`、查询错误或检查点版本低于通知版本时不得 ACK，应保留在 Retry 路径。检查点只能恢复当前状态，不能重放遗漏的状态迁移及其业务副作用。可用 `TaskExecutionService::notification_failure()` 检查失败头部，再用 `quarantine_failed_notification(...)` 显式归档隔离；隔离会有意丢失该通知，且不会自动补发。
 
-持久 outbox 由 `SqliteTaskStore` 提供；`MemoryTaskStore` 不支持。启用 publisher 不会补发启用前提交的生命周期状态。清理会跳过仍有活动 outbox 行的任务，并在删除前原子保存最小终态检查点。检查点不会自动过期，数量和磁盘占用会随清理任务增长。provider 要求、消费者 checkpoint、监控和关闭行为见[发布生命周期变化](user-guide.zh_CN.md#发布任务生命周期变化)。
+持久 outbox 由 `SqliteTaskStore` 提供；`MemoryTaskStore` 不支持。启用 publisher 不会补发启用前提交的生命周期状态。清理会跳过仍有活动 outbox 行的任务，并在删除前原子保存最小终态检查点。检查点不会自动过期，数量和磁盘占用会随清理任务增长。检查点仍存在时，SQLite 会拒绝复用对应 `TaskId`；不会自动修复已经存在的身份冲突。provider 要求、消费者 checkpoint、监控和关闭行为见[发布生命周期变化](user-guide.zh_CN.md#发布任务生命周期变化)。
 
 ## 验证应用迁移
 
