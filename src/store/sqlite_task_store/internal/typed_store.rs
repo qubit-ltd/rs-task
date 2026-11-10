@@ -211,8 +211,10 @@ pub(in crate::store::sqlite_task_store) fn next_retry_deadline(
 ///
 /// # Errors
 ///
-/// Returns an error for a conflicting ID or idempotency key, invalid request
-/// data, or a failed SQLite or serialization operation.
+/// Returns an error for an ID present in either retained tasks or terminal
+/// checkpoints, a conflicting idempotency key, invalid request data, or a
+/// failed SQLite or serialization operation. A retained checkpoint preserves
+/// the task identity after its task row has been pruned.
 pub(in crate::store::sqlite_task_store) fn accept_encoded(
     connection: &Connection,
     id: TaskId,
@@ -255,9 +257,14 @@ pub(in crate::store::sqlite_task_store) fn accept_encoded(
     }
     let id_key = id.to_padded_decimal();
     let duplicate: bool = transaction
-        .query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)", [&id_key], |row| {
-            row.get(0)
-        })
+        .query_row(
+            concat!(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1) ",
+                "OR EXISTS(SELECT 1 FROM task_terminal_checkpoints WHERE task_id=?1)",
+            ),
+            [&id_key],
+            |row| row.get(0),
+        )
         .map_err(failure)?;
     if duplicate {
         return Err(StoreError::DuplicateTask);

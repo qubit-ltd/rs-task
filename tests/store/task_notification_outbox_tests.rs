@@ -374,6 +374,39 @@ async fn test_terminal_prune_skips_outbox_then_retains_checkpoint_atomically() {
     assert_eq!(checkpoint.id, id);
     assert_eq!(checkpoint.state_version, terminal.state_version);
     assert_eq!(checkpoint.state, terminal.state);
+    let outbox_count_before_collision = store
+        .list_event_outbox(128)
+        .await
+        .expect("outbox before collision")
+        .len();
+    assert!(matches!(
+        store
+            .accept_encoded(
+                id,
+                StoredTaskRequest {
+                    idempotency_key: None,
+                    ..request()
+                }
+            )
+            .await,
+        Err(StoreError::DuplicateTask)
+    ));
+    assert_eq!(
+        store
+            .list_event_outbox(128)
+            .await
+            .expect("outbox after collision")
+            .len(),
+        outbox_count_before_collision,
+        "a rejected identity does not append notification snapshots"
+    );
+    let checkpoint_after_collision = store
+        .get_state_checkpoint(id)
+        .await
+        .expect("checkpoint after collision")
+        .expect("pruned checkpoint remains authoritative");
+    assert_eq!(checkpoint_after_collision.state_version, terminal.state_version);
+    assert_eq!(checkpoint_after_collision.state, terminal.state);
     assert!(
         store
             .accept_encoded(TaskId::from_id(Id::new(62)), request())

@@ -62,7 +62,8 @@ mod internal;
 mod owner_lock_tests;
 
 /// SQLite-backed history with an exclusive OS lock for one active service
-/// process.
+/// process. Terminal checkpoints retained after pruning also reserve their
+/// task IDs, so an identity cannot be reused while its checkpoint remains.
 ///
 /// # Examples
 ///

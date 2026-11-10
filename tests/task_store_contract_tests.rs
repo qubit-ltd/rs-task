@@ -14,12 +14,44 @@ use std::env;
 #[cfg(feature = "sqlite")]
 use std::fs;
 use std::num::NonZeroUsize;
+#[cfg(feature = "sqlite")]
+use std::sync::Arc;
+#[cfg(feature = "sqlite")]
+use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "sqlite")]
+use std::sync::atomic::Ordering;
 
 #[cfg(feature = "sqlite")]
 use common::sqlite_paths;
+#[cfg(feature = "sqlite")]
+use qubit_codec::ValueBytesCodecDescriptor;
+#[cfg(feature = "sqlite")]
+use qubit_codec::ValueBytesCodecRegistration;
+#[cfg(feature = "sqlite")]
+use qubit_codec::ValueBytesCodecRegistry;
+#[cfg(feature = "sqlite")]
+use qubit_codec::ValueCodecId;
+#[cfg(feature = "sqlite")]
+use qubit_codec::ValueCodecRegistrationSource;
 use qubit_id::Id;
 use qubit_metadata::Metadata;
+#[cfg(feature = "sqlite")]
+use qubit_model_id::HasModelId;
+#[cfg(feature = "sqlite")]
+use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
+#[cfg(feature = "sqlite")]
+use qubit_task::CancellationMode;
+#[cfg(feature = "sqlite")]
+use qubit_task::TaskContext;
+#[cfg(feature = "sqlite")]
+use qubit_task::TaskExecutionServiceBuilder;
+#[cfg(feature = "sqlite")]
+use qubit_task::TaskHandler;
+#[cfg(feature = "sqlite")]
+use qubit_task::TaskHandlerDescriptor;
+#[cfg(feature = "sqlite")]
+use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::ResourceRequest;
 use qubit_task::model::StartCommand;
 use qubit_task::model::StoredPayload;
@@ -27,11 +59,15 @@ use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskId;
 #[cfg(feature = "sqlite")]
 use qubit_task::model::TaskOutput;
+#[cfg(feature = "sqlite")]
+use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
 use qubit_task::model::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
+#[cfg(feature = "sqlite")]
+use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 #[cfg(feature = "sqlite")]
 use rusqlite::Connection;
@@ -40,6 +76,81 @@ use tokio::test as tokio_test;
 use uuid::Uuid;
 
 fn assert_task_store_is_object_safe(_: &dyn TaskStore) {}
+
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Copy)]
+struct IdentityProbe(u8);
+
+#[cfg(feature = "sqlite")]
+impl HasModelId for IdentityProbe {
+    const MODEL_ID: ModelId = ModelId::new("test.IdentityProbe");
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Default)]
+struct IdentityProbeCodec;
+
+#[cfg(feature = "sqlite")]
+impl qubit_codec::ValueEncoder<IdentityProbe> for IdentityProbeCodec {
+    type Output = Vec<u8>;
+    type Error = std::convert::Infallible;
+
+    fn encode(&mut self, value: &IdentityProbe) -> Result<Vec<u8>, Self::Error> {
+        Ok(vec![value.0])
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl qubit_codec::ValueDecoder<[u8]> for IdentityProbeCodec {
+    type Output = IdentityProbe;
+    type Error = std::io::Error;
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<IdentityProbe, Self::Error> {
+        bytes
+            .first()
+            .copied()
+            .map(IdentityProbe)
+            .ok_or_else(|| std::io::Error::other("empty probe"))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+static IDENTITY_PROBE_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<IdentityProbeCodec, IdentityProbe>();
+#[cfg(feature = "sqlite")]
+static IDENTITY_PROBE_REGISTRATION: ValueBytesCodecRegistration = ValueBytesCodecRegistration::new(
+    ValueCodecId::new("task_store_contract.identity_probe"),
+    &IDENTITY_PROBE_DESCRIPTOR,
+    ValueCodecRegistrationSource::new("qubit-task", "task_store_contract_tests", file!(), 1),
+);
+
+#[cfg(feature = "sqlite")]
+struct SequenceIds(AtomicUsize);
+
+#[cfg(feature = "sqlite")]
+impl qubit_id::IdGenerator for SequenceIds {
+    fn generate(&self) -> Result<Id, qubit_id::IdGenerationError> {
+        let generated = match self.0.fetch_add(1, Ordering::Relaxed) {
+            0 => 883,
+            _ => 886,
+        };
+        Ok(Id::new(generated))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+struct IdentityProbeHandler;
+
+#[cfg(feature = "sqlite")]
+impl TaskHandler<IdentityProbe> for IdentityProbeHandler {
+    fn run<'a>(
+        &'a self,
+        _value: IdentityProbe,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
+    }
+}
 
 #[test]
 fn test_typed_task_store_is_object_safe_and_reports_capabilities() {
@@ -218,6 +329,208 @@ async fn test_sqlite_store_obeys_terminal_prune_contract() {
     let store = SqliteTaskStore::open(&path).expect("typed sqlite store opens");
     support::store_contract::check_terminal_prune_contract(&store).await;
     drop(store);
+    for file in [
+        &path,
+        &sqlite_paths::owner_lock_path(&path),
+        &path.with_extension("sqlite-wal"),
+        &path.with_extension("sqlite-shm"),
+    ] {
+        let _ = fs::remove_file(file);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio_test]
+async fn test_sqlite_pruned_task_identity_survives_checkpoint_and_reopen() {
+    let path = env::temp_dir().join(format!("rs-task-identity-contract-{}.sqlite", Uuid::new_v4()));
+    let id = TaskId::from_id(Id::new(883));
+    let request = StoredTaskRequest {
+        kind_id: "identity.contract".into(),
+        category: None,
+        payload: StoredPayload {
+            type_id: ModelIdBuf::parse("test.IdentityContract").unwrap(),
+            schema_version: 1,
+            codec_id: "qubit.bytes.json".into(),
+            bytes: vec![1],
+        },
+        metadata: Metadata::new(),
+        resource_limit: ResourceRequest::default(),
+        correlation_key: None,
+        idempotency_key: Some("identity-key".into()),
+    };
+    let store = SqliteTaskStore::open(&path).expect("open typed sqlite store");
+    let accepted = store.accept_encoded(id, request.clone()).await.expect("accept task");
+    assert!(
+        !store
+            .accept_encoded(TaskId::from_id(Id::new(884)), request.clone())
+            .await
+            .unwrap()
+            .created
+    );
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: 1,
+        })
+        .await
+        .unwrap();
+    store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: Some(2),
+            output: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .prune_terminal_before(i64::MAX as u64, NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap(),
+        1
+    );
+    let checkpoint = store.get_state_checkpoint(id).await.unwrap().unwrap();
+    assert_eq!(checkpoint.state, TaskState::Succeeded);
+    assert_eq!(checkpoint.state_version, 2);
+    assert!(store.get_encoded_task(id).await.unwrap().is_none());
+    drop(store);
+
+    let store = SqliteTaskStore::open(&path).expect("reopen typed sqlite store");
+    let same_identity = store
+        .accept_encoded(
+            id,
+            StoredTaskRequest {
+                idempotency_key: None,
+                ..request.clone()
+            },
+        )
+        .await;
+    assert!(matches!(
+        same_identity,
+        Err(qubit_task::store::StoreError::DuplicateTask)
+    ));
+    let checkpoint_after = store.get_state_checkpoint(id).await.unwrap().unwrap();
+    assert_eq!(checkpoint_after.state, checkpoint.state);
+    assert_eq!(checkpoint_after.state_version, checkpoint.state_version);
+    assert!(store.get_encoded_task(id).await.unwrap().is_none());
+    let released_key = store
+        .accept_encoded(TaskId::from_id(Id::new(885)), request)
+        .await
+        .unwrap();
+    assert!(
+        released_key.created,
+        "pruning releases the idempotency key for a new ID"
+    );
+    drop(store);
+    for file in [
+        &path,
+        &sqlite_paths::owner_lock_path(&path),
+        &path.with_extension("sqlite-wal"),
+        &path.with_extension("sqlite-shm"),
+    ] {
+        let _ = fs::remove_file(file);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio_test]
+async fn test_sqlite_duplicate_generated_identity_does_not_fault_service() {
+    let path = env::temp_dir().join(format!("rs-task-service-identity-{}.sqlite", Uuid::new_v4()));
+    let id = TaskId::from_id(Id::new(883));
+    let store = SqliteTaskStore::open(&path).expect("open typed sqlite store");
+    let accepted = store
+        .accept_encoded(
+            id,
+            StoredTaskRequest {
+                kind_id: "identity.service".into(),
+                category: None,
+                payload: StoredPayload {
+                    type_id: ModelIdBuf::parse("test.IdentityProbe").unwrap(),
+                    schema_version: 1,
+                    codec_id: "task_store_contract.identity_probe".into(),
+                    bytes: vec![1],
+                },
+                metadata: Metadata::new(),
+                resource_limit: ResourceRequest::default(),
+                correlation_key: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: 1,
+        })
+        .await
+        .unwrap();
+    store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: Some(2),
+            output: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .prune_terminal_before(i64::MAX as u64, NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap(),
+        1
+    );
+    drop(store);
+
+    let store = Arc::new(SqliteTaskStore::open(&path).expect("reopen for task service"));
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&IDENTITY_PROBE_REGISTRATION]).unwrap());
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(SequenceIds(AtomicUsize::new(0))));
+    builder
+        .handlers_mut()
+        .register::<IdentityProbe, _>(
+            TaskHandlerDescriptor {
+                kind_id: "identity.service".into(),
+                payload_type_id: ModelIdBuf::parse("test.IdentityProbe").unwrap(),
+                accepted_schema_versions: vec![1],
+                cancellation_mode: CancellationMode::Cooperative,
+            },
+            Arc::new(IdentityProbeHandler),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    let request = || {
+        TaskRequest::new(
+            "identity.service",
+            1,
+            ValueCodecId::new("task_store_contract.identity_probe"),
+            IdentityProbe(2),
+        )
+    };
+    assert!(matches!(
+        service.submit(request()).await,
+        Err(qubit_task::service::TaskServiceError::DuplicateTaskId)
+    ));
+    let accepted_after_collision = service
+        .submit(request())
+        .await
+        .expect("service accepts a new identity after collision");
+    assert_eq!(accepted_after_collision.id, TaskId::from_id(Id::new(886)));
+    service.shutdown().await.expect("collision did not fault service");
+    drop(service);
     for file in [
         &path,
         &sqlite_paths::owner_lock_path(&path),
