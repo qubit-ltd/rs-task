@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-qubit-task = { path = "../../.." }
-qubit-codec = { version = "0.17" }
-qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "0.1.0" }
+qubit-task = { path = "../../../", version = "^0.11" }
+qubit-codec = { version = "^0.17" }
+qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "^0.1" }
 serde_json = "1"

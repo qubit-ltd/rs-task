@@ -45,12 +45,12 @@ required-features = ["sqlite"]
 futures = "^0.3"
 fs2 = { version = "^0.4", optional = true }
 parking_lot = "^0.12"
-qubit-event-bus = { path = "../rs-event-bus", version = "0.21", optional = true }
+qubit-event-bus = { version = "^0.21", optional = true }
 qubit-codec = { version = "^0.17", features = ["registry"] }
 qubit-budget = { version = "^0.10", features = ["json"] }
 qubit-id = { version = "^0.7", features = ["serde"] }
-qubit-metadata = { path = "../rs-metadata", version = "0.7.0", features = ["json"] }
-qubit-model-id = { path = "../rs-model-metadata/model-id", version = "0.1.0" }
+qubit-metadata = { path = "../rs-metadata", version = "^0.7", features = ["json"] }
+qubit-model-id = { path = "../rs-model-metadata/model-id", version = "^0.1" }
 qubit-progress = "^0.9"
 qubit-spi = "^0.14"
 rusqlite = { version = "^0.41", features = ["bundled"], optional = true }
@@ -73,7 +73,7 @@ qubit-event-bus = { path = "../rs-event-bus" }
 
 [dev-dependencies]
 proptest = "^1.11"
-qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "0.7" }
+qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "^0.7" }
 redis = { package = "qubit-redis", version = "=2.0.0-rc.2", default-features = false, features = ["streams"] }
 tokio = { version = "^1.54", features = ["macros", "rt-multi-thread", "time"] }
 

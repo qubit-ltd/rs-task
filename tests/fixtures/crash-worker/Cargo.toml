@@ -7,9 +7,9 @@ publish = false
 [workspace]
 
 [dependencies]
-qubit-task = { path = "../../..", default-features = false, features = ["sqlite"] }
-qubit-codec = { version = "0.17" }
-qubit-id = { version = "0.7" }
-qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "0.1.0" }
+qubit-task = { path = "../../../", default-features = false, features = ["sqlite"] , version = "^0.11" }
+qubit-codec = { version = "^0.17" }
+qubit-id = { version = "^0.7" }
+qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "^0.1" }
 serde_json = "1"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time"] }

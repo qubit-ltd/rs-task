@@ -11,5 +11,5 @@ inventory = ["qubit-task/inventory"]
 event-bus = ["qubit-task/event-bus"]
 
 [dependencies]
-qubit-task = { path = "../../..", default-features = false }
-qubit-id = { version = "0.7" }
+qubit-task = { path = "../../../", default-features = false , version = "^0.11" }
+qubit-id = { version = "^0.7" }

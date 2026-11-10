@@ -10,13 +10,13 @@ name = "task_service"
 path = "../../../examples/task_service.rs"
 
 [dependencies]
-qubit-event-bus = { path = "../../../../rs-event-bus", version = "0.21", features = ["discovery"] }
-qubit-event-bus-redis = { path = "../../../../rs-event-bus-redis", version = "0.7" }
-qubit-spi = "0.14"
-qubit-task = { path = "../../..", features = ["event-bus", "inventory", "sqlite"] }
-qubit-codec = { version = "0.17", features = ["registry"] }
-qubit-id = { version = "0.7" }
-qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "0.1.0" }
+qubit-event-bus = { version = "^0.21", features = ["discovery"] }
+qubit-event-bus-redis = { path = "../../../../rs-event-bus-redis", version = "^0.7" }
+qubit-spi = "^0.14"
+qubit-task = { path = "../../../", features = ["event-bus", "inventory", "sqlite"] , version = "^0.11" }
+qubit-codec = { version = "^0.17", features = ["registry"] }
+qubit-id = { version = "^0.7" }
+qubit-model-id = { path = "../../../../rs-model-metadata/model-id", version = "^0.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
