@@ -81,6 +81,7 @@ qubit-event-bus = { path = "../rs-event-bus" }
 
 [dev-dependencies]
 proptest = "^1.11"
+qubit-event-bus = { version = "^0.21", features = ["discovery"] }
 qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "^0.7" }
 redis = { package = "qubit-redis", version = "=2.0.0-rc.2", default-features = false, features = ["streams"] }
 tokio = { version = "^1.54", features = ["macros", "rt-multi-thread", "time"] }
