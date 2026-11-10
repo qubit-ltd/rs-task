@@ -29,7 +29,38 @@ use crate::model::typed::TransitionCommand as TypedTransitionCommand;
 ///
 /// IDs use `qubit_id::Id`; payload type and schema identity remain in the
 /// stored payload. Implementations must make acceptance and version-checked
-/// updates atomic. Recovery ownership methods fence concurrent services.
+/// updates atomic. Recovery ownership methods coordinate exclusive service
+/// recovery.
+///
+/// Implementations must enforce ownership and write synchronization inside
+/// the store. In particular, a persistent store must prevent two services
+/// from recovering the same store concurrently and must coordinate release
+/// with writes already admitted under that ownership. Dropping a caller's
+/// future does not necessarily stop backend work that has already started, so
+/// release must also account for writes that may still commit after caller
+/// cancellation.
+///
+/// Write methods do not accept an [`OwnerEpoch`]. The epoch identifies an
+/// acquisition and is passed back to [`TaskStore::release_owner`] for release
+/// validation; it is not a per-write fencing token. This trait therefore does
+/// not promise to reject every operation made through an older business
+/// handle. Service lifecycle coordination and the store's internal ownership
+/// checks define the ownership boundary.
+///
+/// In the SQLite implementation, opening the database obtains and retains the
+/// process lock before a service acquires an epoch. `acquire_owner` advances
+/// the persisted epoch, while writes run through a serialized blocking
+/// worker, hold the internal owner-state lock, and check that the process lock
+/// is present. They do not compare a caller-supplied epoch. `release_owner`
+/// runs through the same serialized worker, waits behind prior work, and
+/// compares the supplied epoch before releasing the process lock. The
+/// in-memory implementation keeps ownership local to one store instance and
+/// does not provide restart or cross-process recovery coordination.
+///
+/// Existing regression coverage includes the [SQLite cancelled-write and
+/// release-wait test](https://github.com/qubit-ltd/rs-task/blob/main/src/store/sqlite_task_store.rs#L1155),
+/// [SQLite epoch advancement and stale-release test](https://github.com/qubit-ltd/rs-task/blob/main/tests/store/sqlite_tests.rs#L716),
+/// and [owner conflict tests](https://github.com/qubit-ltd/rs-task/blob/main/tests/store_tests.rs#L148).
 ///
 /// # Examples
 ///
@@ -381,10 +412,14 @@ pub trait TaskStore: Send + Sync {
     ) -> TaskFuture<'a, Result<usize, StoreError>>;
 
     /// Acquires exclusive ownership before recovering unfinished tasks.
+    /// The store enforces ownership internally; the returned epoch identifies
+    /// this acquisition for the matching `release_owner` call. Write methods
+    /// do not take this epoch.
     ///
     /// # Returns
     ///
-    /// Returns the epoch that must accompany writes and eventual release.
+    /// Returns the epoch to pass to [`TaskStore::release_owner`] when releasing
+    /// this acquisition. It is not passed to write methods.
     ///
     /// # Errors
     ///
@@ -392,7 +427,10 @@ pub trait TaskStore: Send + Sync {
     /// `UnsupportedCapability` when ownership is not supported.
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<OwnerEpoch, StoreError>>;
 
-    /// Releases ownership after all writes admitted under it have completed.
+    /// Releases ownership after writes admitted under it have completed.
+    /// Implementations must serialize release with admitted writes, including
+    /// backend work that may continue after the caller's write future is
+    /// cancelled.
     ///
     /// # Parameters
     ///
