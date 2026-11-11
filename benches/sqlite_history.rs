@@ -631,10 +631,10 @@ fn compare_ready_queries(
         old_sql: &str,
         split_sql: &str,
     ) -> Result<(Timing, i32, bool), Box<dyn std::error::Error>> {
-        let mut sample = connection.prepare("SELECT retry_not_before_ms FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4")?;
-        let mut future = connection.prepare("SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1)")?;
-        let mut old = connection.prepare(old_sql)?;
-        let mut split = connection.prepare(split_sql)?;
+        let mut sample = connection.prepare_cached("SELECT retry_not_before_ms FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4")?;
+        let mut future = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1)")?;
+        let mut old = connection.prepare_cached(old_sql)?;
+        let mut split = connection.prepare_cached(split_sql)?;
         fn execute_rows(statement: &mut rusqlite::Statement<'_>) -> Result<(), rusqlite::Error> {
             let rows = statement.query_map(
                 params![

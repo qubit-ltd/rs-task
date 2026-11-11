@@ -75,14 +75,9 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
         })
         .transpose()?;
 
-    if connection.is_autocommit() {
-        let transaction = connection.unchecked_transaction().map_err(failure)?;
-        let page = query_snapshot(&transaction, cursor.as_ref(), limit.get(), now)?;
-        transaction.commit().map_err(failure)?;
-        Ok(page)
-    } else {
-        query_snapshot(connection, cursor.as_ref(), limit.get(), now)
-    }
+    // Probe results only select a query plan. Each page query rechecks all
+    // state, deadline, cursor and ordering predicates in its own snapshot.
+    query_snapshot(connection, cursor.as_ref(), limit.get(), now)
 }
 
 fn query_snapshot(
@@ -130,7 +125,7 @@ fn query_snapshot(
         )
     };
     let rows = connection
-        .prepare(sql)
+        .prepare_cached(sql)
         .map_err(failure)?
         .query_map(params![now, accepted, id, fetch], |row| {
             Ok((
@@ -162,7 +157,7 @@ fn sampled_ready_count(
     sample_limit: i64,
 ) -> Result<usize, StoreError> {
     let mut statement = connection
-        .prepare(concat!(
+        .prepare_cached(concat!(
             "SELECT retry_not_before_ms FROM tasks INDEXED BY tasks_queued_accepted_id ",
             "WHERE state_kind='Queued' AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ",
             "ORDER BY accepted_at,id LIMIT ?4"
@@ -187,11 +182,11 @@ fn sampled_ready_count(
 
 fn has_future_deadline(connection: &Connection, now: i64) -> Result<bool, StoreError> {
     connection
-        .query_row(
+        .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1)",
-            [now],
-            |row| row.get(0),
         )
+        .map_err(failure)?
+        .query_row([now], |row| row.get(0))
         .map_err(failure)
 }
 
