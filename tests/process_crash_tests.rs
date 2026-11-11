@@ -227,7 +227,11 @@ struct Database(PathBuf);
 
 impl Database {
     fn new() -> Self {
-        let path = temp_dir().join(format!("qubit-task-process-crash-{}", new_task_id()));
+        let path = temp_dir().join(format!(
+            "qubit-task-process-crash-{}-{}",
+            std::process::id(),
+            new_task_id()
+        ));
         create_dir(&path).expect("disposable database directory is created");
         Self(path)
     }
