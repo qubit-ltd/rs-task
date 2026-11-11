@@ -724,6 +724,7 @@ impl BuildGateStore {
             submission_gate: None,
             #[cfg(feature = "sqlite")]
             fail_next_accept: false,
+            #[cfg(feature = "sqlite")]
             panic_next_accept_constructor: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -765,7 +766,7 @@ impl BuildGateStore {
                 armed: AtomicBool::new(false),
                 pause_before_commit: false,
                 panic_after_release: false,
-        panic_inner_constructor_after_release: false,
+                panic_inner_constructor_after_release: false,
             }),
         );
         store.panic_next_accept_constructor.store(true, Ordering::Release);
@@ -2485,7 +2486,7 @@ async fn test_cancelled_submit_wakes_durable_outbox_publisher() {
         armed: AtomicBool::new(true),
         pause_before_commit: false,
         panic_after_release: false,
-                panic_inner_constructor_after_release: false,
+        panic_inner_constructor_after_release: false,
     });
     let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
     let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
@@ -2567,11 +2568,13 @@ async fn test_accept_constructor_panic_reaches_live_submit_waiter_and_latches_fa
         .expect("service starts");
     let submit_service = service.clone();
     let submission = tokio::spawn(async move { submit_service.submit(request()).await });
-    assert!(tokio::time::timeout(Duration::from_secs(5), submission)
-        .await
-        .expect("submit waiter completes")
-        .expect_err("submit waiter observes store panic")
-        .is_panic());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), submission)
+            .await
+            .expect("submit waiter completes")
+            .expect_err("submit waiter observes store panic")
+            .is_panic()
+    );
     assert!(matches!(
         service.submit(request()).await,
         Err(task::service::TaskServiceError::StoreUnavailable(_))
