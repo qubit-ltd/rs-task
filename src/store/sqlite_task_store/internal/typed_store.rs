@@ -23,6 +23,7 @@ use super::super::failure;
 use super::super::sqlite_i64_from_u64;
 use super::super::sqlite_u64_from_i64;
 use super::query_sql::build_encoded_history_query;
+use super::ready_query::ReadyQuery;
 use crate::event::TaskEvent;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::TaskOutput;
@@ -109,12 +110,13 @@ pub(in crate::store::sqlite_task_store) fn list_encoded(
 /// Returns an error if the limit or timestamp is invalid, SQLite fails, or a
 /// stored row cannot be decoded.
 pub(in crate::store::sqlite_task_store) fn list_ready_queued(
-    connection: &Connection,
+    connection: &mut Connection,
     after: Option<TaskCursor>,
     limit: NonZeroUsize,
     now_ms: u64,
+    budget: &ReadyQuery,
 ) -> Result<TaskPage, StoreError> {
-    super::ready_query::list_ready_queued(connection, after, limit, now_ms)
+    super::ready_query::list_ready_queued_with_budget(connection, after, limit, now_ms, budget)
 }
 
 /// Finds the minimum queued retry deadline strictly after the supplied time.

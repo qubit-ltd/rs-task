@@ -107,6 +107,8 @@ pub struct SqliteTaskStore {
     owner_state: Arc<Mutex<SqliteOwnerState>>,
     /// Bounds connection operations to one blocking worker at a time.
     operation_slot: Arc<sync::Semaphore>,
+    /// Reusable VM budget callback state for bounded ready-queue scans.
+    ready_query_budget: Arc<internal::ReadyQuery>,
     /// Controls whether accepted lifecycle changes create outbox snapshots.
     outbox_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Tracks blocking worker overlap in unit tests.
@@ -149,6 +151,7 @@ impl SqliteTaskStore {
         connection
             .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
             .map_err(failure)?;
+        let ready_query_budget = internal::ReadyQuery::install(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             database_path: identity.path().to_path_buf(),
@@ -157,6 +160,7 @@ impl SqliteTaskStore {
                 epoch: None,
             })),
             operation_slot: Arc::new(sync::Semaphore::new(1)),
+            ready_query_budget: Arc::new(ready_query_budget),
             outbox_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             worker_counts: Arc::new(WorkerCounts::default()),
@@ -420,7 +424,7 @@ impl SqliteTaskStore {
     fn run<'a, T, F>(&'a self, operation: F) -> TaskFuture<'a, Result<T, StoreError>>
     where
         T: Send + 'static,
-        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, StoreError> + Send + 'static,
     {
         let connection = self.connection.clone();
         let operation_slot = Arc::clone(&self.operation_slot);
@@ -435,7 +439,8 @@ impl SqliteTaskStore {
                 let _permit = permit;
                 #[cfg(test)]
                 let _worker_guard = WorkerGuard::enter(worker_counts);
-                operation(&connection.lock())
+                let mut connection_guard = connection.lock();
+                operation(&mut connection_guard)
             })
             .await
             .map_err(|error| StoreError::Failure(format!("SQLite blocking operation stopped: {error}")))?
@@ -807,7 +812,8 @@ impl super::TaskStore for SqliteTaskStore {
         limit: NonZeroUsize,
         now_ms: u64,
     ) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
-        self.run(move |connection| list_ready_queued(connection, after, limit, now_ms))
+        let budget = Arc::clone(&self.ready_query_budget);
+        self.run(move |connection| list_ready_queued(connection, after, limit, now_ms, &budget))
     }
 
     /// Finds the earliest queued retry time strictly later than `now_ms`.

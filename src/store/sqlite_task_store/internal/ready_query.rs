@@ -11,9 +11,14 @@ mod lifecycle;
 mod request_info;
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use qubit_id::Id;
 use rusqlite::Connection;
+use rusqlite::ErrorCode;
 use rusqlite::params;
 
 use self::lifecycle::Lifecycle;
@@ -27,16 +32,75 @@ use crate::store::StoreError;
 
 /// Maximum page size accepted by the ready-task query.
 const MAX_TASK_QUERY_LIMIT: usize = 256;
-/// Maximum number of queued rows inspected to estimate ready-task density.
-const MAX_READY_SAMPLE: usize = 16;
+/// SQLite reports VM progress every 1,000 instructions while the acceptance
+/// scan is attempted.
+const ACCEPTANCE_PROGRESS_INTERVAL: i32 = 1_000;
+/// Bounds the acceptance-order attempt to roughly 2,000 VM instructions.
+const MAX_ACCEPTANCE_PROGRESS_CALLBACKS: usize = 2;
+
+/// Reusable per-connection state for bounded ready-query attempts.
+#[derive(Clone)]
+pub(in crate::store::sqlite_task_store) struct ReadyQuery {
+    /// Enables the VM budget only while an acceptance-order scan is active.
+    active: Arc<AtomicBool>,
+    /// Counts progress callbacks for the active acceptance-order scan.
+    progress_calls: Arc<AtomicUsize>,
+}
+
+impl ReadyQuery {
+    /// Installs a reusable SQLite progress callback on a connection.
+    ///
+    /// # Parameters
+    ///
+    /// - `connection`: SQLite connection on which to install the callback.
+    ///
+    /// # Returns
+    ///
+    /// The state used to enable bounded acceptance-order attempts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQLite cannot install the callback.
+    pub(in crate::store::sqlite_task_store) fn install(connection: &mut Connection) -> Result<Self, StoreError> {
+        let active = Arc::new(AtomicBool::new(false));
+        let progress_calls = Arc::new(AtomicUsize::new(0));
+        let callback_active = Arc::clone(&active);
+        let callback_calls = Arc::clone(&progress_calls);
+        connection
+            .progress_handler(
+                ACCEPTANCE_PROGRESS_INTERVAL,
+                Some(move || {
+                    callback_active.load(Ordering::Relaxed)
+                        && callback_calls.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_ACCEPTANCE_PROGRESS_CALLBACKS
+                }),
+            )
+            .map_err(failure)?;
+        Ok(Self { active, progress_calls })
+    }
+
+    /// Resets the progress count and enables the scan budget.
+    fn start(&self) {
+        self.progress_calls.store(0, Ordering::Relaxed);
+        self.active.store(true, Ordering::Relaxed);
+    }
+
+    /// Disables the scan budget after the acceptance query completes.
+    fn stop(&self) {
+        self.active.store(false, Ordering::Relaxed);
+    }
+}
+
+const READY_ACCEPTANCE_QUERY: &str = concat!(
+    "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id ",
+    "WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ",
+    "AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4"
+);
 
 /// Lists queued task summaries in acceptance order when their retry deadline
 /// is absent or no later than `now_ms`.
 ///
-/// A bounded prefix probe chooses the acceptance-order scan when it can fill
-/// the page within the sample or reaches the end of a short queue. Otherwise a
-/// deadline probe decides whether the disjoint immediate/due branches are
-/// needed. All checks share the query's read snapshot.
+/// Attempts the acceptance-order scan with a SQLite VM budget. If the budget
+/// interrupts that statement, retries the page with the retry-deadline index.
 ///
 /// # Parameters
 ///
@@ -54,11 +118,41 @@ const MAX_READY_SAMPLE: usize = 16;
 ///
 /// Returns `InvalidRequest` for unrepresentable timestamps or limits above
 /// 256, and `Failure` for SQL errors or invalid stored summary JSON.
-pub(in crate::store::sqlite_task_store) fn list_ready_queued(
-    connection: &Connection,
+#[cfg(test)]
+fn list_ready_queued(
+    connection: &mut Connection,
     after: Option<TaskCursor>,
     limit: NonZeroUsize,
     now_ms: u64,
+) -> Result<TaskPage, StoreError> {
+    let budget = ReadyQuery::install(connection)?;
+    list_ready_queued_with_budget(connection, after, limit, now_ms, &budget)
+}
+
+/// Lists ready queued tasks using the connection's reusable VM budget.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task rows.
+/// - `after`: Optional exclusive acceptance-order cursor.
+/// - `limit`: Maximum number of ready summaries to return.
+/// - `now_ms`: Current time used to test retry eligibility.
+/// - `budget`: Reusable VM budget callback state installed for this connection.
+///
+/// # Returns
+///
+/// The ready page and a continuation cursor when additional results exist.
+///
+/// # Errors
+///
+/// Returns `InvalidRequest` for invalid limits or timestamps and `Failure`
+/// for SQLite or stored summary decoding errors.
+pub(in crate::store::sqlite_task_store) fn list_ready_queued_with_budget(
+    connection: &mut Connection,
+    after: Option<TaskCursor>,
+    limit: NonZeroUsize,
+    now_ms: u64,
+    budget: &ReadyQuery,
 ) -> Result<TaskPage, StoreError> {
     if limit.get() > MAX_TASK_QUERY_LIMIT {
         return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
@@ -74,22 +168,15 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
         })
         .transpose()?;
 
-    // Keep the deadline probe and selected page on the same read snapshot.
-    if connection.is_autocommit() {
-        let transaction = connection.unchecked_transaction().map_err(failure)?;
-        let page = query_snapshot(&transaction, cursor.as_ref(), limit.get(), now)?;
-        transaction.commit().map_err(failure)?;
-        Ok(page)
-    } else {
-        query_snapshot(connection, cursor.as_ref(), limit.get(), now)
-    }
+    query_snapshot(connection, cursor.as_ref(), limit.get(), now, budget)
 }
 
-/// Selects and executes the ready-page query while using the caller's snapshot.
+/// Attempts an acceptance-order read within a VM budget, then falls back to
+/// the deadline-index split query if the budget interrupts that read.
 ///
 /// # Parameters
 ///
-/// - `connection`: SQLite connection in the query's read snapshot.
+/// - `connection`: SQLite connection containing task rows.
 /// - `cursor`: Optional exclusive acceptance-order key.
 /// - `page_size`: Maximum number of summaries to return.
 /// - `now`: SQLite-representable retry deadline cutoff.
@@ -103,18 +190,82 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
 ///
 /// Returns an error if SQLite fails or persisted summary data is invalid.
 fn query_snapshot(
-    connection: &Connection,
+    connection: &mut Connection,
     cursor: Option<&(i64, String)>,
     page_size: usize,
     now: i64,
+    budget: &ReadyQuery,
 ) -> Result<TaskPage, StoreError> {
     let fetch =
         i64::try_from(page_size + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
     let (accepted, id) = cursor.map_or((None, None), |(accepted, id)| (Some(*accepted), Some(id.as_str())));
-    let use_split = should_use_split_query(connection, now, accepted, id, page_size)?;
+    budget.start();
+    let acceptance_result = query_acceptance_rows(connection, now, accepted, id, fetch);
+    budget.stop();
+    let page_rows = match acceptance_result {
+        Ok(rows) => rows,
+        Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::OperationInterrupted => {
+            query_split_rows(connection, now, accepted, id, fetch)?
+        }
+        Err(error) => return Err(failure(error)),
+    };
+    page_from_rows(page_rows, page_size)
+}
 
-    let sql = if use_split {
-        concat!(
+/// Reads a page in acceptance order while filtering by retry eligibility.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task rows.
+/// - `now`: Retry deadline cutoff.
+/// - `accepted`: Optional cursor timestamp.
+/// - `id`: Optional cursor task ID.
+/// - `fetch`: Page size including the lookahead row.
+///
+/// # Returns
+///
+/// The ordered page rows, or a SQLite error including VM-budget interruption.
+fn query_acceptance_rows(
+    connection: &Connection,
+    now: i64,
+    accepted: Option<i64>,
+    id: Option<&str>,
+    fetch: i64,
+) -> Result<Vec<(String, String, String)>, rusqlite::Error> {
+    connection
+        .prepare_cached(READY_ACCEPTANCE_QUERY)?
+        .query_map(params![now, accepted, id, fetch], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// Reads the same ready page through disjoint immediate and due indexes.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task rows.
+/// - `now`: Retry deadline cutoff.
+/// - `accepted`: Optional cursor timestamp.
+/// - `id`: Optional cursor task ID.
+/// - `fetch`: Page size including the lookahead row.
+///
+/// # Returns
+///
+/// Ready rows in acceptance order, or a storage error.
+fn query_split_rows(
+    connection: &Connection,
+    now: i64,
+    accepted: Option<i64>,
+    id: Option<&str>,
+    fetch: i64,
+) -> Result<Vec<(String, String, String)>, StoreError> {
+    connection
+        .prepare_cached(concat!(
             "WITH candidates(id,accepted_at) AS (",
             "SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_immediate_accepted_id ",
             "WHERE state_kind='Queued' AND retry_not_before_ms IS NULL AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ",
@@ -126,18 +277,7 @@ fn query_snapshot(
             "), page AS (SELECT id,accepted_at FROM candidates ORDER BY accepted_at,id LIMIT ?4) ",
             "SELECT tasks.id,tasks.request_info_json,tasks.lifecycle_json FROM page ",
             "JOIN tasks ON tasks.id=page.id ORDER BY page.accepted_at,page.id"
-        )
-    } else {
-        concat!(
-            "WITH page AS (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_accepted_id ",
-            "WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ",
-            "AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4) ",
-            "SELECT tasks.id,tasks.request_info_json,tasks.lifecycle_json FROM page ",
-            "JOIN tasks ON tasks.id=page.id ORDER BY page.accepted_at,page.id"
-        )
-    };
-    let rows = connection
-        .prepare_cached(sql)
+        ))
         .map_err(failure)?
         .query_map(params![now, accepted, id, fetch], |row| {
             Ok((
@@ -148,120 +288,48 @@ fn query_snapshot(
         })
         .map_err(failure)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(failure)?;
-    let mut records = rows
-        .into_iter()
-        .map(|(id, request, lifecycle)| decode_summary(id, &request, &lifecycle))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map_err(failure)
+}
+
+/// Decodes fetched rows and applies page truncation and cursor construction.
+///
+/// # Parameters
+///
+/// - `rows`: Ordered summary columns, with at most one lookahead row.
+/// - `page_size`: Maximum number of records to return.
+///
+/// # Returns
+///
+/// A task page and continuation cursor when another row exists.
+///
+/// # Errors
+///
+/// Returns an error if stored summary fields are invalid.
+fn page_from_rows(rows: Vec<(String, String, String)>, page_size: usize) -> Result<TaskPage, StoreError> {
+    let mut records = decode_rows(rows)?;
     let has_more = records.len() > page_size;
     records.truncate(page_size);
     let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
     Ok(TaskPage { records, next })
 }
 
-/// Chooses the bounded deadline-index query when sampled ready density is low.
+/// Decodes each row's summary columns.
 ///
 /// # Parameters
 ///
-/// - `connection`: SQLite connection containing queued tasks.
-/// - `now`: Retry deadline cutoff.
-/// - `accepted`: Optional cursor acceptance timestamp.
-/// - `id`: Optional cursor ID key paired with `accepted`.
-/// - `page_size`: Requested maximum number of ready summaries.
+/// - `rows`: Task ID, request metadata JSON, and lifecycle JSON tuples.
 ///
 /// # Returns
 ///
-/// Whether the disjoint immediate/due branches should be used.
+/// The decoded task summaries.
 ///
 /// # Errors
 ///
-/// Returns an error if either the bounded sample or deadline probe fails.
-fn should_use_split_query(
-    connection: &Connection,
-    now: i64,
-    accepted: Option<i64>,
-    id: Option<&str>,
-    page_size: usize,
-) -> Result<bool, StoreError> {
-    let sample_limit = (page_size / 2).clamp(8, MAX_READY_SAMPLE);
-    let query_limit = i64::try_from(sample_limit + 1).map_err(failure)?;
-    let (sampled_ready, sampled_rows) = sampled_ready_count(connection, now, accepted, id, query_limit)?;
-    if sampled_rows <= sample_limit || sampled_ready > page_size {
-        Ok(false)
-    } else {
-        has_future_deadline(connection, now)
-    }
-}
-
-/// Checks whether any queued task has a retry deadline later than `now`.
-///
-/// # Parameters
-///
-/// - `connection`: SQLite connection containing queued tasks.
-/// - `now`: Retry deadline cutoff.
-///
-/// # Returns
-///
-/// Whether a queued task has a future deadline.
-///
-/// # Errors
-///
-/// Returns an error if the existence query fails.
-fn has_future_deadline(connection: &Connection, now: i64) -> Result<bool, StoreError> {
-    connection
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1)",
-        )
-        .map_err(failure)?
-        .query_row([now], |row| row.get(0))
-        .map_err(failure)
-}
-
-/// Counts ready rows in a bounded acceptance-order sample.
-///
-/// # Parameters
-///
-/// - `connection`: SQLite connection containing queued tasks.
-/// - `now`: Retry deadline cutoff.
-/// - `accepted`: Optional cursor acceptance timestamp.
-/// - `id`: Optional cursor ID key paired with `accepted`.
-/// - `sample_limit`: Maximum queued rows inspected.
-///
-/// # Returns
-///
-/// The number of ready rows in the bounded sample.
-///
-/// # Errors
-///
-/// Returns an error if the sample query fails.
-fn sampled_ready_count(
-    connection: &Connection,
-    now: i64,
-    accepted: Option<i64>,
-    id: Option<&str>,
-    sample_limit: i64,
-) -> Result<(usize, usize), StoreError> {
-    let mut statement = connection
-        .prepare_cached(concat!(
-            "SELECT retry_not_before_ms FROM tasks INDEXED BY tasks_queued_accepted_id ",
-            "WHERE state_kind='Queued' AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ",
-            "ORDER BY accepted_at,id LIMIT ?4"
-        ))
-        .map_err(failure)?;
-    let rows = statement
-        .query_map(params![now, accepted, id, sample_limit], |row| {
-            row.get::<_, Option<i64>>(0)
-        })
-        .map_err(failure)?;
-    let mut ready = 0;
-    let mut sampled = 0;
-    for deadline in rows {
-        sampled += 1;
-        if deadline.map_err(failure)?.is_none_or(|deadline| deadline <= now) {
-            ready += 1;
-        }
-    }
-    Ok((ready, sampled))
+/// Returns an error if any stored summary field is invalid.
+fn decode_rows(rows: Vec<(String, String, String)>) -> Result<Vec<TaskSummary>, StoreError> {
+    rows.into_iter()
+        .map(|(id, request, lifecycle)| decode_summary(id, &request, &lifecycle))
+        .collect()
 }
 
 /// Decodes summary columns without reading the encoded payload bytes.
@@ -311,15 +379,18 @@ fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
+    use std::sync::atomic::Ordering;
 
     use qubit_id::Id;
     use rusqlite::Connection;
     use rusqlite::params;
 
     use super::Lifecycle;
+    use super::MAX_ACCEPTANCE_PROGRESS_CALLBACKS;
+    use super::ReadyQuery;
     use super::RequestInfo;
     use super::list_ready_queued;
-    use super::should_use_split_query;
+    use super::list_ready_queued_with_budget;
     use crate::model::TaskState;
     use crate::model::typed::ResourceRequest;
     use crate::model::typed::TaskCursor;
@@ -379,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_filters_deadlines_and_pages_by_numeric_id() {
-        let connection = connection();
+        let mut connection = connection();
         // Equal acceptance times make the numeric ID tie-breaker observable.
         add_task(&connection, 9, 10, None, "Queued");
         add_task(&connection, 2, 10, Some(100), "Queued");
@@ -390,13 +461,13 @@ mod tests {
         add_task(&connection, 3, 12, None, "Running");
 
         let limit = NonZeroUsize::new(2).unwrap();
-        let first = list_ready_queued(&connection, None, limit, 100).unwrap();
+        let first = list_ready_queued(&mut connection, None, limit, 100).unwrap();
         assert_eq!(
             first.records.iter().map(|row| row.id.to_string()).collect::<Vec<_>>(),
             ["2", "9"]
         );
         assert_eq!(first.next, Some(TaskCursor::from(first.records.last().unwrap())));
-        let second = list_ready_queued(&connection, first.next, limit, 100).unwrap();
+        let second = list_ready_queued(&mut connection, first.next, limit, 100).unwrap();
         assert_eq!(
             second.records.iter().map(|row| row.id.to_string()).collect::<Vec<_>>(),
             ["4"]
@@ -406,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_randomized_deadline_rows_match_sorted_reference_across_pages() {
-        let connection = connection();
+        let mut connection = connection();
         let mut expected = Vec::new();
         for index in 0..80_u64 {
             let id = ((index * 37) % 81) + 1;
@@ -427,7 +498,7 @@ mod tests {
         let mut actual = Vec::new();
         let mut cursor = None;
         loop {
-            let page = list_ready_queued(&connection, cursor, NonZeroUsize::new(7).unwrap(), 17).unwrap();
+            let page = list_ready_queued(&mut connection, cursor, NonZeroUsize::new(7).unwrap(), 17).unwrap();
             actual.extend(
                 page.records
                     .iter()
@@ -445,25 +516,25 @@ mod tests {
 
     #[test]
     fn test_empty_ready_page_has_no_next_cursor() {
-        let page = list_ready_queued(&connection(), None, NonZeroUsize::new(256).unwrap(), 0).unwrap();
+        let page = list_ready_queued(&mut connection(), None, NonZeroUsize::new(256).unwrap(), 0).unwrap();
         assert!(page.records.is_empty());
         assert_eq!(page.next, None);
     }
 
     #[test]
     fn test_rejects_invalid_limits_and_unrepresentable_timestamps() {
-        let connection = connection();
+        let mut connection = connection();
         assert!(matches!(
-            list_ready_queued(&connection, None, NonZeroUsize::new(257).unwrap(), 0),
+            list_ready_queued(&mut connection, None, NonZeroUsize::new(257).unwrap(), 0),
             Err(StoreError::InvalidRequest("ready task page limit exceeds 256"))
         ));
         assert!(matches!(
-            list_ready_queued(&connection, None, NonZeroUsize::new(1).unwrap(), u64::MAX),
+            list_ready_queued(&mut connection, None, NonZeroUsize::new(1).unwrap(), u64::MAX),
             Err(StoreError::InvalidRequest("task timestamp is too large"))
         ));
         assert!(matches!(
             list_ready_queued(
-                &connection,
+                &mut connection,
                 Some(TaskCursor::new(u64::MAX, TaskId::from_id(Id::new(1)))),
                 NonZeroUsize::new(1).unwrap(),
                 0,
@@ -474,44 +545,8 @@ mod tests {
 
     #[test]
     fn test_future_backlog_scan_steps_stay_bounded_as_rows_grow() {
-        use rusqlite::StatementStatus;
-
-        fn vm_steps(connection: &Connection, sql: &str, params: impl rusqlite::Params) -> i32 {
-            let mut statement = connection.prepare(sql).unwrap();
-            let _ = statement
-                .query_map(params, |row| row.get::<_, String>(0))
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-            statement.get_status(StatementStatus::VmStep)
-        }
-
-        fn sample_ready(connection: &Connection, now: i64, limit: i64) -> (usize, i32) {
-            let mut statement = connection.prepare(
-                "SELECT retry_not_before_ms FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' ORDER BY accepted_at,id LIMIT ?1",
-            ).unwrap();
-            let rows = statement
-                .query_map([limit], |row| row.get::<_, Option<i64>>(0))
-                .unwrap();
-            let mut ready = 0;
-            for deadline in rows {
-                if deadline.unwrap().is_none_or(|value| value <= now) {
-                    ready += 1;
-                }
-            }
-            (ready, statement.get_status(StatementStatus::VmStep))
-        }
-
-        fn future_probe(connection: &Connection, now: i64) -> (bool, i32) {
-            let mut statement = connection.prepare(
-                "SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1)",
-            ).unwrap();
-            let exists = statement.query_row([now], |row| row.get(0)).unwrap();
-            (exists, statement.get_status(StatementStatus::VmStep))
-        }
-
-        fn measure(size: usize) -> (i32, i32) {
-            let connection = connection();
+        fn measure(size: usize) -> usize {
+            let mut connection = connection();
             let transaction = connection.unchecked_transaction().unwrap();
             {
                 let mut insert = transaction
@@ -522,66 +557,49 @@ mod tests {
                 }
             }
             transaction.commit().unwrap();
-            let legacy_steps = vm_steps(
-                &connection,
-                "SELECT id FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ORDER BY accepted_at,id LIMIT ?2",
-                params![0_i64, 2_i64],
-            );
-            let threshold = 1;
-            let (sampled_ready, sample_steps) = sample_ready(&connection, 0, 2);
-            let (use_split, future_steps) = if sampled_ready < threshold {
-                let (future, steps) = future_probe(&connection, 0);
-                (future, steps)
-            } else {
-                (false, 0)
-            };
-            let ready_steps = vm_steps(
-                &connection,
-                if use_split {
-                    "WITH candidates(id,accepted_at) AS (SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_immediate_accepted_id WHERE state_kind='Queued' AND retry_not_before_ms IS NULL AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4) UNION ALL SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms IS NOT NULL AND retry_not_before_ms<=?1 AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4)), page AS (SELECT id,accepted_at FROM candidates ORDER BY accepted_at,id LIMIT ?4) SELECT tasks.id FROM page JOIN tasks ON tasks.id=page.id ORDER BY page.accepted_at,page.id"
-                } else {
-                    "SELECT id FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4"
-                },
-                params![0_i64, Option::<i64>::None, Option::<String>::None, 2_i64],
-            );
-            (legacy_steps, sample_steps + future_steps + ready_steps)
+            let budget = ReadyQuery::install(&mut connection).unwrap();
+            let page = list_ready_queued_with_budget(&mut connection, None, NonZeroUsize::new(1).unwrap(), 0, &budget)
+                .unwrap();
+            assert!(page.records.is_empty());
+            budget.progress_calls.load(Ordering::Relaxed)
         }
 
-        let (small_legacy, small_split) = measure(1_000);
-        let (large_legacy, large_split) = measure(100_000);
-        assert!(
-            large_legacy > small_legacy * 50,
-            "legacy VM steps: {small_legacy} -> {large_legacy}"
-        );
-        assert!(
-            large_split <= small_split * 3,
-            "split VM steps: {small_split} -> {large_split}"
-        );
+        let small_calls = measure(1_000);
+        let large_calls = measure(100_000);
+        assert_eq!(small_calls, MAX_ACCEPTANCE_PROGRESS_CALLBACKS);
+        assert_eq!(large_calls, small_calls);
     }
 
     #[test]
     fn test_sparse_ready_prefix_uses_split_query() {
-        let connection = connection();
-        for index in 0..1_000_u64 {
-            let deadline = if index < 16 && index % 4 == 0 {
-                Some(0)
-            } else {
-                Some(i64::MAX as u64)
-            };
+        let mut connection = connection();
+        for index in 0..10_000_u64 {
+            let deadline = if index == 0 { Some(0) } else { Some(i64::MAX as u64) };
             add_task(&connection, index, index, deadline, "Queued");
         }
 
-        assert!(should_use_split_query(&connection, 1, None, None, 32).unwrap());
-        let page = list_ready_queued(&connection, None, NonZeroUsize::new(32).unwrap(), 1).unwrap();
-        assert_eq!(page.records.len(), 4);
+        let page = list_ready_queued(&mut connection, None, NonZeroUsize::new(32).unwrap(), 1).unwrap();
+        assert_eq!(page.records.len(), 1);
+    }
+
+    #[test]
+    fn test_dense_ready_prefix_returns_without_unbounded_scan() {
+        let mut connection = connection();
+        for index in 0..1_000_u64 {
+            let deadline = if index % 4 == 0 { Some(0) } else { Some(i64::MAX as u64) };
+            add_task(&connection, index, index, deadline, "Queued");
+        }
+
+        let page = list_ready_queued(&mut connection, None, NonZeroUsize::new(32).unwrap(), 1).unwrap();
+        assert_eq!(page.records.len(), 32);
     }
 
     #[test]
     fn test_reads_inside_existing_transaction_without_nested_begin() {
         let mut connection = connection();
-        let transaction = connection.transaction().unwrap();
-        let page = list_ready_queued(&transaction, None, NonZeroUsize::new(1).unwrap(), 0).unwrap();
+        connection.execute_batch("BEGIN").unwrap();
+        let page = list_ready_queued(&mut connection, None, NonZeroUsize::new(1).unwrap(), 0).unwrap();
         assert!(page.records.is_empty());
-        transaction.rollback().unwrap();
+        connection.execute_batch("ROLLBACK").unwrap();
     }
 }
