@@ -81,7 +81,7 @@ impl SubmissionOperation {
         let runner = ServiceRunner {
             core: Arc::clone(&core),
         };
-        let accepted = AssertUnwindSafe(core.store.accept_encoded(id, request))
+        let accepted = AssertUnwindSafe(async { core.store.accept_encoded(id, request).await })
             .catch_unwind()
             .await;
         let result = match accepted {

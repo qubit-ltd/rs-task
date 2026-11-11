@@ -555,6 +555,8 @@ struct BuildGateStore {
     submission_gate: Option<Arc<SubmissionStoreGate>>,
     #[cfg(feature = "sqlite")]
     fail_next_accept: bool,
+    #[cfg(feature = "sqlite")]
+    panic_next_accept_constructor: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "sqlite")]
@@ -565,6 +567,7 @@ struct SubmissionStoreGate {
     armed: AtomicBool,
     pause_before_commit: bool,
     panic_after_release: bool,
+    panic_inner_constructor_after_release: bool,
 }
 
 #[cfg(feature = "sqlite")]
@@ -721,6 +724,7 @@ impl BuildGateStore {
             submission_gate: None,
             #[cfg(feature = "sqlite")]
             fail_next_accept: false,
+            panic_next_accept_constructor: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -733,6 +737,7 @@ impl BuildGateStore {
             first_list: std::sync::atomic::AtomicBool::new(false),
             submission_gate: Some(gate),
             fail_next_accept: false,
+            panic_next_accept_constructor: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -745,7 +750,26 @@ impl BuildGateStore {
             first_list: std::sync::atomic::AtomicBool::new(false),
             submission_gate: None,
             fail_next_accept: true,
+            panic_next_accept_constructor: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn panicking_accept_constructor(inner: Arc<dyn TaskStore>) -> Self {
+        let store = Self::for_submission(
+            inner,
+            Arc::new(SubmissionStoreGate {
+                scanned: Notify::new(),
+                accepted: Notify::new(),
+                release: Arc::new(tokio::sync::Semaphore::new(0)),
+                armed: AtomicBool::new(false),
+                pause_before_commit: false,
+                panic_after_release: false,
+        panic_inner_constructor_after_release: false,
+            }),
+        );
+        store.panic_next_accept_constructor.store(true, Ordering::Release);
+        store
     }
 }
 
@@ -786,6 +810,10 @@ impl TaskStore for BuildGateStore {
         request: StoredTaskRequest,
     ) -> TaskFuture<'a, Result<task::model::AcceptOutcome, task::store::StoreError>> {
         #[cfg(feature = "sqlite")]
+        if self.panic_next_accept_constructor.swap(false, Ordering::AcqRel) {
+            panic!("controlled acceptance constructor panic");
+        }
+        #[cfg(feature = "sqlite")]
         if self.fail_next_accept {
             return Box::pin(async { Err(task::store::StoreError::Failure("controlled accept failure".into())) });
         }
@@ -813,6 +841,16 @@ impl TaskStore for BuildGateStore {
                             .forget();
                     }
                     panic!("controlled acceptance future panic");
+                }
+                if gate.panic_inner_constructor_after_release {
+                    gate.accepted.notify_one();
+                    gate.release
+                        .acquire()
+                        .await
+                        .map_err(|error| task::store::StoreError::Failure(error.to_string()))?
+                        .forget();
+                    let _future = self.inner.accept_encoded(id, request);
+                    unreachable!("configured inner constructor should panic synchronously");
                 }
                 let accepted = self.inner.accept_encoded(id, request).await?;
                 if !gate.pause_before_commit {
@@ -2270,6 +2308,7 @@ async fn test_cancelled_submit_acceptance_still_dispatches() {
         armed: AtomicBool::new(true),
         pause_before_commit: false,
         panic_after_release: false,
+        panic_inner_constructor_after_release: false,
     });
     let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
     let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
@@ -2350,6 +2389,7 @@ async fn test_cancelled_submit_before_sqlite_commit_still_dispatches() {
         armed: AtomicBool::new(true),
         pause_before_commit: true,
         panic_after_release: false,
+        panic_inner_constructor_after_release: false,
     });
     let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
     let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
@@ -2396,6 +2436,7 @@ async fn test_cancelled_submit_keeps_shutdown_waiting_for_acceptance_owner() {
         armed: AtomicBool::new(true),
         pause_before_commit: false,
         panic_after_release: false,
+        panic_inner_constructor_after_release: false,
     });
     let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
     let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
@@ -2444,6 +2485,7 @@ async fn test_cancelled_submit_wakes_durable_outbox_publisher() {
         armed: AtomicBool::new(true),
         pause_before_commit: false,
         panic_after_release: false,
+                panic_inner_constructor_after_release: false,
     });
     let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
     let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
@@ -2514,6 +2556,73 @@ async fn test_submit_operational_accept_failure_latches_service_fault() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn test_accept_constructor_panic_reaches_live_submit_waiter_and_latches_fault() {
+    let database = SubmissionDatabase::new("submit-constructor-panic-live");
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
+    let wrapped = Arc::new(BuildGateStore::panicking_accept_constructor(Arc::clone(&inner)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(93401))))
+        .build()
+        .await
+        .expect("service starts");
+    let submit_service = service.clone();
+    let submission = tokio::spawn(async move { submit_service.submit(request()).await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), submission)
+        .await
+        .expect("submit waiter completes")
+        .expect_err("submit waiter observes store panic")
+        .is_panic());
+    assert!(matches!(
+        service.submit(request()).await,
+        Err(task::service::TaskServiceError::StoreUnavailable(_))
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await,
+        Ok(Err(task::service::TaskServiceError::StoreUnavailable(message)))
+            if message.contains("submission store operation panicked")
+    ));
+    assert!(inner.acquire_owner().await.is_ok(), "shutdown releases store ownership");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_accept_constructor_panic_after_submit_abort_still_latches_fault() {
+    let database = SubmissionDatabase::new("submit-constructor-panic-aborted");
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
+    let gate = Arc::new(SubmissionStoreGate {
+        scanned: Notify::new(),
+        accepted: Notify::new(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        armed: AtomicBool::new(true),
+        pause_before_commit: false,
+        panic_after_release: false,
+        panic_inner_constructor_after_release: true,
+    });
+    let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
+    let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(93402))))
+        .build()
+        .await
+        .expect("service starts");
+    let submit_service = service.clone();
+    let submission = tokio::spawn(async move { submit_service.submit(request()).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.accepted.notified())
+        .await
+        .expect("accept wrapper reaches release gate");
+    submission.abort();
+    assert!(submission.await.expect_err("submit waiter is cancelled").is_cancelled());
+    gate.release.add_permits(1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await,
+        Ok(Err(task::service::TaskServiceError::StoreUnavailable(message)))
+            if message.contains("submission store operation panicked")
+    ));
+    assert!(inner.acquire_owner().await.is_ok(), "shutdown releases store ownership");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn test_accept_future_panic_reaches_live_submit_waiter_and_latches_fault() {
     let database = SubmissionDatabase::new("submit-panic-live");
     let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
@@ -2524,6 +2633,7 @@ async fn test_accept_future_panic_reaches_live_submit_waiter_and_latches_fault()
         armed: AtomicBool::new(true),
         pause_before_commit: true,
         panic_after_release: true,
+        panic_inner_constructor_after_release: false,
     });
     let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
     let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
@@ -2559,6 +2669,7 @@ async fn test_accept_future_panic_after_submit_abort_still_latches_fault() {
         armed: AtomicBool::new(true),
         pause_before_commit: true,
         panic_after_release: true,
+        panic_inner_constructor_after_release: false,
     });
     let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
     let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
