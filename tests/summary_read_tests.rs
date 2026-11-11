@@ -2,6 +2,8 @@
 //    Copyright (c) 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Summary-only reads return lifecycle state without decoding stored payloads.
 
@@ -10,6 +12,7 @@ use std::alloc::Layout;
 use std::alloc::System;
 use std::cell::Cell;
 use std::num::NonZeroUsize;
+
 use qubit_id::Id;
 use qubit_metadata::Metadata;
 use qubit_model_id::ModelIdBuf;
@@ -20,8 +23,10 @@ use qubit_task::model::typed::StoredTaskRequest;
 use qubit_task::model::typed::TaskId;
 use qubit_task::model::typed::TransitionCommand;
 use qubit_task::store::MemoryTaskStore;
+#[cfg(feature = "sqlite")]
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
+#[cfg(feature = "sqlite")]
 use rusqlite::Connection;
 
 thread_local! {
@@ -118,13 +123,10 @@ fn request(payload_size: usize) -> StoredTaskRequest {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn memory_summary_reads_track_updates_without_cloning_payload() {
+async fn test_memory_summary_reads_track_updates_without_cloning_payload() {
     let store = MemoryTaskStore::new(4);
     let id = task_id(301);
-    let accepted = store
-        .accept_encoded(id, request(8 * 1024 * 1024))
-        .await
-        .unwrap();
+    let accepted = store.accept_encoded(id, request(8 * 1024 * 1024)).await.unwrap();
     let initial = store.get_summary(id).await.unwrap().unwrap();
     assert_eq!(initial, accepted.summary);
 
@@ -136,7 +138,10 @@ async fn memory_summary_reads_track_updates_without_cloning_payload() {
     let small_read_bytes = measure_summary_read_allocations(&store, small_id).await;
     let large_read_bytes = measure_summary_read_allocations(&store, id).await;
     let encoded_read_bytes = measure_encoded_read_allocations(&store, id).await;
-    assert!(small_read_bytes < 32 * 1024, "small summary read allocated {small_read_bytes} bytes");
+    assert!(
+        small_read_bytes < 32 * 1024,
+        "small summary read allocated {small_read_bytes} bytes"
+    );
     assert!(
         large_read_bytes <= small_read_bytes + 32 * 1024,
         "8 MiB payload summary read allocated {large_read_bytes} bytes versus {small_read_bytes} for a 1-byte payload",
@@ -196,7 +201,7 @@ async fn memory_summary_reads_track_updates_without_cloning_payload() {
 }
 
 #[tokio::test]
-async fn memory_summary_reads_return_none_after_terminal_eviction() {
+async fn test_memory_summary_reads_return_none_after_terminal_eviction() {
     let store = MemoryTaskStore::new(0);
     let id = task_id(303);
     let accepted = store.accept_encoded(id, request(1)).await.unwrap();
@@ -227,7 +232,8 @@ async fn memory_summary_reads_return_none_after_terminal_eviction() {
 }
 
 #[tokio::test]
-async fn sqlite_summary_reads_do_not_select_payload() {
+#[cfg(feature = "sqlite")]
+async fn test_sqlite_summary_reads_do_not_select_payload() {
     let path = std::env::temp_dir().join(format!(
         "qubit-task-summary-read-{}-{}.sqlite",
         std::process::id(),
@@ -248,7 +254,7 @@ async fn sqlite_summary_reads_do_not_select_payload() {
         .unwrap();
 
     assert_eq!(store.get_summary(id).await.unwrap(), Some(accepted.summary));
-    assert!(matches!(store.get_encoded_task(id).await, Err(_)));
+    assert!(store.get_encoded_task(id).await.is_err());
     assert_eq!(store.get_summary(task_id(402)).await.unwrap(), None);
     let running = store
         .start_encoded(StartCommand {

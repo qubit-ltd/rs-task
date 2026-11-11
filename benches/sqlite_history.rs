@@ -580,37 +580,26 @@ fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<Stri
     )
 }
 
-fn compare_ready_queries(
-    connection: &Connection,
-) -> Result<ReadyQueryComparison, Box<dyn std::error::Error>> {
+fn compare_ready_queries(connection: &Connection) -> Result<ReadyQueryComparison, Box<dyn std::error::Error>> {
     const OLD_SQL: &str = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4";
     const SPLIT_SQL: &str = "WITH candidates(id,accepted_at) AS (SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_immediate_accepted_id WHERE state_kind='Queued' AND retry_not_before_ms IS NULL AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4) UNION ALL SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms IS NOT NULL AND retry_not_before_ms<=?1 AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4)), page AS (SELECT id,accepted_at FROM candidates ORDER BY accepted_at,id LIMIT ?4) SELECT tasks.id,tasks.request_info_json,tasks.lifecycle_json FROM page JOIN tasks ON tasks.id=page.id ORDER BY page.accepted_at,page.id";
 
-    fn run(
-        connection: &Connection,
-        sql: &str,
-    ) -> Result<(Timing, i32), Box<dyn std::error::Error>> {
+    fn run(connection: &Connection, sql: &str) -> Result<(Timing, i32), Box<dyn std::error::Error>> {
         let mut statement = connection.prepare(sql)?;
-        let execute =
-            |statement: &mut rusqlite::Statement<'_>| -> Result<(), Box<dyn std::error::Error>> {
-                let rows = statement.query_map(
-                    params![
-                        1_i64,
-                        Option::<i64>::None,
-                        Option::<String>::None,
-                        PAGE_SIZE as i64 + 1
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )?;
-                let _ = rows.collect::<Result<Vec<_>, _>>()?;
-                Ok(())
-            };
+        let execute = |statement: &mut rusqlite::Statement<'_>| -> Result<(), Box<dyn std::error::Error>> {
+            let rows = statement.query_map(
+                params![1_i64, Option::<i64>::None, Option::<String>::None, PAGE_SIZE as i64 + 1],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?;
+            let _ = rows.collect::<Result<Vec<_>, _>>()?;
+            Ok(())
+        };
         for _ in 0..QUERY_WARMUPS {
             execute(&mut statement)?;
         }
@@ -637,12 +626,7 @@ fn compare_ready_queries(
         let mut split = connection.prepare_cached(split_sql)?;
         fn execute_rows(statement: &mut rusqlite::Statement<'_>) -> Result<(), rusqlite::Error> {
             let rows = statement.query_map(
-                params![
-                    1_i64,
-                    Option::<i64>::None,
-                    Option::<String>::None,
-                    PAGE_SIZE as i64 + 1
-                ],
+                params![1_i64, Option::<i64>::None, Option::<String>::None, PAGE_SIZE as i64 + 1],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -666,21 +650,23 @@ fn compare_ready_queries(
             } else {
                 None
             };
+            let sample_limit = (PAGE_SIZE / 2).clamp(8, 16);
             let rows = sample.query_map(
                 params![
                     1_i64,
                     Option::<i64>::None,
                     Option::<String>::None,
-                    (PAGE_SIZE / 4).max((PAGE_SIZE / 16).max(1)) as i64
+                    (sample_limit + 1) as i64
                 ],
                 |row| row.get::<_, Option<i64>>(0),
             )?;
-            let sampled_ready = rows
-                .collect::<Result<Vec<_>, _>>()?
+            let sampled_deadlines = rows.collect::<Result<Vec<_>, _>>()?;
+            let sampled_rows = sampled_deadlines.len();
+            let sampled_ready = sampled_deadlines
                 .into_iter()
                 .filter(|deadline| deadline.is_none_or(|value| value <= 1))
                 .count();
-            let use_split = if sampled_ready < (PAGE_SIZE / 16).max(1) {
+            let use_split = if sampled_rows > sample_limit && sampled_ready <= PAGE_SIZE {
                 future.query_row([1_i64], |row| row.get::<_, bool>(0))?
             } else {
                 false
@@ -733,12 +719,15 @@ fn compare_ready_queries(
                 "UPDATE tasks SET state_kind='Queued',retry_not_before_ms=CASE WHEN CAST(id AS INTEGER)%100=0 THEN 0 ELSE 9223372036854775807 END",
             ),
             (
+                "sparse_ready_prefix_many_future",
+                "UPDATE tasks SET state_kind='Queued',retry_not_before_ms=CASE WHEN CAST(id AS INTEGER)<16 AND CAST(id AS INTEGER)%4=0 THEN 0 ELSE 9223372036854775807 END",
+            ),
+            (
                 "many_due_few_future",
                 "UPDATE tasks SET state_kind='Queued',retry_not_before_ms=CASE WHEN CAST(id AS INTEGER)%10=0 THEN 9223372036854775807 ELSE 0 END",
             ),
         ];
-        let rows_i64: i64 =
-            connection.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
+        let rows_i64: i64 = connection.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
         let rows = usize::try_from(rows_i64)?;
         let mut reports = Vec::with_capacity(scenarios.len());
         for (name, update) in scenarios {
@@ -746,26 +735,15 @@ fn compare_ready_queries(
             let legacy_plan = explain(
                 connection,
                 OLD_SQL,
-                params![
-                    1_i64,
-                    Option::<i64>::None,
-                    Option::<String>::None,
-                    PAGE_SIZE as i64 + 1
-                ],
+                params![1_i64, Option::<i64>::None, Option::<String>::None, PAGE_SIZE as i64 + 1],
             )?;
             let (legacy, legacy_vm_steps) = run(connection, OLD_SQL)?;
-            let (optimized, optimized_vm_steps, use_split) =
-                run_adaptive(connection, OLD_SQL, SPLIT_SQL)?;
+            let (optimized, optimized_vm_steps, use_split) = run_adaptive(connection, OLD_SQL, SPLIT_SQL)?;
             let optimized_plan = if use_split {
                 explain(
                     connection,
                     SPLIT_SQL,
-                    params![
-                        1_i64,
-                        Option::<i64>::None,
-                        Option::<String>::None,
-                        PAGE_SIZE as i64 + 1
-                    ],
+                    params![1_i64, Option::<i64>::None, Option::<String>::None, PAGE_SIZE as i64 + 1],
                 )?
             } else {
                 legacy_plan.clone()
@@ -800,12 +778,7 @@ fn compare_ready_queries(
         } else {
             OLD_SQL
         },
-        params![
-            1_i64,
-            Option::<i64>::None,
-            Option::<String>::None,
-            PAGE_SIZE as i64 + 1
-        ],
+        params![1_i64, Option::<i64>::None, Option::<String>::None, PAGE_SIZE as i64 + 1],
     )?;
     let (old_sql, old_sql_vm_steps) = run(connection, OLD_SQL)?;
     let (split_sql, split_sql_vm_steps) = run(connection, SPLIT_SQL)?;
@@ -817,22 +790,12 @@ fn compare_ready_queries(
         old_plan: explain(
             connection,
             OLD_SQL,
-            params![
-                1_i64,
-                Option::<i64>::None,
-                Option::<String>::None,
-                PAGE_SIZE as i64 + 1
-            ],
+            params![1_i64, Option::<i64>::None, Option::<String>::None, PAGE_SIZE as i64 + 1],
         )?,
         split_plan: explain(
             connection,
             SPLIT_SQL,
-            params![
-                1_i64,
-                Option::<i64>::None,
-                Option::<String>::None,
-                PAGE_SIZE as i64 + 1
-            ],
+            params![1_i64, Option::<i64>::None, Option::<String>::None, PAGE_SIZE as i64 + 1],
         )?,
         representative_adaptive_vm_steps,
         representative_adaptive,

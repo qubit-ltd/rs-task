@@ -103,9 +103,7 @@ impl ValueEncoder<Payload> for BlockingCodec {
             "intentional encoder panic"
         );
         let gate = if value.0 {
-            CANCEL_ENCODER_GATE
-                .get()
-                .expect("cancel encoder gate installed")
+            CANCEL_ENCODER_GATE.get().expect("cancel encoder gate installed")
         } else {
             ENCODER_GATE.get().expect("encoder gate installed")
         };
@@ -124,8 +122,7 @@ impl ValueDecoder<[u8]> for BlockingCodec {
     }
 }
 
-static DESCRIPTOR: ValueBytesCodecDescriptor =
-    ValueBytesCodecDescriptor::of::<BlockingCodec, Payload>();
+static DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<BlockingCodec, Payload>();
 static REGISTRATION: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("test.codec_isolation"),
     &DESCRIPTOR,
@@ -140,11 +137,7 @@ static REGISTRATION: ValueBytesCodecRegistration = ValueCodecRegistration::new(
 struct Handler;
 
 impl TaskHandler<Payload> for Handler {
-    fn run<'a>(
-        &'a self,
-        _payload: Payload,
-        _context: TaskContext,
-    ) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(&'a self, _payload: Payload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async { Ok(TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
@@ -158,28 +151,17 @@ impl IdGenerator for Ids {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn submit_codec_does_not_block_current_thread_runtime() {
+async fn test_submit_codec_does_not_block_current_thread_runtime() {
     let gate = Arc::new(Gate::default());
     let decoder_gate = Arc::new(Gate::default());
     let cancel_encoder_gate = Arc::new(Gate::default());
+    assert!(ENCODER_GATE.set(Arc::clone(&gate)).is_ok(), "one codec test");
+    assert!(DECODER_GATE.set(Arc::clone(&decoder_gate)).is_ok(), "one codec test");
     assert!(
-        ENCODER_GATE.set(Arc::clone(&gate)).is_ok(),
+        CANCEL_ENCODER_GATE.set(Arc::clone(&cancel_encoder_gate)).is_ok(),
         "one codec test"
     );
-    assert!(
-        DECODER_GATE.set(Arc::clone(&decoder_gate)).is_ok(),
-        "one codec test"
-    );
-    assert!(
-        CANCEL_ENCODER_GATE
-            .set(Arc::clone(&cancel_encoder_gate))
-            .is_ok(),
-        "one codec test"
-    );
-    let codecs = Arc::new(
-        ValueBytesCodecRegistry::from_registrations([&REGISTRATION])
-            .expect("codec registry builds"),
-    );
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&REGISTRATION]).expect("codec registry builds"));
     let ids = Arc::new(Ids(AtomicU64::new(1)));
     let mut builder = TaskExecutionServiceBuilder::new(
         Arc::new(MemoryTaskStore::new(100)),
@@ -191,8 +173,7 @@ async fn submit_codec_does_not_block_current_thread_runtime() {
         .register::<Payload, _>(
             TaskHandlerDescriptor {
                 kind_id: "test.codec".into(),
-                payload_type_id: ModelIdBuf::parse("test.CodecIsolationPayload")
-                    .expect("valid model id"),
+                payload_type_id: ModelIdBuf::parse("test.CodecIsolationPayload").expect("valid model id"),
                 accepted_schema_versions: vec![1],
                 cancellation_mode: CancellationMode::Cooperative,
             },
@@ -230,8 +211,7 @@ async fn submit_codec_does_not_block_current_thread_runtime() {
         Payload(false),
     );
     let result = service.submit(request).await;
-    let (encoder_entered, count_at_release) =
-        releaser.join().expect("encoder releaser thread joins");
+    let (encoder_entered, count_at_release) = releaser.join().expect("encoder releaser thread joins");
     assert!(encoder_entered, "encoder gate was reached");
     let accepted = result.expect("submit finishes after encoder release");
 
@@ -257,12 +237,9 @@ async fn submit_codec_does_not_block_current_thread_runtime() {
             ))
             .await
     });
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        cancel_encoder_gate.reached.notified(),
-    )
-    .await
-    .expect("second encoder reaches cancellation gate");
+    tokio::time::timeout(Duration::from_secs(2), cancel_encoder_gate.reached.notified())
+        .await
+        .expect("second encoder reaches cancellation gate");
     cancelled_submit.abort();
     assert!(
         cancelled_submit
@@ -270,9 +247,8 @@ async fn submit_codec_does_not_block_current_thread_runtime() {
             .expect_err("cancelled submit task")
             .is_cancelled()
     );
-    let (cancel_encoder_entered, cancel_encoder_heartbeats) = cancel_releaser
-        .join()
-        .expect("cancel encoder releaser joins");
+    let (cancel_encoder_entered, cancel_encoder_heartbeats) =
+        cancel_releaser.join().expect("cancel encoder releaser joins");
     assert!(cancel_encoder_entered, "cancel encoder gate was reached");
     assert!(
         cancel_encoder_heartbeats > 0,
@@ -295,14 +271,12 @@ async fn submit_codec_does_not_block_current_thread_runtime() {
         decoder_release_gate.release();
         (entered, count)
     });
-    // A bounded wait proves shutdown retains the in-flight task while decode is blocked.
+    // A bounded wait proves shutdown retains the in-flight task while decode is
+    // blocked.
     tokio::time::timeout(Duration::from_secs(2), decoder_gate.reached.notified())
         .await
         .expect("decoder enters before cancellation and shutdown checks");
-    let _ = service
-        .cancel(accepted.id)
-        .await
-        .expect("cancel during preparation");
+    let _ = service.cancel(accepted.id).await.expect("cancel during preparation");
     let summary = service
         .get(accepted.id)
         .await
@@ -327,9 +301,7 @@ async fn submit_codec_does_not_block_current_thread_runtime() {
     );
 
     let shutdown_early = tokio::time::timeout(Duration::from_millis(20), service.shutdown()).await;
-    let (decoder_entered, decoder_count_at_release) = decoder_releaser
-        .join()
-        .expect("decoder releaser thread joins");
+    let (decoder_entered, decoder_count_at_release) = decoder_releaser.join().expect("decoder releaser thread joins");
     let shutdown = service.shutdown().await;
     heartbeat.abort();
 

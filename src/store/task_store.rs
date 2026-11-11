@@ -245,7 +245,8 @@ pub trait TaskStore: Send + Sync {
     /// Returns `Failure` when stored task data cannot be read or decoded.
     fn get_encoded_task<'a>(&'a self, id: TypedTaskId) -> TaskFuture<'a, Result<Option<TypedStoredTask>, StoreError>>;
 
-    /// Reads the retained task summary without requiring the stored request payload.
+    /// Reads the retained task summary without requiring the stored request
+    /// payload.
     ///
     /// Implementations with payload-bearing records should override this
     /// method to avoid loading or cloning the payload. The default preserves

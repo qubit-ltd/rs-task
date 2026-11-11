@@ -658,6 +658,18 @@ impl super::TaskStore for SqliteTaskStore {
     }
 
     /// Reads summary columns without selecting the stored payload blob.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the task to inspect.
+    ///
+    /// # Returns
+    ///
+    /// The summary when retained, or `None` when the task is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if summary columns cannot be read or decoded.
     fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         self.run(move |connection| get_summary(connection, id))
     }

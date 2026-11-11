@@ -17,7 +17,6 @@ use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
 use rusqlite::params;
 use rusqlite::params_from_iter;
-use rusqlite::types::Value;
 use serde_json;
 
 use super::super::failure;
@@ -29,7 +28,6 @@ use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::TaskOutput;
 use crate::model::TaskState;
 use crate::model::typed::AcceptOutcome;
-use crate::model::typed::MAX_TASK_QUERY_LIMIT;
 use crate::model::typed::ProgressCommand;
 use crate::model::typed::StartCommand;
 use crate::model::typed::StoredTask;
@@ -116,43 +114,7 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     limit: NonZeroUsize,
     now_ms: u64,
 ) -> Result<TaskPage, StoreError> {
-    if limit.get() > MAX_TASK_QUERY_LIMIT {
-        return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
-    }
-    let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
-    let fetch =
-        i64::try_from(limit.get() + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
-    let mut sql = concat!(
-        "SELECT id,request_info_json,lifecycle_json FROM tasks ",
-        "INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' ",
-        "AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1)"
-    )
-    .to_string();
-    let mut values = vec![Value::Integer(now)];
-    if let Some(cursor) = after {
-        let accepted = i64::try_from(cursor.accepted_at_ms)
-            .map_err(|_| StoreError::InvalidRequest("task cursor timestamp is too large"))?;
-        values.push(Value::Integer(accepted));
-        values.push(Value::Text(cursor.id.to_padded_decimal()));
-        sql.push_str(" AND (accepted_at,id)>(?2,?3)");
-    }
-    let limit_idx = values.len() + 1;
-    sql.push_str(&format!(" ORDER BY accepted_at,id LIMIT ?{limit_idx}"));
-    values.push(Value::Integer(fetch));
-    let mut statement = connection.prepare(&sql).map_err(failure)?;
-    let mut rows = statement.query(params_from_iter(values)).map_err(failure)?;
-    let mut records = Vec::new();
-    while let Some(row) = rows.next().map_err(failure)? {
-        records.push(decode_summary(
-            row.get::<_, String>(0).map_err(failure)?,
-            &row.get::<_, String>(1).map_err(failure)?,
-            &row.get::<_, String>(2).map_err(failure)?,
-        )?);
-    }
-    let has_more = records.len() > limit.get();
-    records.truncate(limit.get());
-    let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
-    Ok(TaskPage { records, next })
+    super::ready_query::list_ready_queued(connection, after, limit, now_ms)
 }
 
 /// Finds the minimum queued retry deadline strictly after the supplied time.
@@ -364,6 +326,19 @@ pub(in crate::store::sqlite_task_store) fn get_encoded_task(
 }
 
 /// Reads the current task summary without loading the encoded payload.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing task rows.
+/// - `id`: Stable identity of the task to inspect.
+///
+/// # Returns
+///
+/// The summary when the task is retained, or `None` when it is absent.
+///
+/// # Errors
+///
+/// Returns an error if SQLite data cannot be read or summary JSON is invalid.
 pub(in crate::store::sqlite_task_store) fn get_summary(
     connection: &Connection,
     id: TaskId,
@@ -373,7 +348,13 @@ pub(in crate::store::sqlite_task_store) fn get_summary(
         .query_row(
             "SELECT id,request_info_json,lifecycle_json FROM tasks WHERE id=?1",
             [&id_key],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(failure)?

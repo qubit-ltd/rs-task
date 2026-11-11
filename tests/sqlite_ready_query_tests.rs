@@ -1,3 +1,13 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+//! Public SQLite ready-query behavior and schema migration regressions.
+#![cfg(feature = "sqlite")]
+
 use std::env;
 use std::fs;
 use std::num::NonZeroUsize;
@@ -40,10 +50,7 @@ fn id(value: u64) -> TaskId {
 }
 
 async fn queued_with_deadline(store: &SqliteTaskStore, value: u64, deadline: Option<u64>) {
-    let accepted = store
-        .accept_encoded(id(value), request(value))
-        .await
-        .unwrap();
+    let accepted = store.accept_encoded(id(value), request(value)).await.unwrap();
     let running = store
         .start_encoded(StartCommand {
             id: id(value),
@@ -78,7 +85,7 @@ fn remove_database(path: &Path) {
 }
 
 #[tokio::test]
-async fn ready_query_filters_deadlines_and_pages_ties_in_numeric_id_order() {
+async fn test_ready_query_filters_deadlines_and_pages_ties_in_numeric_id_order() {
     let path = env::temp_dir().join(format!("qubit-task-ready-query-{}.sqlite", Uuid::new_v4()));
     let store = SqliteTaskStore::open(&path).unwrap();
     queued_with_deadline(&store, 1, None).await;
@@ -87,10 +94,7 @@ async fn ready_query_filters_deadlines_and_pages_ties_in_numeric_id_order() {
     queued_with_deadline(&store, 4, Some(100)).await;
 
     let page_limit = NonZeroUsize::new(2).unwrap();
-    let first = store
-        .list_ready_queued(None, page_limit, 100)
-        .await
-        .unwrap();
+    let first = store.list_ready_queued(None, page_limit, 100).await.unwrap();
     assert_eq!(
         first
             .records
@@ -100,10 +104,7 @@ async fn ready_query_filters_deadlines_and_pages_ties_in_numeric_id_order() {
         [1, 2]
     );
     assert!(first.next.is_some());
-    let second = store
-        .list_ready_queued(first.next, page_limit, 100)
-        .await
-        .unwrap();
+    let second = store.list_ready_queued(first.next, page_limit, 100).await.unwrap();
     assert_eq!(
         second
             .records
@@ -125,7 +126,7 @@ async fn ready_query_filters_deadlines_and_pages_ties_in_numeric_id_order() {
 }
 
 #[test]
-fn reopening_v8_recreates_the_ready_index_without_changing_schema_version() {
+fn test_reopening_v8_recreates_ready_index_without_changing_schema_version() {
     let path = env::temp_dir().join(format!("qubit-task-ready-index-{}.sqlite", Uuid::new_v4()));
     drop(SqliteTaskStore::open(&path).unwrap());
     let connection = Connection::open(&path).unwrap();
@@ -151,11 +152,8 @@ fn reopening_v8_recreates_the_ready_index_without_changing_schema_version() {
 }
 
 #[test]
-fn failed_v7_migration_rolls_back_ready_index_and_schema_version() {
-    let path = env::temp_dir().join(format!(
-        "qubit-task-ready-migration-{}.sqlite",
-        Uuid::new_v4()
-    ));
+fn test_failed_v7_migration_rolls_back_ready_index_and_schema_version() {
+    let path = env::temp_dir().join(format!("qubit-task-ready-migration-{}.sqlite", Uuid::new_v4()));
     drop(SqliteTaskStore::open(&path).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection

@@ -2,38 +2,41 @@
 //    Copyright (c) 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Bounded SQLite query for queued tasks whose retry deadline has elapsed.
+
+mod lifecycle;
+mod request_info;
 
 use std::num::NonZeroUsize;
 
 use qubit_id::Id;
 use rusqlite::Connection;
 use rusqlite::params;
-use serde::Deserialize;
-use serde::Serialize;
 
+use self::lifecycle::Lifecycle;
+use self::request_info::RequestInfo;
 use super::super::failure;
-use crate::model::TaskOutput;
-use crate::model::TaskState;
-use crate::model::typed::ResourceRequest;
 use crate::model::typed::TaskCursor;
 use crate::model::typed::TaskId;
 use crate::model::typed::TaskPage;
-use crate::model::typed::TaskProgressSnapshot;
 use crate::model::typed::TaskSummary;
 use crate::store::StoreError;
 
+/// Maximum page size accepted by the ready-task query.
 const MAX_TASK_QUERY_LIMIT: usize = 256;
-const MAX_READY_SAMPLE: usize = 65;
+/// Maximum number of queued rows inspected to estimate ready-task density.
+const MAX_READY_SAMPLE: usize = 16;
 
 /// Lists queued task summaries in acceptance order when their retry deadline
 /// is absent or no later than `now_ms`.
 ///
 /// A bounded prefix probe chooses the acceptance-order scan when it can fill
-/// a useful part of the page. Otherwise a deadline probe decides whether the
-/// disjoint immediate/due branches are needed. Both checks share the query's
-/// read snapshot; only selected rows have their JSON summary columns read.
+/// the page within the sample or reaches the end of a short queue. Otherwise a
+/// deadline probe decides whether the disjoint immediate/due branches are
+/// needed. All checks share the query's read snapshot.
 ///
 /// # Parameters
 ///
@@ -58,18 +61,14 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     now_ms: u64,
 ) -> Result<TaskPage, StoreError> {
     if limit.get() > MAX_TASK_QUERY_LIMIT {
-        return Err(StoreError::InvalidRequest(
-            "ready task page limit exceeds 256",
-        ));
+        return Err(StoreError::InvalidRequest("ready task page limit exceeds 256"));
     }
-    let now = i64::try_from(now_ms)
-        .map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidRequest("task timestamp is too large"))?;
     let cursor = after
         .map(|cursor| {
             Ok::<_, StoreError>((
-                i64::try_from(cursor.accepted_at_ms).map_err(|_| {
-                    StoreError::InvalidRequest("task cursor timestamp is too large")
-                })?,
+                i64::try_from(cursor.accepted_at_ms)
+                    .map_err(|_| StoreError::InvalidRequest("task cursor timestamp is too large"))?,
                 cursor.id.to_padded_decimal(),
             ))
         })
@@ -86,26 +85,33 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
     }
 }
 
+/// Selects and executes the ready-page query while using the caller's snapshot.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection in the query's read snapshot.
+/// - `cursor`: Optional exclusive acceptance-order key.
+/// - `page_size`: Maximum number of summaries to return.
+/// - `now`: SQLite-representable retry deadline cutoff.
+///
+/// # Returns
+///
+/// The ordered ready page and a continuation cursor when a lookahead row
+/// exists.
+///
+/// # Errors
+///
+/// Returns an error if SQLite fails or persisted summary data is invalid.
 fn query_snapshot(
     connection: &Connection,
     cursor: Option<&(i64, String)>,
     page_size: usize,
     now: i64,
 ) -> Result<TaskPage, StoreError> {
-    let fetch = i64::try_from(page_size + 1)
-        .map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
-    let (accepted, id) = cursor.map_or((None, None), |(accepted, id)| {
-        (Some(*accepted), Some(id.as_str()))
-    });
-    let ready_threshold = (page_size / 16).max(1);
-    let sample_limit = i64::try_from((page_size / 4).max(ready_threshold).min(MAX_READY_SAMPLE))
-        .map_err(failure)?;
-    let sampled_ready = sampled_ready_count(connection, now, accepted, id, sample_limit)?;
-    let use_split = if sampled_ready < ready_threshold {
-        has_future_deadline(connection, now)?
-    } else {
-        false
-    };
+    let fetch =
+        i64::try_from(page_size + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
+    let (accepted, id) = cursor.map_or((None, None), |(accepted, id)| (Some(*accepted), Some(id.as_str())));
+    let use_split = should_use_split_query(connection, now, accepted, id, page_size)?;
 
     let sql = if use_split {
         concat!(
@@ -149,19 +155,92 @@ fn query_snapshot(
         .collect::<Result<Vec<_>, _>>()?;
     let has_more = records.len() > page_size;
     records.truncate(page_size);
-    let next = has_more
-        .then(|| records.last().map(TaskCursor::from))
-        .flatten();
+    let next = has_more.then(|| records.last().map(TaskCursor::from)).flatten();
     Ok(TaskPage { records, next })
 }
 
+/// Chooses the bounded deadline-index query when sampled ready density is low.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing queued tasks.
+/// - `now`: Retry deadline cutoff.
+/// - `accepted`: Optional cursor acceptance timestamp.
+/// - `id`: Optional cursor ID key paired with `accepted`.
+/// - `page_size`: Requested maximum number of ready summaries.
+///
+/// # Returns
+///
+/// Whether the disjoint immediate/due branches should be used.
+///
+/// # Errors
+///
+/// Returns an error if either the bounded sample or deadline probe fails.
+fn should_use_split_query(
+    connection: &Connection,
+    now: i64,
+    accepted: Option<i64>,
+    id: Option<&str>,
+    page_size: usize,
+) -> Result<bool, StoreError> {
+    let sample_limit = (page_size / 2).clamp(8, MAX_READY_SAMPLE);
+    let query_limit = i64::try_from(sample_limit + 1).map_err(failure)?;
+    let (sampled_ready, sampled_rows) = sampled_ready_count(connection, now, accepted, id, query_limit)?;
+    if sampled_rows <= sample_limit || sampled_ready > page_size {
+        Ok(false)
+    } else {
+        has_future_deadline(connection, now)
+    }
+}
+
+/// Checks whether any queued task has a retry deadline later than `now`.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing queued tasks.
+/// - `now`: Retry deadline cutoff.
+///
+/// # Returns
+///
+/// Whether a queued task has a future deadline.
+///
+/// # Errors
+///
+/// Returns an error if the existence query fails.
+fn has_future_deadline(connection: &Connection, now: i64) -> Result<bool, StoreError> {
+    connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1)",
+        )
+        .map_err(failure)?
+        .query_row([now], |row| row.get(0))
+        .map_err(failure)
+}
+
+/// Counts ready rows in a bounded acceptance-order sample.
+///
+/// # Parameters
+///
+/// - `connection`: SQLite connection containing queued tasks.
+/// - `now`: Retry deadline cutoff.
+/// - `accepted`: Optional cursor acceptance timestamp.
+/// - `id`: Optional cursor ID key paired with `accepted`.
+/// - `sample_limit`: Maximum queued rows inspected.
+///
+/// # Returns
+///
+/// The number of ready rows in the bounded sample.
+///
+/// # Errors
+///
+/// Returns an error if the sample query fails.
 fn sampled_ready_count(
     connection: &Connection,
     now: i64,
     accepted: Option<i64>,
     id: Option<&str>,
     sample_limit: i64,
-) -> Result<usize, StoreError> {
+) -> Result<(usize, usize), StoreError> {
     let mut statement = connection
         .prepare_cached(concat!(
             "SELECT retry_not_before_ms FROM tasks INDEXED BY tasks_queued_accepted_id ",
@@ -175,64 +254,32 @@ fn sampled_ready_count(
         })
         .map_err(failure)?;
     let mut ready = 0;
+    let mut sampled = 0;
     for deadline in rows {
-        if deadline
-            .map_err(failure)?
-            .is_none_or(|deadline| deadline <= now)
-        {
+        sampled += 1;
+        if deadline.map_err(failure)?.is_none_or(|deadline| deadline <= now) {
             ready += 1;
         }
     }
-    Ok(ready)
+    Ok((ready, sampled))
 }
 
-fn has_future_deadline(connection: &Connection, now: i64) -> Result<bool, StoreError> {
-    connection
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1)",
-        )
-        .map_err(failure)?
-        .query_row([now], |row| row.get(0))
-        .map_err(failure)
-}
-
-#[derive(Serialize, Deserialize)]
-struct RequestInfo {
-    kind_id: String,
-    category: Option<String>,
-    payload_type_id: String,
-    payload_schema_version: u32,
-    payload_codec_id: String,
-    metadata: qubit_metadata::Metadata,
-    resource_limit: ResourceRequest,
-    correlation_key: Option<String>,
-    idempotency_key: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Lifecycle {
-    state: TaskState,
-    #[serde(default)]
-    cancel_requested: bool,
-    #[serde(default)]
-    cancel_error: Option<String>,
-    state_version: u64,
-    attempt: u32,
-    #[serde(default)]
-    retry_not_before_ms: Option<u64>,
-    accepted_at_ms: u64,
-    started_at_ms: Option<u64>,
-    finished_at_ms: Option<u64>,
-    progress: Option<TaskProgressSnapshot>,
-    #[serde(default)]
-    output: Option<TaskOutput>,
-}
-
-fn decode_summary(
-    id: String,
-    request_json: &str,
-    lifecycle_json: &str,
-) -> Result<TaskSummary, StoreError> {
+/// Decodes summary columns without reading the encoded payload bytes.
+///
+/// # Parameters
+///
+/// - `id`: Padded numeric task ID read from SQLite.
+/// - `request_json`: Stored request metadata JSON.
+/// - `lifecycle_json`: Stored lifecycle JSON.
+///
+/// # Returns
+///
+/// A task summary assembled from the stored summary columns.
+///
+/// # Errors
+///
+/// Returns an error if either JSON value or the task ID is invalid.
+fn decode_summary(id: String, request_json: &str, lifecycle_json: &str) -> Result<TaskSummary, StoreError> {
     let request: RequestInfo = serde_json::from_str(request_json).map_err(failure)?;
     let lifecycle: Lifecycle = serde_json::from_str(lifecycle_json).map_err(failure)?;
     let numeric_id = id.parse::<u64>().map_err(failure)?;
@@ -263,8 +310,21 @@ fn decode_summary(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::num::NonZeroUsize;
+
+    use qubit_id::Id;
     use rusqlite::Connection;
+    use rusqlite::params;
+
+    use super::Lifecycle;
+    use super::RequestInfo;
+    use super::list_ready_queued;
+    use super::should_use_split_query;
+    use crate::model::TaskState;
+    use crate::model::typed::ResourceRequest;
+    use crate::model::typed::TaskCursor;
+    use crate::model::typed::TaskId;
+    use crate::store::StoreError;
 
     fn connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -282,13 +342,7 @@ mod tests {
         connection
     }
 
-    fn add_task(
-        connection: &Connection,
-        id: u64,
-        accepted: u64,
-        deadline: Option<u64>,
-        state: &str,
-    ) {
+    fn add_task(connection: &Connection, id: u64, accepted: u64, deadline: Option<u64>, state: &str) {
         let request = RequestInfo {
             kind_id: "ready.test".into(),
             category: None,
@@ -324,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn branches_filter_deadlines_and_page_by_numeric_id() {
+    fn test_filters_deadlines_and_pages_by_numeric_id() {
         let connection = connection();
         // Equal acceptance times make the numeric ID tie-breaker observable.
         add_task(&connection, 9, 10, None, "Queued");
@@ -338,31 +392,20 @@ mod tests {
         let limit = NonZeroUsize::new(2).unwrap();
         let first = list_ready_queued(&connection, None, limit, 100).unwrap();
         assert_eq!(
-            first
-                .records
-                .iter()
-                .map(|row| row.id.to_string())
-                .collect::<Vec<_>>(),
+            first.records.iter().map(|row| row.id.to_string()).collect::<Vec<_>>(),
             ["2", "9"]
         );
-        assert_eq!(
-            first.next,
-            Some(TaskCursor::from(first.records.last().unwrap()))
-        );
+        assert_eq!(first.next, Some(TaskCursor::from(first.records.last().unwrap())));
         let second = list_ready_queued(&connection, first.next, limit, 100).unwrap();
         assert_eq!(
-            second
-                .records
-                .iter()
-                .map(|row| row.id.to_string())
-                .collect::<Vec<_>>(),
+            second.records.iter().map(|row| row.id.to_string()).collect::<Vec<_>>(),
             ["4"]
         );
         assert_eq!(second.next, None);
     }
 
     #[test]
-    fn randomized_deadline_rows_match_sorted_reference_across_pages() {
+    fn test_randomized_deadline_rows_match_sorted_reference_across_pages() {
         let connection = connection();
         let mut expected = Vec::new();
         for index in 0..80_u64 {
@@ -384,14 +427,12 @@ mod tests {
         let mut actual = Vec::new();
         let mut cursor = None;
         loop {
-            let page =
-                list_ready_queued(&connection, cursor, NonZeroUsize::new(7).unwrap(), 17).unwrap();
-            actual.extend(page.records.iter().map(|summary| {
-                (
-                    summary.accepted_at_ms,
-                    summary.id.to_string().parse::<u64>().unwrap(),
-                )
-            }));
+            let page = list_ready_queued(&connection, cursor, NonZeroUsize::new(7).unwrap(), 17).unwrap();
+            actual.extend(
+                page.records
+                    .iter()
+                    .map(|summary| (summary.accepted_at_ms, summary.id.to_string().parse::<u64>().unwrap())),
+            );
             let has_more = page.records.len() == 7 && page.next.is_some();
             cursor = page.next;
             if !has_more {
@@ -403,21 +444,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_ready_page_has_no_next_cursor() {
-        let page =
-            list_ready_queued(&connection(), None, NonZeroUsize::new(256).unwrap(), 0).unwrap();
+    fn test_empty_ready_page_has_no_next_cursor() {
+        let page = list_ready_queued(&connection(), None, NonZeroUsize::new(256).unwrap(), 0).unwrap();
         assert!(page.records.is_empty());
         assert_eq!(page.next, None);
     }
 
     #[test]
-    fn rejects_invalid_limits_and_unrepresentable_timestamps() {
+    fn test_rejects_invalid_limits_and_unrepresentable_timestamps() {
         let connection = connection();
         assert!(matches!(
             list_ready_queued(&connection, None, NonZeroUsize::new(257).unwrap(), 0),
-            Err(StoreError::InvalidRequest(
-                "ready task page limit exceeds 256"
-            ))
+            Err(StoreError::InvalidRequest("ready task page limit exceeds 256"))
         ));
         assert!(matches!(
             list_ready_queued(&connection, None, NonZeroUsize::new(1).unwrap(), u64::MAX),
@@ -430,14 +468,12 @@ mod tests {
                 NonZeroUsize::new(1).unwrap(),
                 0,
             ),
-            Err(StoreError::InvalidRequest(
-                "task cursor timestamp is too large"
-            ))
+            Err(StoreError::InvalidRequest("task cursor timestamp is too large"))
         ));
     }
 
     #[test]
-    fn future_backlog_scan_steps_stay_bounded_as_rows_grow() {
+    fn test_future_backlog_scan_steps_stay_bounded_as_rows_grow() {
         use rusqlite::StatementStatus;
 
         fn vm_steps(connection: &Connection, sql: &str, params: impl rusqlite::Params) -> i32 {
@@ -482,9 +518,7 @@ mod tests {
                     .prepare("INSERT INTO tasks(id,state_kind,accepted_at,request_info_json,lifecycle_json,retry_not_before_ms) VALUES (?1,'Queued',?2,'{}','{}',1000)")
                     .unwrap();
                 for index in 0..size {
-                    insert
-                        .execute(params![format!("{index:020}"), index as i64])
-                        .unwrap();
+                    insert.execute(params![format!("{index:020}"), index as i64]).unwrap();
                 }
             }
             transaction.commit().unwrap();
@@ -526,7 +560,24 @@ mod tests {
     }
 
     #[test]
-    fn reads_inside_existing_transaction_without_nested_begin() {
+    fn test_sparse_ready_prefix_uses_split_query() {
+        let connection = connection();
+        for index in 0..1_000_u64 {
+            let deadline = if index < 16 && index % 4 == 0 {
+                Some(0)
+            } else {
+                Some(i64::MAX as u64)
+            };
+            add_task(&connection, index, index, deadline, "Queued");
+        }
+
+        assert!(should_use_split_query(&connection, 1, None, None, 32).unwrap());
+        let page = list_ready_queued(&connection, None, NonZeroUsize::new(32).unwrap(), 1).unwrap();
+        assert_eq!(page.records.len(), 4);
+    }
+
+    #[test]
+    fn test_reads_inside_existing_transaction_without_nested_begin() {
         let mut connection = connection();
         let transaction = connection.transaction().unwrap();
         let page = list_ready_queued(&transaction, None, NonZeroUsize::new(1).unwrap(), 0).unwrap();

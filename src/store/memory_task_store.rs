@@ -354,6 +354,18 @@ impl super::TaskStore for MemoryTaskStore {
     }
 
     /// Reads only the retained task summary, cloning no request payload bytes.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the task to inspect.
+    ///
+    /// # Returns
+    ///
+    /// The summary when retained, or `None` when the task is absent.
+    ///
+    /// # Errors
+    ///
+    /// This in-memory implementation does not produce read errors.
     fn get_summary<'a>(&'a self, id: EncodedTaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
         Box::pin(async move {
             let state = self.state.lock();

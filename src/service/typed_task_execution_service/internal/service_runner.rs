@@ -11,10 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use tokio::task::spawn_blocking;
-
 use futures::FutureExt;
 use qubit_progress::AsyncReporter;
+use tokio::task::spawn_blocking;
 
 use super::super::super::task_progress_reporter::TaskProgressReporter;
 use super::super::now_ms;

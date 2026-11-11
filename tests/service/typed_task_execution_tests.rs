@@ -294,6 +294,7 @@ struct FailingListStore {
     fail_next_list: std::sync::atomic::AtomicBool,
     fail_next_query: std::sync::atomic::AtomicBool,
     fail_next_get: std::sync::atomic::AtomicBool,
+    fail_next_summary: std::sync::atomic::AtomicBool,
     fail_next_state_checkpoint: std::sync::atomic::AtomicBool,
     fail_next_start: std::sync::atomic::AtomicBool,
     fail_next_transition: std::sync::atomic::AtomicBool,
@@ -346,6 +347,7 @@ fn failing_store_with_inner(
         fail_next_list: std::sync::atomic::AtomicBool::new(false),
         fail_next_query: std::sync::atomic::AtomicBool::new(false),
         fail_next_get: std::sync::atomic::AtomicBool::new(false),
+        fail_next_summary: std::sync::atomic::AtomicBool::new(false),
         fail_next_state_checkpoint: std::sync::atomic::AtomicBool::new(false),
         fail_next_start: std::sync::atomic::AtomicBool::new(false),
         fail_next_transition: std::sync::atomic::AtomicBool::new(false),
@@ -356,7 +358,7 @@ fn failing_store_with_inner(
 }
 
 #[tokio::test]
-async fn service_get_uses_summary_specific_store_method() {
+async fn test_service_get_uses_summary_specific_store_method() {
     let id = TaskId::from_id(id::Id::new(19_004));
     let inner = Arc::new(MemoryTaskStore::new(8));
     let accepted = inner
@@ -381,14 +383,10 @@ async fn service_get_uses_summary_specific_store_method() {
         .expect("task record is accepted");
     let store = failing_store_with_inner(inner, None);
     *store.target_summary.lock().unwrap() = Some(accepted.summary.clone());
-    let service = TaskExecutionServiceBuilder::new(
-        store.clone(),
-        registry(),
-        Arc::new(Ids(AtomicU64::new(19_005))),
-    )
-    .build()
-    .await
-    .expect("service starts");
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(19_005))))
+        .build()
+        .await
+        .expect("service starts");
 
     store.fail_next_get.store(true, Ordering::Release);
     assert_eq!(service.get(id).await.unwrap(), Some(accepted.summary));
@@ -436,7 +434,9 @@ impl TaskStore for FailingListStore {
         &'a self,
         id: TaskId,
     ) -> TaskFuture<'a, Result<Option<task::model::TaskSummary>, task::store::StoreError>> {
-        if let Some(summary) = self.target_summary.lock().unwrap().clone()
+        if self.fail_next_summary.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(task::store::StoreError::Failure("injected summary failure".into())) })
+        } else if let Some(summary) = self.target_summary.lock().unwrap().clone()
             && summary.id == id
         {
             Box::pin(async move { Ok(Some(summary)) })
@@ -1841,12 +1841,12 @@ async fn test_typed_service_get_query_and_cancel_map_store_failures() {
         .await
         .expect("service starts");
 
-    store.fail_next_get.store(true, Ordering::Release);
+    store.fail_next_summary.store(true, Ordering::Release);
     assert!(matches!(
         service.get(TaskId::from_id(id::Id::new(9998))).await,
         Err(task::service::TaskServiceError::Store(
             task::store::StoreError::Failure(message)
-        )) if message == "injected get failure"
+        )) if message == "injected summary failure"
     ));
     assert_eq!(service.get(TaskId::from_id(id::Id::new(9998))).await.unwrap(), None);
 
