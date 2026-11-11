@@ -5,10 +5,14 @@
 // =============================================================================
 //! Summary-only reads return lifecycle state without decoding stored payloads.
 
+use std::alloc::GlobalAlloc;
+use std::alloc::Layout;
+use std::alloc::System;
+use std::cell::Cell;
+use std::num::NonZeroUsize;
 use qubit_id::Id;
 use qubit_metadata::Metadata;
 use qubit_model_id::ModelIdBuf;
-use std::num::NonZeroUsize;
 use qubit_task::model::TaskState;
 use qubit_task::model::typed::StartCommand;
 use qubit_task::model::typed::StoredPayload;
@@ -19,6 +23,78 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
 use rusqlite::Connection;
+
+thread_local! {
+    static TRACK_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+struct ThreadCountingAllocator;
+
+#[global_allocator]
+static ALLOCATOR: ThreadCountingAllocator = ThreadCountingAllocator;
+
+unsafe impl GlobalAlloc for ThreadCountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        record_allocation(layout.size());
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        record_allocation(layout.size());
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let result = unsafe { System.realloc(pointer, layout, new_size) };
+        if !result.is_null() {
+            record_allocation(new_size);
+        }
+        result
+    }
+}
+
+fn record_allocation(bytes: usize) {
+    let _ = TRACK_ALLOCATIONS.try_with(|tracking| {
+        if tracking.get() {
+            let _ = ALLOCATED_BYTES.try_with(|allocated| {
+                allocated.set(allocated.get().saturating_add(bytes));
+            });
+        }
+    });
+}
+
+struct AllocationTrackingGuard;
+
+impl Drop for AllocationTrackingGuard {
+    fn drop(&mut self) {
+        let _ = TRACK_ALLOCATIONS.try_with(|tracking| tracking.set(false));
+    }
+}
+
+async fn measure_summary_read_allocations(store: &MemoryTaskStore, id: TaskId) -> usize {
+    ALLOCATED_BYTES.with(|allocated| allocated.set(0));
+    TRACK_ALLOCATIONS.with(|tracking| tracking.set(true));
+    let _guard = AllocationTrackingGuard;
+    let _summary = store.get_summary(id).await.unwrap();
+    drop(_guard);
+    ALLOCATED_BYTES.with(Cell::get)
+}
+
+async fn measure_encoded_read_allocations(store: &MemoryTaskStore, id: TaskId) -> usize {
+    ALLOCATED_BYTES.with(|allocated| allocated.set(0));
+    TRACK_ALLOCATIONS.with(|tracking| tracking.set(true));
+    let _guard = AllocationTrackingGuard;
+    let _task = store.get_encoded_task(id).await.unwrap();
+    drop(_guard);
+    ALLOCATED_BYTES.with(Cell::get)
+}
 
 fn task_id(value: u64) -> TaskId {
     TaskId::from_id(Id::new(value))
@@ -41,7 +117,7 @@ fn request(payload_size: usize) -> StoredTaskRequest {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn memory_summary_reads_track_updates_without_cloning_payload() {
     let store = MemoryTaskStore::new(4);
     let id = task_id(301);
@@ -51,6 +127,25 @@ async fn memory_summary_reads_track_updates_without_cloning_payload() {
         .unwrap();
     let initial = store.get_summary(id).await.unwrap().unwrap();
     assert_eq!(initial, accepted.summary);
+
+    let small_id = task_id(304);
+    store.accept_encoded(small_id, request(1)).await.unwrap();
+    // Warm both paths before measuring so one-time runtime setup is excluded.
+    store.get_summary(small_id).await.unwrap();
+    store.get_summary(id).await.unwrap();
+    let small_read_bytes = measure_summary_read_allocations(&store, small_id).await;
+    let large_read_bytes = measure_summary_read_allocations(&store, id).await;
+    let encoded_read_bytes = measure_encoded_read_allocations(&store, id).await;
+    assert!(small_read_bytes < 32 * 1024, "small summary read allocated {small_read_bytes} bytes");
+    assert!(
+        large_read_bytes <= small_read_bytes + 32 * 1024,
+        "8 MiB payload summary read allocated {large_read_bytes} bytes versus {small_read_bytes} for a 1-byte payload",
+    );
+    assert!(large_read_bytes < 8 * 1024 * 1024 / 16);
+    assert!(
+        encoded_read_bytes >= 8 * 1024 * 1024 / 2,
+        "allocator control failed to observe payload clone: only {encoded_read_bytes} bytes allocated",
+    );
 
     let running = store
         .start_encoded(StartCommand {
