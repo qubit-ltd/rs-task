@@ -95,6 +95,10 @@ struct ReadyQueryComparison {
     split_sql: Timing,
     old_plan: Vec<String>,
     split_plan: Vec<String>,
+    representative_adaptive_vm_steps: i32,
+    representative_adaptive: Timing,
+    representative_adaptive_uses_split: bool,
+    representative_adaptive_plan: Vec<String>,
     extreme_distributions: Vec<ReadyDistributionReport>,
 }
 
@@ -656,20 +660,25 @@ fn compare_ready_queries(
             old: &mut rusqlite::Statement<'connection>,
             split: &mut rusqlite::Statement<'connection>,
         ) -> Result<bool, rusqlite::Error> {
-            let has_future = future.query_row([1_i64], |row| row.get::<_, bool>(0))?;
-            let sampled_ready = if has_future {
-                let rows = sample.query_map(
-                    params![1_i64, Option::<i64>::None, Option::<String>::None, 9_i64],
-                    |row| row.get::<_, Option<i64>>(0),
-                )?;
-                rows.collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .filter(|deadline| deadline.is_none_or(|value| value <= 1))
-                    .count()
+            let rows = sample.query_map(
+                params![
+                    1_i64,
+                    Option::<i64>::None,
+                    Option::<String>::None,
+                    (PAGE_SIZE / 4).max((PAGE_SIZE / 16).max(1)) as i64
+                ],
+                |row| row.get::<_, Option<i64>>(0),
+            )?;
+            let sampled_ready = rows
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|deadline| deadline.is_none_or(|value| value <= 1))
+                .count();
+            let use_split = if sampled_ready < (PAGE_SIZE / 16).max(1) {
+                future.query_row([1_i64], |row| row.get::<_, bool>(0))?
             } else {
-                0
+                false
             };
-            let use_split = has_future && sampled_ready < 8;
             execute_rows(if use_split { split } else { old })?;
             Ok(use_split)
         }
@@ -763,6 +772,22 @@ fn compare_ready_queries(
     connection.execute_batch("ROLLBACK TO ready_query_benchmark_distributions; RELEASE ready_query_benchmark_distributions")?;
     let extreme_distributions = measured?;
 
+    let (representative_adaptive, representative_adaptive_vm_steps, representative_adaptive_uses_split) =
+        run_adaptive(connection, OLD_SQL, SPLIT_SQL)?;
+    let representative_adaptive_plan = explain(
+        connection,
+        if representative_adaptive_uses_split {
+            SPLIT_SQL
+        } else {
+            OLD_SQL
+        },
+        params![
+            1_i64,
+            Option::<i64>::None,
+            Option::<String>::None,
+            PAGE_SIZE as i64 + 1
+        ],
+    )?;
     let (old_sql, old_sql_vm_steps) = run(connection, OLD_SQL)?;
     let (split_sql, split_sql_vm_steps) = run(connection, SPLIT_SQL)?;
     Ok(ReadyQueryComparison {
@@ -790,6 +815,10 @@ fn compare_ready_queries(
                 PAGE_SIZE as i64 + 1
             ],
         )?,
+        representative_adaptive_vm_steps,
+        representative_adaptive,
+        representative_adaptive_uses_split,
+        representative_adaptive_plan,
         extreme_distributions,
     })
 }

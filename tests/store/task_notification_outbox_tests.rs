@@ -57,6 +57,14 @@ async fn test_outbox_requires_owner_and_valid_page_size() {
     ));
 }
 
+async fn assert_ready_query_finds(store: &SqliteTaskStore, id: TaskId) {
+    let page = store
+        .list_ready_queued(None, NonZeroUsize::new(8).expect("nonzero page size"), 0)
+        .await
+        .expect("ready query works after migration");
+    assert!(page.records.iter().any(|summary| summary.id == id));
+}
+
 #[tokio::test]
 async fn test_memory_store_reports_unsupported_quarantine_capability() {
     let store = MemoryTaskStore::new(8);
@@ -124,6 +132,9 @@ async fn test_schema_five_migrates_to_eight_and_reopens_without_rewriting_tasks(
     connection
         .prepare("SELECT task_id,state_version,event_id,event_json,created_at_ms FROM task_event_outbox")
         .expect("outbox schema");
+    drop(connection);
+    let migrated = SqliteTaskStore::open(&path).expect("reopen migrated database");
+    assert_ready_query_finds(&migrated, id).await;
 }
 
 #[tokio::test]
@@ -178,6 +189,26 @@ async fn test_schema_six_migrates_outbox_rows_to_eight_and_reopens() {
         assert_eq!(migrated.event_id, original.event_id);
         assert_eq!(migrated.event_json, original.event_json);
     }
+    let loaded = store
+        .get_encoded_task(id)
+        .await
+        .expect("read task after v6 migration")
+        .expect("task remains stored");
+    store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: loaded.summary.state_version,
+            expected_attempt: loaded.summary.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: None,
+            output: None,
+        })
+        .await
+        .expect("return migrated task to the ready queue");
+    assert_ready_query_finds(&store, id).await;
     store.release_owner(owner).await.expect("release owner");
     let connection = Connection::open(&path).expect("inspect schema");
     let version: i64 = connection
@@ -229,6 +260,9 @@ async fn test_schema_four_and_five_migrate_tasks_to_eight() {
         connection
             .prepare("SELECT task_id,state_version,event_id,event_json,created_at_ms,quarantined_at_ms,reason,last_error FROM task_event_outbox_quarantine")
             .expect("quarantine schema");
+        drop(connection);
+        let migrated = SqliteTaskStore::open(&path).expect("reopen upgraded schema");
+        assert_ready_query_finds(&migrated, id).await;
     }
 }
 
@@ -269,6 +303,9 @@ async fn test_schema_seven_migrates_to_eight_preserving_outbox_and_quarantine() 
             .expect("retained row count");
         assert_eq!(count, 1, "{table} data survives v7 migration");
     }
+    drop(connection);
+    let migrated = SqliteTaskStore::open(&path).expect("reopen upgraded v7 schema");
+    assert_ready_query_finds(&migrated, id).await;
 }
 
 #[test]

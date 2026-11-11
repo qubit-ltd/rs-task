@@ -96,12 +96,12 @@ fn query_snapshot(
     let (accepted, id) = cursor.map_or((None, None), |(accepted, id)| {
         (Some(*accepted), Some(id.as_str()))
     });
-    let ready_threshold = (page_size / 4).max(1);
-    let sample_limit =
-        i64::try_from((ready_threshold + 1).min(MAX_READY_SAMPLE)).map_err(failure)?;
-    let has_future = has_future_deadline(connection, now)?;
-    let use_split = if has_future {
-        sampled_ready_count(connection, now, accepted, id, sample_limit)? < ready_threshold
+    let ready_threshold = (page_size / 16).max(1);
+    let sample_limit = i64::try_from((page_size / 4).max(ready_threshold).min(MAX_READY_SAMPLE))
+        .map_err(failure)?;
+    let sampled_ready = sampled_ready_count(connection, now, accepted, id, sample_limit)?;
+    let use_split = if sampled_ready < ready_threshold {
+        has_future_deadline(connection, now)?
     } else {
         false
     };
