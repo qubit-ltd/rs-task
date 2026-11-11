@@ -36,14 +36,10 @@ mod tests {
     use crate::store::TaskStore;
 
     async fn create_publisher() -> (TaskEventPublisher, std::path::PathBuf, Arc<SqliteTaskStore>) {
-        let database =
-            std::env::temp_dir().join(format!("task-publisher-{}.sqlite", Uuid::new_v4()));
+        let database = std::env::temp_dir().join(format!("task-publisher-{}.sqlite", Uuid::new_v4()));
         let store = Arc::new(SqliteTaskStore::open(&database).expect("open temporary task store"));
         store.acquire_owner().await.expect("acquire store owner");
-        store
-            .enable_event_outbox()
-            .await
-            .expect("enable durable outbox");
+        store.enable_event_outbox().await.expect("enable durable outbox");
         let registry = AsyncEventBusRegistry::with_local().expect("local bus registry");
         let bus = Arc::new(
             registry
@@ -96,14 +92,8 @@ mod tests {
         assert_eq!(publisher.stats().failed, 0);
         assert_eq!(publisher.stats().dropped, 0);
 
-        publisher
-            .close()
-            .await
-            .expect("worker exits after empty outbox");
-        publisher
-            .close()
-            .await
-            .expect("joined worker is not joined twice");
+        publisher.close().await.expect("worker exits after empty outbox");
+        publisher.close().await.expect("joined worker is not joined twice");
         drop(publisher);
         std::fs::remove_file(database).expect("remove temporary task database");
     }
@@ -150,13 +140,7 @@ mod tests {
             )
         });
         assert_eq!(publisher.stats().queued, 0);
-        assert!(
-            store
-                .list_event_outbox(128)
-                .await
-                .expect("outbox read")
-                .is_empty()
-        );
+        assert!(store.list_event_outbox(128).await.expect("outbox read").is_empty());
         publisher.close().await.expect("worker closes");
         drop(publisher);
         std::fs::remove_file(database).expect("remove temporary task database");
@@ -176,10 +160,7 @@ mod tests {
             .await
             .expect_err("outbox read keeps failing until deadline");
         let diagnostic = error.to_string();
-        assert!(
-            diagnostic.contains("pending count unavailable"),
-            "{diagnostic}"
-        );
+        assert!(diagnostic.contains("pending count unavailable"), "{diagnostic}");
         assert!(
             diagnostic.contains("no publication was active at timeout"),
             "{diagnostic}"
