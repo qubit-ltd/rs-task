@@ -353,6 +353,14 @@ impl super::TaskStore for MemoryTaskStore {
         Box::pin(async move { Ok(self.state.lock().encoded_tasks.get(&id).cloned()) })
     }
 
+    /// Reads only the retained task summary, cloning no request payload bytes.
+    fn get_summary<'a>(&'a self, id: EncodedTaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        Box::pin(async move {
+            let state = self.state.lock();
+            Ok(state.encoded_tasks.get(&id).map(|task| task.summary.clone()))
+        })
+    }
+
     /// Returns the retained task's authoritative lifecycle state and revision.
     ///
     /// A pruned or evicted task has no checkpoint in this volatile store.

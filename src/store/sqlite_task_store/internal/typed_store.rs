@@ -363,6 +363,24 @@ pub(in crate::store::sqlite_task_store) fn get_encoded_task(
     .transpose()
 }
 
+/// Reads the current task summary without loading the encoded payload.
+pub(in crate::store::sqlite_task_store) fn get_summary(
+    connection: &Connection,
+    id: TaskId,
+) -> Result<Option<TaskSummary>, StoreError> {
+    let id_key = id.to_padded_decimal();
+    connection
+        .query_row(
+            "SELECT id,request_info_json,lifecycle_json FROM tasks WHERE id=?1",
+            [&id_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+        )
+        .optional()
+        .map_err(failure)?
+        .map(|(id, request_json, lifecycle_json)| decode_summary(id, &request_json, &lifecycle_json))
+        .transpose()
+}
+
 /// Starts a queued task attempt when its state revision still matches.
 ///
 /// # Returns

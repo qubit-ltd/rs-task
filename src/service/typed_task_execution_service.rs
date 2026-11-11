@@ -326,7 +326,7 @@ impl TypedTaskExecutionService {
     ///
     /// Returns an error if the store cannot read the task.
     pub async fn get(&self, id: TaskId) -> Result<Option<TaskSummary>, TaskServiceError> {
-        Ok(self.core.store.get_encoded_task(id).await?.map(|task| task.summary))
+        Ok(self.core.store.get_summary(id).await?)
     }
 
     /// Returns the authoritative current state and revision when the store has

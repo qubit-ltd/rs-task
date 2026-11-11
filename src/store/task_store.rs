@@ -245,6 +245,30 @@ pub trait TaskStore: Send + Sync {
     /// Returns `Failure` when stored task data cannot be read or decoded.
     fn get_encoded_task<'a>(&'a self, id: TypedTaskId) -> TaskFuture<'a, Result<Option<TypedStoredTask>, StoreError>>;
 
+    /// Reads the retained task summary without requiring the stored request payload.
+    ///
+    /// Implementations with payload-bearing records should override this
+    /// method to avoid loading or cloning the payload. The default preserves
+    /// compatibility with existing stores by deriving the summary from
+    /// [`TaskStore::get_encoded_task`]. Pruned or evicted tasks return `None`;
+    /// terminal checkpoints remain available through
+    /// [`TaskStore::get_state_checkpoint`].
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Stable identity of the retained task to read.
+    ///
+    /// # Returns
+    ///
+    /// The current summary, or `None` when no task record is retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error reported while loading or decoding the stored task.
+    fn get_summary<'a>(&'a self, id: TypedTaskId) -> TaskFuture<'a, Result<Option<TypedTaskSummary>, StoreError>> {
+        Box::pin(async move { Ok(self.get_encoded_task(id).await?.map(|task| task.summary)) })
+    }
+
     /// Returns the authoritative current state and revision when the store has
     /// one.
     ///

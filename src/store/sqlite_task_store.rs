@@ -31,6 +31,7 @@ use self::internal::WorkerGuard;
 use self::internal::accept_encoded;
 use self::internal::acquire_owner_lock;
 use self::internal::get_encoded_task;
+use self::internal::get_summary;
 use self::internal::initialize_next_schema;
 use self::internal::list_encoded;
 use self::internal::list_ready_queued;
@@ -654,6 +655,11 @@ impl super::TaskStore for SqliteTaskStore {
     /// Returns an error when SQLite data cannot be read or decoded.
     fn get_encoded_task<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
         self.run(move |connection| get_encoded_task(connection, id))
+    }
+
+    /// Reads summary columns without selecting the stored payload blob.
+    fn get_summary<'a>(&'a self, id: TaskId) -> TaskFuture<'a, Result<Option<TaskSummary>, StoreError>> {
+        self.run(move |connection| get_summary(connection, id))
     }
 
     /// Reads the authoritative lifecycle state or retained terminal checkpoint.

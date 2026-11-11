@@ -27,6 +27,7 @@ pub(super) use schema::initialize_next_schema;
 pub(super) use sqlite_owner_state::SqliteOwnerState;
 pub(super) use typed_store::accept_encoded;
 pub(super) use typed_store::get_encoded_task;
+pub(super) use typed_store::get_summary;
 pub(super) use typed_store::list_encoded;
 pub(super) use typed_store::list_ready_queued;
 pub(super) use typed_store::next_retry_deadline;
