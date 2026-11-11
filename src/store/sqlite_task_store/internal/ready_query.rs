@@ -75,9 +75,15 @@ pub(in crate::store::sqlite_task_store) fn list_ready_queued(
         })
         .transpose()?;
 
-    // Probe results only select a query plan. Each page query rechecks all
-    // state, deadline, cursor and ordering predicates in its own snapshot.
-    query_snapshot(connection, cursor.as_ref(), limit.get(), now)
+    // Keep the deadline probe and selected page on the same read snapshot.
+    if connection.is_autocommit() {
+        let transaction = connection.unchecked_transaction().map_err(failure)?;
+        let page = query_snapshot(&transaction, cursor.as_ref(), limit.get(), now)?;
+        transaction.commit().map_err(failure)?;
+        Ok(page)
+    } else {
+        query_snapshot(connection, cursor.as_ref(), limit.get(), now)
+    }
 }
 
 fn query_snapshot(

@@ -655,11 +655,17 @@ fn compare_ready_queries(
             Ok(())
         }
         fn execute_once<'connection>(
+            connection: &Connection,
             sample: &mut rusqlite::Statement<'connection>,
             future: &mut rusqlite::Statement<'connection>,
             old: &mut rusqlite::Statement<'connection>,
             split: &mut rusqlite::Statement<'connection>,
         ) -> Result<bool, rusqlite::Error> {
+            let transaction = if connection.is_autocommit() {
+                Some(connection.unchecked_transaction()?)
+            } else {
+                None
+            };
             let rows = sample.query_map(
                 params![
                     1_i64,
@@ -680,22 +686,25 @@ fn compare_ready_queries(
                 false
             };
             execute_rows(if use_split { split } else { old })?;
+            if let Some(transaction) = transaction {
+                transaction.commit()?;
+            }
             Ok(use_split)
         }
         for _ in 0..QUERY_WARMUPS {
-            execute_once(&mut sample, &mut future, &mut old, &mut split)?;
+            execute_once(connection, &mut sample, &mut future, &mut old, &mut split)?;
         }
         let mut samples = Vec::with_capacity(QUERY_SAMPLES);
         for _ in 0..QUERY_SAMPLES {
             let start = Instant::now();
-            execute_once(&mut sample, &mut future, &mut old, &mut split)?;
+            execute_once(connection, &mut sample, &mut future, &mut old, &mut split)?;
             samples.push(start.elapsed());
         }
         let _ = sample.reset_status(StatementStatus::VmStep);
         let _ = future.reset_status(StatementStatus::VmStep);
         let _ = old.reset_status(StatementStatus::VmStep);
         let _ = split.reset_status(StatementStatus::VmStep);
-        let use_split = execute_once(&mut sample, &mut future, &mut old, &mut split)?;
+        let use_split = execute_once(connection, &mut sample, &mut future, &mut old, &mut split)?;
         let steps = sample.reset_status(StatementStatus::VmStep)
             + future.reset_status(StatementStatus::VmStep)
             + old.reset_status(StatementStatus::VmStep)
