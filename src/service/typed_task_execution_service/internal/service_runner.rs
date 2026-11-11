@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use tokio::task::spawn_blocking;
+
 use futures::FutureExt;
 use qubit_progress::AsyncReporter;
 
@@ -1043,14 +1045,22 @@ impl ServiceRunner {
         if !matches!(task.summary.state, TaskState::Running) {
             return;
         }
-        let preparation = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            prepare_handler(
-                &self.core.handlers,
-                &self.core.codecs,
-                &running.kind_id,
-                task.request.payload,
-            )
-        }));
+        let core = Arc::clone(&self.core);
+        let kind_id = running.kind_id.clone();
+        let payload = task.request.payload;
+        let preparation = spawn_blocking(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                prepare_handler(&core.handlers, &core.codecs, &kind_id, payload)
+            }))
+        })
+        .await;
+        let preparation = match preparation {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                self.latch_fault(format!("task payload preparation worker unavailable: {error}"));
+                return;
+            }
+        };
         let prepared = match preparation {
             Ok(Ok(prepared)) => prepared,
             Ok(Err(message)) => {

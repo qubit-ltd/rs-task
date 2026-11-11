@@ -275,8 +275,9 @@ impl TypedTaskExecutionService {
     /// generation fails, or the store rejects the request or cannot accept
     /// it.
     ///
-    /// Synchronous ID generation runs on Tokio's blocking pool. Cancelling
-    /// this future does not stop a generator call that has already started.
+    /// Synchronous request encoding and ID generation run on Tokio's blocking
+    /// pool. Cancelling this future does not stop either call after it starts,
+    /// but a cancelled submission does not proceed to task acceptance.
     pub async fn submit<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
@@ -286,9 +287,17 @@ impl TypedTaskExecutionService {
         if self.core.shutting_down.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
         }
-        let stored = request
-            .encode(&self.core.codecs)
-            .map_err(|error| TaskServiceError::TypedRequest(error.to_string()))?;
+        let codecs = Arc::clone(&self.core.codecs);
+        let stored = match spawn_blocking(move || request.encode(&codecs)).await {
+            Ok(Ok(stored)) => stored,
+            Ok(Err(error)) => return Err(TaskServiceError::TypedRequest(error.to_string())),
+            Err(error) if error.is_panic() => resume_unwind(error.into_panic()),
+            Err(error) => {
+                return Err(TaskServiceError::SchedulerUnavailable(format!(
+                    "task request encoding worker unavailable: {error}"
+                )));
+            }
+        };
         let generator = Arc::clone(&self.core.id_generator);
         let allocated = match spawn_blocking(move || generator.generate()).await {
             Ok(result) => result?,
