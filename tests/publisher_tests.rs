@@ -42,7 +42,14 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures::poll;
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistration;
 use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistration;
+use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
 use qubit_event_bus::AsyncEventBus;
 use qubit_event_bus::CapabilityError;
 use qubit_event_bus::EventBusFacadeConfig;
@@ -76,8 +83,11 @@ use qubit_event_bus::spi::TransportPayload;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
+use qubit_model_id::ModelId;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskRequest;
 use qubit_task::event::TaskEvent;
 use qubit_task::model::StartCommand;
 use qubit_task::model::TaskId;
@@ -90,6 +100,48 @@ use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 use serde_json::from_slice;
+
+#[derive(Clone, Copy)]
+struct IdempotentPayload(u32);
+
+impl HasModelId for IdempotentPayload {
+    const MODEL_ID: ModelId = ModelId::new("qubit_task.tests.PublisherPayload");
+}
+
+#[derive(Default)]
+struct PublisherPayloadCodec;
+
+impl ValueEncoder<IdempotentPayload> for PublisherPayloadCodec {
+    type Output = Vec<u8>;
+    type Error = std::convert::Infallible;
+
+    fn encode(&mut self, value: &IdempotentPayload) -> Result<Vec<u8>, Self::Error> {
+        Ok(value.0.to_le_bytes().to_vec())
+    }
+}
+
+impl ValueDecoder<[u8]> for PublisherPayloadCodec {
+    type Output = IdempotentPayload;
+    type Error = std::array::TryFromSliceError;
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
+        Ok(IdempotentPayload(u32::from_le_bytes(bytes.try_into()?)))
+    }
+}
+
+qubit_codec::register_value_bytes_codec!(
+    id = "qubit_task.tests.publisher_payload_u32",
+    codec = PublisherPayloadCodec,
+    value = IdempotentPayload
+);
+
+static PUBLISHER_PAYLOAD_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<PublisherPayloadCodec, IdempotentPayload>();
+static PUBLISHER_PAYLOAD_REGISTRATION: ValueBytesCodecRegistration = ValueCodecRegistration::new(
+    ValueCodecId::new("qubit_task.tests.publisher_payload_u32"),
+    &PUBLISHER_PAYLOAD_DESCRIPTOR,
+    ValueCodecRegistrationSource::new("qubit-task", "publisher_tests", "tests/publisher_tests.rs", 1),
+);
 
 use crate::support::task_event_codec;
 
@@ -413,6 +465,91 @@ async fn test_startup_replay_deletes_only_confirmed_admissions() {
         assert!(store.list_event_outbox(128).await.expect("empty").is_empty());
         store.release_owner(owner).await.expect("release");
     }
+}
+
+#[tokio::test]
+async fn test_idempotent_submit_wakes_without_counting_lifecycle_write() {
+    let database = database_path();
+    let store = Arc::new(SqliteTaskStore::open(&database).expect("SQLite store"));
+    let codecs = Arc::new(
+        ValueBytesCodecRegistry::from_registrations([&PUBLISHER_PAYLOAD_REGISTRATION])
+            .expect("registered payload codec"),
+    );
+    let mut first_request = TaskRequest::new(
+        "test.publisher-idempotency",
+        1,
+        ValueCodecId::new("qubit_task.tests.publisher_payload_u32"),
+        IdempotentPayload(42),
+    );
+    first_request.idempotency_key = Some("stable-publisher-key".into());
+    let stored = first_request.encode(&codecs).expect("encode initial request");
+    let owner = store.acquire_owner().await.expect("acquire store owner");
+    store.enable_event_outbox().await.expect("enable outbox");
+    let id = TaskId::from_id(Id::new(99));
+    store.accept_encoded(id, stored).await.expect("accept seed task");
+    store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: 0,
+            started_at_ms: 1,
+        })
+        .await
+        .expect("start seed task");
+    store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: 1,
+            expected_attempt: 1,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            retry_not_before_ms: None,
+            finished_at_ms: Some(2),
+            output: None,
+        })
+        .await
+        .expect("finish seed task");
+    store.release_owner(owner).await.expect("release seed owner");
+
+    let store_trait: Arc<dyn TaskStore> = store.clone();
+    let (event_bus, _) = bus(OPAQUE_ACCEPTED, true);
+    let service = TaskExecutionServiceBuilder::new(store_trait, codecs, Arc::new(Ids))
+        .event_bus(event_bus)
+        .build()
+        .await
+        .expect("service starts");
+    let first = service.get(id).await.expect("task lookup").expect("seed exists");
+    assert!(first.state.is_terminal());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if service.notification_stats().published >= 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("startup replay drains the initial lifecycle events");
+    let before = service.notification_stats();
+
+    let mut repeated_request = TaskRequest::new(
+        "test.publisher-idempotency",
+        1,
+        ValueCodecId::new("qubit_task.tests.publisher_payload_u32"),
+        IdempotentPayload(42),
+    );
+    repeated_request.idempotency_key = Some("stable-publisher-key".into());
+    let repeated = service.submit(repeated_request).await.expect("idempotent submission");
+    let after = service.notification_stats();
+    assert_eq!(repeated.id, id);
+    assert_eq!(after.queued, before.queued);
+    assert_eq!(after.published, before.published);
+
+    service.shutdown().await.expect("service shuts down");
+    let owner = store.acquire_owner().await.expect("service released store owner");
+    assert!(store.list_event_outbox(128).await.expect("outbox read").is_empty());
+    store.release_owner(owner).await.expect("store owner released");
+    std::fs::remove_file(database).expect("remove temporary database");
 }
 
 #[tokio::test]

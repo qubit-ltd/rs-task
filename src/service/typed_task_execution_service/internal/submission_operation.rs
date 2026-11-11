@@ -71,7 +71,9 @@ impl SubmissionOperation {
     /// # Errors
     ///
     /// Returns structured submission rejection errors or mapped store errors.
-    pub(in crate::service::typed_task_execution_service) async fn run(self) -> Result<TaskSummary, TaskServiceError> {
+    pub(in crate::service::typed_task_execution_service) async fn run(
+        self,
+    ) -> Result<TaskSummary, TaskServiceError> {
         let Self {
             core,
             admission,
@@ -94,7 +96,13 @@ impl SubmissionOperation {
         };
         if let Ok(accepted) = &result {
             #[cfg(feature = "event-bus")]
-            runner.notify_notifications();
+            if let Some(publisher) = &core.publisher {
+                if accepted.created {
+                    publisher.notify();
+                } else {
+                    publisher.wake();
+                }
+            }
             core.scheduler_changed.notify_one();
             let summary = accepted.summary.clone();
             drop(admission);

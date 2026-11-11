@@ -66,13 +66,15 @@ impl TaskEventPublisher {
         bus: Arc<AsyncEventBus>,
         shutdown_timeout: Duration,
     ) -> Result<Self, TaskServiceError> {
-        let topic = Topic::new("task.lifecycle")
-            .map_err(|error| TaskServiceError::InvalidRequest(format!("invalid task notification topic: {error}")))?;
-        bus.check_publish_codec(&topic)
-            .map_err(|source| TaskServiceError::NotificationCodecUnavailable {
+        let topic = Topic::new("task.lifecycle").map_err(|error| {
+            TaskServiceError::InvalidRequest(format!("invalid task notification topic: {error}"))
+        })?;
+        bus.check_publish_codec(&topic).map_err(|source| {
+            TaskServiceError::NotificationCodecUnavailable {
                 provider_id: bus.provider_id().as_str().to_owned(),
                 topic: topic.name().to_owned(),
                 source,
+            }
             })?;
         let (controls, receiver) = mpsc::channel(16);
         Ok(Self {
@@ -98,17 +100,28 @@ impl TaskEventPublisher {
         let mut worker = self.worker.lock().await;
         if worker.is_none() {
             let state = Arc::clone(&self.state);
-            let controls = self.receiver.lock().await.take().expect("worker receiver is present");
+            let controls = self
+                .receiver
+                .lock()
+                .await
+                .take()
+                .expect("worker receiver is present");
             *worker = Some(tokio::spawn(async move {
                 state.run(controls).await;
             }));
         }
     }
 
-    /// Wakes the worker after a committed lifecycle write.
+    /// Wakes the worker to check the durable outbox without recording a
+    /// lifecycle write.
+    pub(in crate::service) fn wake(&self) {
+        self.state.changed.notify_one();
+    }
+
+    /// Records a committed lifecycle write and wakes the worker to publish it.
     pub(in crate::service) fn notify(&self) {
         self.state.counters.queued.fetch_add(1, Ordering::Relaxed);
-        self.state.changed.notify_one();
+        self.wake();
     }
 
     /// Returns the process-local notification counters for this publisher.
@@ -175,7 +188,9 @@ impl TaskEventPublisher {
             ));
         }
         let _gate = self.control_gate.lock().await;
-        if service_shutting_down.load(Ordering::Acquire) || self.state.closing.load(Ordering::Acquire) {
+        if service_shutting_down.load(Ordering::Acquire)
+            || self.state.closing.load(Ordering::Acquire)
+        {
             return Err(TaskServiceError::ShuttingDown);
         }
         let (response, receiver) = oneshot::channel();
@@ -201,7 +216,9 @@ impl TaskEventPublisher {
         }
         drop(_gate);
         receiver.await.map_err(|error| {
-            TaskServiceError::NotificationClose(format!("notification worker dropped quarantine result: {error}"))
+            TaskServiceError::NotificationClose(format!(
+                "notification worker dropped quarantine result: {error}"
+            ))
         })?
     }
 
@@ -236,7 +253,9 @@ impl TaskEventPublisher {
             Ok(result) => {
                 *worker = None;
                 result.map_err(|error| {
-                    TaskServiceError::NotificationClose(format!("notification worker stopped: {error}"))
+                    TaskServiceError::NotificationClose(format!(
+                        "notification worker stopped: {error}"
+                    ))
                 })
             }
             Err(_) => {
@@ -251,7 +270,8 @@ impl TaskEventPublisher {
                         "shutdown deadline expired; last observed pending page contained {pending} notification(s); final backlog may differ"
                     )
                 };
-                let publication_diagnostic = self.state.in_flight_event_id.lock().as_deref().map_or_else(
+                let publication_diagnostic =
+                    self.state.in_flight_event_id.lock().as_deref().map_or_else(
                     || "no publication was active at timeout".to_owned(),
                     |event_id| format!("publication timed out for event {event_id}"),
                 );
