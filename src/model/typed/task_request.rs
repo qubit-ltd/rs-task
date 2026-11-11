@@ -150,9 +150,8 @@ impl<T: HasModelId + 'static> TaskRequest<T> {
             .into_builder()
             .output_bytes_limit(ResourceLimit::new(JsonResource::OutputBytes, MAX_TASK_METADATA_BYTES))
             .build();
-        let _ = self
-            .metadata
-            .to_json_vec_with_limits(encode_limits)
+        self.metadata
+            .validate_json_with_limits(encode_limits)
             .map_err(|error| match error {
                 MetadataWireEncodeError::Budget(ref source) if *source.resource() == JsonResource::OutputBytes => {
                     TaskRequestEncodeError::MetadataTooLarge(MAX_TASK_METADATA_BYTES + 1)

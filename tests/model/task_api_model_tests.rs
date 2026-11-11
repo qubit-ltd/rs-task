@@ -314,6 +314,22 @@ fn test_task_request_metadata_reports_size_lower_bound() {
 }
 
 #[test]
+fn test_task_request_preserves_metadata_serialization_failures() {
+    let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
+    let mut request = TaskRequest::new(
+        "example.count",
+        1,
+        ValueCodecId::new("qubit_task.tests.u32_le"),
+        Counter(1),
+    );
+    request.metadata.insert("not_finite", f64::NAN);
+    assert!(matches!(
+        request.encode(registry),
+        Err(TaskRequestEncodeError::Metadata(_))
+    ));
+}
+
+#[test]
 fn test_task_request_preserves_metadata_wire_failures() {
     let registry = ValueBytesCodecRegistry::try_global().expect("registry builds");
     let mut request = TaskRequest::new(
