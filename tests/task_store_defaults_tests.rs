@@ -6,6 +6,8 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::num::NonZeroUsize;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use qubit_id::Id;
 use qubit_metadata::Metadata;
@@ -31,7 +33,10 @@ use qubit_task::store::StoreError;
 use qubit_task::store::TaskFuture;
 use qubit_task::store::TaskStore;
 
-struct NoOutboxStore;
+#[derive(Default)]
+struct NoOutboxStore {
+    encoded_reads: AtomicUsize,
+}
 
 impl TaskStore for NoOutboxStore {
     fn capabilities(&self) -> StoreCapabilities {
@@ -47,6 +52,7 @@ impl TaskStore for NoOutboxStore {
     }
 
     fn get_encoded_task<'a>(&'a self, _id: TaskId) -> TaskFuture<'a, Result<Option<StoredTask>, StoreError>> {
+        self.encoded_reads.fetch_add(1, Ordering::AcqRel);
         Box::pin(async move {
             if _id.into_id().value() == 44 {
                 return Err(StoreError::Failure("legacy get failure".to_owned()));
@@ -156,7 +162,7 @@ fn typed_id(value: u64) -> TaskId {
 
 #[tokio::test]
 async fn test_outbox_defaults_report_unsupported_for_supplied_inputs() {
-    let store = NoOutboxStore;
+    let store = NoOutboxStore::default();
 
     assert!(matches!(
         store.enable_event_outbox().await,
@@ -174,7 +180,7 @@ async fn test_outbox_defaults_report_unsupported_for_supplied_inputs() {
 
 #[tokio::test]
 async fn test_legacy_store_summary_default_preserves_encoded_read_error() {
-    let store = NoOutboxStore;
+    let store = NoOutboxStore::default();
     assert!(matches!(
         store.get_summary(typed_id(44)).await,
         Err(StoreError::Failure(message)) if message == "legacy get failure"
@@ -183,8 +189,20 @@ async fn test_legacy_store_summary_default_preserves_encoded_read_error() {
 
 #[tokio::test]
 async fn test_legacy_store_summary_default_derives_summary_from_encoded_task() {
-    let store = NoOutboxStore;
+    let store = NoOutboxStore::default();
     let id = typed_id(43);
     let task = store.get_encoded_task(id).await.unwrap().unwrap();
     assert_eq!(store.get_summary(id).await.unwrap(), Some(task.summary));
+}
+
+#[tokio::test]
+async fn test_legacy_store_summary_default_uses_encoded_task_once() {
+    let store = NoOutboxStore::default();
+    let summary = store
+        .get_summary(typed_id(43))
+        .await
+        .expect("legacy summary fallback succeeds")
+        .expect("legacy task exists");
+    assert_eq!(summary.id, typed_id(43));
+    assert_eq!(store.encoded_reads.load(Ordering::Acquire), 1);
 }

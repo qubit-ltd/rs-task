@@ -184,8 +184,8 @@ impl ServiceRunner {
         };
         let result = async {
             loop {
-                let task = match core.store.get_encoded_task(id).await {
-                    Ok(Some(task)) => task,
+                let summary = match core.store.get_summary(id).await {
+                    Ok(Some(summary)) => summary,
                     Ok(None) => {
                         return ExternalCancelResult::ServiceFailed(
                             "task disappeared during external cancellation".into(),
@@ -193,7 +193,6 @@ impl ServiceRunner {
                     }
                     Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
                 };
-                let summary = task.summary;
                 if summary.state.is_terminal()
                     || summary.attempt != attempt
                     || !matches!(summary.state, TaskState::Running)
@@ -239,8 +238,8 @@ impl ServiceRunner {
             };
             match AssertUnwindSafe(hook).catch_unwind().await {
                 Ok(Ok(())) => loop {
-                    let task = match core.store.get_encoded_task(id).await {
-                        Ok(Some(task)) => task,
+                    let summary = match core.store.get_summary(id).await {
+                        Ok(Some(summary)) => summary,
                         Ok(None) => {
                             return ExternalCancelResult::ServiceFailed(
                                 "task disappeared after external cancellation".into(),
@@ -250,7 +249,6 @@ impl ServiceRunner {
                             return ExternalCancelResult::ServiceFailed(error.to_string());
                         }
                     };
-                    let summary = task.summary;
                     if summary.state.is_terminal()
                         || summary.attempt != attempt
                         || !matches!(summary.state, TaskState::Running)
@@ -638,8 +636,8 @@ impl ServiceRunner {
     ) -> ExternalCancelResult {
         let message = bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
         loop {
-            let task = match core.store.get_encoded_task(id).await {
-                Ok(Some(task)) => task,
+            let summary = match core.store.get_summary(id).await {
+                Ok(Some(summary)) => summary,
                 Ok(None) => {
                     return ExternalCancelResult::ServiceFailed(
                         "task disappeared while recording cancellation failure".into(),
@@ -647,7 +645,6 @@ impl ServiceRunner {
                 }
                 Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
             };
-            let summary = task.summary;
             if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running)
             {
                 return ExternalCancelResult::AlreadyTerminal;
@@ -1093,8 +1090,8 @@ impl ServiceRunner {
             .cancellations
             .lock()
             .insert((id, running.attempt), Arc::clone(&cancelled));
-        let latest_cancel_requested = match self.core.store.get_encoded_task(id).await {
-            Ok(task) => task.is_some_and(|task| task.summary.cancel_requested),
+        let latest_cancel_requested = match self.core.store.get_summary(id).await {
+            Ok(summary) => summary.is_some_and(|summary| summary.cancel_requested),
             Err(error) => {
                 self.latch_fault(error);
                 return;
@@ -1213,7 +1210,7 @@ impl ServiceRunner {
         let state = bound_state_diagnostics(state);
         let mut conflicted_version = None;
         loop {
-            let latest = match self.core.store.get_encoded_task(started.id).await {
+            let latest = match self.core.store.get_summary(started.id).await {
                 Ok(Some(latest)) => latest,
                 Ok(None) => {
                     self.latch_fault("task disappeared while finalizing");
@@ -1224,23 +1221,23 @@ impl ServiceRunner {
                     return;
                 }
             };
-            if latest.summary.state.is_terminal() {
+            if latest.state.is_terminal() {
                 self.core
                     .external_cancellations
                     .lock()
                     .remove(&(started.id, started.attempt));
                 return;
             }
-            if conflicted_version.take() == Some(latest.summary.state_version) {
+            if conflicted_version.take() == Some(latest.state_version) {
                 self.latch_fault("task lifecycle compare-and-set conflicted without a competing revision");
                 return;
             }
-            if latest.summary.attempt != started.attempt || !matches!(latest.summary.state, TaskState::Running) {
+            if latest.attempt != started.attempt || !matches!(latest.state, TaskState::Running) {
                 self.latch_fault("task attempt changed while finalizing");
                 return;
             }
 
-            let retry = retryable && !latest.summary.cancel_requested && started.attempt < self.core.max_attempts;
+            let retry = retryable && !latest.cancel_requested && started.attempt < self.core.max_attempts;
             let retry_deadline = retry
                 .then(|| now_ms().saturating_add(self.core.retry_policy.delay_millis_for_attempt(started.attempt)));
             let final_state = if retry { TaskState::Queued } else { state.clone() };
@@ -1249,13 +1246,12 @@ impl ServiceRunner {
                 .store
                 .transition_encoded(TransitionCommand {
                     id: started.id,
-                    expected_state_version: latest.summary.state_version,
+                    expected_state_version: latest.state_version,
                     expected_attempt: started.attempt,
                     retry_not_before_ms: retry_deadline,
                     state: final_state,
-                    cancel_requested: latest.summary.cancel_requested,
+                    cancel_requested: latest.cancel_requested,
                     cancel_error: latest
-                        .summary
                         .cancel_error
                         .map(|message| bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES)),
                     finished_at_ms: Some(now_ms()),
@@ -1273,7 +1269,7 @@ impl ServiceRunner {
                     return;
                 }
                 Err(crate::store::StoreError::Conflict) => {
-                    conflicted_version = Some(latest.summary.state_version);
+                    conflicted_version = Some(latest.state_version);
                 }
                 Err(error) => {
                     self.latch_fault(error);
@@ -1291,8 +1287,8 @@ impl ServiceRunner {
     /// - `id`: ID of the task whose transition conflicted.
     /// - `expected_version`: Revision used by the failed compare-and-set.
     async fn check_competing_transition(&self, id: TaskId, expected_version: u64) {
-        match self.core.store.get_encoded_task(id).await {
-            Ok(Some(task)) if task.summary.state_version != expected_version => {}
+        match self.core.store.get_summary(id).await {
+            Ok(Some(summary)) if summary.state_version != expected_version => {}
             Ok(Some(_)) => self.latch_fault("task lifecycle compare-and-set conflicted without a competing revision"),
             Ok(None) => self.latch_fault("task disappeared after lifecycle compare-and-set conflict"),
             Err(error) => self.latch_fault(error),

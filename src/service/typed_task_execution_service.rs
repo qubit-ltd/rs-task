@@ -501,19 +501,19 @@ impl TypedTaskExecutionService {
         if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
         }
-        let task = self
+        let summary = self
             .runner()
-            .store_result(self.core.store.get_encoded_task(id).await)?
+            .store_result(self.core.store.get_summary(id).await)?
             .ok_or(crate::store::StoreError::NotFound)?;
-        if task.summary.state_version != expected_state_version {
+        if summary.state_version != expected_state_version {
             return Err(crate::store::StoreError::Conflict.into());
         }
-        if !matches!(task.summary.state, TaskState::Blocked { .. }) {
+        if !matches!(summary.state, TaskState::Blocked { .. }) {
             return Err(TaskServiceError::NotBlocked {
-                actual: task.summary.state.kind(),
+                actual: summary.state.kind(),
             });
         }
-        if task.summary.cancel_requested {
+        if summary.cancel_requested {
             return Err(TaskServiceError::CancellationPending);
         }
         let resumed = self.runner().store_write_result(
@@ -522,7 +522,7 @@ impl TypedTaskExecutionService {
                 .transition_encoded(TransitionCommand {
                     id,
                     expected_state_version,
-                    expected_attempt: task.summary.attempt,
+                    expected_attempt: summary.attempt,
                     state: TaskState::Queued,
                     cancel_requested: false,
                     cancel_error: None,
@@ -595,10 +595,9 @@ impl TypedTaskExecutionService {
         if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
         }
-        let Some(task) = self.runner().store_result(self.core.store.get_encoded_task(id).await)? else {
+        let Some(summary) = self.runner().store_result(self.core.store.get_summary(id).await)? else {
             return Err(TaskServiceError::Store(crate::store::StoreError::NotFound));
         };
-        let summary = task.summary;
         if summary.state.is_terminal() {
             return Ok(CancelOutcome::AlreadyTerminal);
         }

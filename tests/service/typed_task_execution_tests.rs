@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -290,14 +291,17 @@ impl TaskHandler<Counter> for GatedHandler {
 
 struct FailingListStore {
     inner: Arc<dyn TaskStore>,
+    read_counts: StdMutex<HashMap<TaskId, (usize, usize)>>,
     target_summary: StdMutex<Option<task::model::TaskSummary>>,
     fail_next_list: std::sync::atomic::AtomicBool,
     fail_next_query: std::sync::atomic::AtomicBool,
     fail_next_get: std::sync::atomic::AtomicBool,
     fail_next_summary: std::sync::atomic::AtomicBool,
+    return_none_next_summary: std::sync::atomic::AtomicBool,
     fail_next_state_checkpoint: std::sync::atomic::AtomicBool,
     fail_next_start: std::sync::atomic::AtomicBool,
     fail_next_transition: std::sync::atomic::AtomicBool,
+    conflict_next_transition: std::sync::atomic::AtomicBool,
     fail_next_release: std::sync::atomic::AtomicBool,
     panic_next_release: std::sync::atomic::AtomicBool,
     transition_gate: Option<Arc<TransitionCasGate>>,
@@ -343,18 +347,127 @@ fn failing_store_with_inner(
 ) -> Arc<FailingListStore> {
     Arc::new(FailingListStore {
         inner,
+        read_counts: StdMutex::new(HashMap::new()),
         target_summary: StdMutex::new(None),
         fail_next_list: std::sync::atomic::AtomicBool::new(false),
         fail_next_query: std::sync::atomic::AtomicBool::new(false),
         fail_next_get: std::sync::atomic::AtomicBool::new(false),
         fail_next_summary: std::sync::atomic::AtomicBool::new(false),
+        return_none_next_summary: std::sync::atomic::AtomicBool::new(false),
         fail_next_state_checkpoint: std::sync::atomic::AtomicBool::new(false),
         fail_next_start: std::sync::atomic::AtomicBool::new(false),
         fail_next_transition: std::sync::atomic::AtomicBool::new(false),
+        conflict_next_transition: std::sync::atomic::AtomicBool::new(false),
         fail_next_release: std::sync::atomic::AtomicBool::new(false),
         panic_next_release: std::sync::atomic::AtomicBool::new(false),
         transition_gate,
     })
+}
+
+struct DefaultSummaryStore {
+    inner: Arc<dyn TaskStore>,
+    encoded_reads: AtomicU64,
+}
+
+impl TaskStore for DefaultSummaryStore {
+    fn capabilities(&self) -> task::model::StoreCapabilities {
+        self.inner.capabilities()
+    }
+    fn accept_encoded<'a>(
+        &'a self,
+        id: TaskId,
+        request: task::model::StoredTaskRequest,
+    ) -> TaskFuture<'a, Result<task::model::AcceptOutcome, task::store::StoreError>> {
+        self.inner.accept_encoded(id, request)
+    }
+    fn get_encoded_task<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<task::model::StoredTask>, task::store::StoreError>> {
+        self.encoded_reads.fetch_add(1, Ordering::AcqRel);
+        self.inner.get_encoded_task(id)
+    }
+    fn get_state_checkpoint<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<task::model::TaskStateCheckpoint>, task::store::StoreError>> {
+        self.inner.get_state_checkpoint(id)
+    }
+    fn start_encoded<'a>(
+        &'a self,
+        command: task::model::StartCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
+        self.inner.start_encoded(command)
+    }
+    fn transition_encoded<'a>(
+        &'a self,
+        command: task::model::TransitionCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
+        self.inner.transition_encoded(command)
+    }
+    fn update_progress<'a>(
+        &'a self,
+        command: task::model::ProgressCommand,
+    ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
+        self.inner.update_progress(command)
+    }
+    fn list_encoded<'a>(
+        &'a self,
+        query: TaskQuery,
+    ) -> TaskFuture<'a, Result<task::model::TaskPage, task::store::StoreError>> {
+        self.inner.list_encoded(query)
+    }
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<task::model::TaskCursor>,
+        limit: NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<task::model::TaskPage, task::store::StoreError>> {
+        self.inner.list_ready_queued(after, limit, now_ms)
+    }
+    fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, task::store::StoreError>> {
+        self.inner.next_retry_deadline(now_ms)
+    }
+    fn prune_terminal_before<'a>(
+        &'a self,
+        finished_before_ms: u64,
+        max_rows: NonZeroUsize,
+    ) -> TaskFuture<'a, Result<usize, task::store::StoreError>> {
+        self.inner.prune_terminal_before(finished_before_ms, max_rows)
+    }
+    fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<task::model::OwnerEpoch, task::store::StoreError>> {
+        self.inner.acquire_owner()
+    }
+    fn release_owner<'a>(
+        &'a self,
+        epoch: task::model::OwnerEpoch,
+    ) -> TaskFuture<'a, Result<(), task::store::StoreError>> {
+        self.inner.release_owner(epoch)
+    }
+}
+
+#[tokio::test]
+async fn test_typed_service_lifecycle_uses_default_summary_fallback() {
+    let store = Arc::new(DefaultSummaryStore {
+        inner: Arc::new(MemoryTaskStore::new(16)),
+        encoded_reads: AtomicU64::new(0),
+    });
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(19_021))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    let accepted = service.submit(request()).await.expect("task is accepted");
+    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    assert!(store.encoded_reads.load(Ordering::Acquire) >= 2);
+    service.shutdown().await.expect("legacy store lifecycle completes");
 }
 
 #[tokio::test]
@@ -393,6 +506,195 @@ async fn test_service_get_uses_summary_specific_store_method() {
     service.shutdown().await.expect("service shuts down");
 }
 
+#[tokio::test]
+async fn test_typed_service_state_coordination_summary_reads_memory() {
+    assert_state_coordination_summary_reads(failing_store(), 19_015).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_typed_service_state_coordination_summary_reads_sqlite() {
+    let path = std::env::temp_dir().join(format!("typed-service-summary-{}.sqlite", Uuid::new_v4()));
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    let store = failing_store_with_inner(inner, None);
+    assert_state_coordination_summary_reads(store, 19_016).await;
+    drop(std::fs::remove_file(path));
+}
+
+async fn assert_state_coordination_summary_reads(store: Arc<FailingListStore>, id_seed: u64) {
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(id_seed))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    let accepted = service.submit(request()).await.expect("task is accepted");
+
+    tokio::time::timeout(Duration::from_secs(2), started.acquire())
+        .await
+        .expect("handler reaches the gate")
+        .expect("handler gate remains open")
+        .forget();
+    let reads = store
+        .read_counts
+        .lock()
+        .unwrap()
+        .get(&accepted.id)
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(reads.0, 1, "one full read prepares the handler payload");
+    assert!(reads.1 > 0, "state coordination reads the task summary");
+
+    release.add_permits(1);
+    assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
+    service.shutdown().await.expect("service shuts down");
+    let reads = store
+        .read_counts
+        .lock()
+        .unwrap()
+        .get(&accepted.id)
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(reads.0, 1, "successful attempt has one payload preparation read");
+    assert!(reads.1 > 0, "finish and cancellation checks use summary reads");
+}
+
+async fn seed_lifecycle_task(
+    store: &dyn TaskStore,
+    id: TaskId,
+    state: TaskState,
+    retry_not_before_ms: Option<u64>,
+) -> task::model::TaskSummary {
+    let accepted = store
+        .accept_encoded(
+            id,
+            task::model::StoredTaskRequest {
+                kind_id: "test.typed-service".into(),
+                category: None,
+                payload: task::model::StoredPayload {
+                    type_id: ModelIdBuf::parse("test.TypedServicePayload").expect("valid model ID"),
+                    schema_version: 1,
+                    codec_id: "qubit_task.typed_service.u32".into(),
+                    bytes: 42_u32.to_le_bytes().to_vec(),
+                },
+                metadata: metadata::Metadata::new(),
+                resource_limit: ResourceRequest::default(),
+                correlation_key: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .expect("task is accepted");
+    let base = if state == TaskState::Queued {
+        store
+            .start_encoded(task::model::StartCommand {
+                id,
+                expected_state_version: accepted.summary.state_version,
+                started_at_ms: 1,
+            })
+            .await
+            .expect("task is started before scheduling it for later");
+        store
+            .get_summary(id)
+            .await
+            .expect("started summary is readable")
+            .expect("started task remains present")
+    } else {
+        accepted.summary
+    };
+    store
+        .transition_encoded(task::model::TransitionCommand {
+            id,
+            expected_state_version: base.state_version,
+            expected_attempt: base.attempt,
+            retry_not_before_ms,
+            state,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: None,
+            output: None,
+        })
+        .await
+        .expect("initial lifecycle state is persisted")
+}
+
+async fn assert_cancel_reads_summary_only(state: TaskState, retry_not_before_ms: Option<u64>, id_value: u64) {
+    let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(8));
+    let id = TaskId::from_id(id::Id::new(id_value));
+    let seeded = seed_lifecycle_task(inner.as_ref(), id, state, retry_not_before_ms).await;
+    let store = failing_store_with_inner(inner.clone(), None);
+    let service =
+        TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(id_value + 1))))
+            .build()
+            .await
+            .expect("service starts");
+    store.read_counts.lock().unwrap().clear();
+
+    assert_eq!(service.cancel(id).await.unwrap(), CancelOutcome::CancelledBeforeStart);
+    let counts = store.read_counts.lock().unwrap().get(&id).copied().unwrap_or_default();
+    assert_eq!(counts.0, 0, "cancel does not read the encoded payload");
+    assert!(counts.1 > 0, "cancel reads the current summary");
+    let cancelled = inner.get_summary(id).await.unwrap().expect("task remains present");
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    assert!(cancelled.state_version > seeded.state_version);
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[tokio::test]
+async fn test_typed_service_queued_cancel_summary_reads() {
+    assert_cancel_reads_summary_only(TaskState::Queued, Some(u64::MAX), 19_017).await;
+}
+
+#[tokio::test]
+async fn test_typed_service_blocked_cancel_summary_reads() {
+    assert_cancel_reads_summary_only(
+        TaskState::Blocked {
+            reason: "test gate".into(),
+        },
+        None,
+        19_018,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_typed_service_resume_blocked_summary_reads() {
+    let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(8));
+    let id = TaskId::from_id(id::Id::new(19_019));
+    let blocked = seed_lifecycle_task(
+        inner.as_ref(),
+        id,
+        TaskState::Blocked {
+            reason: "test gate".into(),
+        },
+        None,
+    )
+    .await;
+    let store = failing_store_with_inner(inner.clone(), None);
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(19_020))))
+        .build()
+        .await
+        .expect("service starts");
+    store.read_counts.lock().unwrap().clear();
+
+    let resumed = service.resume_blocked(id, blocked.state_version).await.unwrap();
+    assert_eq!(resumed.state, TaskState::Queued);
+    assert_eq!(resumed.state_version, blocked.state_version + 1);
+    let counts = store.read_counts.lock().unwrap().get(&id).copied().unwrap_or_default();
+    assert_eq!(counts.0, 0, "resume does not read the encoded payload");
+    assert!(counts.1 > 0, "resume reads the current summary");
+    service.shutdown().await.expect("service shuts down");
+}
+
 async fn wait_for_latched_store_fault(service: &task::service::TaskExecutionService) {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -424,6 +726,7 @@ impl TaskStore for FailingListStore {
         &'a self,
         id: TaskId,
     ) -> TaskFuture<'a, Result<Option<task::model::StoredTask>, task::store::StoreError>> {
+        self.read_counts.lock().unwrap().entry(id).or_default().0 += 1;
         if self.fail_next_get.swap(false, Ordering::AcqRel) {
             Box::pin(async { Err(task::store::StoreError::Failure("injected get failure".into())) })
         } else {
@@ -434,7 +737,10 @@ impl TaskStore for FailingListStore {
         &'a self,
         id: TaskId,
     ) -> TaskFuture<'a, Result<Option<task::model::TaskSummary>, task::store::StoreError>> {
-        if self.fail_next_summary.swap(false, Ordering::AcqRel) {
+        self.read_counts.lock().unwrap().entry(id).or_default().1 += 1;
+        if self.return_none_next_summary.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Ok(None) })
+        } else if self.fail_next_summary.swap(false, Ordering::AcqRel) {
             Box::pin(async { Err(task::store::StoreError::Failure("injected summary failure".into())) })
         } else if let Some(summary) = self.target_summary.lock().unwrap().clone()
             && summary.id == id
@@ -472,7 +778,9 @@ impl TaskStore for FailingListStore {
         &'a self,
         command: task::model::TransitionCommand,
     ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
-        if let Some(gate) = &self.transition_gate
+        if self.conflict_next_transition.swap(false, Ordering::AcqRel) {
+            Box::pin(async { Err(task::store::StoreError::Conflict) })
+        } else if let Some(gate) = &self.transition_gate
             && (command.state.is_terminal() || matches!(&command.state, TaskState::Queued))
             && gate.armed.swap(false, Ordering::AcqRel)
         {
@@ -1546,8 +1854,9 @@ async fn test_typed_submit_rejection_duplicate_id_keeps_service_running() {
 
 #[tokio::test]
 async fn test_retryable_handler_error_is_persisted_and_retried_after_deadline() {
-    let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1201))))
+    let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
+    let store = failing_store_with_inner(inner, None);
+    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1201))))
         .retry_policy(
             task::service::RetryPolicy::new(
                 std::time::Duration::from_nanos(1_000_001),
@@ -1581,6 +1890,15 @@ async fn test_retryable_handler_error_is_persisted_and_retried_after_deadline() 
     assert_eq!(wait_for_terminal(&service, accepted.id).await, TaskState::Succeeded);
     assert_eq!(service.get(accepted.id).await.unwrap().unwrap().attempt, 2);
     service.shutdown().await.unwrap();
+    let reads = store
+        .read_counts
+        .lock()
+        .unwrap()
+        .get(&accepted.id)
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(reads.0, 2, "each attempt loads its payload exactly once");
+    assert!(reads.1 > 0, "retry and finish coordination use summaries");
 }
 
 #[tokio::test]
@@ -1794,6 +2112,106 @@ async fn test_typed_service_latches_finalizer_transition_failure() {
     ));
 }
 
+async fn assert_finalizer_summary_failure_is_latched(return_none: bool, id_seed: u64, expected: &str) {
+    let store = failing_store();
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(id_seed))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    let accepted = service.submit(request()).await.expect("task is accepted");
+    tokio::time::timeout(Duration::from_secs(2), started.acquire())
+        .await
+        .expect("handler reaches gate")
+        .expect("handler gate remains open")
+        .forget();
+    if return_none {
+        store.return_none_next_summary.store(true, Ordering::Release);
+    } else {
+        store.fail_next_summary.store(true, Ordering::Release);
+    }
+    release.add_permits(1);
+    let shutdown = tokio::time::timeout(Duration::from_secs(2), service.shutdown())
+        .await
+        .expect("shutdown waits for finalization");
+    assert!(matches!(
+        shutdown,
+        Err(task::service::TaskServiceError::StoreUnavailable(message)) if message.contains(expected)
+    ));
+    let reads = store
+        .read_counts
+        .lock()
+        .unwrap()
+        .get(&accepted.id)
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(reads.0, 1, "finalizer read failure does not fall back to payload");
+    assert!(reads.1 > 0, "finalizer reads summary");
+}
+
+#[tokio::test]
+async fn test_typed_service_latches_finalizer_summary_none() {
+    assert_finalizer_summary_failure_is_latched(true, 1582, "task disappeared while finalizing").await;
+}
+
+#[tokio::test]
+async fn test_typed_service_latches_finalizer_summary_failure() {
+    assert_finalizer_summary_failure_is_latched(false, 1583, "injected summary failure").await;
+}
+
+#[tokio::test]
+async fn test_typed_service_latches_finalizer_conflict_without_revision() {
+    let store = failing_store();
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1584))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    let accepted = service.submit(request()).await.expect("task is accepted");
+    tokio::time::timeout(Duration::from_secs(2), started.acquire())
+        .await
+        .expect("handler reaches gate")
+        .expect("handler gate remains open")
+        .forget();
+    store.conflict_next_transition.store(true, Ordering::Release);
+    release.add_permits(1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), service.shutdown())
+            .await
+            .expect("shutdown waits for finalization"),
+        Err(task::service::TaskServiceError::StoreUnavailable(message))
+            if message.contains("conflicted without a competing revision")
+    ));
+    let reads = store
+        .read_counts
+        .lock()
+        .unwrap()
+        .get(&accepted.id)
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(reads.0, 1, "CAS conflict does not reload the payload");
+    assert!(reads.1 > 0, "CAS verification rereads the summary");
+}
+
 async fn finish_retries_after_cancel_revision(inner: Arc<dyn TaskStore>) -> Result<(), String> {
     let gate = Arc::new(TransitionCasGate {
         armed: AtomicBool::new(true),
@@ -1801,7 +2219,7 @@ async fn finish_retries_after_cancel_revision(inner: Arc<dyn TaskStore>) -> Resu
         release: tokio::sync::Semaphore::new(0),
     });
     let store = failing_store_with_inner(inner, Some(Arc::clone(&gate)));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1582))));
+    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1582))));
     builder
         .handlers_mut()
         .register::<Counter, _>(
@@ -1849,6 +2267,19 @@ async fn finish_retries_after_cancel_revision(inner: Arc<dyn TaskStore>) -> Resu
     }
     if !summary.cancel_requested {
         return Err("latest cancellation request was not retained".into());
+    }
+    let reads = store
+        .read_counts
+        .lock()
+        .unwrap()
+        .get(&accepted.id)
+        .copied()
+        .unwrap_or_default();
+    if reads.0 != 1 || reads.1 == 0 {
+        return Err(format!(
+            "CAS retry used unexpected reads: encoded={}, summary={}",
+            reads.0, reads.1
+        ));
     }
     Ok(())
 }
@@ -2207,12 +2638,12 @@ async fn test_typed_service_get_query_and_cancel_map_store_failures() {
     ));
     assert_eq!(service.get(TaskId::from_id(id::Id::new(9998))).await.unwrap(), None);
 
-    store.fail_next_get.store(true, Ordering::Release);
+    store.fail_next_summary.store(true, Ordering::Release);
     assert!(matches!(
         service.cancel(TaskId::from_id(id::Id::new(9997))).await,
         Err(task::service::TaskServiceError::Store(
             task::store::StoreError::Failure(message)
-        )) if message == "injected get failure"
+        )) if message == "injected summary failure"
     ));
 
     store.fail_next_state_checkpoint.store(true, Ordering::Release);
@@ -2236,8 +2667,29 @@ async fn test_typed_service_get_query_and_cancel_map_store_failures() {
     assert!(matches!(
         service.shutdown().await,
         Err(task::service::TaskServiceError::StoreUnavailable(message))
-            if message.contains("injected get failure")
+            if message.contains("injected summary failure")
     ));
+}
+
+#[tokio::test]
+async fn test_typed_service_cancel_summary_none_maps_to_not_found_without_payload_read() {
+    let store = failing_store();
+    let service = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1332))))
+        .build()
+        .await
+        .expect("service starts");
+    let id = TaskId::from_id(id::Id::new(9995));
+    store.return_none_next_summary.store(true, Ordering::Release);
+    assert!(matches!(
+        service.cancel(id).await,
+        Err(task::service::TaskServiceError::Store(
+            task::store::StoreError::NotFound
+        ))
+    ));
+    let reads = store.read_counts.lock().unwrap().get(&id).copied().unwrap_or_default();
+    assert_eq!(reads.0, 0, "missing summary does not fall back to payload");
+    assert_eq!(reads.1, 1);
+    service.shutdown().await.expect("not found does not fault the service");
 }
 
 #[tokio::test]
@@ -3045,8 +3497,9 @@ async fn test_external_cancel_retries_failed_hook() {
             })
         }
     }
-    let store = Arc::new(MemoryTaskStore::new(16));
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(701))));
+    let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
+    let store = failing_store_with_inner(inner, None);
+    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(701))));
     let hook_calls = Arc::new(AtomicU64::new(0));
     let hook_call_counter = Arc::clone(&hook_calls);
     let hook_finished = Arc::new(tokio::sync::Notify::new());
@@ -3089,6 +3542,7 @@ async fn test_external_cancel_retries_failed_hook() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
+    store.conflict_next_transition.store(true, Ordering::Release);
     assert!(matches!(
         service.cancel(accepted.id).await,
         Err(task::service::TaskServiceError::ExternalCancellationFailed { message, .. })
@@ -3108,6 +3562,16 @@ async fn test_external_cancel_retries_failed_hook() {
         CancelOutcome::AlreadyTerminal
     );
     assert_eq!(hook_calls.load(Ordering::Relaxed), 2);
+    service.shutdown().await.unwrap();
+    let reads = store
+        .read_counts
+        .lock()
+        .unwrap()
+        .get(&accepted.id)
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(reads.0, 1, "external cancel retry does not reload the payload");
+    assert!(reads.1 > 0, "external cancel reconciliation reads summaries");
 }
 
 #[derive(Clone, Copy)]
@@ -3406,7 +3870,8 @@ async fn test_external_cancel_terminal_race_preserves_terminal_state() {
             })
         }
     }
-    let store = Arc::new(MemoryTaskStore::new(16));
+    let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(16));
+    let store = failing_store_with_inner(inner, None);
     let hook_started = Arc::new(tokio::sync::Notify::new());
     let hook_release = Arc::new(tokio::sync::Notify::new());
     let handler_release = Arc::new(tokio::sync::Notify::new());
@@ -3428,7 +3893,7 @@ async fn test_external_cancel_terminal_race_preserves_terminal_state() {
             })
         })
     });
-    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(704))));
+    let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(704))));
     builder
         .handlers_mut()
         .register_with_cancellation_hook::<Counter, _>(
@@ -3467,6 +3932,15 @@ async fn test_external_cancel_terminal_race_preserves_terminal_state() {
     );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     service.shutdown().await.unwrap();
+    let reads = store
+        .read_counts
+        .lock()
+        .unwrap()
+        .get(&accepted.id)
+        .copied()
+        .unwrap_or_default();
+    assert_eq!(reads.0, 1, "terminal cancellation race does not reload the payload");
+    assert!(reads.1 > 0, "external cancel reconciliation reads summaries");
 }
 
 #[tokio::test]
