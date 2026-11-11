@@ -24,9 +24,14 @@ pub(in crate::store::memory_task_store) struct MemoryState {
     pub(in crate::store::memory_task_store) encoded_tasks: BTreeMap<EncodedTaskId, StoredTask>,
     /// Queued task IDs in acceptance order.
     pub(in crate::store::memory_task_store) queued_order: BTreeSet<(u64, EncodedTaskId)>,
+    /// Queued tasks with retry deadlines, ordered by deadline then task ID.
+    pub(in crate::store::memory_task_store) queued_retry_deadlines: BTreeSet<(u64, EncodedTaskId)>,
     /// Test-only count of entries visited by the last ready scan.
     #[cfg(test)]
     pub(in crate::store::memory_task_store) ready_scan_visits: std::cell::Cell<usize>,
+    /// Test-only count of deadline index entries yielded by the last query.
+    #[cfg(test)]
+    pub(in crate::store::memory_task_store) deadline_index_entries_visited: std::cell::Cell<usize>,
     /// Encoded idempotency keys mapped to their task IDs.
     pub(in crate::store::memory_task_store) encoded_idempotency: HashMap<String, EncodedTaskId>,
     /// Encoded terminal task IDs in eviction order.
@@ -73,6 +78,10 @@ impl MemoryState {
         let task = self.encoded_tasks.remove(&id)?;
         if task.summary.state == crate::model::TaskState::Queued {
             self.queued_order.remove(&(task.summary.accepted_at_ms, id));
+            if let Some(deadline) = task.summary.retry_not_before_ms {
+                let removed = self.queued_retry_deadlines.remove(&(deadline, id));
+                debug_assert!(removed, "queued retry must have a deadline index entry");
+            }
         }
         self.retained_payload_bytes -= task.request.payload.bytes.len();
         if !task.summary.state.is_terminal() {

@@ -5,7 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Measures complete ready-queue scans with varying terminal history sizes.
+//! Measures ready pages, retry-deadline queries, scheduler wait cycles, and
+//! concurrent store access under varying future and ready queue sizes.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -28,10 +29,13 @@ use qubit_task::store::TaskStore;
 use tokio::sync::oneshot;
 
 const SIZES: [u64; 4] = [0, 256, 4_096, 32_768];
+const READY_SIZES: [u64; 3] = [0, 1, 128];
 const PAGE: usize = 128;
-const WARMUPS: usize = 3;
-const SAMPLES: usize = 9;
+const WARMUPS: usize = 5;
+const SAMPLES: usize = 31;
 const BUDGET: usize = 64 * 1024 * 1024;
+const NOW_MS: u64 = 10_000;
+const FUTURE_MS: u64 = NOW_MS + 60_000;
 
 fn request() -> StoredTaskRequest {
     StoredTaskRequest {
@@ -85,6 +89,39 @@ async fn add(store: &MemoryTaskStore, id: u64, req: &StoredTaskRequest, terminal
     }
 }
 
+async fn add_future(store: &MemoryTaskStore, id: u64, req: &StoredTaskRequest, deadline: u64) {
+    let task_id = TaskId::from_id(Id::new(id));
+    let accepted = TaskStore::accept_encoded(store, task_id, req.clone())
+        .await
+        .expect("task accepted");
+    let started = TaskStore::start_encoded(
+        store,
+        StartCommand {
+            id: task_id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: 1,
+        },
+    )
+    .await
+    .expect("task starts");
+    TaskStore::transition_encoded(
+        store,
+        TransitionCommand {
+            id: task_id,
+            expected_state_version: started.state_version,
+            expected_attempt: started.attempt,
+            retry_not_before_ms: Some(deadline),
+            state: TaskState::Queued,
+            cancel_requested: false,
+            cancel_error: None,
+            output: None,
+            finished_at_ms: None,
+        },
+    )
+    .await
+    .expect("task is requeued with a deadline");
+}
+
 async fn scan(store: &MemoryTaskStore, now_ms: u64) -> usize {
     let mut after: Option<TaskCursor> = None;
     let mut records = 0;
@@ -105,7 +142,7 @@ async fn scan(store: &MemoryTaskStore, now_ms: u64) -> usize {
     }
 }
 
-async fn scan_with_probe(store: Arc<MemoryTaskStore>, started: oneshot::Sender<()>) -> usize {
+async fn scan_with_probe(store: Arc<MemoryTaskStore>, started: Vec<oneshot::Sender<()>>) -> usize {
     let mut after: Option<TaskCursor> = None;
     let mut records = 0;
     let mut started = Some(started);
@@ -114,13 +151,15 @@ async fn scan_with_probe(store: Arc<MemoryTaskStore>, started: oneshot::Sender<(
             store.as_ref(),
             after,
             NonZeroUsize::new(PAGE).expect("positive page size"),
-            u64::MAX,
+            NOW_MS,
         )
         .await
         .expect("ready scan succeeds");
         records += page.records.len();
         if let Some(started) = started.take() {
-            let _ = started.send(());
+            for sender in started {
+                let _ = sender.send(());
+            }
             // Let the concurrent lookup run after a scan page has released the
             // store lock and before this complete scan returns.
             tokio::task::yield_now().await;
@@ -132,14 +171,22 @@ async fn scan_with_probe(store: Arc<MemoryTaskStore>, started: oneshot::Sender<(
     }
 }
 
-async fn concurrent_probe_samples(store: &Arc<MemoryTaskStore>, expected: usize) -> Vec<Duration> {
-    let mut samples = Vec::with_capacity(SAMPLES);
-    for _ in 0..SAMPLES {
+async fn concurrent_probe_samples(
+    store: &Arc<MemoryTaskStore>,
+    expected: usize,
+    first_probe_id: u64,
+    req: &StoredTaskRequest,
+) -> (Vec<Duration>, Vec<Duration>) {
+    let mut get_samples = Vec::with_capacity(SAMPLES);
+    let mut accept_samples = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
         let (started_tx, started_rx) = oneshot::channel();
+        let (accept_started_tx, accept_started_rx) = oneshot::channel();
         let scan_store = Arc::clone(store);
-        let scan_task = tokio::spawn(async move { scan_with_probe(scan_store, started_tx).await });
+        let scan_task =
+            tokio::spawn(async move { scan_with_probe(scan_store, vec![started_tx, accept_started_tx]).await });
         let query_store = Arc::clone(store);
-        let query_task = tokio::spawn(async move {
+        let get_task = tokio::spawn(async move {
             started_rx.await.expect("scan reached its first page");
             let start = Instant::now();
             let _ = TaskStore::get_encoded_task(query_store.as_ref(), TaskId::from_id(Id::new(1)))
@@ -147,60 +194,154 @@ async fn concurrent_probe_samples(store: &Arc<MemoryTaskStore>, expected: usize)
                 .expect("concurrent task lookup succeeds");
             start.elapsed()
         });
-        assert_eq!(scan_task.await.expect("scan task joins"), expected);
-        samples.push(query_task.await.expect("query task joins"));
+        let accept_store = Arc::clone(store);
+        let accept_request = req.clone();
+        let accept_task = tokio::spawn(async move {
+            accept_started_rx.await.expect("scan reached its first page");
+            let id = TaskId::from_id(Id::new(first_probe_id + sample as u64));
+            let start = Instant::now();
+            TaskStore::accept_encoded(accept_store.as_ref(), id, accept_request)
+                .await
+                .expect("concurrent accept succeeds");
+            start.elapsed()
+        });
+        let count = scan_task.await.expect("scan task joins");
+        let prior_accepts = expected + sample;
+        assert!(count == prior_accepts || count == prior_accepts + 1);
+        get_samples.push(get_task.await.expect("get task joins"));
+        accept_samples.push(accept_task.await.expect("accept task joins"));
     }
-    samples
+    (get_samples, accept_samples)
 }
 
 fn percentile(sorted: &[Duration], n: usize, d: usize) -> Duration {
     sorted[sorted.len().saturating_mul(n).div_ceil(d).max(1) - 1]
 }
 
-async fn run(history: u64, queued: u64) {
+async fn deadline(store: &MemoryTaskStore, now_ms: u64) -> Option<u64> {
+    TaskStore::next_retry_deadline(store, now_ms)
+        .await
+        .expect("retry deadline query succeeds")
+}
+
+async fn run(future: u64, ready: u64) {
+    let total = future + ready;
     let store = Arc::new(MemoryTaskStore::with_limits(
-        usize::try_from(history).expect("history fits usize"),
+        0,
         NonZeroUsize::new(BUDGET).expect("positive budget"),
-        NonZeroUsize::new(usize::try_from(queued).expect("queue fits usize").max(1)).expect("positive queue limit"),
+        NonZeroUsize::new(usize::try_from(total + 2 * SAMPLES as u64 + 1).expect("queue fits usize"))
+            .expect("positive queue limit"),
     ));
     let req = request();
-    for id in 1..=history {
-        add(&store, id, &req, true).await;
+    for offset in 1..=future {
+        // Alternate two stable deadlines to cover duplicate-key ordering and
+        // ensure the query returns the minimum future value.
+        let due = if offset % 2 == 0 { FUTURE_MS + 1 } else { FUTURE_MS };
+        add_future(&store, offset, &req, due).await;
     }
-    for offset in 1..=queued {
-        add(&store, history + offset, &req, false).await;
+    for offset in 1..=ready {
+        add(&store, future + offset, &req, false).await;
     }
-    let expected = usize::try_from(queued).expect("queue fits usize");
-    let pages = expected.div_ceil(PAGE).max(1);
-    let baseline_entry_visits = pages * (history + queued) as usize;
-    let indexed_entry_visits = if expected == 0 { 0 } else { expected + pages - 1 };
-    let mut samples = Vec::with_capacity(SAMPLES);
+    let expected = usize::try_from(ready).expect("ready count fits usize");
+    let mut page_samples = Vec::with_capacity(SAMPLES);
+    let mut deadline_samples = Vec::with_capacity(SAMPLES);
+    let mut cycle_samples = Vec::with_capacity(SAMPLES);
     for sample in 0..WARMUPS + SAMPLES {
         let start = Instant::now();
-        let count = scan(&store, u64::MAX).await;
-        let elapsed = start.elapsed();
+        let count = scan(&store, NOW_MS).await;
+        let page_elapsed = start.elapsed();
+        assert_eq!(count, expected);
+        let start = Instant::now();
+        assert_eq!(deadline(&store, NOW_MS).await, (future > 0).then_some(FUTURE_MS));
+        let deadline_elapsed = start.elapsed();
+        let start = Instant::now();
+        let count = scan(&store, NOW_MS).await;
+        let _next = deadline(&store, NOW_MS).await;
+        // This measures the complete scan-and-select path through the point
+        // where scheduler_loop would enter sleep; wall-clock sleep is excluded.
+        let cycle_elapsed = start.elapsed();
         assert_eq!(count, expected);
         if sample >= WARMUPS {
-            samples.push(elapsed);
+            page_samples.push(page_elapsed);
+            deadline_samples.push(deadline_elapsed);
+            cycle_samples.push(cycle_elapsed);
         }
     }
-    samples.sort_unstable();
-    let mut probe_samples = concurrent_probe_samples(&store, expected).await;
-    probe_samples.sort_unstable();
+    page_samples.sort_unstable();
+    deadline_samples.sort_unstable();
+    cycle_samples.sort_unstable();
+
+    let mut retry_transition_samples = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES as u64 {
+        let id = TaskId::from_id(Id::new(total + sample + 1));
+        let accepted = TaskStore::accept_encoded(store.as_ref(), id, req.clone())
+            .await
+            .expect("retry timing task is accepted");
+        let running = TaskStore::start_encoded(
+            store.as_ref(),
+            StartCommand {
+                id,
+                expected_state_version: accepted.summary.state_version,
+                started_at_ms: 1,
+            },
+        )
+        .await
+        .expect("retry timing task starts");
+        let start = Instant::now();
+        TaskStore::transition_encoded(
+            store.as_ref(),
+            TransitionCommand {
+                id,
+                expected_state_version: running.state_version,
+                expected_attempt: running.attempt,
+                retry_not_before_ms: Some(FUTURE_MS),
+                state: TaskState::Queued,
+                cancel_requested: false,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: None,
+            },
+        )
+        .await
+        .expect("retry timing task is requeued");
+        retry_transition_samples.push(start.elapsed());
+    }
+    retry_transition_samples.sort_unstable();
+
+    let (mut get_samples, mut accept_samples) =
+        concurrent_probe_samples(&store, expected, total + SAMPLES as u64 + 1, &req).await;
+    get_samples.sort_unstable();
+    accept_samples.sort_unstable();
     println!(
-        "history={history} queued={queued} page={PAGE} baseline_entry_visits={baseline_entry_visits} indexed_entry_visits={indexed_entry_visits} samples_ns={:?} median_ns={} p95_ns={} concurrent_probe_samples_ns={:?} concurrent_probe_median_ns={} concurrent_probe_p95_ns={}",
-        samples.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
-        percentile(&samples, 1, 2).as_nanos(),
-        percentile(&samples, 95, 100).as_nanos(),
-        probe_samples.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
-        percentile(&probe_samples, 1, 2).as_nanos(),
-        percentile(&probe_samples, 95, 100).as_nanos()
+        "future={future} ready={ready} now_ms={NOW_MS} future_deadline_ms={FUTURE_MS} page={PAGE} ready_scan_visit_upper_bound={} ready_page_ns={:?} ready_page_median_ns={} ready_page_p95_ns={} deadline_ns={:?} deadline_median_ns={} deadline_p95_ns={} scheduler_cycle_ns={:?} scheduler_cycle_median_ns={} scheduler_cycle_p95_ns={} running_to_queued_retry_ns={:?} running_to_queued_retry_median_ns={} running_to_queued_retry_p95_ns={} concurrent_get_ns={:?} concurrent_get_median_ns={} concurrent_get_p95_ns={} concurrent_accept_ns={:?} concurrent_accept_median_ns={} concurrent_accept_p95_ns={}",
+        future + ready,
+        page_samples.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
+        percentile(&page_samples, 1, 2).as_nanos(),
+        percentile(&page_samples, 95, 100).as_nanos(),
+        deadline_samples.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
+        percentile(&deadline_samples, 1, 2).as_nanos(),
+        percentile(&deadline_samples, 95, 100).as_nanos(),
+        cycle_samples.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
+        percentile(&cycle_samples, 1, 2).as_nanos(),
+        percentile(&cycle_samples, 95, 100).as_nanos(),
+        retry_transition_samples
+            .iter()
+            .map(Duration::as_nanos)
+            .collect::<Vec<_>>(),
+        percentile(&retry_transition_samples, 1, 2).as_nanos(),
+        percentile(&retry_transition_samples, 95, 100).as_nanos(),
+        get_samples.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
+        percentile(&get_samples, 1, 2).as_nanos(),
+        percentile(&get_samples, 95, 100).as_nanos(),
+        accept_samples.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
+        percentile(&accept_samples, 1, 2).as_nanos(),
+        percentile(&accept_samples, 95, 100).as_nanos(),
     );
 }
 
 fn main() {
     eprintln!(
-        "memory_ready_scan mode=release target={}-{} available_cpus={} runtime_workers=4 page={} warmups={} samples={} payload_bytes=64 budget_bytes={} sizes={:?}",
+        "memory_ready_scan mode=release target={}-{} available_cpus={} runtime_workers=4 page={} warmups={} samples={} payload_bytes=64 budget_bytes={} future_sizes={:?} ready_sizes={:?} seed=stable-sequential-ids deadline_pattern=alternating-two-values",
         std::env::consts::ARCH,
         std::env::consts::OS,
         std::thread::available_parallelism().map_or(1, usize::from),
@@ -208,16 +349,17 @@ fn main() {
         WARMUPS,
         SAMPLES,
         BUDGET,
-        SIZES
+        SIZES,
+        READY_SIZES
     );
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()
         .expect("runtime builds");
-    for history in SIZES {
-        for queued in SIZES {
-            rt.block_on(run(history, queued));
+    for future in SIZES {
+        for ready in READY_SIZES {
+            rt.block_on(run(future, ready));
         }
     }
 }

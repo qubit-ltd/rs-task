@@ -142,8 +142,11 @@ impl MemoryTaskStore {
                 last_owner_epoch: 0,
                 encoded_tasks: BTreeMap::new(),
                 queued_order: BTreeSet::new(),
+                queued_retry_deadlines: BTreeSet::new(),
                 #[cfg(test)]
                 ready_scan_visits: std::cell::Cell::new(0),
+                #[cfg(test)]
+                deadline_index_entries_visited: std::cell::Cell::new(0),
                 encoded_idempotency: HashMap::new(),
                 encoded_terminal_order: VecDeque::new(),
                 retained_payload_bytes: 0,
@@ -425,7 +428,7 @@ impl super::TaskStore for MemoryTaskStore {
     fn start_encoded<'a>(&'a self, command: StartCommand) -> TaskFuture<'a, Result<TaskSummary, StoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock();
-            let (summary, queued_key) = {
+            let (summary, queued_key, retry_deadline) = {
                 let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
                 if task.summary.state_version != command.expected_state_version
                     || !matches!(task.summary.state, TaskState::Queued)
@@ -443,6 +446,7 @@ impl super::TaskStore for MemoryTaskStore {
                     .checked_add(1)
                     .ok_or(StoreError::Failure("task attempt counter overflow".to_owned()))?;
                 let queued_key = (task.summary.accepted_at_ms, command.id);
+                let retry_deadline = task.summary.retry_not_before_ms;
                 task.summary.state_version = next_version;
                 task.summary.attempt = next_attempt;
                 task.summary.state = TaskState::Running;
@@ -450,10 +454,14 @@ impl super::TaskStore for MemoryTaskStore {
                 task.summary.started_at_ms = Some(command.started_at_ms);
                 task.summary.finished_at_ms = None;
                 task.summary.progress = None;
-                (task.summary.clone(), queued_key)
+                (task.summary.clone(), queued_key, retry_deadline)
             };
             let removed = state.queued_order.remove(&queued_key);
             debug_assert!(removed, "queued record must have an order index entry");
+            if let Some(deadline) = retry_deadline {
+                let removed = state.queued_retry_deadlines.remove(&(deadline, command.id));
+                debug_assert!(removed, "queued retry must have a deadline index entry");
+            }
             Ok(summary)
         })
     }
@@ -495,7 +503,7 @@ impl super::TaskStore for MemoryTaskStore {
             }
             validate_encoded_output(&command.state, command.output.as_ref())?;
             let mut state = self.state.lock();
-            let (was_terminal, is_terminal, was_queued, is_queued, accepted_at_ms, summary) = {
+            let (was_terminal, is_terminal, was_queued, is_queued, accepted_at_ms, old_deadline, summary) = {
                 let task = state.encoded_tasks.get_mut(&command.id).ok_or(StoreError::NotFound)?;
                 let terminal_cancel_annotation = task.summary.state.is_terminal()
                     && task.summary.state == command.state
@@ -521,6 +529,7 @@ impl super::TaskStore for MemoryTaskStore {
                 let is_terminal = command.state.is_terminal();
                 let was_queued = task.summary.state == TaskState::Queued;
                 let is_queued = command.state == TaskState::Queued;
+                let old_deadline = task.summary.retry_not_before_ms;
                 let next_version = task
                     .summary
                     .state_version
@@ -544,6 +553,7 @@ impl super::TaskStore for MemoryTaskStore {
                     was_queued,
                     is_queued,
                     accepted_at_ms,
+                    old_deadline,
                     task.summary.clone(),
                 )
             };
@@ -553,6 +563,14 @@ impl super::TaskStore for MemoryTaskStore {
             }
             if is_queued {
                 state.queued_order.insert((accepted_at_ms, command.id));
+            }
+            if was_queued && let Some(deadline) = old_deadline {
+                let removed = state.queued_retry_deadlines.remove(&(deadline, command.id));
+                debug_assert!(removed, "queued retry must have a deadline index entry");
+            }
+            if is_queued && let Some(deadline) = command.retry_not_before_ms {
+                let inserted = state.queued_retry_deadlines.insert((deadline, command.id));
+                debug_assert!(inserted, "queued retry deadline keys must be unique");
             }
             if !was_terminal && is_terminal {
                 state.unfinished_records = state.unfinished_records.saturating_sub(1);
@@ -777,18 +795,22 @@ impl super::TaskStore for MemoryTaskStore {
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
             let state = self.state.lock();
+            #[cfg(test)]
+            state.deadline_index_entries_visited.set(0);
             Ok(state
-                .queued_order
-                .iter()
-                .map(|(_, id)| {
+                .queued_retry_deadlines
+                .range((
+                    Excluded((now_ms, EncodedTaskId::from_id(qubit_id::Id::new(u64::MAX)))),
+                    Unbounded,
+                ))
+                .inspect(|_| {
+                    #[cfg(test)]
                     state
-                        .encoded_tasks
-                        .get(id)
-                        .expect("queued order entry has a retained task")
+                        .deadline_index_entries_visited
+                        .set(state.deadline_index_entries_visited.get() + 1);
                 })
-                .filter_map(|task| task.summary.retry_not_before_ms)
-                .filter(|deadline| *deadline > now_ms)
-                .min())
+                .next()
+                .map(|(deadline, _)| *deadline))
         })
     }
 
@@ -907,6 +929,7 @@ mod tests {
     use super::super::TaskStore;
     use super::EncodedTaskId;
     use super::MemoryTaskStore;
+    use super::TaskSummary;
     use crate::model::TaskState;
     use crate::model::typed::AcceptOutcome;
     use crate::model::typed::StartCommand;
@@ -951,6 +974,16 @@ mod tests {
             state
                 .queued_order
                 .extend(keys.into_iter().map(|(id, accepted_at_ms)| (accepted_at_ms, id)));
+            state.queued_retry_deadlines = state
+                .encoded_tasks
+                .iter()
+                .filter_map(|(id, task)| {
+                    task.summary
+                        .retry_not_before_ms
+                        .filter(|_| task.summary.state == TaskState::Queued)
+                        .map(|deadline| (deadline, *id))
+                })
+                .collect::<std::collections::BTreeSet<_>>();
         }
 
         let page = TaskStore::list_ready_queued(
@@ -1043,6 +1076,61 @@ mod tests {
         assert_eq!(store.state.lock().ready_scan_visits.get(), 2);
     }
 
+    /// Empty ready scans inspect every queued retry; indexed deadline lookup
+    /// visits at most its first matching entry as backlog grows.
+    #[tokio::test]
+    async fn test_ready_and_deadline_visit_counters_track_queued_backlog() {
+        for queued in [4_u64, 8] {
+            let store = MemoryTaskStore::new(0);
+            for value in 1..=queued {
+                let id = EncodedTaskId::from_id(qubit_id::Id::new(value));
+                let accepted = TaskStore::accept_encoded(&store, id, lifecycle_request(value))
+                    .await
+                    .expect("task is accepted");
+                let started = TaskStore::start_encoded(
+                    &store,
+                    StartCommand {
+                        id,
+                        expected_state_version: accepted.summary.state_version,
+                        started_at_ms: 1,
+                    },
+                )
+                .await
+                .expect("task starts");
+                TaskStore::transition_encoded(
+                    &store,
+                    TransitionCommand {
+                        id,
+                        expected_state_version: started.state_version,
+                        expected_attempt: started.attempt,
+                        retry_not_before_ms: Some(100),
+                        state: TaskState::Queued,
+                        cancel_requested: false,
+                        cancel_error: None,
+                        output: None,
+                        finished_at_ms: None,
+                    },
+                )
+                .await
+                .expect("task is queued for a future retry");
+            }
+
+            assert_eq!(
+                TaskStore::next_retry_deadline(&store, 99)
+                    .await
+                    .expect("deadline query succeeds"),
+                Some(100)
+            );
+            assert_eq!(store.state.lock().deadline_index_entries_visited.get(), 1);
+            let page =
+                TaskStore::list_ready_queued(&store, None, NonZeroUsize::new(1).expect("page size is positive"), 99)
+                    .await
+                    .expect("ready page succeeds");
+            assert!(page.records.is_empty());
+            assert_eq!(store.state.lock().ready_scan_visits.get(), queued as usize);
+        }
+    }
+
     fn assert_queued_index_matches_records(store: &MemoryTaskStore) {
         let state = store.state.lock();
         let expected = state
@@ -1052,6 +1140,340 @@ mod tests {
             .map(|task| (task.summary.accepted_at_ms, task.summary.id))
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(state.queued_order, expected);
+        let expected_deadlines = state
+            .encoded_tasks
+            .values()
+            .filter(|task| task.summary.state == TaskState::Queued)
+            .filter_map(|task| {
+                task.summary
+                    .retry_not_before_ms
+                    .map(|deadline| (deadline, task.summary.id))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(state.queued_retry_deadlines, expected_deadlines);
+    }
+
+    /// Retains duplicate deadline keys and returns only deadlines strictly
+    /// after `now`, including the maximum timestamp without overflow.
+    #[tokio::test]
+    async fn test_retry_deadline_index_orders_and_uses_strict_range() {
+        let store = MemoryTaskStore::new(8);
+        let mut summaries = Vec::new();
+        for (id_value, due) in [(3, 100), (1, 100), (2, 99), (4, u64::MAX)] {
+            let id = EncodedTaskId::from_id(qubit_id::Id::new(id_value));
+            let accepted = TaskStore::accept_encoded(&store, id, lifecycle_request(id_value))
+                .await
+                .expect("task is accepted");
+            let started = TaskStore::start_encoded(
+                &store,
+                StartCommand {
+                    id,
+                    expected_state_version: accepted.summary.state_version,
+                    started_at_ms: 1,
+                },
+            )
+            .await
+            .expect("task starts");
+            summaries.push(
+                TaskStore::transition_encoded(
+                    &store,
+                    TransitionCommand {
+                        id,
+                        expected_state_version: started.state_version,
+                        expected_attempt: started.attempt,
+                        retry_not_before_ms: Some(due),
+                        state: TaskState::Queued,
+                        cancel_requested: false,
+                        cancel_error: None,
+                        output: None,
+                        finished_at_ms: None,
+                    },
+                )
+                .await
+                .expect("task is queued with a retry deadline"),
+            );
+        }
+
+        assert_queued_index_matches_records(&store);
+        assert_eq!(
+            TaskStore::next_retry_deadline(&store, 98)
+                .await
+                .expect("lookup succeeds"),
+            Some(99)
+        );
+        assert_eq!(
+            TaskStore::next_retry_deadline(&store, 99)
+                .await
+                .expect("lookup succeeds"),
+            Some(100)
+        );
+        assert_eq!(
+            TaskStore::next_retry_deadline(&store, 100)
+                .await
+                .expect("lookup succeeds"),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            TaskStore::next_retry_deadline(&store, u64::MAX)
+                .await
+                .expect("lookup succeeds"),
+            None
+        );
+
+        let stale = TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: summaries[0].id,
+                expected_state_version: summaries[0].state_version - 1,
+                expected_attempt: summaries[0].attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Running,
+                cancel_requested: false,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: None,
+            },
+        )
+        .await;
+        assert!(matches!(stale, Err(super::super::StoreError::Conflict)));
+        assert_queued_index_matches_records(&store);
+
+        let started = TaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id: summaries[0].id,
+                expected_state_version: summaries[0].state_version,
+                started_at_ms: 2,
+            },
+        )
+        .await
+        .expect("started retry leaves the deadline index");
+        assert_queued_index_matches_records(&store);
+        assert_eq!(started.state, TaskState::Running);
+
+        let rewritten = TaskStore::transition_encoded(
+            &store,
+            TransitionCommand {
+                id: started.id,
+                expected_state_version: started.state_version,
+                expected_attempt: started.attempt,
+                retry_not_before_ms: Some(200),
+                state: TaskState::Queued,
+                cancel_requested: false,
+                cancel_error: None,
+                output: None,
+                finished_at_ms: None,
+            },
+        )
+        .await
+        .expect("retry attempt is requeued with a new deadline");
+        assert_queued_index_matches_records(&store);
+        assert_eq!(
+            TaskStore::next_retry_deadline(&store, 100)
+                .await
+                .expect("lookup succeeds"),
+            Some(200)
+        );
+
+        let removed_by_start = TaskStore::start_encoded(
+            &store,
+            StartCommand {
+                id: rewritten.id,
+                expected_state_version: rewritten.state_version,
+                started_at_ms: 2,
+            },
+        )
+        .await
+        .expect("started retry leaves the deadline index");
+        assert_queued_index_matches_records(&store);
+        assert_eq!(
+            TaskStore::next_retry_deadline(&store, 100)
+                .await
+                .expect("lookup succeeds"),
+            Some(u64::MAX)
+        );
+        assert_eq!(removed_by_start.state, TaskState::Running);
+    }
+
+    /// Keeps the deadline index equal to an independent summary model through
+    /// generated retry, block, resume, start, and terminal transitions.
+    #[tokio::test]
+    async fn test_retry_deadline_index_matches_generated_lifecycle_model() {
+        let store = MemoryTaskStore::new(32);
+        let mut model = Vec::<TaskSummary>::new();
+        for value in 500..512 {
+            let id = EncodedTaskId::from_id(qubit_id::Id::new(value));
+            let accepted = TaskStore::accept_encoded(&store, id, lifecycle_request(value))
+                .await
+                .expect("task is accepted");
+            model.push(accepted.summary);
+        }
+
+        let mut seed = 0x4d59_5df4_d0f3_3173_u64;
+        for _ in 0..192 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let index = (seed as usize) % model.len();
+            let action = (seed >> 32) % 4;
+            let current = model[index].clone();
+            let updated = match current.state.clone() {
+                TaskState::Queued if action == 0 => Some(
+                    TaskStore::start_encoded(
+                        &store,
+                        StartCommand {
+                            id: current.id,
+                            expected_state_version: current.state_version,
+                            started_at_ms: seed,
+                        },
+                    )
+                    .await
+                    .expect("queued task starts"),
+                ),
+                TaskState::Queued if action == 1 => Some(
+                    TaskStore::transition_encoded(
+                        &store,
+                        TransitionCommand {
+                            id: current.id,
+                            expected_state_version: current.state_version,
+                            expected_attempt: current.attempt,
+                            retry_not_before_ms: None,
+                            state: TaskState::Cancelled,
+                            cancel_requested: true,
+                            cancel_error: None,
+                            output: None,
+                            finished_at_ms: Some(seed),
+                        },
+                    )
+                    .await
+                    .expect("queued task cancels"),
+                ),
+                TaskState::Running if action == 0 => {
+                    let due = if seed.is_multiple_of(17) {
+                        u64::MAX
+                    } else {
+                        seed % 1_000
+                    };
+                    Some(
+                        TaskStore::transition_encoded(
+                            &store,
+                            TransitionCommand {
+                                id: current.id,
+                                expected_state_version: current.state_version,
+                                expected_attempt: current.attempt,
+                                retry_not_before_ms: Some(due),
+                                state: TaskState::Queued,
+                                cancel_requested: false,
+                                cancel_error: None,
+                                output: None,
+                                finished_at_ms: None,
+                            },
+                        )
+                        .await
+                        .expect("running task retries"),
+                    )
+                }
+                TaskState::Running if action == 1 => Some(
+                    TaskStore::transition_encoded(
+                        &store,
+                        TransitionCommand {
+                            id: current.id,
+                            expected_state_version: current.state_version,
+                            expected_attempt: current.attempt,
+                            retry_not_before_ms: None,
+                            state: TaskState::Blocked {
+                                reason: "generated pause".to_owned(),
+                            },
+                            cancel_requested: false,
+                            cancel_error: None,
+                            output: None,
+                            finished_at_ms: None,
+                        },
+                    )
+                    .await
+                    .expect("running task blocks"),
+                ),
+                TaskState::Running if action == 2 => Some(
+                    TaskStore::transition_encoded(
+                        &store,
+                        TransitionCommand {
+                            id: current.id,
+                            expected_state_version: current.state_version,
+                            expected_attempt: current.attempt,
+                            retry_not_before_ms: None,
+                            state: TaskState::Succeeded,
+                            cancel_requested: false,
+                            cancel_error: None,
+                            output: None,
+                            finished_at_ms: Some(seed),
+                        },
+                    )
+                    .await
+                    .expect("running task finishes"),
+                ),
+                TaskState::Blocked { .. } if action < 2 => {
+                    let due = (action == 0).then_some(seed % 1_000);
+                    Some(
+                        TaskStore::transition_encoded(
+                            &store,
+                            TransitionCommand {
+                                id: current.id,
+                                expected_state_version: current.state_version,
+                                expected_attempt: current.attempt,
+                                retry_not_before_ms: due,
+                                state: TaskState::Queued,
+                                cancel_requested: false,
+                                cancel_error: None,
+                                output: None,
+                                finished_at_ms: None,
+                            },
+                        )
+                        .await
+                        .expect("blocked task resumes"),
+                    )
+                }
+                TaskState::Blocked { .. } if action == 2 => Some(
+                    TaskStore::transition_encoded(
+                        &store,
+                        TransitionCommand {
+                            id: current.id,
+                            expected_state_version: current.state_version,
+                            expected_attempt: current.attempt,
+                            retry_not_before_ms: None,
+                            state: TaskState::Cancelled,
+                            cancel_requested: true,
+                            cancel_error: None,
+                            output: None,
+                            finished_at_ms: Some(seed),
+                        },
+                    )
+                    .await
+                    .expect("blocked task cancels"),
+                ),
+                _ => None,
+            };
+            if let Some(updated) = updated {
+                model[index] = updated;
+            }
+
+            let expected_deadlines = model
+                .iter()
+                .filter(|summary| summary.state == TaskState::Queued)
+                .filter_map(|summary| summary.retry_not_before_ms.map(|due| (due, summary.id)))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(store.state.lock().queued_retry_deadlines, expected_deadlines);
+            for now_ms in [0, 100, 500, u64::MAX] {
+                let expected_next = expected_deadlines
+                    .iter()
+                    .copied()
+                    .find(|(due, _)| *due > now_ms)
+                    .map(|(due, _)| due);
+                assert_eq!(
+                    TaskStore::next_retry_deadline(&store, now_ms)
+                        .await
+                        .expect("deadline lookup succeeds"),
+                    expected_next,
+                );
+            }
+        }
     }
 
     fn lifecycle_request(id: u64) -> StoredTaskRequest {
