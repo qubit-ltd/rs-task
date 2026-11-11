@@ -17,10 +17,11 @@
 - **任务标识：** 每个已受理任务都有一个由 `TaskId` 包装的 `rs-id::Id`。注入能够跨进程重启生成唯一 ID 的 `IdGenerator`；跨进程使用 Snowflake 生成器时，各进程必须使用不同节点编号，并配置合适的时钟条件。同步生成会在 Tokio 阻塞线程池中运行。取消提交不会停止已经开始的生成调用，因此可能消耗一个 ID 但不接纳任务；未取消的提交仍处于服务关闭的接纳边界内。自定义生成器应最终返回，且不能依赖 executor-local 状态。运行时关闭可能等待阻塞调用；该线程切换会增加调度开销，但不提供硬超时或无限并发保证。
 - **路由与分类：** `kind_id` 选择处理器，`category` 是独立的业务分类，用于查询过滤。
 - **Payload 兼容性：** `Payload<T>` 将 `type_id`、`schema_version` 和 `codec_id` 与值绑定。一个处理器只接受一种 payload type ID，并显式声明支持的 schema 版本。一个 codec 可以服务多个 schema 版本。
+- **Codec 执行：** `submit()` 中的同步 payload 编码，以及任务开始前的解码，都会放到 Tokio blocking pool 运行。取消 submit 的等待 future 无法中断已开始的编码，但请求不会被接纳，编码结果可能被丢弃。运行中的任务在解码期间仍占用运行名额和资源预留；`shutdown()` 会等待解码和 handler 完成。blocking 工作没有硬超时，codec 卡住会拖延关闭。
 - **资源准入：** CPU、GPU、内存、磁盘和自定义单位是并发配额，由执行引擎内部预留；它们不会固定 CPU、隔离 GPU，也不会强制限制操作系统层面的内存或磁盘使用。
 - **生命周期与取消：** 排队中的任务可直接取消。运行中的处理器必须声明协作式取消能力或外部取消 hook；取消请求本身无法强行停止任意代码。外部 hook 失败会保留可查询诊断，任务仍在运行时可再次调用 `cancel()` 重试。同一 attempt 的并发调用共享一次 hook，取消调用方不会停止 hook，`shutdown()` 会等待 hook 完成。hook 应对每个 (`TaskId`, attempt) 幂等。
 - **进度：** 处理器通过 `rs-progress::AsyncReporter` 汇报进度。`report_async()` 等待持久化完成，之后读取任务会包含阶段和指标快照。版本在等待存储前分配；报告失败或取消后不会复用，允许出现版本空洞。进度版本与生命周期 `state_version` 相互独立。
-- **历史：** typed 分页按 `(accepted_at_ms, numeric task id)` 升序排列。排他性的 `after` 游标是 keyset 游标；每次查询读取各自的存储快照。
+- **历史：** typed 分页按 `(accepted_at_ms, numeric task id)` 升序排列。排他性的 `after` 游标是 keyset 游标；每次查询读取各自的存储快照。`TaskSummary` 包含生命周期和进度信息，不会加载或解码 payload 字节。`get_state_checkpoint()` 只返回消费者恢复投影所需的当前状态和版本；SQLite 清理任务后仍可读取，但它无法恢复 payload、进度或中间迁移。
 
 ## 启动与关闭服务
 

@@ -20,6 +20,10 @@ The service keeps routing, classification, and payload identity separate:
 
 A handler registered for a `kind_id` accepts one payload `type_id` and declares the schema versions it supports. The codec registry maps bytes codecs independently; a codec may serve multiple schema versions. Encoding validates the typed request and stores an `EncodedPayload` with its identity and bytes. Decoding and handler dispatch occur after acceptance when the task starts.
 
+Synchronous codec encode and decode calls run on Tokio's blocking pool. Encoding finishes before submission is accepted. Cancelling the submit future does not stop an encode already running, but the request is not accepted and its result may be discarded. Decoding runs after an attempt has acquired its running slot and resource reservation; both remain held until preparation and the async handler finish. The in-flight guard makes shutdown wait for preparation. A decoder panic becomes that task's `Panicked` outcome with panic unwinding enabled. Blocking calls have no hard timeout and cannot be forcibly cancelled, so a stuck codec can delay shutdown and runtime teardown.
+
+`TaskSummary` supports status and history reads without loading or decoding stored payload bytes. `get_state_checkpoint` is a smaller consumer-recovery read containing current state and version; after SQLite pruning it can restore that terminal projection, but not payload, progress, or intermediate transitions.
+
 ## Service and store
 
 `TaskExecutionServiceBuilder` receives a typed `TaskStore`, byte codec registry, and ID generator. `capacity(ResourceCapacity)` configures the local engine's reservation budgets. The builder owns a `TypedTaskHandlerRegistry`; registrations are fixed when the service is built. The service writes accepted task data through the store and returns payload-free `TaskSummary` values for status reads and history pages.

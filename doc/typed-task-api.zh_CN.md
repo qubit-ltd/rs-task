@@ -115,10 +115,13 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 
 `TaskStore` 是公开的带类型持久化契约，由 `MemoryTaskStore` 和 `SqliteTaskStore` 直接实现。旧 UUID 适配层 `LegacyTaskStore` 及其 `RecoveryPage`/`scan_unfinished` API 不属于当前公开契约。使用 `SqliteTaskStore::open(path)` 打开 SQLite；typed schema v4 到 v7 会在原数据库中通过事务迁移到 v8，保留任务、活动 outbox 行和隔离归档记录，并新增终态状态检查点。旧 UUID schema 会被拒绝且不作修改。
 
+`TaskExecutionService::get(id)` 和 typed 历史查询返回 `TaskSummary`，其中有生命周期、路由、metadata、资源和进度信息，但不会加载或解码持久化的 payload 字节。`get_state_checkpoint(id)` 是更精简的恢复查询，只返回修复消费者投影所需的当前状态和版本；SQLite 清理终态任务后仍可读取该检查点。检查点不是任务摘要，不能恢复 payload、进度或中间状态迁移。
+
 - `TaskId` 包装 `rs-id::Id`；service 要求显式注入能跨进程重启保持唯一的 `IdGenerator`。Snowflake 跨进程唯一性依赖节点 ID 不重复和时钟条件。`to_padded_decimal()` 输出定长十进制字符串，用于数据库字典序稳定排序。
 - CPU slot、GPU 设备和标签、可选 memory/disk 字节数、自定义整数单位都是每次执行的接纳配额。它们限制并发预留量，不会绑核、在 OS 层发现或隔离 GPU，也不会限制进程实际内存或磁盘使用。超过配置容量的请求不可满足；暂时拿不到资源的任务会保留在队列中，调度器继续检查后续资源匹配的任务，因此不保证严格 FIFO。
 - 排队或阻塞任务可直接取消。运行中任务使用 `CancellationMode::Cooperative` 时，`TaskContext::is_cancelled()` 会收到信号，处理器应在安全边界停止并返回 `TaskRunOutcome::Cancelled`。`ExternalHook` 需要注册外部 hook；`Unsupported` 不会停止运行中的尝试。
 - `max_running_tasks` 限制活跃 handler 数，`scan_page_size` 限制每次 queued 摘要扫描量。待执行任务保留在 store 中，只有拿到运行名额后才创建执行协程。
+- 同步 payload codec 工作会放到 Tokio blocking pool：`submit()` 在任务接纳前编码；运行中的 attempt 先解码，再运行异步 handler。取消 submit future 不会中止已经开始的编码，但不会继续接纳该请求；编码结果可能被丢弃。解码期间仍占用 running 名额和资源预留，`shutdown()` 会等待准备阶段和 handler 完成。启用 panic unwind 时，decoder panic 会记为该任务的 `Panicked` 终态。blocking 工作不能被强制取消，也没有硬超时；codec 卡住可能拖延 shutdown 和 runtime 退出。
 - handler 的 `TaskRunError.retryable` 决定是否重试。默认 `max_attempts` 为 3，`RetryPolicy` 延迟从 1 秒增长到 60 秒。持久化正延迟时会向上取整到整毫秒，取整增加不足 1 毫秒，因此存储间隔可能略高于 `max_delay`；这不保证墙钟等待时长等于策略值。queued 状态和 `retry_not_before_ms` 一起保存，重启恢复仍遵守截止时间。不可重试错误、panic、取消和超过尝试上限都会结束任务。
 - 调用 `resume_blocked(id, expected_state_version)` 可在修复配置并使用兼容 handler 或 codec 重启服务后重新排队。状态版本冲突时先重新读取摘要；存在待处理取消时不能恢复。
 - 后台存储故障会被锁存：停止写入和调度，保留诊断读取；`shutdown()` 排空活跃工作后返回存储故障。SQLite typed schema v4 到 v7 会在原数据库中通过事务迁移到 v8；旧 UUID schema 仍需显式映射数据。

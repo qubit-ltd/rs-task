@@ -35,7 +35,7 @@ let store = SqliteTaskStore::open("tasks.sqlite")?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-如果仍在使用旧入口，请将 `SqliteTaskStore::open_next` 替换为 `SqliteTaskStore::open`。带类型 API 只有一个 SQLite 入口；不要保留旧 UUID 存储作为回退路径。打开 typed schema v4 到 v7 时，程序会在原数据库中通过事务迁移到 v8，保留任务、活动 outbox 和隔离归档记录，并新增 `task_terminal_checkpoints`。归档行保留原始事件数据，不会随终态任务清理删除。旧 UUID schema 会被明确拒绝，原数据库保持不变。请先由应用控制迁移过程，将旧记录映射到新的带类型数据库，再打开数据库。0.8 历史迁移说明仍作为历史文档保留，本次 schema 变更不会改写它。schema 版本 8 与 crate 版本 0.11 相互独立。
+如果仍在使用旧入口，请将 `SqliteTaskStore::open_next` 替换为 `SqliteTaskStore::open`。带类型 API 只有一个 SQLite 入口；不要保留旧 UUID 存储作为回退路径。打开 typed schema v4 到 v7 时，程序会在原数据库中通过事务迁移到 v8，保留任务、活动 outbox 和隔离归档记录，并新增 `task_terminal_checkpoints`。打开已有的 v8 数据库时也会确保 queued-ready 索引存在，但不会更改 schema 版本或任务数据。首次创建该索引会扫描现有任务表，数据库越大，首次打开可能越久；不需要应用层数据迁移。归档行保留原始事件数据，不会随终态任务清理删除。旧 UUID schema 会被明确拒绝，原数据库保持不变。请先由应用控制迁移过程，将旧记录映射到新的带类型数据库，再打开数据库。0.8 历史迁移说明仍作为历史文档保留，本次 schema 变更不会改写它。schema 版本 8 与 crate 版本 0.11 相互独立。
 
 ## 实现当前 `TaskStore` 契约
 
