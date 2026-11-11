@@ -290,6 +290,7 @@ impl TaskHandler<Counter> for GatedHandler {
 
 struct FailingListStore {
     inner: Arc<dyn TaskStore>,
+    target_summary: StdMutex<Option<task::model::TaskSummary>>,
     fail_next_list: std::sync::atomic::AtomicBool,
     fail_next_query: std::sync::atomic::AtomicBool,
     fail_next_get: std::sync::atomic::AtomicBool,
@@ -341,6 +342,7 @@ fn failing_store_with_inner(
 ) -> Arc<FailingListStore> {
     Arc::new(FailingListStore {
         inner,
+        target_summary: StdMutex::new(None),
         fail_next_list: std::sync::atomic::AtomicBool::new(false),
         fail_next_query: std::sync::atomic::AtomicBool::new(false),
         fail_next_get: std::sync::atomic::AtomicBool::new(false),
@@ -351,6 +353,46 @@ fn failing_store_with_inner(
         panic_next_release: std::sync::atomic::AtomicBool::new(false),
         transition_gate,
     })
+}
+
+#[tokio::test]
+async fn service_get_uses_summary_specific_store_method() {
+    let id = TaskId::from_id(id::Id::new(19_004));
+    let inner = Arc::new(MemoryTaskStore::new(8));
+    let accepted = inner
+        .accept_encoded(
+            id,
+            task::model::StoredTaskRequest {
+                kind_id: "routing.test".to_owned(),
+                category: None,
+                payload: task::model::StoredPayload {
+                    type_id: ModelIdBuf::parse("test.TypedServicePayload").expect("valid model ID"),
+                    schema_version: 1,
+                    codec_id: "test.codec".to_owned(),
+                    bytes: vec![1],
+                },
+                metadata: metadata::Metadata::new(),
+                resource_limit: ResourceRequest::default(),
+                correlation_key: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .expect("task record is accepted");
+    let store = failing_store_with_inner(inner, None);
+    *store.target_summary.lock().unwrap() = Some(accepted.summary.clone());
+    let service = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        registry(),
+        Arc::new(Ids(AtomicU64::new(19_005))),
+    )
+    .build()
+    .await
+    .expect("service starts");
+
+    store.fail_next_get.store(true, Ordering::Release);
+    assert_eq!(service.get(id).await.unwrap(), Some(accepted.summary));
+    service.shutdown().await.expect("service shuts down");
 }
 
 async fn wait_for_latched_store_fault(service: &task::service::TaskExecutionService) {
@@ -388,6 +430,18 @@ impl TaskStore for FailingListStore {
             Box::pin(async { Err(task::store::StoreError::Failure("injected get failure".into())) })
         } else {
             self.inner.get_encoded_task(id)
+        }
+    }
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<task::model::TaskSummary>, task::store::StoreError>> {
+        if let Some(summary) = self.target_summary.lock().unwrap().clone()
+            && summary.id == id
+        {
+            Box::pin(async move { Ok(Some(summary)) })
+        } else {
+            self.inner.get_summary(id)
         }
     }
     fn get_state_checkpoint<'a>(

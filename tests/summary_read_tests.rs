@@ -8,6 +8,7 @@
 use qubit_id::Id;
 use qubit_metadata::Metadata;
 use qubit_model_id::ModelIdBuf;
+use std::num::NonZeroUsize;
 use qubit_task::model::TaskState;
 use qubit_task::model::typed::StartCommand;
 use qubit_task::model::typed::StoredPayload;
@@ -91,6 +92,43 @@ async fn memory_summary_reads_track_updates_without_cloning_payload() {
         .await
         .unwrap();
     assert_eq!(store.get_summary(id).await.unwrap(), Some(terminal));
+    store
+        .prune_terminal_before(13, NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(store.get_summary(id).await.unwrap(), None);
+    assert_eq!(store.get_state_checkpoint(id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn memory_summary_reads_return_none_after_terminal_eviction() {
+    let store = MemoryTaskStore::new(0);
+    let id = task_id(303);
+    let accepted = store.accept_encoded(id, request(1)).await.unwrap();
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: accepted.summary.state_version,
+            started_at_ms: 20,
+        })
+        .await
+        .unwrap();
+    store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: Some(21),
+            output: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(store.get_summary(id).await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -117,6 +155,34 @@ async fn sqlite_summary_reads_do_not_select_payload() {
     assert_eq!(store.get_summary(id).await.unwrap(), Some(accepted.summary));
     assert!(matches!(store.get_encoded_task(id).await, Err(_)));
     assert_eq!(store.get_summary(task_id(402)).await.unwrap(), None);
+    let running = store
+        .start_encoded(StartCommand {
+            id,
+            expected_state_version: 0,
+            started_at_ms: 20,
+        })
+        .await
+        .unwrap();
+    store
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: running.state_version,
+            expected_attempt: running.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Succeeded,
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: Some(21),
+            output: None,
+        })
+        .await
+        .unwrap();
+    store
+        .prune_terminal_before(22, NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(store.get_summary(id).await.unwrap(), None);
+    assert!(store.get_state_checkpoint(id).await.unwrap().is_some());
     drop(store);
     let _ = std::fs::remove_file(&path);
     let mut lock_path = path.as_os_str().to_owned();
