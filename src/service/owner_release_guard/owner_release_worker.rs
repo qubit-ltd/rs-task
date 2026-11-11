@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use futures::FutureExt;
 
@@ -19,6 +20,9 @@ use super::internal::ReleaseJob;
 use crate::model::OwnerEpoch;
 use crate::store::StoreError;
 use crate::store::TaskStore;
+
+const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(25);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// A process-wide, pre-started cleanup thread for guards dropped while armed.
 #[derive(Clone)]
@@ -107,26 +111,126 @@ fn run_cleanup_worker(
     runtime.block_on(async move {
         while let Some(ReleaseJob { store, epoch }) = receiver.recv().await {
             tokio::spawn(async move {
-                let release = async { store.release_owner(epoch).await };
-                match AssertUnwindSafe(release).catch_unwind().await {
-                    Ok(result) => log_release_error(epoch, result),
-                    Err(_) => {
-                        eprintln!("owner cleanup worker panicked while releasing epoch {epoch:?}")
-                    }
-                }
+                run_release_job(store, epoch).await;
             });
         }
     });
 }
 
-/// Reports a store release failure with its owner generation.
+/// Releases one queued owner epoch, retrying operational failures
+/// independently.
+///
+/// The job retains the original store and epoch across retries. `Failure` uses
+/// exponential backoff without a retry limit; `OwnerConflict`, other errors,
+/// and panics terminate this job because retrying cannot safely establish that
+/// the old ownership is still applicable. A permanently failing release can
+/// therefore keep the store reference alive until the process exits.
 ///
 /// # Parameters
 ///
-/// * `epoch` identifies the ownership whose release was attempted.
-/// * `result` is the outcome to report; successful releases produce no log.
-fn log_release_error(epoch: OwnerEpoch, result: Result<(), StoreError>) {
-    if let Err(error) = result {
-        eprintln!("failed to release task store owner epoch {epoch:?}: {error}");
+/// * `store` is retained for each attempt until this job completes.
+/// * `epoch` identifies the original ownership and is reused for every retry.
+async fn run_release_job(store: Arc<dyn TaskStore>, epoch: OwnerEpoch) {
+    let mut delay = INITIAL_RETRY_DELAY;
+    let mut failure_count = 0_u32;
+    loop {
+        let release = async { store.release_owner(epoch).await };
+        match AssertUnwindSafe(release).catch_unwind().await {
+            Ok(Ok(())) => {
+                if failure_count > 0 {
+                    eprintln!("owner cleanup recovered epoch {epoch:?} after {failure_count} failures");
+                }
+                return;
+            }
+            Ok(Err(StoreError::Failure(message))) => {
+                let previous_count = failure_count;
+                failure_count = failure_count.saturating_add(1);
+                if should_log_retry_failure(previous_count, failure_count) {
+                    eprintln!(
+                        "owner cleanup failed for epoch {epoch:?} on attempt {failure_count}: {message}; retrying in {delay:?}"
+                    );
+                }
+                tokio::time::sleep(delay).await;
+                delay = next_cleanup_delay(delay);
+            }
+            Ok(Err(StoreError::OwnerConflict)) => {
+                eprintln!("owner cleanup stopped for epoch {epoch:?}: ownership epoch is no longer active");
+                return;
+            }
+            Ok(Err(error)) => {
+                eprintln!("owner cleanup stopped for epoch {epoch:?} after terminal error: {error}");
+                return;
+            }
+            Err(_) => {
+                eprintln!("owner cleanup worker panicked while releasing epoch {epoch:?}");
+                return;
+            }
+        }
+    }
+}
+
+/// Returns the next exponentially doubled cleanup delay, capped at five
+/// seconds.
+///
+/// # Parameters
+///
+/// * `delay` is the delay used for the previous failed attempt.
+fn next_cleanup_delay(delay: Duration) -> Duration {
+    delay.saturating_mul(2).min(MAX_RETRY_DELAY)
+}
+
+/// Logs the first failure and powers of two, excluding a saturated counter.
+///
+/// # Parameters
+///
+/// * `previous_count` is the failure count before this attempt.
+/// * `failure_count` is the saturated count after this attempt.
+fn should_log_retry_failure(previous_count: u32, failure_count: u32) -> bool {
+    failure_count > previous_count && (failure_count == 1 || failure_count.is_power_of_two())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::INITIAL_RETRY_DELAY;
+    use super::MAX_RETRY_DELAY;
+    use super::next_cleanup_delay;
+    use super::should_log_retry_failure;
+
+    #[test]
+    fn test_cleanup_delay_doubles_and_stays_capped_without_overflow() {
+        let mut delay = INITIAL_RETRY_DELAY;
+        let expected = [
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_millis(400),
+            Duration::from_millis(800),
+            Duration::from_millis(1_600),
+            Duration::from_millis(3_200),
+            MAX_RETRY_DELAY,
+            MAX_RETRY_DELAY,
+        ];
+        for expected_delay in expected {
+            delay = next_cleanup_delay(delay);
+            assert_eq!(delay, expected_delay);
+        }
+        assert_eq!(next_cleanup_delay(Duration::MAX), MAX_RETRY_DELAY);
+        assert_eq!(next_cleanup_delay(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_cleanup_failure_logging_is_first_and_power_of_two_only() {
+        for count in 1..64 {
+            assert_eq!(
+                should_log_retry_failure(count - 1, count),
+                count.is_power_of_two(),
+                "count {count}"
+            );
+        }
+        assert!(should_log_retry_failure((1 << 31) - 1, 1 << 31));
+        assert!(!should_log_retry_failure(u32::MAX - 1, u32::MAX));
+        assert!(!should_log_retry_failure(u32::MAX, u32::MAX));
     }
 }

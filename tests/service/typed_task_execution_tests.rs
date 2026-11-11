@@ -1051,6 +1051,60 @@ async fn test_build_cancellation_releases_sqlite_file_lock() {
     let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
 }
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_cancelled_sqlite_build_cleanup_recovers_after_transient_release_failure() {
+    let database = SubmissionDatabase::new("build-cancel-release-retry");
+    let inner: Arc<dyn TaskStore> =
+        Arc::new(task::store::SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
+    let gate = Arc::new(BuildGateStore::new(Arc::clone(&inner)));
+    let gated: Arc<dyn TaskStore> = gate.clone();
+    let wrapped = failing_store_with_inner(gated, None);
+    wrapped.fail_next_release.store(true, Ordering::Release);
+
+    let entered = gate.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let build_store: Arc<dyn TaskStore> = wrapped;
+    let build = tokio::spawn(async move {
+        TaskExecutionServiceBuilder::new(build_store, registry(), Arc::new(Ids(AtomicU64::new(7_001))))
+            .build()
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered)
+        .await
+        .expect("SQLite build enters recovery while holding owner");
+    build.abort();
+    let _ = build.await;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match task::store::SqliteTaskStore::open(&database.0) {
+                Ok(store) => {
+                    let store: Arc<dyn TaskStore> = Arc::new(store);
+                    match TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(7_002))))
+                        .build()
+                        .await
+                    {
+                        Ok(service) => {
+                            service.shutdown().await.expect("replacement service shuts down");
+                            break;
+                        }
+                        Err(task::service::TaskServiceError::Store(task::store::StoreError::OwnerConflict)) => {
+                            tokio::task::yield_now().await;
+                        }
+                        Err(error) => panic!("unexpected replacement build error: {error}"),
+                    }
+                }
+                Err(task::store::StoreError::OwnerConflict) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected SQLite reopen error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("cleanup retries transient release failure and allows replacement build");
+}
+
 impl TaskHandler<Counter> for ParallelismHandler {
     fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;

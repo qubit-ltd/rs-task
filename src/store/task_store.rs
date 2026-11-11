@@ -468,6 +468,11 @@ pub trait TaskStore: Send + Sync {
     /// # Errors
     ///
     /// Returns `OwnerConflict` when the epoch is not the active owner, or
-    /// `UnsupportedCapability` when ownership is not supported.
+    /// `UnsupportedCapability` when ownership is not supported, or `Failure`
+    /// when the release operation fails. Deferred cleanup may retry `Failure`
+    /// with the same epoch.
+    /// Implementations must ensure an old epoch can never release a newer
+    /// owner's lease; callers may stop retrying when `OwnerConflict` is
+    /// returned.
     fn release_owner<'a>(&'a self, epoch: OwnerEpoch) -> TaskFuture<'a, Result<(), StoreError>>;
 }

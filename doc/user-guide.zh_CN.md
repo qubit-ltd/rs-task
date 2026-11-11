@@ -27,7 +27,7 @@
 
 在应用启动时构建服务，并在应用继续接收工作期间保留 service 句柄。应用退出时，先停止应用自己的请求或消息入口，再等待 `service.shutdown()` 并处理返回结果。关闭应用入口属于应用职责；crate 不提供应用服务器的停止 API。
 
-关闭会停止新的任务提交和调度器派发，等待已经派发的提交、运行中的 handler 与外部取消 hook，按配置的超时时间排空通知 publisher，最后释放 store ownership。排队任务会留在队列中，供后续服务实例处理；shutdown 不会运行所有排队任务。若 handler 或取消 hook 始终不返回，shutdown 可能一直等待。丢弃最后一个 service 句柄也会异步请求同样的排空，但 `Drop` 不会等待或返回结果。
+关闭会停止新的任务提交和调度器派发，等待已经派发的提交、运行中的 handler 与外部取消 hook，按配置的超时时间排空通知 publisher，最后释放 store ownership。排队任务会留在队列中，供后续服务实例处理；shutdown 不会运行所有排队任务。若 handler 或取消 hook 始终不返回，shutdown 可能一直等待。丢弃最后一个 service 句柄也会异步请求同样的排空，但 `Drop` 不会等待或返回结果。若在取得 ownership 后取消 `build()` future，guard 会排队异步清理。清理会立即尝试释放；返回 `Failure` 时使用同一 epoch 重试，等待从 25ms 开始并加倍，最多 5 秒，不设最大次数。没有完成时限保证；永久 `Failure` 会持续重试并保留 store 引用。`OwnerConflict`、其他错误或 panic 会结束清理任务；`OwnerConflict` 不代表 store 当前没有 owner。永久挂起的释放或进程退出不在进程内自动恢复保证内。
 
 可以限制应用等待时间，但不能把超时当作关闭已经完成的证明：
 
@@ -57,7 +57,7 @@ async fn stop_tasks(service: &TaskExecutionService) {
 }
 ```
 
-取消或超时某个 `shutdown()` 等待者不会取消 supervisor 的排空。保留句柄，并在慢速 handler 或 hook 结束后再次等待 `shutdown()`。超时不能保证 store ownership 已释放，因此不能据此认定可以立即构建替代服务。只有在 shutdown 结果确认 owner 已释放后，才打开替代 service 或 store：`Ok(())` 表示关闭完成；`NotificationClose` 表示通知关闭出错，但 owner 已成功释放。owner 暂时释放失败时，之后显式调用 `shutdown()` 会重试。遇到 `NotificationClose` 时，检查持久 outbox 积压，未发送的通知行可由后续服务实例继续处理。若 owner 释放时发生 panic，等待者会收到 `StoreUnavailable`，仍持有 owner 的 guard 会交给清理 worker。锁存的 store 故障应与暂时性释放错误分别判断。
+取消或超时某个 `shutdown()` 等待者不会取消 supervisor 的排空。保留句柄，并在慢速 handler 或 hook 结束后再次等待 `shutdown()`。超时不能保证 store ownership 已释放，因此不能据此认定可以立即构建替代服务。只有在 shutdown 结果确认 owner 已释放后，才打开替代 service 或 store：`Ok(())` 表示关闭完成；`NotificationClose` 表示通知关闭出错，但 owner 已成功释放。owner 暂时释放失败时，之后显式调用 `shutdown()` 会重试。遇到 `NotificationClose` 时，检查持久 outbox 积压，未发送的通知行可由后续服务实例继续处理。若 owner 释放时发生 panic，等待者会收到 `StoreUnavailable`，仍持有 owner 的 guard 会交给清理 worker。该 worker 对返回的 `Failure` 使用同一 epoch 和有界指数退避无限重试；`OwnerConflict`、其他错误或 panic 会结束任务。永久 `Failure` 可能无限期保留 ownership 和 store 引用；永久挂起或进程退出不保证自动恢复。清理日志包含 epoch 和失败尝试信息，可用于排障，但 stderr 不是查询接口。锁存的 store 故障应与暂时性释放错误分别判断。
 
 ## Features 与边界
 
