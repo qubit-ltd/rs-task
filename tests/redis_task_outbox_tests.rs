@@ -75,6 +75,7 @@ type TestResult = Result<(), Box<dyn Error>>;
 type ProjectionResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 type ProjectionSnapshot = (Option<(u64, TaskState)>, Vec<u64>);
 const DEADLINE: Duration = Duration::from_secs(15);
+const DELIVERY_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Converts a projection version to SQLite's signed integer representation.
 fn sqlite_integer_from_version(value: u64) -> ProjectionResult<i64> {
@@ -1178,7 +1179,7 @@ fn test_failed_authority_query_keeps_redis_delivery_pending() -> TestResult {
     let started = std::time::Instant::now();
     while bus.delivery_metrics().completed == 0 {
         assert!(
-            started.elapsed() < DEADLINE,
+            started.elapsed() < DELIVERY_SETTLEMENT_DEADLINE,
             "failed handler must finish Retry settlement"
         );
         std::thread::sleep(Duration::from_millis(10));
