@@ -48,7 +48,7 @@ pub(in crate::service::typed_task_execution_service) struct TypedServiceCore {
     /// Guard for exclusive ownership of the store.
     pub(in crate::service::typed_task_execution_service) owner_guard: tokio::sync::Mutex<Option<OwnerReleaseGuard>>,
     /// Gate that prevents new admissions while shutdown drains.
-    pub(in crate::service::typed_task_execution_service) admission: tokio::sync::RwLock<()>,
+    pub(in crate::service::typed_task_execution_service) admission: Arc<tokio::sync::RwLock<()>>,
     /// Wakes the scheduler after work or lifecycle changes.
     pub(in crate::service::typed_task_execution_service) scheduler_changed: tokio::sync::Notify,
     /// Indicates that the scheduler task has stopped.

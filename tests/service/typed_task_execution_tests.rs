@@ -551,6 +551,163 @@ struct BuildGateStore {
     entered: tokio::sync::Notify,
     resume: tokio::sync::Semaphore,
     first_list: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "sqlite")]
+    submission_gate: Option<Arc<SubmissionStoreGate>>,
+    #[cfg(feature = "sqlite")]
+    fail_next_accept: bool,
+}
+
+#[cfg(feature = "sqlite")]
+struct SubmissionStoreGate {
+    scanned: Notify,
+    accepted: Notify,
+    release: Arc<tokio::sync::Semaphore>,
+    armed: AtomicBool,
+    pause_before_commit: bool,
+    panic_after_release: bool,
+}
+
+#[cfg(feature = "sqlite")]
+struct SubmissionGateRelease(Arc<tokio::sync::Semaphore>);
+
+#[cfg(feature = "sqlite")]
+impl Drop for SubmissionGateRelease {
+    fn drop(&mut self) {
+        self.0.add_permits(1);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+struct SubmissionDatabase(std::path::PathBuf);
+
+#[cfg(feature = "sqlite")]
+impl SubmissionDatabase {
+    fn new(label: &str) -> Self {
+        let directory = std::env::temp_dir().join(format!("qubit-task-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).expect("SQLite test directory creates");
+        Self(directory.join("tasks.sqlite"))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl Drop for SubmissionDatabase {
+    fn drop(&mut self) {
+        if let Some(directory) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}
+
+#[cfg(all(feature = "sqlite", feature = "event-bus"))]
+struct SubmissionEventSpi {
+    ids: StdMutex<Vec<String>>,
+    published: Notify,
+}
+
+#[cfg(all(feature = "sqlite", feature = "event-bus"))]
+impl qubit_event_bus::spi::AsyncEventBusSpi for SubmissionEventSpi {
+    fn capabilities(&self) -> qubit_event_bus::spi::EventBusCapabilities {
+        use qubit_event_bus::spi::DelayedDeliveryCapability;
+        use qubit_event_bus::spi::DurabilityCapability;
+        use qubit_event_bus::spi::EventBusCapabilities;
+        use qubit_event_bus::spi::OrderingCapability;
+        use qubit_event_bus::spi::PayloadModes;
+        use qubit_event_bus::spi::PublishGuarantee;
+        use qubit_event_bus::spi::PublishVisibility;
+        use qubit_event_bus::spi::ReplayCapability;
+        use qubit_event_bus::spi::SettlementCapabilities;
+        use qubit_event_bus::spi::SubscriptionModes;
+        EventBusCapabilities::builder()
+            .payload_modes(PayloadModes::Encoded)
+            .settlement(SettlementCapabilities::None)
+            .ordering(OrderingCapability::None)
+            .delayed_delivery(DelayedDeliveryCapability::None)
+            .durability(DurabilityCapability::Durable)
+            .subscription_modes(SubscriptionModes::EPHEMERAL)
+            .consumer_groups(false)
+            .replay(ReplayCapability::None)
+            .publish_guarantee(PublishGuarantee::Accepted)
+            .publish_visibility(PublishVisibility::Opaque)
+            .build()
+            .expect("valid durable fake capabilities")
+    }
+
+    fn publish<'a>(
+        &'a self,
+        message: qubit_event_bus::spi::OutboundMessage,
+    ) -> qubit_event_bus::spi::SpiFuture<
+        'a,
+        Result<qubit_event_bus::model::PublishAcknowledgement, qubit_event_bus::error::SpiError>,
+    > {
+        Box::pin(async move {
+            self.ids
+                .lock()
+                .expect("event IDs")
+                .push(message.id().as_str().to_owned());
+            self.published.notify_one();
+            Ok(qubit_event_bus::model::PublishAcknowledgement::Accepted {
+                provider_message_id: None,
+                metadata: Default::default(),
+            })
+        })
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        _: qubit_event_bus::spi::SpiSubscriptionRequest,
+    ) -> qubit_event_bus::spi::SpiFuture<
+        'a,
+        Result<Box<dyn qubit_event_bus::spi::AsyncEventSubscriptionSpi>, qubit_event_bus::error::SpiError>,
+    > {
+        Box::pin(async {
+            Err(qubit_event_bus::error::SpiError::Operation {
+                provider_id: "submit-cancellation".into(),
+                operation: "subscribe",
+                resource: None,
+                kind: "unsupported",
+                retryable: Some(false),
+                source: Box::new(std::io::Error::other("unused")),
+            })
+        })
+    }
+
+    fn shutdown<'a>(
+        &'a self,
+        _: qubit_event_bus::spi::ShutdownMode,
+    ) -> qubit_event_bus::spi::SpiFuture<
+        'a,
+        Result<qubit_event_bus::spi::ShutdownOutcome, qubit_event_bus::error::SpiError>,
+    > {
+        Box::pin(async { Ok(qubit_event_bus::spi::ShutdownOutcome::Complete) })
+    }
+}
+
+#[cfg(all(feature = "sqlite", feature = "event-bus"))]
+fn submission_event_bus() -> (Arc<qubit_event_bus::AsyncEventBus>, Arc<SubmissionEventSpi>) {
+    use qubit_event_bus::AsyncEventBus;
+    use qubit_event_bus::EventBusFacadeConfig;
+    use qubit_event_bus::codec::CodecRegistry;
+    use qubit_event_bus::model::ProviderId;
+
+    let spi = Arc::new(SubmissionEventSpi {
+        ids: StdMutex::new(Vec::new()),
+        published: Notify::new(),
+    });
+    let mut codecs = CodecRegistry::new();
+    codecs
+        .register(Arc::new(
+            crate::task_event_codec::TaskEventJsonCodec::new().expect("task event codec"),
+        ))
+        .expect("register task event codec");
+    let config = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
+    let provider: Arc<dyn qubit_event_bus::spi::AsyncEventBusSpi> = spi.clone();
+    let bus = AsyncEventBus::with_config(
+        ProviderId::new("submit-cancellation").expect("provider ID"),
+        provider,
+        config,
+    )
+    .expect("event bus");
+    (Arc::new(bus), spi)
 }
 
 impl BuildGateStore {
@@ -560,6 +717,34 @@ impl BuildGateStore {
             entered: tokio::sync::Notify::new(),
             resume: tokio::sync::Semaphore::new(0),
             first_list: std::sync::atomic::AtomicBool::new(true),
+            #[cfg(feature = "sqlite")]
+            submission_gate: None,
+            #[cfg(feature = "sqlite")]
+            fail_next_accept: false,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn for_submission(inner: Arc<dyn TaskStore>, gate: Arc<SubmissionStoreGate>) -> Self {
+        Self {
+            inner,
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Semaphore::new(0),
+            first_list: std::sync::atomic::AtomicBool::new(false),
+            submission_gate: Some(gate),
+            fail_next_accept: false,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn failing_accept(inner: Arc<dyn TaskStore>) -> Self {
+        Self {
+            inner,
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Semaphore::new(0),
+            first_list: std::sync::atomic::AtomicBool::new(false),
+            submission_gate: None,
+            fail_next_accept: true,
         }
     }
 }
@@ -568,11 +753,79 @@ impl TaskStore for BuildGateStore {
     fn capabilities(&self) -> task::model::StoreCapabilities {
         self.inner.capabilities()
     }
+    fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), task::store::StoreError>> {
+        self.inner.enable_event_outbox()
+    }
+    fn list_event_outbox<'a>(
+        &'a self,
+        limit: usize,
+    ) -> TaskFuture<'a, Result<Vec<task::store::EventOutboxEntry>, task::store::StoreError>> {
+        self.inner.list_event_outbox(limit)
+    }
+    fn mark_event_published<'a>(
+        &'a self,
+        task_id: TaskId,
+        state_version: u64,
+    ) -> TaskFuture<'a, Result<(), task::store::StoreError>> {
+        self.inner.mark_event_published(task_id, state_version)
+    }
+    fn quarantine_event_outbox_head<'a>(
+        &'a self,
+        task_id: TaskId,
+        state_version: u64,
+        event_id: &'a str,
+        reason: &'a str,
+        last_error: &'a str,
+    ) -> TaskFuture<'a, Result<(), task::store::StoreError>> {
+        self.inner
+            .quarantine_event_outbox_head(task_id, state_version, event_id, reason, last_error)
+    }
     fn accept_encoded<'a>(
         &'a self,
         id: TaskId,
         request: StoredTaskRequest,
     ) -> TaskFuture<'a, Result<task::model::AcceptOutcome, task::store::StoreError>> {
+        #[cfg(feature = "sqlite")]
+        if self.fail_next_accept {
+            return Box::pin(async { Err(task::store::StoreError::Failure("controlled accept failure".into())) });
+        }
+        #[cfg(feature = "sqlite")]
+        if let Some(gate) = &self.submission_gate
+            && gate.armed.swap(false, Ordering::AcqRel)
+        {
+            let gate = Arc::clone(gate);
+            return Box::pin(async move {
+                if gate.pause_before_commit {
+                    gate.accepted.notify_one();
+                    gate.release
+                        .acquire()
+                        .await
+                        .map_err(|error| task::store::StoreError::Failure(error.to_string()))?
+                        .forget();
+                }
+                if gate.panic_after_release {
+                    if !gate.pause_before_commit {
+                        gate.accepted.notify_one();
+                        gate.release
+                            .acquire()
+                            .await
+                            .map_err(|error| task::store::StoreError::Failure(error.to_string()))?
+                            .forget();
+                    }
+                    panic!("controlled acceptance future panic");
+                }
+                let accepted = self.inner.accept_encoded(id, request).await?;
+                if !gate.pause_before_commit {
+                    gate.accepted.notify_one();
+                    gate.release
+                        .acquire()
+                        .await
+                        .map_err(|error| task::store::StoreError::Failure(error.to_string()))?
+                        .forget();
+                }
+                Ok(accepted)
+            });
+        }
         self.inner.accept_encoded(id, request)
     }
     fn get_encoded_task<'a>(
@@ -628,6 +881,17 @@ impl TaskStore for BuildGateStore {
         limit: std::num::NonZeroUsize,
         now_ms: u64,
     ) -> TaskFuture<'a, Result<task::model::TaskPage, task::store::StoreError>> {
+        #[cfg(feature = "sqlite")]
+        if let Some(gate) = &self.submission_gate {
+            let gate = Arc::clone(gate);
+            return Box::pin(async move {
+                let page = self.inner.list_ready_queued(after, limit, now_ms).await?;
+                if after.is_none() {
+                    gate.scanned.notify_one();
+                }
+                Ok(page)
+            });
+        }
         self.inner.list_ready_queued(after, limit, now_ms)
     }
     fn next_retry_deadline<'a>(&'a self, now_ms: u64) -> TaskFuture<'a, Result<Option<u64>, task::store::StoreError>> {
@@ -1991,6 +2255,332 @@ async fn test_submit_cancellation_does_not_accept_after_id_generation() {
             .is_empty()
     );
     driver.join().expect("external driver");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_cancelled_submit_acceptance_still_dispatches() {
+    let database = SubmissionDatabase::new("submit-cancel");
+    let path = &database.0;
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(path).expect("SQLite store opens"));
+    let gate = Arc::new(SubmissionStoreGate {
+        scanned: Notify::new(),
+        accepted: Notify::new(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        armed: AtomicBool::new(true),
+        pause_before_commit: false,
+        panic_after_release: false,
+    });
+    let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
+    let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(91001))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let service = builder.build().await.expect("service starts");
+
+    tokio::time::timeout(Duration::from_secs(5), gate.scanned.notified())
+        .await
+        .expect("scheduler completes its empty queue scan");
+    let mut request = request();
+    request.idempotency_key = Some("cancelled-submit-stable-key".into());
+    let submit_request = request.clone();
+    let submit_service = service.clone();
+    let submission = tokio::spawn(async move { submit_service.submit(submit_request).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.accepted.notified())
+        .await
+        .expect("SQLite acceptance commits before its result is returned");
+
+    submission.abort();
+    assert!(submission.await.expect_err("submit waiter is cancelled").is_cancelled());
+    gate.release.add_permits(1);
+
+    let summaries = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = inner
+                .list_encoded(TaskQuery {
+                    limit: 10,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if let Some(summary) = page.records.first()
+                && summary.state.is_terminal()
+            {
+                break page.records;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("accepted task is dispatched to a terminal state");
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].state, TaskState::Succeeded);
+
+    let replay = service.submit(request).await.expect("same idempotency key replays");
+    assert_eq!(replay.id, summaries[0].id);
+    let page = inner
+        .list_encoded(TaskQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.records.len(), 1, "retry does not create another task");
+    service.shutdown().await.expect("service shuts down");
+    drop(inner);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_cancelled_submit_before_sqlite_commit_still_dispatches() {
+    let database = SubmissionDatabase::new("submit-precommit-cancel");
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
+    let gate = Arc::new(SubmissionStoreGate {
+        scanned: Notify::new(),
+        accepted: Notify::new(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        armed: AtomicBool::new(true),
+        pause_before_commit: true,
+        panic_after_release: false,
+    });
+    let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
+    let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(91501))));
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let service = builder.build().await.expect("service starts");
+    tokio::time::timeout(Duration::from_secs(5), gate.scanned.notified())
+        .await
+        .expect("scheduler completes its empty queue scan");
+
+    let submit_service = service.clone();
+    let submission = tokio::spawn(async move { submit_service.submit(request()).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.accepted.notified())
+        .await
+        .expect("accept future enters before SQLite commit");
+    submission.abort();
+    assert!(submission.await.expect_err("submit waiter is cancelled").is_cancelled());
+    gate.release.add_permits(1);
+
+    let id = TaskId::from_id(id::Id::new(91501));
+    assert_eq!(wait_for_terminal(&service, id).await, TaskState::Succeeded);
+    service.shutdown().await.expect("service shuts down");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_cancelled_submit_keeps_shutdown_waiting_for_acceptance_owner() {
+    let database = SubmissionDatabase::new("submit-shutdown");
+    let path = &database.0;
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(path).expect("SQLite store opens"));
+    let gate = Arc::new(SubmissionStoreGate {
+        scanned: Notify::new(),
+        accepted: Notify::new(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        armed: AtomicBool::new(true),
+        pause_before_commit: false,
+        panic_after_release: false,
+    });
+    let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
+    let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(92001))))
+        .build()
+        .await
+        .expect("service starts");
+    tokio::time::timeout(Duration::from_secs(5), gate.scanned.notified())
+        .await
+        .expect("scheduler completes its empty queue scan");
+    let submit_service = service.clone();
+    let submission = tokio::spawn(async move { submit_service.submit(request()).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.accepted.notified())
+        .await
+        .expect("SQLite acceptance commits before its result is returned");
+    submission.abort();
+    assert!(submission.await.expect_err("submit waiter is cancelled").is_cancelled());
+
+    let shutdown_service = service.clone();
+    let mut shutdown = tokio::spawn(async move { shutdown_service.shutdown().await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown retains store ownership until the accepted operation finishes"
+    );
+    gate.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("shutdown completes after the acceptance guard is released")
+        .expect("shutdown task joins")
+        .expect("shutdown succeeds");
+    drop(inner);
+}
+
+#[cfg(all(feature = "sqlite", feature = "event-bus"))]
+#[tokio::test]
+async fn test_cancelled_submit_wakes_durable_outbox_publisher() {
+    let database = SubmissionDatabase::new("submit-outbox");
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
+    let gate = Arc::new(SubmissionStoreGate {
+        scanned: Notify::new(),
+        accepted: Notify::new(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        armed: AtomicBool::new(true),
+        pause_before_commit: false,
+        panic_after_release: false,
+    });
+    let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
+    let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let (bus, spi) = submission_event_bus();
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(94001)))).event_bus(bus);
+    builder
+        .handlers_mut()
+        .register::<Counter, _>(
+            descriptor(CancellationMode::Cooperative),
+            Arc::new(Handler {
+                cooperative_cancel: false,
+            }),
+        )
+        .unwrap();
+    let service = builder.build().await.expect("service starts");
+    tokio::time::timeout(Duration::from_secs(5), gate.scanned.notified())
+        .await
+        .expect("scheduler completes its empty queue scan");
+
+    let submit_service = service.clone();
+    let submission = tokio::spawn(async move { submit_service.submit(request()).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.accepted.notified())
+        .await
+        .expect("SQLite acceptance commits before its result is returned");
+    submission.abort();
+    assert!(submission.await.expect_err("submit waiter is cancelled").is_cancelled());
+    gate.release.add_permits(1);
+
+    let id = TaskId::from_id(id::Id::new(94001));
+    assert_eq!(wait_for_terminal(&service, id).await, TaskState::Succeeded);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if spi.ids.lock().expect("event IDs").iter().any(|id| id == "task:94001:0") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("publisher processes the accepted task outbox snapshot");
+    service.shutdown().await.expect("publisher and service shut down");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_submit_operational_accept_failure_latches_service_fault() {
+    let database = SubmissionDatabase::new("submit-failure");
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
+    let wrapped = Arc::new(BuildGateStore::failing_accept(Arc::clone(&inner)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(93001))))
+        .build()
+        .await
+        .expect("service starts");
+
+    assert!(matches!(
+        service.submit(request()).await,
+        Err(task::service::TaskServiceError::Store(task::store::StoreError::Failure(message)))
+            if message == "controlled accept failure"
+    ));
+    assert!(matches!(
+        service.shutdown().await,
+        Err(task::service::TaskServiceError::StoreUnavailable(_))
+    ));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_accept_future_panic_reaches_live_submit_waiter_and_latches_fault() {
+    let database = SubmissionDatabase::new("submit-panic-live");
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
+    let gate = Arc::new(SubmissionStoreGate {
+        scanned: Notify::new(),
+        accepted: Notify::new(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        armed: AtomicBool::new(true),
+        pause_before_commit: true,
+        panic_after_release: true,
+    });
+    let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
+    let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(93501))))
+        .build()
+        .await
+        .expect("service starts");
+
+    let submit_service = service.clone();
+    let submission = tokio::spawn(async move { submit_service.submit(request()).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.accepted.notified())
+        .await
+        .expect("accept future reaches controlled panic gate");
+    gate.release.add_permits(1);
+    assert!(submission.await.expect_err("submit resumes store panic").is_panic());
+    assert!(matches!(
+        service.shutdown().await,
+        Err(task::service::TaskServiceError::StoreUnavailable(message))
+            if message.contains("submission store operation panicked")
+    ));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_accept_future_panic_after_submit_abort_still_latches_fault() {
+    let database = SubmissionDatabase::new("submit-panic-aborted");
+    let inner: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::open(&database.0).expect("SQLite store opens"));
+    let gate = Arc::new(SubmissionStoreGate {
+        scanned: Notify::new(),
+        accepted: Notify::new(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        armed: AtomicBool::new(true),
+        pause_before_commit: true,
+        panic_after_release: true,
+    });
+    let _release_gate_on_failure = SubmissionGateRelease(Arc::clone(&gate.release));
+    let wrapped = Arc::new(BuildGateStore::for_submission(Arc::clone(&inner), Arc::clone(&gate)));
+    let store: Arc<dyn TaskStore> = wrapped;
+    let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(93601))))
+        .build()
+        .await
+        .expect("service starts");
+
+    let submit_service = service.clone();
+    let submission = tokio::spawn(async move { submit_service.submit(request()).await });
+    tokio::time::timeout(Duration::from_secs(5), gate.accepted.notified())
+        .await
+        .expect("accept future reaches controlled panic gate");
+    submission.abort();
+    assert!(submission.await.expect_err("submit waiter is cancelled").is_cancelled());
+    gate.release.add_permits(1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await,
+        Ok(Err(task::service::TaskServiceError::StoreUnavailable(message)))
+            if message.contains("submission store operation panicked")
+    ));
 }
 
 #[tokio::test]

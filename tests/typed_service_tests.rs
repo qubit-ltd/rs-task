@@ -11,3 +11,8 @@ mod service {
     mod typed_resource_reservation_tests;
     mod typed_task_execution_tests;
 }
+
+mod support;
+
+#[cfg(feature = "event-bus")]
+pub use support::task_event_codec;

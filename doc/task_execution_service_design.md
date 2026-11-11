@@ -20,7 +20,7 @@
 
 针对一个 `kind_id` 注册的处理器只接受一种 payload `type_id`，并声明支持的 schema 版本。codec 注册表独立映射 bytes codec，一个 codec 可以服务多个 schema 版本。编码会验证 typed request，并存储包含身份信息和字节的 `EncodedPayload`。任务开始后再执行解码与处理器分发。
 
-同步 codec 编码和解码会放到 Tokio blocking pool。编码完成后请求才会被接纳。取消 submit future 不会中断已开始的编码，但请求不会被接纳，编码结果可能被丢弃。任务开始后才解码；此时 running 名额和资源预留已经生效，会一直保留到准备阶段和异步 handler 都完成。in-flight guard 会让 shutdown 等待准备阶段。启用 panic unwind 时，decoder panic 会成为该任务的 `Panicked` 终态。blocking 调用无法强制取消，也没有硬超时，因此 codec 卡住可能拖延 shutdown 和 runtime 退出。
+同步 codec 编码和解码会放到 Tokio blocking pool。编码完成后请求才会被接纳。在编码请求交给 store 前取消会停止后续接纳，但无法中断已经开始的编码；编码结果可能被丢弃。接纳派发后，服务持有的任务会完成 store 操作、映射结果并唤醒 scheduler 和可选 publisher。取消或超时调用方的 `submit()` future 不会取消该操作，因此任务可能已接纳，也可能稍后才接纳；shutdown 会等待这条接纳路径完成后才释放 store ownership。调用方应在首次提交前设置稳定幂等键，并以完全相同的请求重提来取回同一任务；若已知道任务 ID，可用 `get()` 查询；要取消任务本身，请调用 `cancel()`。任务开始后才解码；此时 running 名额和资源预留已经生效，会一直保留到准备阶段和异步 handler 都完成。in-flight guard 会让 shutdown 等待准备阶段。启用 panic unwind 时，decoder panic 会成为该任务的 `Panicked` 终态。blocking 调用无法强制取消，也没有硬超时，因此 codec 卡住可能拖延 shutdown 和 runtime 退出。
 
 `TaskSummary` 用于状态和历史查询，不会加载或解码持久化的 payload 字节。`get_state_checkpoint` 是更精简的消费者恢复查询，只包含当前状态和版本；SQLite 清理任务后仍可恢复终态投影，但不能恢复 payload、进度或中间状态迁移。
 

@@ -60,6 +60,7 @@ use internal::PublicLifetime;
 use internal::ServiceRunner;
 use internal::ShutdownOutcome;
 use internal::ShutdownProgress;
+use internal::SubmissionOperation;
 use internal::TypedServiceCore;
 pub(super) use typed_service_options::TypedServiceOptions;
 
@@ -167,7 +168,7 @@ impl TypedTaskExecutionService {
             cancellations: Mutex::new(HashMap::new()),
             external_cancellations: Mutex::new(HashMap::new()),
             owner_guard: tokio::sync::Mutex::new(None),
-            admission: tokio::sync::RwLock::new(()),
+            admission: Arc::new(tokio::sync::RwLock::new(())),
             scheduler_changed: tokio::sync::Notify::new(),
             scheduler_stopped: AtomicBool::new(false),
             scheduler_stopped_changed: tokio::sync::Notify::new(),
@@ -276,13 +277,15 @@ impl TypedTaskExecutionService {
     /// it.
     ///
     /// Synchronous request encoding and ID generation run on Tokio's blocking
-    /// pool. Cancelling this future does not stop either call after it starts,
-    /// but a cancelled submission does not proceed to task acceptance.
+    /// pool. Cancelling before acceptance is dispatched prevents the task from
+    /// being accepted, but does not stop either blocking call after it starts.
+    /// Once acceptance is dispatched, cancellation can leave its outcome
+    /// uncertain; use a stable idempotency key to safely retry the request.
     pub async fn submit<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
     ) -> Result<TaskSummary, TaskServiceError> {
-        let _admission = self.core.admission.read().await;
+        let admission = Arc::clone(&self.core.admission).read_owned().await;
         self.runner().check_fault()?;
         if self.core.shutting_down.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
@@ -309,15 +312,14 @@ impl TypedTaskExecutionService {
             }
         };
         let id = TaskId::from_id(allocated);
-        let accepted = self
-            .runner()
-            .submission_store_result(self.core.store.accept_encoded(id, stored).await)?;
-        if accepted.created {
-            #[cfg(feature = "event-bus")]
-            self.runner().notify_notifications();
-            self.core.scheduler_changed.notify_one();
+        let operation = SubmissionOperation::new(Arc::clone(&self.core), admission, id, stored);
+        match tokio::spawn(operation.run()).await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => resume_unwind(error.into_panic()),
+            Err(error) => Err(TaskServiceError::SchedulerUnavailable(format!(
+                "task submission worker unavailable: {error}"
+            ))),
         }
-        Ok(accepted.summary)
     }
 
     /// Returns a typed task's current persisted summary.

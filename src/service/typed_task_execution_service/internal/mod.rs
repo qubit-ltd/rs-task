@@ -15,6 +15,7 @@ mod resource_fairness;
 mod service_runner;
 mod shutdown_outcome;
 mod shutdown_progress;
+mod submission_operation;
 mod typed_service_core;
 
 pub(in crate::service::typed_task_execution_service) use external_cancel_entry::ExternalCancelEntry;
@@ -25,4 +26,5 @@ pub(in crate::service::typed_task_execution_service) use public_lifetime::Public
 pub(in crate::service::typed_task_execution_service) use service_runner::ServiceRunner;
 pub(in crate::service::typed_task_execution_service) use shutdown_outcome::ShutdownOutcome;
 pub(in crate::service::typed_task_execution_service) use shutdown_progress::ShutdownProgress;
+pub(in crate::service::typed_task_execution_service) use submission_operation::SubmissionOperation;
 pub(in crate::service::typed_task_execution_service) use typed_service_core::TypedServiceCore;
