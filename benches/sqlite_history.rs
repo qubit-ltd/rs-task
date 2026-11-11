@@ -712,7 +712,12 @@ fn compare_ready_queries(
         Ok((summarize(samples), steps, use_split))
     }
 
-    connection.execute_batch("SAVEPOINT ready_query_benchmark_distributions")?;
+    connection.execute_batch(
+        "CREATE TEMP TABLE ready_query_benchmark_original AS \
+         SELECT id,state_kind,retry_not_before_ms FROM tasks; \
+         CREATE UNIQUE INDEX ready_query_benchmark_original_id \
+         ON ready_query_benchmark_original(id);",
+    )?;
     let measured = (|| -> Result<Vec<ReadyDistributionReport>, Box<dyn std::error::Error>> {
         let scenarios = [
             (
@@ -778,7 +783,12 @@ fn compare_ready_queries(
         }
         Ok(reports)
     })();
-    connection.execute_batch("ROLLBACK TO ready_query_benchmark_distributions; RELEASE ready_query_benchmark_distributions")?;
+    connection.execute_batch(
+        "UPDATE tasks AS task SET \
+             state_kind=(SELECT original.state_kind FROM ready_query_benchmark_original AS original WHERE original.id=task.id), \
+             retry_not_before_ms=(SELECT original.retry_not_before_ms FROM ready_query_benchmark_original AS original WHERE original.id=task.id); \
+         DROP TABLE ready_query_benchmark_original;",
+    )?;
     let extreme_distributions = measured?;
 
     let (representative_adaptive, representative_adaptive_vm_steps, representative_adaptive_uses_split) =
