@@ -12,6 +12,7 @@ mod database_identity;
 mod owner_lock;
 mod prune;
 mod query_sql;
+mod ready_query;
 mod schema;
 mod sqlite_owner_state;
 mod typed_store;

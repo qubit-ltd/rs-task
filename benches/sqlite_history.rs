@@ -24,6 +24,7 @@ use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
 use rusqlite::Connection;
 use rusqlite::Params;
+use rusqlite::StatementStatus;
 use rusqlite::params;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value;
@@ -73,16 +74,40 @@ struct DatasetReport {
     legacy_or_no_index_baseline: Timing,
     legacy_or_baseline: Timing,
     count_states: Timing,
+    ready_query_comparison: ReadyQueryComparison,
     shutdown_samples: usize,
     shutdown_timing_strategy: &'static str,
     shutdown: Timing,
     query_plans: QueryPlans,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Timing {
     p50_ms: f64,
     p95_ms: f64,
+}
+
+#[derive(Serialize)]
+struct ReadyQueryComparison {
+    old_sql_vm_steps: i32,
+    split_sql_vm_steps: i32,
+    old_sql: Timing,
+    split_sql: Timing,
+    old_plan: Vec<String>,
+    split_plan: Vec<String>,
+    extreme_distributions: Vec<ReadyDistributionReport>,
+}
+
+#[derive(Serialize)]
+struct ReadyDistributionReport {
+    name: &'static str,
+    rows: usize,
+    legacy_vm_steps: i32,
+    optimized_vm_steps: i32,
+    legacy: Timing,
+    optimized: Timing,
+    legacy_plan: Vec<String>,
+    optimized_plan: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -269,6 +294,7 @@ fn run_dataset(runtime: &Runtime, size: usize) -> Result<DatasetReport, Box<dyn 
          ORDER BY accepted_at,id LIMIT ?2",
         params![i64::MAX, PAGE_SIZE as i64 + 1],
     )?;
+    let ready_query_comparison = compare_ready_queries(&sqlite)?;
     let retry_deadline_plan = explain(
         &sqlite,
         "SELECT MIN(retry_not_before_ms) FROM tasks INDEXED BY tasks_queued_retry_deadline
@@ -422,6 +448,7 @@ fn run_dataset(runtime: &Runtime, size: usize) -> Result<DatasetReport, Box<dyn 
         legacy_or_no_index_baseline,
         legacy_or_baseline,
         count_states,
+        ready_query_comparison,
         shutdown_samples: SHUTDOWN_SAMPLES,
         shutdown_timing_strategy: concat!(
             "each sample builds a fresh service from a same-seed checkpointed DB copy ",
@@ -547,6 +574,224 @@ fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<Stri
         ),
         params_from_iter(values),
     )
+}
+
+fn compare_ready_queries(
+    connection: &Connection,
+) -> Result<ReadyQueryComparison, Box<dyn std::error::Error>> {
+    const OLD_SQL: &str = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4";
+    const SPLIT_SQL: &str = "WITH candidates(id,accepted_at) AS (SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_immediate_accepted_id WHERE state_kind='Queued' AND retry_not_before_ms IS NULL AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4) UNION ALL SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms IS NOT NULL AND retry_not_before_ms<=?1 AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4)), page AS (SELECT id,accepted_at FROM candidates ORDER BY accepted_at,id LIMIT ?4) SELECT tasks.id,tasks.request_info_json,tasks.lifecycle_json FROM page JOIN tasks ON tasks.id=page.id ORDER BY page.accepted_at,page.id";
+
+    fn run(
+        connection: &Connection,
+        sql: &str,
+    ) -> Result<(Timing, i32), Box<dyn std::error::Error>> {
+        let mut statement = connection.prepare(sql)?;
+        let execute =
+            |statement: &mut rusqlite::Statement<'_>| -> Result<(), Box<dyn std::error::Error>> {
+                let rows = statement.query_map(
+                    params![
+                        1_i64,
+                        Option::<i64>::None,
+                        Option::<String>::None,
+                        PAGE_SIZE as i64 + 1
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )?;
+                let _ = rows.collect::<Result<Vec<_>, _>>()?;
+                Ok(())
+            };
+        for _ in 0..QUERY_WARMUPS {
+            execute(&mut statement)?;
+        }
+        let mut samples = Vec::with_capacity(QUERY_SAMPLES);
+        for _ in 0..QUERY_SAMPLES {
+            let start = Instant::now();
+            execute(&mut statement)?;
+            samples.push(start.elapsed());
+        }
+        let _ = statement.reset_status(StatementStatus::VmStep);
+        execute(&mut statement)?;
+        let vm_steps = statement.reset_status(StatementStatus::VmStep);
+        Ok((summarize(samples), vm_steps))
+    }
+
+    fn run_adaptive(
+        connection: &Connection,
+        old_sql: &str,
+        split_sql: &str,
+    ) -> Result<(Timing, i32, bool), Box<dyn std::error::Error>> {
+        let mut sample = connection.prepare("SELECT retry_not_before_ms FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4")?;
+        let mut future = connection.prepare("SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms>?1)")?;
+        let mut old = connection.prepare(old_sql)?;
+        let mut split = connection.prepare(split_sql)?;
+        fn execute_rows(statement: &mut rusqlite::Statement<'_>) -> Result<(), rusqlite::Error> {
+            let rows = statement.query_map(
+                params![
+                    1_i64,
+                    Option::<i64>::None,
+                    Option::<String>::None,
+                    PAGE_SIZE as i64 + 1
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?;
+            let _ = rows.collect::<Result<Vec<_>, _>>()?;
+            Ok(())
+        }
+        fn execute_once<'connection>(
+            sample: &mut rusqlite::Statement<'connection>,
+            future: &mut rusqlite::Statement<'connection>,
+            old: &mut rusqlite::Statement<'connection>,
+            split: &mut rusqlite::Statement<'connection>,
+        ) -> Result<bool, rusqlite::Error> {
+            let has_future = future.query_row([1_i64], |row| row.get::<_, bool>(0))?;
+            let sampled_ready = if has_future {
+                let rows = sample.query_map(
+                    params![1_i64, Option::<i64>::None, Option::<String>::None, 9_i64],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?;
+                rows.collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .filter(|deadline| deadline.is_none_or(|value| value <= 1))
+                    .count()
+            } else {
+                0
+            };
+            let use_split = has_future && sampled_ready < 8;
+            execute_rows(if use_split { split } else { old })?;
+            Ok(use_split)
+        }
+        for _ in 0..QUERY_WARMUPS {
+            execute_once(&mut sample, &mut future, &mut old, &mut split)?;
+        }
+        let mut samples = Vec::with_capacity(QUERY_SAMPLES);
+        for _ in 0..QUERY_SAMPLES {
+            let start = Instant::now();
+            execute_once(&mut sample, &mut future, &mut old, &mut split)?;
+            samples.push(start.elapsed());
+        }
+        let _ = sample.reset_status(StatementStatus::VmStep);
+        let _ = future.reset_status(StatementStatus::VmStep);
+        let _ = old.reset_status(StatementStatus::VmStep);
+        let _ = split.reset_status(StatementStatus::VmStep);
+        let use_split = execute_once(&mut sample, &mut future, &mut old, &mut split)?;
+        let steps = sample.reset_status(StatementStatus::VmStep)
+            + future.reset_status(StatementStatus::VmStep)
+            + old.reset_status(StatementStatus::VmStep)
+            + split.reset_status(StatementStatus::VmStep);
+        Ok((summarize(samples), steps, use_split))
+    }
+
+    connection.execute_batch("SAVEPOINT ready_query_benchmark_distributions")?;
+    let measured = (|| -> Result<Vec<ReadyDistributionReport>, Box<dyn std::error::Error>> {
+        let scenarios = [
+            (
+                "no_future_no_deadlines",
+                "UPDATE tasks SET state_kind='Queued',retry_not_before_ms=NULL",
+            ),
+            (
+                "all_future",
+                "UPDATE tasks SET state_kind='Queued',retry_not_before_ms=9223372036854775807",
+            ),
+            (
+                "few_ready_many_future",
+                "UPDATE tasks SET state_kind='Queued',retry_not_before_ms=CASE WHEN CAST(id AS INTEGER)%100=0 THEN 0 ELSE 9223372036854775807 END",
+            ),
+            (
+                "many_due_few_future",
+                "UPDATE tasks SET state_kind='Queued',retry_not_before_ms=CASE WHEN CAST(id AS INTEGER)%10=0 THEN 9223372036854775807 ELSE 0 END",
+            ),
+        ];
+        let rows_i64: i64 =
+            connection.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
+        let rows = usize::try_from(rows_i64)?;
+        let mut reports = Vec::with_capacity(scenarios.len());
+        for (name, update) in scenarios {
+            connection.execute(update, [])?;
+            let legacy_plan = explain(
+                connection,
+                OLD_SQL,
+                params![
+                    1_i64,
+                    Option::<i64>::None,
+                    Option::<String>::None,
+                    PAGE_SIZE as i64 + 1
+                ],
+            )?;
+            let (legacy, legacy_vm_steps) = run(connection, OLD_SQL)?;
+            let (optimized, optimized_vm_steps, use_split) =
+                run_adaptive(connection, OLD_SQL, SPLIT_SQL)?;
+            let optimized_plan = if use_split {
+                explain(
+                    connection,
+                    SPLIT_SQL,
+                    params![
+                        1_i64,
+                        Option::<i64>::None,
+                        Option::<String>::None,
+                        PAGE_SIZE as i64 + 1
+                    ],
+                )?
+            } else {
+                legacy_plan.clone()
+            };
+            reports.push(ReadyDistributionReport {
+                name,
+                rows,
+                legacy_vm_steps,
+                optimized_vm_steps,
+                legacy,
+                optimized,
+                legacy_plan,
+                optimized_plan,
+            });
+        }
+        Ok(reports)
+    })();
+    connection.execute_batch("ROLLBACK TO ready_query_benchmark_distributions; RELEASE ready_query_benchmark_distributions")?;
+    let extreme_distributions = measured?;
+
+    let (old_sql, old_sql_vm_steps) = run(connection, OLD_SQL)?;
+    let (split_sql, split_sql_vm_steps) = run(connection, SPLIT_SQL)?;
+    Ok(ReadyQueryComparison {
+        old_sql_vm_steps,
+        split_sql_vm_steps,
+        old_sql,
+        split_sql,
+        old_plan: explain(
+            connection,
+            OLD_SQL,
+            params![
+                1_i64,
+                Option::<i64>::None,
+                Option::<String>::None,
+                PAGE_SIZE as i64 + 1
+            ],
+        )?,
+        split_plan: explain(
+            connection,
+            SPLIT_SQL,
+            params![
+                1_i64,
+                Option::<i64>::None,
+                Option::<String>::None,
+                PAGE_SIZE as i64 + 1
+            ],
+        )?,
+        extreme_distributions,
+    })
 }
 
 fn explain<P: Params>(

@@ -207,7 +207,7 @@ async fn test_schema_four_and_five_migrate_tasks_to_eight() {
         if version == 4 {
             connection
                 .execute_batch(
-                    "DROP INDEX tasks_queued_retry_deadline; ALTER TABLE tasks DROP COLUMN retry_not_before_ms;",
+                    "DROP INDEX tasks_queued_immediate_accepted_id; DROP INDEX tasks_queued_retry_deadline; ALTER TABLE tasks DROP COLUMN retry_not_before_ms;",
                 )
                 .expect("restore v4 tasks schema");
         }

@@ -423,6 +423,7 @@ async fn test_typed_schema_four_migrates_retry_deadline_column_without_losing_ro
         .execute_batch(concat!(
             "DROP TABLE task_event_outbox; DROP TABLE task_event_outbox_quarantine; ",
             "DROP TABLE task_terminal_checkpoints; ",
+            "DROP INDEX tasks_queued_immediate_accepted_id; ",
             "DROP INDEX tasks_queued_retry_deadline; ",
             "ALTER TABLE tasks DROP COLUMN retry_not_before_ms; PRAGMA user_version=4;",
         ))
