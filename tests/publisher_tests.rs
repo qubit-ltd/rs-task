@@ -99,6 +99,7 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
 use qubit_task::store::TaskStore;
+use rusqlite::Connection;
 use serde_json::from_slice;
 
 #[derive(Clone, Copy)]
@@ -512,7 +513,7 @@ async fn test_idempotent_submit_wakes_without_counting_lifecycle_write() {
     store.release_owner(owner).await.expect("release seed owner");
 
     let store_trait: Arc<dyn TaskStore> = store.clone();
-    let (event_bus, _) = bus(OPAQUE_ACCEPTED, true);
+    let (event_bus, spi) = bus(OPAQUE_ACCEPTED, true);
     let service = TaskExecutionServiceBuilder::new(store_trait, codecs, Arc::new(Ids))
         .event_bus(event_bus)
         .build()
@@ -531,6 +532,13 @@ async fn test_idempotent_submit_wakes_without_counting_lifecycle_write() {
     .await
     .expect("startup replay drains the initial lifecycle events");
     let before = service.notification_stats();
+    let outbox_count = || {
+        Connection::open(&database)
+            .expect("open database for outbox count")
+            .query_row("SELECT COUNT(*) FROM task_event_outbox", [], |row| row.get::<_, i64>(0))
+            .expect("count durable outbox rows")
+    };
+    assert_eq!(outbox_count(), 0, "baseline outbox is empty before repeat");
 
     let mut repeated_request = TaskRequest::new(
         "test.publisher-idempotency",
@@ -539,9 +547,15 @@ async fn test_idempotent_submit_wakes_without_counting_lifecycle_write() {
         IdempotentPayload(42),
     );
     repeated_request.idempotency_key = Some("stable-publisher-key".into());
+    spi.mode.store(BLOCKED_ACCEPTED, Ordering::Release);
     let repeated = service.submit(repeated_request).await.expect("idempotent submission");
+    let repeated_outbox_count = outbox_count();
+    // Always leave a permit in case a faulty implementation started a publish
+    // while the test was checking the durable outbox.
+    spi.release_publish.notify_one();
     let after = service.notification_stats();
     assert_eq!(repeated.id, id);
+    assert_eq!(repeated_outbox_count, 0, "idempotent repeat adds no durable outbox row");
     assert_eq!(after.queued, before.queued);
     assert_eq!(after.published, before.published);
 
