@@ -1,6 +1,6 @@
 [package]
 name = "qubit-task"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -57,7 +57,7 @@ qubit-event-bus = { version = "^0.21", optional = true }
 qubit-codec = { version = "^0.17", features = ["registry"] }
 qubit-budget = { version = "^0.10", features = ["json"] }
 qubit-id = { version = "^0.7", features = ["serde"] }
-qubit-metadata = { path = "../rs-metadata", version = "^0.7", features = ["json"] }
+qubit-metadata = { version = "^0.7", features = ["json"] }
 qubit-model-id = { path = "../rs-model-metadata/model-id", version = "^0.1" }
 qubit-progress = "^0.9"
 qubit-spi = "^0.14"
@@ -82,7 +82,7 @@ qubit-event-bus = { path = "../rs-event-bus" }
 [dev-dependencies]
 proptest = "^1.11"
 qubit-event-bus = { version = "^0.21", features = ["discovery"] }
-qubit-event-bus-redis = { path = "../rs-event-bus-redis", version = "^0.7" }
+qubit-event-bus-redis = { version = "^0.7" }
 redis = { package = "qubit-redis", version = "=2.0.0-rc.2", default-features = false, features = ["streams"] }
 tokio = { version = "^1.54", features = ["macros", "rt-multi-thread", "time"] }
 
