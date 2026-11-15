@@ -58,7 +58,7 @@ qubit-codec = { version = "^0.17", features = ["registry"] }
 qubit-budget = { version = "^0.10", features = ["json"] }
 qubit-id = { version = "^0.7", features = ["serde"] }
 qubit-metadata = { version = "^0.7", features = ["json"] }
-qubit-model-id = { path = "../rs-model-metadata/model-id", version = "^0.1" }
+qubit-model-id = "^0.1"
 qubit-progress = "^0.9"
 qubit-spi = "^0.14"
 rusqlite = { version = "^0.41", features = ["bundled", "hooks"], optional = true }
@@ -76,8 +76,6 @@ event-bus = ["dep:qubit-event-bus", "tokio/macros"]
 
 [workspace]
 
-[patch.crates-io]
-qubit-event-bus = { path = "../rs-event-bus" }
 
 [dev-dependencies]
 proptest = "^1.11"

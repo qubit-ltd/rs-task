@@ -38,9 +38,6 @@ jobs:
         run: |
           ./update-infra.sh
           ./update-infra.sh --check
-      - name: Prepare local path dependencies
-        shell: bash
-        run: ./.infra/bin/prepare-local-path-dependencies.sh
       - name: Test SQLite store and ownership on Windows
         shell: bash
         run: >-
