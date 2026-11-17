@@ -18,7 +18,7 @@ EXPECTED_DEPENDENCIES = {
     "qubit-task": {"version": "0.11", "features": ["sqlite"]},
     "qubit-codec": {"version": "0.17", "features": ["registry"]},
     "qubit-id": {"version": "0.7", "features": ["serde"]},
-    "qubit-model-id": "0.1",
+    "qubit-model-id": "0.2",
     "serde": {"version": "1.0", "features": ["derive"]},
     "serde_json": "1.0",
     "tokio": {"version": "1.54", "features": ["macros", "rt-multi-thread", "time"]},
@@ -62,7 +62,6 @@ def extract(readme: Path, install_heading: str, quick_heading: str) -> tuple[str
 def local_manifest(dependency_block: str) -> str:
     manifest = dependency_block
     project_path = str(PROJECT_ROOT).replace("\\", "\\\\").replace('"', '\\"')
-    model_id_path = str(PROJECT_ROOT.parent / "rs-model-metadata" / "model-id").replace("\\", "\\\\").replace('"', '\\"')
     manifest, task_count = re.subn(
         r'(?m)^qubit-task\s*=\s*\{([^}]*)\}',
         lambda match: f'qubit-task = {{ {match.group(1).rstrip().rstrip(",")}, path = "{project_path}" }}',
@@ -70,13 +69,6 @@ def local_manifest(dependency_block: str) -> str:
     )
     if task_count != 1:
         raise ValueError("local mode requires exactly one declared qubit-task dependency")
-    manifest, model_count = re.subn(
-        r'(?m)^qubit-model-id\s*=\s*"([^"]+)"\s*$',
-        lambda match: f'qubit-model-id = {{ version = "{match.group(1)}", path = "{model_id_path}" }}',
-        manifest,
-    )
-    if model_count != 1:
-        raise ValueError("local mode requires exactly one declared qubit-model-id dependency")
     return manifest
 
 
@@ -84,7 +76,7 @@ def check_consumer(readme: Path, install_heading: str, quick_heading: str, mode:
     dependency_block, _, source = extract(readme, install_heading, quick_heading)
     if mode == "local":
         dependency_block = local_manifest(dependency_block)
-        print(f"{readme.name}: local overrides qubit-task={PROJECT_ROOT} and qubit-model-id={PROJECT_ROOT.parent / 'rs-model-metadata' / 'model-id'}")
+        print(f"{readme.name}: local overrides qubit-task={PROJECT_ROOT}")
     consumer = root / readme.stem
     (consumer / "src").mkdir(parents=True)
     manifest = "\n".join(

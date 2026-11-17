@@ -95,7 +95,7 @@ fn test_readme_quick_start_matches_and_compiles_as_a_consumer() {
         "qubit-task = { version = \"0.11\", features = [\"sqlite\"] }",
         "qubit-codec = { version = \"0.17\", features = [\"registry\"] }",
         "qubit-id = { version = \"0.7\", features = [\"serde\"] }",
-        "qubit-model-id = \"0.1\"",
+        "qubit-model-id = \"0.2\"",
         "serde = { version = \"1.0\", features = [\"derive\"] }",
         "serde_json = \"1.0\"",
         "tokio = { version = \"1.54\", features = [\"macros\", \"rt-multi-thread\", \"time\"] }",
@@ -107,7 +107,7 @@ fn test_readme_quick_start_matches_and_compiles_as_a_consumer() {
     for dependency in [
         "qubit-codec = { version = \"^0.17\", features = [\"registry\"] }",
         "qubit-id = { version = \"^0.7\", features = [\"serde\"] }",
-        "qubit-model-id = { path = \"../../../../rs-model-metadata/model-id\", version = \"^0.1\" }",
+        "qubit-model-id = { version = \"^0.2\" }",
         "serde = { version = \"1.0\", features = [\"derive\"] }",
         "serde_json = \"1.0\"",
     ] {

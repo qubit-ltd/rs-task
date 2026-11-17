@@ -31,7 +31,7 @@ The [typed task API guide](doc/typed-task-api.md) contains the complete example 
 qubit-task = { version = "0.11", features = ["sqlite"] }
 qubit-codec = { version = "0.17", features = ["registry"] }
 qubit-id = { version = "0.7", features = ["serde"] }
-qubit-model-id = "0.1"
+qubit-model-id = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "time"] }
