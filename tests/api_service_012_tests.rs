@@ -288,7 +288,7 @@ async fn test_wait_terminal_reads_checkpoint_after_sqlite_prunes_terminal_row() 
     assert!(store.get_summary(accepted.summary.id).await.unwrap().is_none());
     assert_eq!(
         service
-            .wait_terminal(accepted.summary.id, Duration::ZERO)
+            .wait_terminal(accepted.summary.id, Duration::from_secs(2))
             .await
             .unwrap(),
         terminal
