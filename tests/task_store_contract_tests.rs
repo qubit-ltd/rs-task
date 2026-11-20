@@ -13,6 +13,7 @@ mod support;
 use std::env;
 #[cfg(feature = "sqlite")]
 use std::fs;
+#[cfg(feature = "sqlite")]
 use std::num::NonZeroUsize;
 #[cfg(feature = "sqlite")]
 use std::sync::Arc;

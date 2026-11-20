@@ -7,6 +7,7 @@
 // =============================================================================
 use std::sync::Arc;
 
+#[cfg(feature = "event-bus")]
 use qubit_event_bus::model::Topic;
 use qubit_progress::AsyncProgress;
 use qubit_progress::AsyncReporter;
@@ -14,6 +15,7 @@ use qubit_progress::Event;
 use qubit_progress::Metric;
 use qubit_progress::MetricDelta;
 use qubit_progress::ReportFuture;
+#[cfg(feature = "event-bus")]
 use qubit_task::event::TaskEvent;
 use qubit_task::service::TaskProgressError;
 use qubit_task::service::TaskProgressExt;
