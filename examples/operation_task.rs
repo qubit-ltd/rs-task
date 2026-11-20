@@ -44,10 +44,14 @@ use qubit_task::store::MemoryTaskStore;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[path = "operation_task/external_job.rs"]
 mod external_job;
+#[path = "operation_task/managed_handler.rs"]
 mod managed_handler;
 #[cfg(test)]
-mod scenarios;
+mod operation_task {
+    mod scenarios;
+}
 
 use external_job::AttemptGates;
 use managed_handler::ManagedHandler;
