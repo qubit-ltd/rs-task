@@ -210,8 +210,11 @@ async fn test_blocked_task_cancel_write_keeps_store_owner_until_cas_returns() {
     let _ = cancel.await;
 
     let shutdown_service = service.clone();
-    let shutdown = tokio::spawn(async move { shutdown_service.shutdown().await });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut shutdown = Box::pin(async move { shutdown_service.shutdown().await });
+    assert!(
+        futures::poll!(shutdown.as_mut()).is_pending(),
+        "shutdown waits for the in-flight cancellation write"
+    );
     assert!(
         !gate.owner_released.load(Ordering::Acquire),
         "shutdown must not release ownership while the cancellation CAS is held"
@@ -219,7 +222,6 @@ async fn test_blocked_task_cancel_write_keeps_store_owner_until_cas_returns() {
     gate.release.notify_one();
     tokio::time::timeout(Duration::from_secs(3), shutdown)
         .await
-        .unwrap()
         .unwrap()
         .unwrap();
     assert!(gate.cancel_committed.load(Ordering::Acquire));
