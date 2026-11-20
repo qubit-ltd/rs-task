@@ -20,6 +20,7 @@ mod retry_policy_error;
 #[cfg(feature = "event-bus")]
 mod task_event_publisher;
 mod task_pages;
+mod task_progress_error;
 mod task_progress_ext;
 mod task_progress_reporter;
 mod task_route_error;
@@ -36,7 +37,7 @@ pub use notification_stats::NotificationStats;
 pub use retry_policy::RetryPolicy;
 pub use retry_policy_error::RetryPolicyError;
 pub use task_pages::TaskPages;
-pub use task_progress_ext::TaskProgressError;
+pub use task_progress_error::TaskProgressError;
 pub use task_progress_ext::TaskProgressExt;
 pub use task_route_error::TaskRouteError;
 pub use task_service_error::TaskServiceError;

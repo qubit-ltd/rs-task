@@ -6,9 +6,6 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-
 use qubit_codec::ValueBytesCodecRegistry;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::AsyncEventBus;
@@ -31,29 +28,10 @@ use crate::service::TaskServiceError;
 use crate::store::MemoryTaskStore;
 use crate::store::TaskStore;
 
-struct InMemoryIdGenerator {
-    sequence: AtomicU64,
-}
+// Supplies the private ID generator used by the in-memory constructor.
+mod internal;
 
-impl InMemoryIdGenerator {
-    fn new() -> Self {
-        Self {
-            sequence: AtomicU64::new(0),
-        }
-    }
-}
-
-impl IdGenerator<Id, IdGenerationError> for InMemoryIdGenerator {
-    fn generate(&self) -> Result<Id, IdGenerationError> {
-        self.sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| sequence.checked_add(1))
-            .map(|previous| Id::new(previous + 1))
-            .map_err(|sequence| IdGenerationError::SequenceOverflow {
-                sequence,
-                max: u64::MAX - 1,
-            })
-    }
-}
+use internal::InMemoryIdGenerator;
 
 /// Builder for the typed task service.
 ///
@@ -147,6 +125,16 @@ mod id_generator_tests {
 
 impl TaskExecutionServiceBuilder {
     /// Creates an in-memory builder with an independent monotonic ID sequence.
+    ///
+    /// # Parameters
+    ///
+    /// * `history_capacity` - Maximum number of terminal task summaries kept
+    ///   by the in-memory store.
+    /// * `codecs` - Registry used to encode and decode typed task payloads.
+    ///
+    /// # Returns
+    ///
+    /// A builder backed by an in-memory store and a local monotonic ID source.
     #[must_use]
     pub fn in_memory(history_capacity: usize, codecs: ValueBytesCodecRegistry) -> Self {
         Self::new(
@@ -169,6 +157,10 @@ impl TaskExecutionServiceBuilder {
     /// * `codecs` - Registry for encoding and decoding typed request values.
     /// * `id_generator` - Generator used to assign task identifiers uniquely
     ///   across process restarts.
+    ///
+    /// # Returns
+    ///
+    /// A builder that owns the supplied persistence, codec, and ID services.
     #[must_use = "the builder must be configured and built to create a service"]
     pub fn new(
         store: Arc<dyn TaskStore>,
@@ -202,6 +194,10 @@ impl TaskExecutionServiceBuilder {
     /// # Parameters
     ///
     /// * `capacity` - Resource capacity available to local task attempts.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the supplied local reservation capacity.
     #[must_use = "the returned builder contains the updated capacity"]
     #[inline]
     pub fn capacity(mut self, capacity: ResourceCapacity) -> Self {
@@ -214,6 +210,10 @@ impl TaskExecutionServiceBuilder {
     /// # Parameters
     ///
     /// * `limit` - Non-zero maximum number of concurrent handlers.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the new handler concurrency limit.
     #[must_use = "the returned builder contains the updated limit"]
     #[inline]
     pub fn max_running_tasks(mut self, limit: std::num::NonZeroUsize) -> Self {
@@ -229,6 +229,10 @@ impl TaskExecutionServiceBuilder {
     ///
     /// * `limit` - Non-zero queued-summary scan page size; values above 256 are
     ///   capped.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the capped scan page size.
     #[must_use = "the returned builder contains the updated page size"]
     #[inline]
     pub fn scan_page_size(mut self, limit: std::num::NonZeroUsize) -> Self {
@@ -244,6 +248,10 @@ impl TaskExecutionServiceBuilder {
     ///
     /// * `limit` - Non-zero count of successful newer starts allowed to bypass
     ///   an older resource-blocked task.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the new resource bypass bound.
     #[must_use = "the returned builder contains the updated bypass limit"]
     #[inline]
     pub fn max_resource_bypasses(mut self, limit: std::num::NonZeroUsize) -> Self {
@@ -256,6 +264,10 @@ impl TaskExecutionServiceBuilder {
     /// # Parameters
     ///
     /// * `limit` - Non-zero maximum attempt count.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the retry attempt limit.
     #[must_use = "the returned builder contains the updated attempt limit"]
     #[inline]
     pub fn max_attempts(mut self, limit: std::num::NonZeroU32) -> Self {
@@ -268,6 +280,10 @@ impl TaskExecutionServiceBuilder {
     /// # Parameters
     ///
     /// * `policy` - Retry delay policy persisted with retryable failures.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the supplied retry delay policy.
     #[must_use = "the returned builder contains the updated retry policy"]
     #[inline]
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
@@ -283,6 +299,10 @@ impl TaskExecutionServiceBuilder {
     /// # Parameters
     ///
     /// * `bus` - Event bus used to publish committed lifecycle events.
+    ///
+    /// # Returns
+    ///
+    /// The builder configured to publish lifecycle events through this bus.
     #[cfg(feature = "event-bus")]
     #[must_use = "the returned builder has lifecycle publication enabled"]
     #[inline]
@@ -299,6 +319,10 @@ impl TaskExecutionServiceBuilder {
     ///
     /// * `timeout` - Maximum duration allowed to drain notifications at
     ///   shutdown.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the supplied notification drain timeout.
     #[cfg(feature = "event-bus")]
     #[must_use = "the returned builder contains the updated timeout"]
     #[inline]
@@ -308,6 +332,17 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Registers a typed handler with default cancellation options.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` - Kind, payload model, schema, and codec metadata used
+    ///   to route stored tasks.
+    /// * `handler` - Shared implementation invoked for matching requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another handler already owns the kind or if the
+    /// descriptor is inconsistent with the payload type.
     pub fn register_handler<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -320,7 +355,19 @@ impl TaskExecutionServiceBuilder {
         self.handlers.register::<T, H>(descriptor, handler)
     }
 
-    /// Registers a typed handler with explicit options.
+    /// Registers a typed handler with explicit cancellation options.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` - Kind, payload model, schema, and codec metadata used
+    ///   to route stored tasks.
+    /// * `handler` - Shared implementation invoked for matching requests.
+    /// * `options` - Cancellation behavior and attempt settings for the handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if registration conflicts with an existing handler or
+    /// descriptor metadata is invalid for the payload type.
     pub fn register_handler_with_options<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -335,7 +382,18 @@ impl TaskExecutionServiceBuilder {
             .register_with_options::<T, H>(descriptor, handler, options)
     }
 
-    /// Registers an async function handler with default options.
+    /// Registers an async function handler with default cancellation options.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` - Route metadata used to resolve this handler.
+    /// * `handler` - Async function invoked with the decoded request and task
+    ///   context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if registration conflicts with an existing handler or
+    /// descriptor metadata is invalid for the payload type.
     pub fn register_handler_fn<T, F, Fut>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -349,7 +407,19 @@ impl TaskExecutionServiceBuilder {
         self.handlers.register_handler_fn(descriptor, handler)
     }
 
-    /// Registers an async function handler with explicit options.
+    /// Registers an async function handler with explicit cancellation options.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` - Route metadata used to resolve this handler.
+    /// * `handler` - Async function invoked with the decoded request and task
+    ///   context.
+    /// * `options` - Cancellation behavior and attempt settings for the handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if registration conflicts with an existing handler or
+    /// descriptor metadata is invalid for the payload type.
     pub fn register_handler_fn_with_options<T, F, Fut>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -366,11 +436,23 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Removes a registered handler before the service is built.
+    ///
+    /// # Parameters
+    ///
+    /// * `kind` - Task kind whose handler should be removed.
+    ///
+    /// # Returns
+    ///
+    /// `true` if a handler was registered and removed, otherwise `false`.
     pub fn unregister_handler(&mut self, kind: &str) -> bool {
         self.handlers.unregister(kind)
     }
 
     /// Builds the service and begins recovering encoded queued tasks.
+    ///
+    /// # Returns
+    ///
+    /// A running service with recovery and its background workers started.
     ///
     /// # Errors
     ///

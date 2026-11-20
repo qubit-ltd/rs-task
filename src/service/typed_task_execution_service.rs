@@ -293,6 +293,27 @@ impl TaskExecutionService {
         self.submit_inner(request, false).await
     }
 
+    /// Encodes a request, validates it against the currently registered route,
+    /// and submits it only when the handler and codec are ready.
+    ///
+    /// Route validation happens before allocating a task ID or writing to the
+    /// store. This is useful when callers need configuration errors reported
+    /// synchronously with submission, while [`Self::submit`] defers route
+    /// validation until dispatch.
+    ///
+    /// # Parameters
+    ///
+    /// * `request` - Typed request whose route metadata is checked before
+    ///   acceptance.
+    ///
+    /// # Returns
+    ///
+    /// The accepted task summary with its assigned identity and initial state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if encoding or ID generation fails, the route is not
+    /// registered, admission has stopped, or the store rejects the request.
     pub async fn submit_checked<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
@@ -377,10 +398,41 @@ impl TaskExecutionService {
         Ok(self.core.store.get_summary(id).await?)
     }
 
+    /// Creates a cursor-based paginator for matching task summaries.
+    ///
+    /// The paginator borrows this service and advances only after each page is
+    /// read successfully.
+    ///
+    /// # Parameters
+    ///
+    /// * `query` - Filters, initial cursor, and bound for each returned page.
+    ///
+    /// # Returns
+    ///
+    /// A paginator that fetches successive pages from the same query.
     pub fn pages(&self, query: TaskQuery) -> TaskPages<'_> {
         TaskPages::new(self, query)
     }
 
+    /// Waits until a task reaches a terminal state or the timeout expires.
+    ///
+    /// The store is polled at bounded intervals; the returned checkpoint is
+    /// the authoritative terminal state observed by the store.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identity of the task to observe.
+    /// * `timeout` - Maximum duration to wait for a terminal checkpoint.
+    ///
+    /// # Returns
+    ///
+    /// The task's terminal state checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WaitTaskError::Unavailable`] when the task is absent,
+    /// [`WaitTaskError::Timeout`] when the deadline passes, or
+    /// [`WaitTaskError::Read`] when the store fails.
     pub async fn wait_terminal(
         &self,
         id: TaskId,
