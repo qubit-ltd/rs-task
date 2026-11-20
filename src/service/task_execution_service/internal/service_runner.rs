@@ -226,6 +226,9 @@ impl ServiceRunner {
                 }
                 break;
             }
+            if let Some(cancellation) = core.cancellations.lock().get(&key).cloned() {
+                cancellation.request(false);
+            }
             let hook = match std::panic::catch_unwind(AssertUnwindSafe(|| {
                 core.handlers.cancel_externally(&kind_id, id, attempt)
             })) {

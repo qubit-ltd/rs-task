@@ -89,6 +89,9 @@ impl TypedTaskContext {
 
     /// Reports whether cancellation was requested for this attempt.
     ///
+    /// For external cancellation, the request becomes visible after its
+    /// durable intent is recorded and before the service invokes the hook.
+    ///
     /// # Returns
     ///
     /// `true` if the shared cancellation flag is set, or `false` otherwise.
@@ -116,7 +119,8 @@ impl TypedTaskContext {
     /// This notification can be awaited repeatedly. The read-only handle
     /// returned by [`cancellation`](Self::cancellation) observes every durable
     /// cancellation request, while this future completes only for cooperative
-    /// requests.
+    /// requests. An external cancellation request is visible through that
+    /// handle but does not complete this future.
     pub async fn wait_cancel_requested(&self) {
         self.cancellation.wait_requested().await;
     }

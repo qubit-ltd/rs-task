@@ -8,9 +8,8 @@
 //! Service-level coverage for the operation feature's cooperative cancel
 //! bridge.
 
-#![cfg(feature = "operation")]
-
 use std::convert::Infallible;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -130,6 +129,42 @@ struct AttemptHandler {
     contexts: Arc<Mutex<Vec<(TaskAttempt, TaskCancellation)>>>,
 }
 
+struct ExternalIntentHandler {
+    entered: Arc<Notify>,
+    check_intent: Arc<Notify>,
+    release: Arc<Notify>,
+    requested: Arc<AtomicBool>,
+    requested_after_hook: Arc<AtomicBool>,
+    cooperative_wait_pending: Arc<AtomicBool>,
+}
+
+impl TaskHandler<Payload> for ExternalIntentHandler {
+    fn run<'a>(&'a self, _: Payload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
+        let entered = Arc::clone(&self.entered);
+        let check_intent = Arc::clone(&self.check_intent);
+        let release = Arc::clone(&self.release);
+        let requested = Arc::clone(&self.requested);
+        let requested_after_hook = Arc::clone(&self.requested_after_hook);
+        let cooperative_wait_pending = Arc::clone(&self.cooperative_wait_pending);
+        Box::pin(async move {
+            entered.notify_one();
+            check_intent.notified().await;
+            let cancellation = context.cancellation();
+            requested.store(cancellation.is_requested(), Ordering::Release);
+            let mut cooperative_wait = std::pin::pin!(cancellation.wait_requested());
+            let pending = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(cooperative_wait.as_mut().poll(cx).is_pending())
+            })
+            .await;
+            cooperative_wait_pending.store(pending, Ordering::Release);
+            entered.notify_one();
+            release.notified().await;
+            requested_after_hook.store(cancellation.is_requested(), Ordering::Release);
+            Ok(TaskRunOutcome::Succeeded(Default::default()))
+        })
+    }
+}
+
 impl TaskHandler<Payload> for AttemptHandler {
     fn run<'a>(&'a self, _: Payload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         let entered = Arc::clone(&self.entered);
@@ -174,6 +209,42 @@ async fn build_service<H: TaskHandler<Payload> + 'static>(
     };
     builder
         .register_handler_with_options::<Payload, _>(descriptor, handler, options)
+        .expect("handler registers");
+    builder.build().await.expect("service starts")
+}
+
+async fn build_slow_failing_external_service<H: TaskHandler<Payload> + 'static>(
+    handler: Arc<H>,
+    hook_entered: Arc<Notify>,
+    hook_release: Arc<Notify>,
+) -> qubit_task::service::TaskExecutionService {
+    let codecs = Arc::new(
+        ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION])
+            .expect("payload codec registers"),
+    );
+    let store = Arc::new(MemoryTaskStore::new(8));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(82_000))))
+            .capacity(ResourceCapacity::default());
+    let descriptor = TaskHandlerDescriptor::for_payload::<Payload>("test.operation_cancel", 1);
+    builder
+        .register_handler_with_options::<Payload, _>(
+            descriptor,
+            handler,
+            HandlerOptions::new().with_external_cancellation(move |_attempt| {
+                let entered = Arc::clone(&hook_entered);
+                let release = Arc::clone(&hook_release);
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Err(TaskRunError {
+                        category: "external-cancel".into(),
+                        message: "hook failed after intent publication".into(),
+                        retryable: false,
+                    })
+                }
+            }),
+        )
         .expect("handler registers");
     builder.build().await.expect("service starts")
 }
@@ -289,6 +360,82 @@ async fn test_external_hook_cancellation_does_not_publish_operation_wait() {
         CancelOutcome::CancellationRequested,
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_external_intent_is_published_before_slow_hook_and_survives_failure() {
+    let handler_entered = Arc::new(Notify::new());
+    let check_intent = Arc::new(Notify::new());
+    let handler_release = Arc::new(Notify::new());
+    let hook_entered = Arc::new(Notify::new());
+    let hook_release = Arc::new(Notify::new());
+    let requested = Arc::new(AtomicBool::new(false));
+    let requested_after_hook = Arc::new(AtomicBool::new(false));
+    let cooperative_wait_pending = Arc::new(AtomicBool::new(false));
+    let service = build_slow_failing_external_service(
+        Arc::new(ExternalIntentHandler {
+            entered: Arc::clone(&handler_entered),
+            check_intent: Arc::clone(&check_intent),
+            release: Arc::clone(&handler_release),
+            requested: Arc::clone(&requested),
+            requested_after_hook: Arc::clone(&requested_after_hook),
+            cooperative_wait_pending: Arc::clone(&cooperative_wait_pending),
+        }),
+        Arc::clone(&hook_entered),
+        Arc::clone(&hook_release),
+    )
+    .await;
+    let accepted = service.submit(request()).await.expect("task accepted");
+    tokio::time::timeout(Duration::from_secs(3), handler_entered.notified())
+        .await
+        .expect("handler starts");
+
+    let service_for_cancel = service.clone();
+    let cancel =
+        tokio::spawn(async move { service_for_cancel.request_cancel(accepted.summary.id).await });
+    tokio::time::timeout(Duration::from_secs(3), hook_entered.notified())
+        .await
+        .expect("external hook starts");
+    check_intent.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), handler_entered.notified())
+        .await
+        .expect("handler observed cancellation while hook is blocked");
+    assert!(requested.load(Ordering::Acquire));
+    assert!(cooperative_wait_pending.load(Ordering::Acquire));
+
+    hook_release.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(3), cancel)
+        .await
+        .expect("hook result returned")
+        .expect("cancel task joins")
+        .expect_err("hook failure is reported");
+    assert!(matches!(
+        error,
+        qubit_task::service::TaskServiceError::ExternalCancellationFailed { .. }
+    ));
+    assert!(
+        requested.load(Ordering::Acquire),
+        "failed hooks leave the persisted intent visible"
+    );
+
+    handler_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if service
+                .get_summary(accepted.summary.id)
+                .await
+                .unwrap()
+                .is_some_and(|summary| summary.state.is_terminal())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("handler completes");
+    assert!(requested_after_hook.load(Ordering::Acquire));
+    service.shutdown().await.expect("service shuts down");
 }
 
 #[tokio::test]
