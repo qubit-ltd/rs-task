@@ -183,15 +183,21 @@ impl TaskExecutionServiceBuilder {
         self
     }
 
-    /// Sets the maximum number of concurrently running handler tasks.
+    /// Sets the maximum number of in-flight local handler attempts and
+    /// external cancellation hooks counted by the scheduler's admission
+    /// checks. An external cancellation hook is started by a cancellation
+    /// request independently of this limit, so it may temporarily take the
+    /// in-flight count above the configured maximum; queued task dispatch
+    /// waits until the count falls below the limit again.
     ///
     /// # Parameters
     ///
-    /// * `limit` - Non-zero maximum number of concurrent handlers.
+    /// * `limit` - Non-zero maximum in-flight count used for local task
+    ///   admission checks.
     ///
     /// # Returns
     ///
-    /// The builder with the new handler concurrency limit.
+    /// The builder with the new scheduler admission limit.
     #[must_use = "the returned builder contains the updated limit"]
     #[inline]
     pub fn max_running_tasks(mut self, limit: std::num::NonZeroUsize) -> Self {

@@ -2080,6 +2080,87 @@ async fn test_scheduler_never_exceeds_configured_running_limit() {
 }
 
 #[tokio::test]
+async fn test_running_limit_counts_external_cancel_hook() {
+    let store = Arc::new(MemoryTaskStore::new(16));
+    let handler_started = Arc::new(tokio::sync::Semaphore::new(0));
+    let handler_release = Arc::new(tokio::sync::Semaphore::new(0));
+    let hook_started = Arc::new(Notify::new());
+    let hook_release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut builder =
+        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1402))))
+            .max_running_tasks(NonZeroUsize::new(2).expect("limit is nonzero"));
+    builder
+        .register_handler_with_options::<Counter, _>(
+            descriptor(CancellationMode::ExternalHook),
+            Arc::new(GatedHandler {
+                started: Arc::clone(&handler_started),
+                release: Arc::clone(&handler_release),
+            }),
+            HandlerOptions::new().with_external_cancellation({
+                let hook_started = Arc::clone(&hook_started);
+                let hook_release = Arc::clone(&hook_release);
+                move |_attempt| {
+                    let hook_started = Arc::clone(&hook_started);
+                    let hook_release = Arc::clone(&hook_release);
+                    Box::pin(async move {
+                        hook_started.notify_one();
+                        hook_release
+                            .acquire()
+                            .await
+                            .expect("hook release gate remains open")
+                            .forget();
+                        Ok(())
+                    })
+                }
+            }),
+        )
+        .expect("external cancellation handler registers");
+    let service = builder.build().await.expect("service starts");
+    let first = service.submit(request()).await.expect("first task accepted");
+    tokio::time::timeout(Duration::from_secs(2), handler_started.acquire())
+        .await
+        .expect("handler starts")
+        .expect("handler gate remains open")
+        .forget();
+
+    let cancel_service = service.clone();
+    let cancel = tokio::spawn(async move { cancel_service.request_cancel(first.summary.id).await });
+    tokio::time::timeout(Duration::from_secs(2), hook_started.notified())
+        .await
+        .expect("external cancellation hook starts");
+
+    let second = service.submit(request()).await.expect("second task accepted");
+    tokio::task::yield_now().await;
+    let queued = service
+        .get_summary(second.summary.id)
+        .await
+        .expect("summary can be read")
+        .expect("second task remains persisted");
+    assert!(matches!(queued.state, TaskState::Queued));
+    assert_eq!(
+        handler_started.available_permits(),
+        0,
+        "second handler waits while the hook holds the quota"
+    );
+
+    hook_release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), handler_started.acquire())
+        .await
+        .expect("queued handler starts after the hook releases its quota")
+        .expect("handler gate remains open")
+        .forget();
+    handler_release.add_permits(2);
+    assert!(matches!(
+        cancel.await.expect("cancel task completes"),
+        Ok(CancelOutcome::CancellationRequested)
+    ));
+    for id in [first.summary.id, second.summary.id] {
+        assert_eq!(wait_for_terminal(&service, id).await, TaskState::Succeeded);
+    }
+    service.shutdown().await.expect("service drains and shuts down");
+}
+
+#[tokio::test]
 async fn test_scheduler_store_failure_is_latched_and_reported_by_shutdown() {
     let store = failing_store();
     let mut builder = TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1501))));
