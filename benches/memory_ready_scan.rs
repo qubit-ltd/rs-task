@@ -226,10 +226,7 @@ async fn deadline(store: &MemoryTaskStore, now_ms: u64) -> Option<u64> {
 
 async fn run(future: u64, ready: u64) {
     let total = future + ready;
-    let store = Arc::new(MemoryTaskStore::with_limits(
-        0,
-        NonZeroUsize::new(BUDGET).expect("positive budget"),
-        NonZeroUsize::new(usize::try_from(total + 2 * SAMPLES as u64 + 1).expect("queue fits usize"))
+    let store = Arc::new(MemoryTaskStore::with_options(qubit_task::store::MemoryStoreOptions::new(0).max_payload_bytes(BUDGET).expect("valid payload budget").max_unfinished_records(usize::try_from(total + 2 * SAMPLES as u64 + 1).expect("valid unfinished limit"))
             .expect("positive queue limit"),
     ));
     let req = request();

@@ -31,7 +31,7 @@ use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
-use qubit_task::CancellationMode;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -116,12 +116,7 @@ impl IdGenerator for Ids {
 }
 
 fn descriptor() -> TaskHandlerDescriptor {
-    TaskHandlerDescriptor {
-        kind_id: "test.resource-reservation".into(),
-        payload_type_id: ModelIdBuf::parse("test.ResourceReservationPayload").unwrap(),
-        accepted_schema_versions: vec![1],
-        cancellation_mode: CancellationMode::Unsupported,
-    }
+    TaskHandlerDescriptor::for_payload::<Counter>("test.resource-reservation", 1)
 }
 
 fn request(cpu_slots: u32) -> TaskRequest<Counter> {
@@ -245,14 +240,14 @@ async fn retry_deadline_crossing_boundary(store: Arc<dyn TaskStore>, id: TaskId)
             ..ResourceCapacity::default()
         });
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started_handler),
                 release: handler_release,
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
+            HandlerOptions::new()
         )
         .expect("handler registration");
     let service = builder.build().await.expect("service build");
@@ -338,7 +333,7 @@ async fn retry_deadline_crossing_boundary(store: Arc<dyn TaskStore>, id: TaskId)
 
     let terminal = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Some(summary) = service.get(id).await.expect("retry task query succeeds")
+            if let Some(summary) = service.get_summary(id).await.expect("retry task query succeeds")
                 && summary.state.is_terminal()
             {
                 break summary.state;
@@ -619,7 +614,7 @@ impl TaskStore for GatedReadyStore {
 
 async fn wait_for(service: &TaskExecutionService, id: TaskId, predicate: impl Fn(&TaskState) -> bool) -> TaskState {
     for _ in 0..1000 {
-        if let Some(summary) = service.get(id).await.unwrap()
+        if let Some(summary) = service.get_summary(id).await.unwrap()
             && predicate(&summary.state)
         {
             return summary.state;
@@ -686,14 +681,14 @@ async fn bypass_fixture(
         .scan_page_size(NonZeroUsize::new(page_size).expect("positive page size"))
         .max_resource_bypasses(NonZeroUsize::new(1).expect("positive bypass limit"));
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
+            HandlerOptions::new()
         )
         .expect("handler registration");
     (
@@ -776,14 +771,14 @@ async fn test_ready_scan_yields_between_pages_and_honors_shutdown() {
     .scan_page_size(NonZeroUsize::new(2).expect("positive page size"))
     .max_resource_bypasses(NonZeroUsize::new(1).expect("positive bypass limit"));
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
                 release: Arc::clone(&handler_release),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
+            HandlerOptions::new()
         )
         .expect("handler registration");
     let service = builder.build().await.expect("service builds");
@@ -859,7 +854,7 @@ async fn test_ready_scan_yields_between_pages_and_honors_shutdown() {
         let mut all_queued = true;
         for task in &waiting_tasks {
             all_queued &= service
-                .get(task.id)
+                .get_summary(task.summary.id)
                 .await
                 .expect("task lookup")
                 .is_some_and(|summary| matches!(summary.state, TaskState::Queued));
@@ -877,7 +872,7 @@ async fn test_ready_scan_yields_between_pages_and_honors_shutdown() {
         let _ = probe_worker.await;
     }
     let only_running_task_started =
-        trace.ids.lock().expect("start trace lock is not poisoned").as_slice() == [running.id];
+        trace.ids.lock().expect("start trace lock is not poisoned").as_slice() == [running.summary.id];
     let observed_pages = probe.observed_page_count.load(Ordering::Acquire);
     let scans_after_shutdown = ready_scan_count(&trace);
 
@@ -935,14 +930,14 @@ async fn test_typed_resource_request_above_capacity_is_blocked() {
             ..ResourceCapacity::default()
         });
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::new(Notify::new()),
                 release: Arc::new(Semaphore::new(0)),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
+            HandlerOptions::new()
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -951,7 +946,7 @@ async fn test_typed_resource_request_above_capacity_is_blocked() {
         .expect("startup scheduler scans drain");
 
     let accepted = service.submit(request(2)).await.unwrap();
-    let state = wait_for(&service, accepted.id, |state| {
+    let state = wait_for(&service, accepted.summary.id, |state| {
         matches!(state, TaskState::Blocked { .. })
     })
     .await;
@@ -1001,14 +996,14 @@ async fn test_scheduler_waits_without_scanning_when_max_running_is_full() {
             ..ResourceCapacity::default()
         });
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
+            HandlerOptions::new()
         )
         .expect("handler registration");
     let service = builder.build().await.expect("service builds");
@@ -1045,11 +1040,11 @@ async fn test_scheduler_waits_without_scanning_when_max_running_is_full() {
         "shutdown wake does not trigger a ready scan"
     );
     assert!(matches!(
-        service.get(first.id).await.unwrap().unwrap().state,
+        service.get_summary(first.summary.id).await.unwrap().unwrap().state,
         TaskState::Succeeded
     ));
     assert!(matches!(
-        service.get(second.id).await.unwrap().unwrap().state,
+        service.get_summary(second.summary.id).await.unwrap().unwrap().state,
         TaskState::Queued
     ));
 }
@@ -1070,14 +1065,14 @@ async fn test_typed_resource_reservation_waits_until_capacity_is_released() {
         ..ResourceCapacity::default()
     });
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
                 calls,
             }),
+            HandlerOptions::new()
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1085,24 +1080,24 @@ async fn test_typed_resource_reservation_waits_until_capacity_is_released() {
     let first = service.submit(request(1)).await.unwrap();
     started.notified().await;
     assert!(matches!(
-        wait_for(&service, first.id, |state| matches!(state, TaskState::Running)).await,
+        wait_for(&service, first.summary.id, |state| matches!(state, TaskState::Running)).await,
         TaskState::Running
     ));
 
     let second = service.submit(request(1)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(matches!(
-        service.get(second.id).await.unwrap().unwrap().state,
+        service.get_summary(second.summary.id).await.unwrap().unwrap().state,
         TaskState::Queued
     ));
 
     release.add_permits(1);
     assert_eq!(
-        wait_for(&service, first.id, TaskState::is_terminal).await,
+        wait_for(&service, first.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     assert_eq!(
-        wait_for(&service, second.id, TaskState::is_terminal).await,
+        wait_for(&service, second.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     service.shutdown().await.unwrap();
@@ -1126,14 +1121,14 @@ async fn test_scheduler_skips_resource_blocked_task_without_consuming_run_slot()
     })
     .max_running_tasks(NonZeroUsize::new(2).unwrap());
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
                 calls: Arc::clone(&calls),
             }),
+            HandlerOptions::new()
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1143,25 +1138,25 @@ async fn test_scheduler_skips_resource_blocked_task_without_consuming_run_slot()
     let blocked = service.submit(request_resources(0, 1)).await.unwrap();
     let bypass = service.submit(request_resources(1, 0)).await.unwrap();
     assert_eq!(
-        wait_for(&service, bypass.id, TaskState::is_terminal).await,
+        wait_for(&service, bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     assert!(matches!(
-        service.get(blocked.id).await.unwrap().unwrap().state,
+        service.get_summary(blocked.summary.id).await.unwrap().unwrap().state,
         TaskState::Queued
     ));
     assert!(matches!(
-        service.get(first.id).await.unwrap().unwrap().state,
+        service.get_summary(first.summary.id).await.unwrap().unwrap().state,
         TaskState::Running
     ));
 
     release.add_permits(1);
     assert_eq!(
-        wait_for(&service, first.id, TaskState::is_terminal).await,
+        wait_for(&service, first.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     assert_eq!(
-        wait_for(&service, blocked.id, TaskState::is_terminal).await,
+        wait_for(&service, blocked.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     service.shutdown().await.unwrap();
@@ -1182,9 +1177,9 @@ async fn test_resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_ta
         .submit(request_resources(1, 0))
         .await
         .expect("first bypass accepted");
-    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.id, first_bypass.id]);
+    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.summary.id, first_bypass.summary.id]);
     assert_eq!(
-        wait_for(&service, first_bypass.id, TaskState::is_terminal).await,
+        wait_for(&service, first_bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
 
@@ -1197,7 +1192,7 @@ async fn test_resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_ta
     assert_eq!(trace.ids.lock().expect("start trace lock is not poisoned").len(), 2);
     assert!(matches!(
         service
-            .get(second_bypass.id)
+                .get_summary(second_bypass.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1208,7 +1203,7 @@ async fn test_resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_ta
     release.add_permits(1);
     assert_eq!(
         wait_for_starts(&trace, 4).await,
-        vec![running.id, first_bypass.id, anchor.id, second_bypass.id]
+        vec![running.summary.id, first_bypass.summary.id, anchor.summary.id, second_bypass.summary.id]
     );
     service.shutdown().await.expect("service shutdown");
 }
@@ -1228,9 +1223,9 @@ async fn test_resource_bypass_limit_clears_when_anchor_is_cancelled() {
         .submit(request_resources(1, 0))
         .await
         .expect("first bypass accepted");
-    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.id, first_bypass.id]);
+    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.summary.id, first_bypass.summary.id]);
     assert_eq!(
-        wait_for(&service, first_bypass.id, TaskState::is_terminal).await,
+        wait_for(&service, first_bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
 
@@ -1242,7 +1237,7 @@ async fn test_resource_bypass_limit_clears_when_anchor_is_cancelled() {
     complete_gated_scan(&gate).await;
     assert!(matches!(
         service
-            .get(waiting.id)
+                .get_summary(waiting.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1251,12 +1246,12 @@ async fn test_resource_bypass_limit_clears_when_anchor_is_cancelled() {
     ));
 
     assert_eq!(
-        service.cancel(anchor.id).await.expect("anchor cancellation"),
-        CancelOutcome::CancelledBeforeStart
+        service.request_cancel(anchor.summary.id).await.expect("anchor cancellation"),
+        CancelOutcome::CancelledBeforeRun
     );
     assert_eq!(
         wait_for_starts(&trace, 3).await,
-        vec![running.id, first_bypass.id, waiting.id]
+        vec![running.summary.id, first_bypass.summary.id, waiting.summary.id]
     );
     release.add_permits(1);
     service.shutdown().await.expect("service shutdown");
@@ -1288,13 +1283,13 @@ async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
         .await
         .expect("first bypass accepted");
     complete_gated_scan(&gate).await;
-    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.id, first_bypass.id]);
+    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.summary.id, first_bypass.summary.id]);
     assert_eq!(
-        wait_for(&service, first_bypass.id, TaskState::is_terminal).await,
+        wait_for(&service, first_bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     assert!(matches!(
-        wait_for(&service, impossible_a.id, |state| matches!(
+        wait_for(&service, impossible_a.summary.id, |state| matches!(
             state,
             TaskState::Blocked { .. }
         ))
@@ -1302,7 +1297,7 @@ async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
         TaskState::Blocked { .. }
     ));
     assert!(matches!(
-        wait_for(&service, impossible_b.id, |state| matches!(
+        wait_for(&service, impossible_b.summary.id, |state| matches!(
             state,
             TaskState::Blocked { .. }
         ))
@@ -1322,7 +1317,7 @@ async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
     complete_gated_scan(&gate).await;
     assert!(matches!(
         service
-            .get(waiting_a.id)
+                .get_summary(waiting_a.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1331,7 +1326,7 @@ async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
     ));
     assert!(matches!(
         service
-            .get(waiting_b.id)
+                .get_summary(waiting_b.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1341,7 +1336,7 @@ async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
 
     release.add_permits(1);
     let starts = wait_for_starts(&trace, 4).await;
-    assert_eq!(starts[2], anchor.id);
+    assert_eq!(starts[2], anchor.summary.id);
     service.shutdown().await.expect("service shutdown");
 }
 
@@ -1374,16 +1369,16 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
         .conflicts
         .lock()
         .expect("conflict trace lock is not poisoned")
-        .extend([earlier_a.id, earlier_b.id]);
+        .extend([earlier_a.summary.id, earlier_b.summary.id]);
     complete_gated_scan(&gate).await;
-    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.id, first_bypass.id]);
+    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.summary.id, first_bypass.summary.id]);
     assert_eq!(
-        wait_for(&service, first_bypass.id, TaskState::is_terminal).await,
+        wait_for(&service, first_bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     assert!(matches!(
         service
-            .get(earlier_a.id)
+                .get_summary(earlier_a.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1391,12 +1386,12 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
         TaskState::Queued
     ));
     let earlier_b_summary = service
-        .get(earlier_b.id)
+                .get_summary(earlier_b.summary.id)
         .await
         .expect("task lookup")
         .expect("task exists");
     assert!(matches!(earlier_b_summary.state, TaskState::Queued));
-    let first_page_cursor = TaskCursor::new(earlier_b_summary.accepted_at_ms, earlier_b.id);
+    let first_page_cursor = TaskCursor::new(earlier_b_summary.accepted_at_ms, earlier_b.summary.id);
 
     gate.armed.store(true, Ordering::Release);
     let waiting = service
@@ -1436,7 +1431,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     assert_eq!(trace.ids.lock().expect("start trace lock is not poisoned").len(), 2);
     assert!(matches!(
         service
-            .get(earlier_a.id)
+                .get_summary(earlier_a.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1445,7 +1440,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     ));
     assert!(matches!(
         service
-            .get(earlier_b.id)
+                .get_summary(earlier_b.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1454,7 +1449,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     ));
     assert!(matches!(
         service
-            .get(anchor.id)
+                .get_summary(anchor.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1463,7 +1458,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     ));
     assert!(matches!(
         service
-            .get(waiting.id)
+                .get_summary(waiting.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1474,7 +1469,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     release.add_permits(1);
     assert_eq!(
         wait_for_starts(&trace, 4).await,
-        vec![running.id, first_bypass.id, anchor.id, waiting.id]
+        vec![running.summary.id, first_bypass.summary.id, anchor.summary.id, waiting.summary.id]
     );
     service.shutdown().await.expect("service shutdown");
 }
@@ -1503,14 +1498,14 @@ async fn test_resource_release_during_ready_scan_is_not_lost() {
         })
         .max_running_tasks(NonZeroUsize::new(2).unwrap());
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release_handler),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
+            HandlerOptions::new()
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1527,12 +1522,12 @@ async fn test_resource_release_during_ready_scan_is_not_lost() {
 
     release_handler.add_permits(1);
     assert_eq!(
-        wait_for(&service, first.id, TaskState::is_terminal).await,
+        wait_for(&service, first.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     gate.release.add_permits(1);
     assert_eq!(
-        wait_for(&service, waiting.id, TaskState::is_terminal).await,
+        wait_for(&service, waiting.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     service.shutdown().await.unwrap();
@@ -1568,14 +1563,14 @@ async fn test_cancel_during_start_cas_releases_reservation_without_running_handl
         },
     );
     builder
-        .handlers_mut()
-        .register::<Counter, _>(
+        .register_handler_with_options::<Counter, _>(
             descriptor(),
             Arc::new(GatedHandler {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release_handler),
                 calls: Arc::clone(&calls),
             }),
+            HandlerOptions::new()
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1589,12 +1584,12 @@ async fn test_cancel_during_start_cas_releases_reservation_without_running_handl
         .unwrap();
 
     assert_eq!(
-        service.cancel(cancelled.id).await.unwrap(),
-        CancelOutcome::CancelledBeforeStart
+        service.request_cancel(cancelled.summary.id).await.unwrap(),
+        CancelOutcome::CancelledBeforeRun
     );
     start_gate.release.add_permits(1);
     assert_eq!(
-        wait_for(&service, cancelled.id, TaskState::is_terminal).await,
+        wait_for(&service, cancelled.summary.id, TaskState::is_terminal).await,
         TaskState::Cancelled
     );
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -1602,7 +1597,7 @@ async fn test_cancel_during_start_cas_releases_reservation_without_running_handl
     release_handler.add_permits(1);
     let next = service.submit(request(1)).await.unwrap();
     assert_eq!(
-        wait_for(&service, next.id, TaskState::is_terminal).await,
+        wait_for(&service, next.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     assert_eq!(calls.load(Ordering::Relaxed), 1);

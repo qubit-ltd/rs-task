@@ -67,10 +67,7 @@ fn remove_database(path: &Path) {
 
 async fn ids_in_order(store: &dyn TaskStore) -> Vec<u64> {
     let page = store
-        .list_encoded(TaskQuery {
-            limit: 10,
-            ..TaskQuery::default()
-        })
+        .list_encoded(TaskQuery::default().page_size(10).expect("valid page size"))
         .await
         .expect("typed history query succeeds");
     page.records
@@ -96,13 +93,14 @@ async fn assert_category_filter_and_exclusive_numeric_cursor(store: &dyn TaskSto
         .expect("other correlation is accepted");
 
     let first = store
-        .list_encoded(TaskQuery {
-            states: vec![TaskStateKind::Queued],
-            category: Some("image".to_owned()),
-            correlation_key: Some("batch-a".to_owned()),
-            limit: 1,
-            ..TaskQuery::default()
-        })
+        .list_encoded(
+            TaskQuery::default()
+                .with_states([TaskStateKind::Queued])
+                .with_category("image")
+                .with_correlation_key("batch-a")
+                .page_size(1)
+                .expect("valid page size"),
+        )
         .await
         .expect("filtered first page succeeds");
     assert_eq!(first.records.len(), 1);
@@ -119,13 +117,15 @@ async fn assert_category_filter_and_exclusive_numeric_cursor(store: &dyn TaskSto
         .expect("a later matching task is accepted");
 
     let second = store
-        .list_encoded(TaskQuery {
-            states: vec![TaskStateKind::Queued],
-            category: Some("image".to_owned()),
-            correlation_key: Some("batch-a".to_owned()),
-            after: first.next,
-            limit: 2,
-        })
+        .list_encoded(
+            TaskQuery::default()
+                .with_states([TaskStateKind::Queued])
+                .with_category("image")
+                .with_correlation_key("batch-a")
+                .after(first.next.expect("first page has continuation"))
+                .page_size(2)
+                .expect("valid page size"),
+        )
         .await
         .expect("exclusive continuation page succeeds");
     assert_eq!(first.records.len() + second.records.len(), 3);
@@ -363,19 +363,17 @@ async fn test_typed_history_pages_a_queue_larger_than_the_maximum_page() {
             .expect("task is accepted");
     }
     let first = memory
-        .list_encoded(TaskQuery {
-            limit: 256,
-            ..TaskQuery::default()
-        })
+        .list_encoded(TaskQuery::default().page_size(256).expect("valid page size"))
         .await
         .expect("first history page succeeds");
     assert_eq!(first.records.len(), 256);
     let second = memory
-        .list_encoded(TaskQuery {
-            limit: 256,
-            after: first.next,
-            ..TaskQuery::default()
-        })
+        .list_encoded(
+            TaskQuery::default()
+                .after(first.next.expect("first page has continuation"))
+                .page_size(256)
+                .expect("valid page size"),
+        )
         .await
         .expect("second history page succeeds");
     assert_eq!(second.records.len(), 1);

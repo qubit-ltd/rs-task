@@ -272,20 +272,11 @@ fn run_dataset(runtime: &Runtime, size: usize) -> Result<DatasetReport, Box<dyn 
     let indexed_database_bytes = file_size(&dataset.database_path)?;
     let deep_no_filter_plan = production_plan(
         &sqlite,
-        TaskQuery {
-            after: Some(dataset.cursor),
-            limit: PAGE_SIZE,
-            ..TaskQuery::default()
-        },
+        TaskQuery::default().after(dataset.cursor).page_size(PAGE_SIZE).expect("valid page size"),
     )?;
     let deep_single_correlation_plan = production_plan(
         &sqlite,
-        TaskQuery {
-            after: Some(dataset.cursor),
-            correlation_key: Some(dataset.correlation_key.clone()),
-            limit: PAGE_SIZE,
-            ..TaskQuery::default()
-        },
+        TaskQuery::default().with_correlation_key(dataset.correlation_key.clone()).after(dataset.cursor).page_size(PAGE_SIZE).expect("valid page size"),
     )?;
     let unfinished_recovery_plan = explain(
         &sqlite,
@@ -318,42 +309,25 @@ fn run_dataset(runtime: &Runtime, size: usize) -> Result<DatasetReport, Box<dyn 
     }
     let no_filter_page = measure(runtime, || async {
         let page = runtime_store
-            .list_encoded(TaskQuery {
-                limit: PAGE_SIZE,
-                ..TaskQuery::default()
-            })
+            .list_encoded(TaskQuery::default().page_size(PAGE_SIZE).expect("valid page size"))
             .await?;
         Ok(page.records.len())
     })?;
     let deep_no_filter_page = measure(runtime, || async {
         let page = runtime_store
-            .list_encoded(TaskQuery {
-                after: Some(dataset.cursor),
-                limit: PAGE_SIZE,
-                ..TaskQuery::default()
-            })
+            .list_encoded(TaskQuery::default().after(dataset.cursor).page_size(PAGE_SIZE).expect("valid page size"))
             .await?;
         Ok(page.records.len())
     })?;
     let deep_single_correlation_page = measure(runtime, || async {
         let page = runtime_store
-            .list_encoded(TaskQuery {
-                after: Some(dataset.cursor),
-                correlation_key: Some(dataset.correlation_key.clone()),
-                limit: PAGE_SIZE,
-                ..TaskQuery::default()
-            })
+            .list_encoded(TaskQuery::default().with_correlation_key(dataset.correlation_key.clone()).after(dataset.cursor).page_size(PAGE_SIZE).expect("valid page size"))
             .await?;
         Ok(page.records.len())
     })?;
     let unfinished_recovery_page = measure(runtime, || async {
         let page = runtime_store
-            .list_encoded(TaskQuery {
-                states: vec![TaskStateKind::Queued, TaskStateKind::Running],
-                after: Some(dataset.cursor),
-                limit: 256,
-                ..TaskQuery::default()
-            })
+            .list_encoded(TaskQuery::default().with_states(vec![TaskStateKind::Queued, TaskStateKind::Running]).after(dataset.cursor).page_size(256).expect("valid page size"))
             .await?;
         Ok(page.records.len())
     })?;
@@ -554,23 +528,23 @@ fn legacy_history_measurement(
 fn production_plan(connection: &Connection, query: TaskQuery) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // The plan is read through the public store query in production; this EXPLAIN
     // uses its stable SQL shape for reproducible plan reporting.
-    let (where_sql, values): (&str, Vec<Value>) = if let Some(key) = query.correlation_key {
+    let (where_sql, values): (&str, Vec<Value>) = if let Some(key) = query.correlation_key() {
         (
             "WHERE (accepted_at,id) > (?1,?2) AND correlation_key = ?3 ORDER BY accepted_at,id LIMIT ?4",
             vec![
-                Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
-                Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
-                Value::Text(key),
-                Value::Integer((query.limit + 1) as i64),
+                Value::Integer(query.cursor().expect("cursor was set").accepted_at_ms as i64),
+                Value::Text(query.cursor().expect("cursor was set").id.to_padded_decimal()),
+                Value::Text(key.to_owned()),
+                Value::Integer((query.limit() + 1) as i64),
             ],
         )
     } else {
         (
             "WHERE (accepted_at,id) > (?1,?2) ORDER BY accepted_at,id LIMIT ?3",
             vec![
-                Value::Integer(query.after.expect("cursor was set").accepted_at_ms as i64),
-                Value::Text(query.after.expect("cursor was set").id.to_padded_decimal()),
-                Value::Integer((query.limit + 1) as i64),
+                Value::Integer(query.cursor().expect("cursor was set").accepted_at_ms as i64),
+                Value::Text(query.cursor().expect("cursor was set").id.to_padded_decimal()),
+                Value::Integer((query.limit() + 1) as i64),
             ],
         )
     };

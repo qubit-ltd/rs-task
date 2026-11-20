@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let original = request(serde_json::json!({"object": "imports/42.csv"}), "request-42");
     let first = service.submit(original.clone()).await?;
     let replay = service.submit(original).await?;
-    assert_eq!(replay.id, first.id, "an identical retry keeps its task ID");
+    assert_eq!(replay.summary.id, first.summary.id, "an identical retry keeps its task ID");
 
     let conflict = service
         .submit(request(serde_json::json!({"object": "imports/43.csv"}), "request-42"))

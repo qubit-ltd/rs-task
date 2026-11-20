@@ -18,8 +18,6 @@ use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
-use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
@@ -147,12 +145,7 @@ pub fn codec_registry() -> Result<Arc<ValueBytesCodecRegistry>, Box<dyn Error>> 
 ///
 /// Returns an error if the fixture payload type identifier is invalid.
 pub fn descriptor(kind_id: &str) -> Result<TaskHandlerDescriptor, Box<dyn Error>> {
-    Ok(TaskHandlerDescriptor {
-        kind_id: kind_id.into(),
-        payload_type_id: ModelIdBuf::try_from("fixture.TaskPayload")?,
-        accepted_schema_versions: vec![1],
-        cancellation_mode: CancellationMode::Unsupported,
-    })
+    Ok(TaskHandlerDescriptor::try_new(kind_id, "fixture.TaskPayload", 1)?)
 }
 
 /// Creates a version-one request with the fixture codec and idempotency key.

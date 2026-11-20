@@ -30,12 +30,14 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
+use qubit_task::TaskAttempt;
+use qubit_task::TaskCancellation;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
+use qubit_task::HandlerOptions;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::ResourceCapacity;
@@ -125,7 +127,7 @@ impl TaskHandler<Payload> for ModeProbeHandler {
 
 struct AttemptHandler {
     entered: Arc<Notify>,
-    contexts: Arc<Mutex<Vec<TaskContext>>>,
+    contexts: Arc<Mutex<Vec<(TaskAttempt, TaskCancellation)>>>,
 }
 
 impl TaskHandler<Payload> for AttemptHandler {
@@ -133,9 +135,9 @@ impl TaskHandler<Payload> for AttemptHandler {
         let entered = Arc::clone(&self.entered);
         let contexts = Arc::clone(&self.contexts);
         Box::pin(async move {
-            let attempt = context.attempt();
-            contexts.lock().expect("contexts mutex").push(context.clone());
-            if attempt == 1 {
+            let attempt = context.task_attempt();
+            contexts.lock().expect("contexts mutex").push((attempt, context.cancellation()));
+            if attempt.attempt() == 1 {
                 return Err(TaskRunError {
                     category: "retryable".into(),
                     message: "advance to the next attempt".into(),
@@ -143,7 +145,7 @@ impl TaskHandler<Payload> for AttemptHandler {
                 });
             }
             entered.notify_one();
-            context.wait_cancel_requested().await;
+            context.cancellation().wait_requested().await;
             Ok(TaskRunOutcome::Cancelled)
         })
     }
@@ -159,28 +161,16 @@ async fn build_service<H: TaskHandler<Payload> + 'static>(
     let store = Arc::new(MemoryTaskStore::new(8));
     let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(81_000))))
         .capacity(ResourceCapacity::default());
-    let descriptor = TaskHandlerDescriptor {
-        kind_id: "test.operation_cancel".into(),
-        payload_type_id: ModelIdBuf::try_from("test.OperationCancelPayload").unwrap(),
-        accepted_schema_versions: vec![1],
-        cancellation_mode: mode,
+    let descriptor = TaskHandlerDescriptor::for_payload::<Payload>("test.operation_cancel", 1);
+    let options = match mode {
+        CancellationMode::Cooperative => HandlerOptions::new().with_cooperative_cancellation(),
+        CancellationMode::ExternalHook if with_hook => HandlerOptions::new()
+            .with_source("operation cancellation test")
+            .with_external_cancellation(|_attempt| async { Ok(()) }),
+        _ => HandlerOptions::new(),
     };
-    if with_hook {
-        builder
-            .handlers_mut()
-            .register_with_cancellation_hook::<Payload, _>(
-                descriptor,
-                handler,
-                "operation cancellation test",
-                Arc::new(|_, _| Box::pin(async { Ok(()) })),
-            )
-            .expect("external hook handler registers");
-    } else {
-        builder
-            .handlers_mut()
-            .register::<Payload, _>(descriptor, handler)
-            .expect("handler registers");
-    }
+    builder.register_handler_with_options::<Payload, _>(descriptor, handler, options)
+        .expect("handler registers");
     builder.build().await.expect("service starts")
 }
 
@@ -208,16 +198,16 @@ async fn test_cooperative_cancellation_reaches_multiple_waiters_and_repeated_can
         .await
         .expect("handler starts");
     assert_eq!(
-        service.cancel(accepted.id).await.unwrap(),
+        service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
     assert_eq!(
-        service.cancel(accepted.id).await.unwrap(),
+        service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
     let terminal = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if let Some(summary) = service.get(accepted.id).await.unwrap()
+            if let Some(summary) = service.get_summary(accepted.summary.id).await.unwrap()
                 && summary.state.is_terminal()
             {
                 break summary;
@@ -254,14 +244,14 @@ async fn cancellation_mode_does_not_publish_operation_wait(
         .await
         .expect("handler starts and polls operation wait");
 
-    assert_eq!(service.cancel(accepted.id).await.unwrap(), expected);
+    assert_eq!(service.request_cancel(accepted.summary.id).await.unwrap(), expected);
     tokio::task::yield_now().await;
     assert!(!wait_completed.load(Ordering::Acquire));
     release.notify_one();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if service
-                .get(accepted.id)
+            .get_summary(accepted.summary.id)
                 .await
                 .unwrap()
                 .is_some_and(|summary| summary.state.is_terminal())
@@ -316,18 +306,18 @@ async fn test_cancellation_is_isolated_between_attempts() {
         .expect("second attempt starts");
     let attempt_contexts = contexts.lock().expect("contexts mutex").clone();
     assert_eq!(attempt_contexts.len(), 2);
-    assert_eq!(attempt_contexts[0].attempt(), 1);
-    assert_eq!(attempt_contexts[1].attempt(), 2);
+    assert_eq!(attempt_contexts[0].0.attempt(), 1);
+    assert_eq!(attempt_contexts[1].0.attempt(), 2);
 
     assert_eq!(
-        service.cancel(accepted.id).await.unwrap(),
+        service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
-    tokio::time::timeout(Duration::from_secs(1), attempt_contexts[1].wait_cancel_requested())
+    tokio::time::timeout(Duration::from_secs(1), attempt_contexts[1].1.wait_requested())
         .await
         .expect("current attempt observes cancellation");
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), attempt_contexts[0].wait_cancel_requested())
+        tokio::time::timeout(Duration::from_millis(20), attempt_contexts[0].1.wait_requested())
             .await
             .is_err()
     );

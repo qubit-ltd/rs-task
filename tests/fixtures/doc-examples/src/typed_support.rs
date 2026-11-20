@@ -22,8 +22,7 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
-use qubit_task::CancellationMode;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
@@ -149,14 +148,10 @@ impl TaskHandler<ExamplePayload> for ExampleHandler {
 ///
 /// Returns an error if the handler descriptor cannot be registered.
 pub fn register_handler(builder: &mut TaskExecutionServiceBuilder) -> Result<(), Box<dyn std::error::Error>> {
-    builder.handlers_mut().register::<ExamplePayload, _>(
-        TaskHandlerDescriptor {
-            kind_id: "example.process".into(),
-            payload_type_id: ModelIdBuf::try_from("example.TaskPayload")?,
-            accepted_schema_versions: vec![1],
-            cancellation_mode: CancellationMode::Unsupported,
-        },
+    builder.register_handler_with_options::<ExamplePayload, _>(
+        TaskHandlerDescriptor::for_payload::<ExamplePayload>("example.process", 1),
         Arc::new(ExampleHandler),
+        HandlerOptions::new(),
     )?;
     Ok(())
 }

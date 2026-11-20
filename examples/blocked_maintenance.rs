@@ -30,7 +30,7 @@ use qubit_task::store::StoreError;
 /// an accepted task summary. Call this after repairing the handler or codec
 /// configuration and restarting the service.
 async fn resume_after_repair(service: &TaskExecutionService, id: TaskId) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(summary) = service.get(id).await? else {
+    let Some(summary) = service.get_summary(id).await? else {
         return Ok(());
     };
     if matches!(summary.state, TaskState::Blocked { .. }) {
@@ -38,7 +38,7 @@ async fn resume_after_repair(service: &TaskExecutionService, id: TaskId) -> Resu
             eprintln!("{} still has a pending cancellation", id.to_padded_decimal());
             return Ok(());
         }
-        match service.resume_blocked(id, summary.state_version).await {
+        match service.resume_blocked(&summary).await {
             Ok(_) => println!("{} queued for retry", id.to_padded_decimal()),
             Err(TaskServiceError::Store(StoreError::Conflict)) => {
                 eprintln!("{} changed; read its summary again", id.to_padded_decimal());
@@ -69,18 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-        let mut query = TaskQuery {
-            category: Some("image-processing".into()),
-            limit: 50,
-            ..TaskQuery::default()
-        };
+        let query = TaskQuery::default().with_category("image-processing");
+        let mut pages = service.pages(query);
         loop {
-            let page = service.query(query.clone()).await?;
+            let Some(page) = pages.next_page().await? else { break };
             for task in page.records {
                 println!("{} {:?}", task.id.to_padded_decimal(), task.state);
             }
-            let Some(next) = page.next else { break };
-            query.after = Some(next);
         }
         let _operator_recovery_example = resume_after_repair;
         service.shutdown().await?;

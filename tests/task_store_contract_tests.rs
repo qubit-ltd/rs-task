@@ -41,7 +41,6 @@ use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 #[cfg(feature = "sqlite")]
-use qubit_task::CancellationMode;
 #[cfg(feature = "sqlite")]
 use qubit_task::TaskContext;
 #[cfg(feature = "sqlite")]
@@ -301,7 +300,7 @@ async fn test_memory_state_checkpoint_disappears_after_capacity_eviction() {
 
 #[tokio_test]
 async fn test_memory_terminal_prune_releases_payload_budget() {
-    let store = MemoryTaskStore::with_payload_budget(16, NonZeroUsize::new(4).expect("non-zero memory payload budget"));
+    let store = MemoryTaskStore::with_options(qubit_task::store::MemoryStoreOptions::new(16).max_payload_bytes(4).expect("valid payload budget"));
     support::store_contract::check_memory_prune_reclaims_payload(&store).await;
 }
 
@@ -500,15 +499,10 @@ async fn test_sqlite_duplicate_generated_identity_does_not_fault_service() {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&IDENTITY_PROBE_REGISTRATION]).unwrap());
     let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(SequenceIds(AtomicUsize::new(0))));
     builder
-        .handlers_mut()
-        .register::<IdentityProbe, _>(
-            TaskHandlerDescriptor {
-                kind_id: "identity.service".into(),
-                payload_type_id: ModelIdBuf::parse("test.IdentityProbe").unwrap(),
-                accepted_schema_versions: vec![1],
-                cancellation_mode: CancellationMode::Cooperative,
-            },
+        .register_handler_with_options::<IdentityProbe, _>(
+            TaskHandlerDescriptor::for_payload::<IdentityProbe>("identity.service", 1),
             Arc::new(IdentityProbeHandler),
+            qubit_task::HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
@@ -528,7 +522,7 @@ async fn test_sqlite_duplicate_generated_identity_does_not_fault_service() {
         .submit(request())
         .await
         .expect("service accepts a new identity after collision");
-    assert_eq!(accepted_after_collision.id, TaskId::from_id(Id::new(886)));
+    assert_eq!(accepted_after_collision.summary.id, TaskId::from_id(Id::new(886)));
     service.shutdown().await.expect("collision did not fault service");
     drop(service);
     for file in [

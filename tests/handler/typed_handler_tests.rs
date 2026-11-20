@@ -22,8 +22,10 @@ use qubit_codec::ValueCodecExecutionError;
 use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
 use qubit_id::Id;
+use qubit_model_id::HasModelId;
+use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
-use qubit_task::CancellationMode;
+use qubit_task::HandlerOptions;
 use qubit_task::HandlerDispatchError;
 use qubit_task::HandlerRegistrationError;
 use qubit_task::TaskContext;
@@ -40,6 +42,10 @@ use qubit_task::store::TaskFuture;
 #[derive(Debug, PartialEq, Eq)]
 struct Input(u32);
 
+impl HasModelId for Input {
+    const MODEL_ID: ModelId = ModelId::new("example.ResizeRequest");
+}
+
 struct Handler;
 
 impl TaskHandler<Input> for Handler {
@@ -52,12 +58,8 @@ impl TaskHandler<Input> for Handler {
 }
 
 fn descriptor(versions: Vec<u32>) -> TaskHandlerDescriptor {
-    TaskHandlerDescriptor {
-        kind_id: "example.image.resize".into(),
-        payload_type_id: ModelIdBuf::try_from("example.ResizeRequest").unwrap(),
-        accepted_schema_versions: versions,
-        cancellation_mode: CancellationMode::Cooperative,
-    }
+    TaskHandlerDescriptor::for_payload::<Input>("example.image.resize", 1)
+        .with_accepted_schema_versions(versions)
 }
 
 fn payload(type_id: &str, schema_version: u32, codec_id: &str) -> StoredPayload {
@@ -130,9 +132,9 @@ qubit_codec::register_value_bytes_codec!(id = "qubit_task.tests.handler_input", 
 #[test]
 fn test_registration_rejects_a_duplicate_kind_id_even_if_versions_differ() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry.register_with_options::<Input, _>(descriptor(vec![1]), Arc::new(Handler), HandlerOptions::new()).unwrap();
 
-    let error = registry.register(descriptor(vec![2]), Arc::new(Handler)).unwrap_err();
+    let error = registry.register_with_options::<Input, _>(descriptor(vec![2]), Arc::new(Handler), HandlerOptions::new()).unwrap_err();
 
     assert!(matches!(error, HandlerRegistrationError::DuplicateKindId { .. }));
 }
@@ -141,11 +143,11 @@ fn test_registration_rejects_a_duplicate_kind_id_even_if_versions_differ() {
 fn test_descriptor_requires_one_payload_type_and_unique_explicit_versions() {
     let mut registry = TaskHandlerRegistry::new();
 
-    let error = registry.register(descriptor(vec![]), Arc::new(Handler)).unwrap_err();
+    let error = registry.register_with_options::<Input, _>(descriptor(vec![]), Arc::new(Handler), HandlerOptions::new()).unwrap_err();
     assert!(matches!(error, HandlerRegistrationError::NoAcceptedSchemaVersions));
 
     let error = registry
-        .register(descriptor(vec![1, 1]), Arc::new(Handler))
+        .register_with_options::<Input, _>(descriptor(vec![1, 1]), Arc::new(Handler), HandlerOptions::new())
         .unwrap_err();
     assert!(matches!(error, HandlerRegistrationError::DuplicateSchemaVersion(1)));
 }
@@ -153,22 +155,17 @@ fn test_descriptor_requires_one_payload_type_and_unique_explicit_versions() {
 #[test]
 fn test_registry_rejects_empty_kind_ids_and_unexpected_external_hooks() {
     let mut registry = TaskHandlerRegistry::new();
-    let mut empty_kind = descriptor(vec![1]);
-    empty_kind.kind_id = " \t".into();
+    let empty_kind = TaskHandlerDescriptor::for_payload::<Input>(" \t", 1);
     assert!(matches!(
-        registry.register(empty_kind, Arc::new(Handler)),
+        registry.register_with_options::<Input, _>(empty_kind, Arc::new(Handler), HandlerOptions::new()),
         Err(HandlerRegistrationError::EmptyKindId)
     ));
 
-    let error = registry
-        .register_with_cancellation_hook(
-            descriptor(vec![1]),
-            Arc::new(Handler),
-            "unexpected hook source",
-            Arc::new(|_, _| Box::pin(async { Ok(()) })),
-        )
-        .unwrap_err();
-    assert!(matches!(error, HandlerRegistrationError::UnexpectedExternalHook(_)));
+    registry.register_with_options::<Input, _>(
+        descriptor(vec![1]), Arc::new(Handler),
+        HandlerOptions::new().with_source("external hook source").with_external_cancellation(|_attempt| async { Ok(()) }),
+    ).unwrap();
+    assert!(registry.has_external_cancellation_hook("example.image.resize"));
 }
 
 #[test]
@@ -186,16 +183,16 @@ fn test_registry_reports_missing_handler_and_preserves_registration_source() {
     assert!(!registry.has_external_cancellation_hook("example.unknown"));
     assert!(
         registry
-            .cancel_externally("example.unknown", TaskId::from_id(Id::new(42)), 1,)
+            .cancel_externally("example.unknown", TaskId::from_id(Id::new(42)), 1)
             .is_none()
     );
 
     let mut registry = TaskHandlerRegistry::new();
     registry
-        .register_with_source(descriptor(vec![1]), Arc::new(Handler), "first provider")
+        .register_with_options::<Input, _>(descriptor(vec![1]), Arc::new(Handler), HandlerOptions::new().with_source("first provider"))
         .unwrap();
     let error = registry
-        .register_with_source(descriptor(vec![2]), Arc::new(Handler), "second provider")
+        .register_with_options::<Input, _>(descriptor(vec![2]), Arc::new(Handler), HandlerOptions::new().with_source("second provider"))
         .unwrap_err();
     assert!(matches!(
         error,
@@ -210,7 +207,7 @@ fn test_registry_reports_missing_handler_and_preserves_registration_source() {
 #[test]
 fn test_handler_accepts_only_its_declared_payload_model() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1, 2]), Arc::new(Handler)).unwrap();
+    registry.register_with_options::<Input, _>(descriptor(vec![1, 2]), Arc::new(Handler), HandlerOptions::new()).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
 
     let error = registry
@@ -227,7 +224,7 @@ fn test_handler_accepts_only_its_declared_payload_model() {
 #[test]
 fn test_handler_accepts_each_declared_schema_version_but_rejects_others() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1, 3]), Arc::new(Handler)).unwrap();
+    registry.register_with_options::<Input, _>(descriptor(vec![1, 3]), Arc::new(Handler), HandlerOptions::new()).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
 
     for version in [1, 3] {
@@ -253,7 +250,7 @@ fn test_handler_accepts_each_declared_schema_version_but_rejects_others() {
 #[test]
 fn test_missing_codec_is_rejected_before_handler_execution() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry.register_with_options::<Input, _>(descriptor(vec![1]), Arc::new(Handler), HandlerOptions::new()).unwrap();
 
     let error = registry
         .prepare(
@@ -269,7 +266,7 @@ fn test_missing_codec_is_rejected_before_handler_execution() {
 #[test]
 fn test_payload_codec_with_another_rust_value_type_is_rejected_before_run() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry.register_with_options::<Input, _>(descriptor(vec![1]), Arc::new(Handler), HandlerOptions::new()).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
 
     let error = registry
@@ -286,7 +283,7 @@ fn test_payload_codec_with_another_rust_value_type_is_rejected_before_run() {
 #[test]
 fn test_successfully_decoded_payload_is_prepared_for_execution() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry.register_with_options::<Input, _>(descriptor(vec![1]), Arc::new(Handler), HandlerOptions::new()).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
     let _prepared = registry
         .prepare(
@@ -305,7 +302,7 @@ fn test_successfully_decoded_payload_is_prepared_for_execution() {
 #[test]
 fn test_malformed_bytes_are_classified_as_a_codec_decode_error() {
     let mut registry = TaskHandlerRegistry::new();
-    registry.register(descriptor(vec![1]), Arc::new(Handler)).unwrap();
+    registry.register_with_options::<Input, _>(descriptor(vec![1]), Arc::new(Handler), HandlerOptions::new()).unwrap();
     let codecs = ValueBytesCodecRegistry::try_global().unwrap();
 
     let error = registry
@@ -328,31 +325,24 @@ fn test_malformed_bytes_are_classified_as_a_codec_decode_error() {
 }
 
 #[tokio::test]
-async fn test_external_cancellation_hook_is_required_and_invoked_with_attempt_identity() {
-    let mut descriptor = descriptor(vec![1]);
-    descriptor.cancellation_mode = CancellationMode::ExternalHook;
+async fn test_external_cancellation_hook_is_registered_with_attempt_identity() {
+    let descriptor = descriptor(vec![1]);
     let mut registry = TaskHandlerRegistry::new();
-    let error = registry.register(descriptor.clone(), Arc::new(Handler)).unwrap_err();
-    assert!(matches!(error, HandlerRegistrationError::MissingExternalHook(_)));
-
     let observed = Arc::new(AtomicUsize::new(0));
     let hook_observed = Arc::clone(&observed);
-    registry
-        .register_with_cancellation_hook(
-            descriptor,
-            Arc::new(Handler),
-            "test provider",
-            Arc::new(move |task_id, attempt| {
-                let hook_observed = Arc::clone(&hook_observed);
-                Box::pin(async move {
-                    assert_eq!(task_id, TaskId::from_id(Id::new(42)));
-                    assert_eq!(attempt, 7);
-                    hook_observed.fetch_add(1, Ordering::AcqRel);
-                    Ok(())
-                })
-            }),
-        )
-        .unwrap();
+    registry.register_with_options::<Input, _>(
+        descriptor,
+        Arc::new(Handler),
+        HandlerOptions::new().with_source("test provider").with_external_cancellation(move |attempt| {
+            let hook_observed = Arc::clone(&hook_observed);
+            async move {
+                assert_eq!(attempt.task_id(), TaskId::from_id(Id::new(42)));
+                assert_eq!(attempt.attempt(), 7);
+                hook_observed.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }
+        }),
+    ).unwrap();
 
     assert!(registry.has_external_cancellation_hook("example.image.resize"));
     registry

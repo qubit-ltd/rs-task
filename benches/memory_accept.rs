@@ -7,7 +7,6 @@
 // =============================================================================
 //! Measures typed in-memory task acceptance with different retained histories.
 
-use std::num::NonZeroUsize;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -109,9 +108,10 @@ async fn assert_history_size(store: &MemoryTaskStore, expected: u64, last_accept
 }
 
 async fn measure_group(history: u64) -> Vec<Duration> {
-    let store = MemoryTaskStore::with_payload_budget(
-        usize::try_from(history).expect("history fits usize"),
-        NonZeroUsize::new(PAYLOAD_BUDGET).expect("budget is positive"),
+    let store = MemoryTaskStore::with_options(
+        qubit_task::store::MemoryStoreOptions::new(usize::try_from(history).expect("history fits usize"))
+            .max_payload_bytes(PAYLOAD_BUDGET)
+            .expect("positive budget"),
     );
     let request = request();
     let mut next_id = 1_u64;

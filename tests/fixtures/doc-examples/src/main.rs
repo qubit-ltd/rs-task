@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if service
-                .get(accepted.id)
+                .get_summary(accepted.summary.id)
                 .await?
                 .is_some_and(|task| task.state.is_terminal())
             {

@@ -47,10 +47,9 @@ use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::stream_key;
-use qubit_model_id::ModelIdBuf;
 use qubit_spi::AsyncServiceProvider;
 use qubit_spi::ProviderSelection;
-use qubit_task::CancellationMode;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -344,14 +343,10 @@ async fn service(
     )
     .event_bus(bus)
     .notification_shutdown_timeout(timeout);
-    builder.handlers_mut().register::<typed_support::ExamplePayload, _>(
-        TaskHandlerDescriptor {
-            kind_id: "example.process".into(),
-            payload_type_id: ModelIdBuf::try_from("example.TaskPayload")?,
-            accepted_schema_versions: vec![1],
-            cancellation_mode: CancellationMode::Cooperative,
-        },
+    builder.register_handler_with_options::<typed_support::ExamplePayload, _>(
+        TaskHandlerDescriptor::for_payload::<typed_support::ExamplePayload>("example.process", 1),
         Arc::new(Handler { started }),
+        HandlerOptions::new().with_cooperative_cancellation(),
     )?;
     Ok((builder.build().await?, receiver))
 }
@@ -361,7 +356,7 @@ async fn service(
 async fn terminal(service: &TaskExecutionService, id: TaskId) -> Result<TaskState, Box<dyn Error>> {
     tokio::time::timeout(DEADLINE, async {
         loop {
-            let summary = service.get(id).await?.expect("accepted task is retained");
+            let summary = service.get_summary(id).await?.expect("accepted task is retained");
             if summary.state.is_terminal() {
                 return Ok::<_, TaskServiceError>(summary.state);
             }
@@ -528,24 +523,24 @@ async fn test_typed_lifecycle_and_cancellation_reach_durable_consumer() -> TestR
     let done = service
         .submit(typed_support::request(serde_json::json!({}), "success"))
         .await?;
-    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(done.id));
-    assert_eq!(terminal(&service, done.id).await?, TaskState::Succeeded);
+    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(done.summary.id));
+    assert_eq!(terminal(&service, done.summary.id).await?, TaskState::Succeeded);
     let cancelled = service
         .submit(typed_support::request(serde_json::json!({"cancel": true}), "cancel"))
         .await?;
     assert_eq!(
         tokio::time::timeout(DEADLINE, started.recv()).await?,
-        Some(cancelled.id)
+        Some(cancelled.summary.id)
     );
-    let _outcome = service.cancel(cancelled.id).await?;
-    assert_eq!(terminal(&service, cancelled.id).await?, TaskState::Cancelled);
+    let _outcome = service.request_cancel(cancelled.summary.id).await?;
+    assert_eq!(terminal(&service, cancelled.summary.id).await?, TaskState::Cancelled);
     service.shutdown().await?;
     let projection = consume(redis.url(), namespace)?;
-    assert_success(&projection, done.id);
-    assert_eq!(projection.get(&(cancelled.id, 0)), Some(&TaskState::Queued));
-    assert_eq!(projection.get(&(cancelled.id, 1)), Some(&TaskState::Running));
-    assert_eq!(projection.get(&(cancelled.id, 2)), Some(&TaskState::Running));
-    assert_eq!(projection.get(&(cancelled.id, 3)), Some(&TaskState::Cancelled));
+    assert_success(&projection, done.summary.id);
+    assert_eq!(projection.get(&(cancelled.summary.id, 0)), Some(&TaskState::Queued));
+    assert_eq!(projection.get(&(cancelled.summary.id, 1)), Some(&TaskState::Running));
+    assert_eq!(projection.get(&(cancelled.summary.id, 2)), Some(&TaskState::Running));
+    assert_eq!(projection.get(&(cancelled.summary.id, 3)), Some(&TaskState::Cancelled));
     assert_eq!(projection.len(), 7);
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
     Ok(())
@@ -565,9 +560,9 @@ async fn test_pruned_terminal_task_is_projected_from_state_checkpoint() -> TestR
         .await?;
     assert_eq!(
         tokio::time::timeout(DEADLINE, started.recv()).await?,
-        Some(submitted.id)
+        Some(submitted.summary.id)
     );
-    assert_eq!(terminal(&service, submitted.id).await?, TaskState::Succeeded);
+    assert_eq!(terminal(&service, submitted.summary.id).await?, TaskState::Succeeded);
     tokio::time::timeout(DEADLINE, async {
         while !store.list_event_outbox(128).await?.is_empty() {
             tokio::task::yield_now().await;
@@ -585,9 +580,9 @@ async fn test_pruned_terminal_task_is_projected_from_state_checkpoint() -> TestR
             .await?,
         1
     );
-    assert!(service.get(submitted.id).await?.is_none());
+    assert!(service.get_summary(submitted.summary.id).await?.is_none());
     let checkpoint = service
-        .get_state_checkpoint(submitted.id)
+        .get_state_checkpoint(submitted.summary.id)
         .await?
         .expect("pruned task retains its authoritative checkpoint");
     assert_eq!(checkpoint.state_version, 2);
@@ -600,7 +595,7 @@ async fn test_pruned_terminal_task_is_projected_from_state_checkpoint() -> TestR
             Topic::<TaskEvent>::new("task.lifecycle")?,
             TaskEvent {
                 schema_version: 1,
-                task_id: submitted.id,
+                task_id: submitted.summary.id,
                 state_version: 2,
                 state: TaskState::Succeeded,
                 correlation_key: None,
@@ -615,7 +610,7 @@ async fn test_pruned_terminal_task_is_projected_from_state_checkpoint() -> TestR
         &service,
     )?;
     assert_eq!(
-        DurableProjection::snapshot(projection_database.path(), submitted.id).map_err(test_error)?,
+        DurableProjection::snapshot(projection_database.path(), submitted.summary.id).map_err(test_error)?,
         (Some((2, TaskState::Succeeded)), vec![2]),
         "the first late notification projects current terminal state via checkpoint"
     );
@@ -638,13 +633,13 @@ async fn test_reconcile_missing_terminal_notification() -> TestResult {
         .submit(typed_support::request(serde_json::json!({}), "reconcile-tail"))
         .await?;
     let mut projection = DurableProjection::open(projection_database.path()).map_err(test_error)?;
-    projection.track(accepted.id).map_err(test_error)?;
-    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(accepted.id));
-    assert_eq!(terminal(&service, accepted.id).await?, TaskState::Succeeded);
+    projection.track(accepted.summary.id).map_err(test_error)?;
+    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(accepted.summary.id));
+    assert_eq!(terminal(&service, accepted.summary.id).await?, TaskState::Succeeded);
     service.shutdown().await?;
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
 
-    let running_event_id = format!("task:{}:1", accepted.id);
+    let running_event_id = format!("task:{}:1", accepted.summary.id);
     let mut redis_connection = redis::Client::open(redis.url())?.get_connection()?;
     let stream_entries: redis::streams::StreamRangeReply = redis::cmd("XRANGE")
         .arg(stream_key(namespace, "task.lifecycle"))
@@ -675,7 +670,7 @@ async fn test_reconcile_missing_terminal_notification() -> TestResult {
             .build()?,
         move |delivery| {
             let event = delivery.payload();
-            let retained = (event.task_id == accepted.id && event.state == TaskState::Running).then(|| event.clone());
+            let retained = (event.task_id == accepted.summary.id && event.state == TaskState::Running).then(|| event.clone());
             let _ = sender.send(retained);
             Ok::<(), DeliveryError>(())
         },
@@ -692,34 +687,34 @@ async fn test_reconcile_missing_terminal_notification() -> TestResult {
     projection
         .commit_snapshot(running.task_id, running.state_version, running.state.clone())
         .map_err(test_error)?;
-    let before_reconcile = DurableProjection::snapshot(projection_database.path(), accepted.id).map_err(test_error)?;
+    let before_reconcile = DurableProjection::snapshot(projection_database.path(), accepted.summary.id).map_err(test_error)?;
     assert_eq!(before_reconcile, (Some((1, TaskState::Running)), vec![1]));
-    assert!(projection.is_tracked(accepted.id).map_err(test_error)?);
+    assert!(projection.is_tracked(accepted.summary.id).map_err(test_error)?);
     drop(projection);
 
     // The terminal wire record was removed before creating the consumer group.
     // No terminal delivery or later event can trigger version-gap refresh.
     let latest = service
-        .get_state_checkpoint(accepted.id)
+        .get_state_checkpoint(accepted.summary.id)
         .await?
         .expect("terminal checkpoint");
     let mut reopened = DurableProjection::open(projection_database.path()).map_err(test_error)?;
     assert!(
         reopened
-            .reconcile(accepted.id, |_| Ok(Some((latest.state_version, latest.state.clone()))))
+            .reconcile(accepted.summary.id, |_| Ok(Some((latest.state_version, latest.state.clone()))))
             .map_err(test_error)?
     );
-    let terminal_snapshot = DurableProjection::snapshot(projection_database.path(), accepted.id).map_err(test_error)?;
+    let terminal_snapshot = DurableProjection::snapshot(projection_database.path(), accepted.summary.id).map_err(test_error)?;
     assert_eq!(terminal_snapshot, (Some((2, TaskState::Succeeded)), vec![1, 2]));
-    assert!(!reopened.is_tracked(accepted.id).map_err(test_error)?);
+    assert!(!reopened.is_tracked(accepted.summary.id).map_err(test_error)?);
     assert!(
         !reopened
-            .reconcile(accepted.id, |_| panic!("retired task must not be queried again"))
+            .reconcile(accepted.summary.id, |_| panic!("retired task must not be queried again"))
             .map_err(test_error)?,
         "a retired task must be skipped without querying or repeating its business effect"
     );
     assert_eq!(
-        DurableProjection::snapshot(projection_database.path(), accepted.id).map_err(test_error)?,
+        DurableProjection::snapshot(projection_database.path(), accepted.summary.id).map_err(test_error)?,
         terminal_snapshot
     );
     Ok(())
@@ -738,7 +733,7 @@ async fn test_redis_outage_retains_committed_events_until_restart() -> TestResul
     let done = first
         .submit(typed_support::request(serde_json::json!({}), "outage"))
         .await?;
-    assert_eq!(terminal(&first, done.id).await?, TaskState::Succeeded);
+    assert_eq!(terminal(&first, done.summary.id).await?, TaskState::Succeeded);
     tokio::time::timeout(DEADLINE, async {
         while bus.publish_metrics().errors == 0 {
             tokio::task::yield_now().await;
@@ -758,7 +753,7 @@ async fn test_redis_outage_retains_committed_events_until_restart() -> TestResul
     let (second, _) = service(reopened, fresh_bus.clone(), Duration::from_secs(5)).await?;
     second.shutdown().await?;
     let projection = consume(redis.url(), namespace)?;
-    assert_success(&projection, done.id);
+    assert_success(&projection, done.summary.id);
     assert_eq!(projection.len(), 3);
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
     let _report = fresh_bus.shutdown(ShutdownMode::Immediate).await?;
@@ -780,7 +775,7 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
         .submit(typed_support::request(serde_json::json!({}), "reply-loss"))
         .await?;
     tokio::time::timeout(DEADLINE, gate.wait_applied()).await?;
-    assert_eq!(terminal(&first, done.id).await?, TaskState::Succeeded);
+    assert_eq!(terminal(&first, done.summary.id).await?, TaskState::Succeeded);
     assert_eq!(
         wires(redis.url(), namespace)?.len(),
         1,
@@ -814,7 +809,7 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
         "uncertain publication reuses the same EventId"
     );
     let projection = consume(redis.url(), namespace)?;
-    assert_success(&projection, done.id);
+    assert_success(&projection, done.summary.id);
     assert_eq!(projection.len(), 3, "four deliveries apply only three revisions");
     consume_durable(
         redis.url(),
@@ -823,7 +818,7 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
         projection_database.path(),
         &second,
     )?;
-    let first_snapshot = DurableProjection::snapshot(projection_database.path(), done.id).map_err(test_error)?;
+    let first_snapshot = DurableProjection::snapshot(projection_database.path(), done.summary.id).map_err(test_error)?;
     assert_eq!(first_snapshot.0, Some((2, TaskState::Succeeded)));
     assert_eq!(first_snapshot.1, vec![0, 1, 2]);
     consume_durable(
@@ -834,7 +829,7 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
         &second,
     )?;
     assert_eq!(
-        DurableProjection::snapshot(projection_database.path(), done.id).map_err(test_error)?,
+        DurableProjection::snapshot(projection_database.path(), done.summary.id).map_err(test_error)?,
         first_snapshot
     );
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
@@ -861,7 +856,7 @@ async fn test_outbox_crash_child() -> TestResult {
     let done = service
         .submit(typed_support::request(serde_json::json!({}), "crash"))
         .await?;
-    assert_eq!(terminal(&service, done.id).await?, TaskState::Succeeded);
+    assert_eq!(terminal(&service, done.summary.id).await?, TaskState::Succeeded);
     tokio::time::timeout(DEADLINE, store.reached.notified()).await?;
     assert_eq!(inner.list_event_outbox(128).await?.len(), 3);
     std::process::exit(91);
