@@ -13,6 +13,7 @@ use qubit_operation::ManagerLimits;
 use qubit_operation::ManagerOptions;
 use qubit_operation::ShutdownMode;
 use qubit_task::model::TaskState;
+use qubit_task::service::CancelOutcome;
 use tokio::sync::watch;
 
 use super::external_job::AttemptGates;
@@ -64,11 +65,18 @@ async fn terminal(
 }
 
 async fn shutdown_manager(manager: &AsyncOperationManager) {
-    manager
+    let report = manager
         .request_shutdown(ShutdownMode::Drain)
         .wait()
         .await
         .expect("operation manager drains");
+    let snapshot = report.snapshot;
+    assert_eq!(snapshot.active_operations, 0);
+    assert_eq!(snapshot.queued_operations, 0);
+    assert_eq!(snapshot.unconfirmed_users, 0);
+    assert_eq!(snapshot.cleaning_resources, 0);
+    assert_eq!(snapshot.recovery_groups, 0);
+    assert_eq!(snapshot.service_resources, 0);
 }
 
 #[tokio::test]
@@ -85,10 +93,13 @@ async fn cancel_holds_resources_until_cleanup() {
         .expect("service fixture");
         let accepted = service.submit(request).await.expect("submit managed task");
         activated(&gates).await;
-        service
-            .cancel(accepted.id)
-            .await
-            .expect("request cancellation");
+        assert_eq!(
+            service
+                .cancel(accepted.id)
+                .await
+                .expect("request cancellation"),
+            CancelOutcome::CancellationRequested
+        );
         gate(&mut gates.stop_seen.subscribe()).await;
         gate(&mut gates.parent_outcome_seen.subscribe()).await;
         assert_eq!(
@@ -263,10 +274,13 @@ async fn cancel_after_outcome_suppresses_retry() {
         activated(&first).await;
         open(&first.allow_outcome);
         gate(&mut first.parent_outcome_seen.subscribe()).await;
-        service
-            .cancel(accepted.id)
-            .await
-            .expect("persist late cancellation");
+        assert_eq!(
+            service
+                .cancel(accepted.id)
+                .await
+                .expect("persist late cancellation"),
+            CancelOutcome::CancellationRequested
+        );
         assert!(
             service
                 .get(accepted.id)
