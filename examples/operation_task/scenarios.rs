@@ -138,23 +138,16 @@ async fn shutdown_manager(manager: &AsyncOperationManager) {
 async fn cancel_holds_resources_until_cleanup() {
     let manager = manager(4);
     let gates = AttemptGates::new();
-    let (service, request) = fixture(
-        manager.clone(),
-        vec![Arc::clone(&gates)],
-        NonZeroU32::new(1).unwrap(),
-    )
-    .await
-    .expect("service fixture");
+    let (service, request) = fixture(manager.clone(), vec![Arc::clone(&gates)], NonZeroU32::new(1).unwrap())
+        .await
+        .expect("service fixture");
     let accepted = service.submit(request).await.expect("submit managed task");
     with_timeout_diagnostics(
         "cancel_holds_resources_until_cleanup",
         async {
             activated(&gates).await;
             assert_eq!(
-                service
-                    .cancel(accepted.id)
-                    .await
-                    .expect("request cancellation"),
+                service.cancel(accepted.id).await.expect("request cancellation"),
                 CancelOutcome::CancellationRequested
             );
             gate(&mut gates.stop_seen.subscribe()).await;
@@ -164,10 +157,7 @@ async fn cancel_holds_resources_until_cleanup() {
                 TaskState::Running
             );
 
-            let probe = service
-                .submit(probe_request())
-                .await
-                .expect("submit resource probe");
+            let probe = service.submit(probe_request()).await.expect("submit resource probe");
             // The managed attempt has reached its parent outcome but still owns
             // the task CPU reservation. Observe the probe remain queued while the
             // attempt's settlement gates are deliberately closed.
@@ -212,13 +202,9 @@ async fn cancel_holds_resources_until_cleanup() {
 async fn drain_waits_for_managed_attempt() {
     let manager = manager(4);
     let gates = AttemptGates::new();
-    let (service, request) = fixture(
-        manager.clone(),
-        vec![Arc::clone(&gates)],
-        NonZeroU32::new(1).unwrap(),
-    )
-    .await
-    .expect("service fixture");
+    let (service, request) = fixture(manager.clone(), vec![Arc::clone(&gates)], NonZeroU32::new(1).unwrap())
+        .await
+        .expect("service fixture");
     let accepted = service.submit(request).await.expect("submit managed task");
     with_timeout_diagnostics(
         "drain_waits_for_managed_attempt",
@@ -282,20 +268,14 @@ async fn retry_starts_only_after_settlement() {
             open(&first.allow_outcome);
             gate(&mut first.parent_outcome_seen.subscribe()).await;
             assert_eq!(service.get(accepted.id).await.unwrap().unwrap().attempt, 1);
-            assert!(
-                !*second.activated.borrow(),
-                "attempt 2 waits for attempt 1 cleanup"
-            );
+            assert!(!*second.activated.borrow(), "attempt 2 waits for attempt 1 cleanup");
 
             open(&first.allow_input_release);
             gate(&mut first.input_released.subscribe()).await;
             open(&first.allow_domain_settlement);
             gate(&mut first.domain_settled.subscribe()).await;
             assert_eq!(service.get(accepted.id).await.unwrap().unwrap().attempt, 1);
-            assert!(
-                !*second.activated.borrow(),
-                "settlement alone does not bypass cleanup"
-            );
+            assert!(!*second.activated.borrow(), "settlement alone does not bypass cleanup");
             open(&first.allow_cleanup);
             gate(&mut first.cleanup_finished.subscribe()).await;
             activated(&second).await;
@@ -304,10 +284,7 @@ async fn retry_starts_only_after_settlement() {
             open(&second.allow_domain_settlement);
             open(&second.allow_cleanup);
             gate(&mut second.cleanup_finished.subscribe()).await;
-            assert_eq!(
-                terminal(&service, accepted.id).await.state,
-                TaskState::Succeeded
-            );
+            assert_eq!(terminal(&service, accepted.id).await.state, TaskState::Succeeded);
             service.shutdown().await.expect("task service shutdown");
             shutdown_manager(&manager).await;
         },
@@ -340,20 +317,10 @@ async fn cancel_after_outcome_suppresses_retry() {
             open(&first.allow_outcome);
             gate(&mut first.parent_outcome_seen.subscribe()).await;
             assert_eq!(
-                service
-                    .cancel(accepted.id)
-                    .await
-                    .expect("persist late cancellation"),
+                service.cancel(accepted.id).await.expect("persist late cancellation"),
                 CancelOutcome::CancellationRequested
             );
-            assert!(
-                service
-                    .get(accepted.id)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .cancel_requested
-            );
+            assert!(service.get(accepted.id).await.unwrap().unwrap().cancel_requested);
             open(&first.allow_input_release);
             open(&first.allow_domain_settlement);
             gate(&mut first.domain_settled.subscribe()).await;
@@ -361,10 +328,7 @@ async fn cancel_after_outcome_suppresses_retry() {
             gate(&mut first.cleanup_finished.subscribe()).await;
             let failed = terminal(&service, accepted.id).await;
             assert!(matches!(failed.state, TaskState::Failed { .. }));
-            assert!(
-                !*second.activated.borrow(),
-                "late cancellation suppresses retry"
-            );
+            assert!(!*second.activated.borrow(), "late cancellation suppresses retry");
             service.shutdown().await.expect("task service shutdown");
             shutdown_manager(&manager).await;
         },
@@ -381,24 +345,25 @@ async fn rejected_root_does_not_activate_job() {
     let manager = manager(4);
     manager.close_admission();
     let gates = AttemptGates::new();
-    let (service, request) = fixture(
-        manager.clone(),
-        vec![Arc::clone(&gates)],
-        NonZeroU32::new(1).unwrap(),
-    )
-    .await
-    .expect("service fixture");
+    let (service, request) = fixture(manager.clone(), vec![Arc::clone(&gates)], NonZeroU32::new(1).unwrap())
+        .await
+        .expect("service fixture");
     let accepted = service.submit(request).await.expect("submit managed task");
     with_timeout_diagnostics(
         "rejected_root_does_not_activate_job",
         async {
-        let failed = terminal(&service, accepted.id).await;
-        assert!(matches!(failed.state, TaskState::Failed { ref category, .. } if category == "operation_admission"));
-        assert!(!*gates.activated.borrow(), "rejected root does not start external work");
-        let probe = service.submit(probe_request()).await.expect("probe retains service capacity");
-        assert_eq!(terminal(&service, probe.id).await.state, TaskState::Succeeded);
-        service.shutdown().await.expect("task service shutdown");
-        shutdown_manager(&manager).await;
+            let failed = terminal(&service, accepted.id).await;
+            assert!(
+                matches!(failed.state, TaskState::Failed { ref category, .. } if category == "operation_admission")
+            );
+            assert!(!*gates.activated.borrow(), "rejected root does not start external work");
+            let probe = service
+                .submit(probe_request())
+                .await
+                .expect("probe retains service capacity");
+            assert_eq!(terminal(&service, probe.id).await.state, TaskState::Succeeded);
+            service.shutdown().await.expect("task service shutdown");
+            shutdown_manager(&manager).await;
         },
         &service,
         accepted.id,
@@ -418,13 +383,9 @@ async fn rejected_child_does_not_activate_job() {
     let manager = AsyncOperationManager::new(options).expect("test operation manager");
     let gates = AttemptGates::new();
     open(&gates.allow_cleanup);
-    let (service, request) = fixture(
-        manager.clone(),
-        vec![Arc::clone(&gates)],
-        NonZeroU32::new(1).unwrap(),
-    )
-    .await
-    .expect("service fixture");
+    let (service, request) = fixture(manager.clone(), vec![Arc::clone(&gates)], NonZeroU32::new(1).unwrap())
+        .await
+        .expect("service fixture");
     let accepted = service.submit(request).await.expect("submit managed task");
     with_timeout_diagnostics(
         "rejected_child_does_not_activate_job",
@@ -433,8 +394,10 @@ async fn rejected_child_does_not_activate_job() {
             gate(&mut gates.input_released.subscribe()).await;
             gate(&mut gates.cleanup_finished.subscribe()).await;
             let failed = terminal(&service, accepted.id).await;
-        assert!(matches!(failed.state, TaskState::Failed { ref category, .. } if category == "operation_admission"));
-        assert!(!*gates.activated.borrow(), "rejected child does not activate the job");
+            assert!(
+                matches!(failed.state, TaskState::Failed { ref category, .. } if category == "operation_admission")
+            );
+            assert!(!*gates.activated.borrow(), "rejected child does not activate the job");
             assert!(*gates.cleanup_started.borrow(), "root operation was admitted");
             assert!(*gates.input_released.borrow(), "unstarted child returned its input");
             service.shutdown().await.expect("task service shutdown");

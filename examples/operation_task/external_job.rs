@@ -4,15 +4,31 @@
 //! facts. In particular, publishing an outcome never proves that the input
 //! has been released or that domain cleanup has completed.
 
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Waker;
 
-use qubit_operation::{
-    ChildOutcomeKind, ChildOutcomeSummary, ChildRelease, DiagnosticSummary, EffectFact,
-    EffectRecord, ExecutionFailure, ExecutionPhase, ExternalBindError, OperationControl,
-    OperationId, OperationOutcome, OperationScope, PreparedExternalOperation, ResourceRef,
-    SettlementReport, SettlementStatus, StopReason, StopReport,
-};
+use qubit_operation::ChildOutcomeKind;
+use qubit_operation::ChildOutcomeSummary;
+use qubit_operation::ChildRelease;
+use qubit_operation::DiagnosticSummary;
+use qubit_operation::EffectFact;
+use qubit_operation::EffectRecord;
+use qubit_operation::ExecutionFailure;
+use qubit_operation::ExecutionPhase;
+use qubit_operation::ExternalBindError;
+use qubit_operation::OperationControl;
+use qubit_operation::OperationId;
+use qubit_operation::OperationOutcome;
+use qubit_operation::OperationScope;
+use qubit_operation::PreparedExternalOperation;
+use qubit_operation::ResourceRef;
+use qubit_operation::SettlementReport;
+use qubit_operation::SettlementStatus;
+use qubit_operation::StopReason;
+use qubit_operation::StopReport;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
@@ -89,11 +105,7 @@ pub(super) struct ExternalJob {
 }
 
 impl ExternalJob {
-    pub(super) fn new(
-        runtime: Handle,
-        input: ResourceRef<Vec<u8>>,
-        gates: Arc<AttemptGates>,
-    ) -> Arc<Self> {
+    pub(super) fn new(runtime: Handle, input: ResourceRef<Vec<u8>>, gates: Arc<AttemptGates>) -> Arc<Self> {
         let (stop_tx, _) = watch::channel(None);
         Arc::new(Self {
             runtime,
@@ -296,15 +308,11 @@ impl PreparedExternalOperation<Vec<u8>, String> for ExternalJob {
             let mut state = self.state.lock().expect("external job state poisoned");
             let id = state.id.expect("manager binds before activation");
             state.activated = true;
-            let input = state
-                .input
-                .take()
-                .expect("input is claimed once on activation");
+            let input = state.input.take().expect("input is claimed once on activation");
             (id, input)
         };
         let stop_rx = self.stop_tx.subscribe();
-        self.runtime
-            .spawn(Arc::clone(&self).run(id, stop_rx, input));
+        self.runtime.spawn(Arc::clone(&self).run(id, stop_rx, input));
         Ok(())
     }
 
@@ -340,14 +348,23 @@ impl PreparedExternalOperation<Vec<u8>, String> for ExternalJob {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttemptGates, ExternalJob};
-    use qubit_operation::{
-        ManagerOptions, OperationControl, OperationManager, OperationOptions, OperationOutcome,
-        PreparedExternalOperation, StopReason,
-    };
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Wake;
+    use std::task::Waker;
+
+    use qubit_operation::ManagerOptions;
+    use qubit_operation::OperationControl;
+    use qubit_operation::OperationManager;
+    use qubit_operation::OperationOptions;
+    use qubit_operation::OperationOutcome;
+    use qubit_operation::PreparedExternalOperation;
+    use qubit_operation::StopReason;
     use tokio::sync::oneshot;
+
+    use super::AttemptGates;
+    use super::ExternalJob;
 
     struct NoopWake;
     impl Wake for NoopWake {
@@ -428,10 +445,7 @@ mod tests {
 
         let gates = rx.await.expect("abandon published");
         AttemptGates::wait(&gates.input_released).await;
-        assert!(
-            !*gates.activated.borrow(),
-            "abandon must not start a Tokio job"
-        );
+        assert!(!*gates.activated.borrow(), "abandon must not start a Tokio job");
         assert!(matches!(
             root.wait_outcome().await.expect("root outcome"),
             OperationOutcome::Succeeded(())

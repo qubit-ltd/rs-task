@@ -42,10 +42,7 @@ pub(super) struct ManagedHandler {
 }
 
 impl ManagedHandler {
-    pub(super) fn new(
-        manager: AsyncOperationManager,
-        attempts: Arc<Mutex<Vec<Arc<AttemptGates>>>>,
-    ) -> Self {
+    pub(super) fn new(manager: AsyncOperationManager, attempts: Arc<Mutex<Vec<Arc<AttemptGates>>>>) -> Self {
         Self { manager, attempts }
     }
 }
@@ -62,11 +59,7 @@ struct CleanupPolicy {
 }
 
 impl AsyncCleanup<Vec<u8>> for CleanupPolicy {
-    fn cleanup(
-        self: Arc<Self>,
-        resource: Vec<u8>,
-        _context: CleanupContext,
-    ) -> CleanupFuture<Vec<u8>> {
+    fn cleanup(self: Arc<Self>, resource: Vec<u8>, _context: CleanupContext) -> CleanupFuture<Vec<u8>> {
         Box::pin(async move {
             AttemptGates::open(&self.gates.cleanup_started);
             AttemptGates::wait(&self.gates.allow_cleanup).await;
@@ -78,14 +71,9 @@ impl AsyncCleanup<Vec<u8>> for CleanupPolicy {
 }
 
 impl TaskHandler<ManagedPayload> for ManagedHandler {
-    fn run<'a>(
-        &'a self,
-        _payload: ManagedPayload,
-        context: TaskContext,
-    ) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(&'a self, _payload: ManagedPayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
-            let attempt_index =
-                usize::try_from(context.attempt().saturating_sub(1)).unwrap_or(usize::MAX);
+            let attempt_index = usize::try_from(context.attempt().saturating_sub(1)).unwrap_or(usize::MAX);
             let gates = self
                 .attempts
                 .lock()
@@ -112,9 +100,7 @@ impl TaskHandler<ManagedPayload> for ManagedHandler {
                 move |scope| async move {
                     let resources = scope
                         .resource_scope(ResourceScopeOptions { capacity: 1 })
-                        .map_err(|error| {
-                            ManagedError::Execution(format!("resource scope: {error}"))
-                        })?;
+                        .map_err(|error| ManagedError::Execution(format!("resource scope: {error}")))?;
                     let input = resources
                         .manage_with(
                             vec![0_u8; 32],
@@ -122,11 +108,8 @@ impl TaskHandler<ManagedPayload> for ManagedHandler {
                                 gates: Arc::clone(&gates_in_root),
                             },
                         )
-                        .map_err(|error| {
-                            ManagedError::Execution(format!("resource registration: {error:?}"))
-                        })?;
-                    let job =
-                        ExternalJob::new(runtime_in_root.clone(), input, Arc::clone(&job_gates));
+                        .map_err(|error| ManagedError::Execution(format!("resource registration: {error:?}")))?;
+                    let job = ExternalJob::new(runtime_in_root.clone(), input, Arc::clone(&job_gates));
                     let child_manager = scope.manager().as_async();
                     let child_options = OperationOptions {
                         requirement: ChildRequirement::Required,
@@ -160,20 +143,17 @@ impl TaskHandler<ManagedPayload> for ManagedHandler {
                         }
                         Ok(OperationOutcome::Stopped(_)) => Ok(Vec::new()),
                         Ok(OperationOutcome::Failed(error)) => Err(ManagedError::Execution(error)),
-                        Ok(OperationOutcome::ChildFailed(error)) => Err(ManagedError::Execution(
-                            format!("nested child failed: {:?}", error.operation_id),
-                        )),
-                        Ok(OperationOutcome::Panicked(error)) => Err(ManagedError::Execution(
-                            format!("nested child panicked: {error:?}"),
-                        )),
-                        Ok(OperationOutcome::ExecutionFailed(error)) => {
-                            Err(ManagedError::Execution(format!(
-                                "nested child execution failed: {error:?}"
-                            )))
-                        }
-                        Err(error) => Err(ManagedError::Execution(format!(
-                            "child outcome observation: {error}"
+                        Ok(OperationOutcome::ChildFailed(error)) => Err(ManagedError::Execution(format!(
+                            "nested child failed: {:?}",
+                            error.operation_id
                         ))),
+                        Ok(OperationOutcome::Panicked(error)) => {
+                            Err(ManagedError::Execution(format!("nested child panicked: {error:?}")))
+                        }
+                        Ok(OperationOutcome::ExecutionFailed(error)) => Err(ManagedError::Execution(format!(
+                            "nested child execution failed: {error:?}"
+                        ))),
+                        Err(error) => Err(ManagedError::Execution(format!("child outcome observation: {error}"))),
                     }
                 },
             );
@@ -235,9 +215,7 @@ impl TaskHandler<ManagedPayload> for ManagedHandler {
                 ));
             }
             match root_result.expect("checked above") {
-                OperationOutcome::Succeeded(output) => {
-                    Ok(TaskRunOutcome::Succeeded(TaskOutput { summary: output }))
-                }
+                OperationOutcome::Succeeded(output) => Ok(TaskRunOutcome::Succeeded(TaskOutput { summary: output })),
                 OperationOutcome::Failed(ManagedError::RetryableBusiness) => Err(task_error(
                     "managed_business",
                     "scenario requested a retryable business failure after child success",
@@ -261,8 +239,7 @@ impl TaskHandler<ManagedPayload> for ManagedHandler {
                         failure.outcome.kind,
                         local_stop_requested,
                         snapshot.stop.as_ref().map(|stop| stop.reason),
-                        *child_id_in_root.lock().expect("child identity poisoned")
-                            == Some(failure.operation_id),
+                        *child_id_in_root.lock().expect("child identity poisoned") == Some(failure.operation_id),
                         *gates.stop_seen.borrow(),
                     ) =>
                 {
@@ -316,14 +293,8 @@ enum First<T, E> {
 pub(super) fn tree_released(report: &SettlementReport) -> bool {
     report.all_released()
         && !report.children_truncated
-        && report
-            .children
-            .iter()
-            .all(|child| tree_released(&child.settlement))
-        && report
-            .external_settlement
-            .as_deref()
-            .is_none_or(tree_released)
+        && report.children.iter().all(|child| tree_released(&child.settlement))
+        && report.external_settlement.as_deref().is_none_or(tree_released)
 }
 
 fn task_error(category: &str, message: &str, retryable: bool) -> TaskRunError {
@@ -336,14 +307,22 @@ fn task_error(category: &str, message: &str, retryable: bool) -> TaskRunError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use qubit_operation::AsyncOperationManager;
+    use qubit_operation::ChildOutcomeKind;
+    use qubit_operation::ChildOutcomeSummary;
+    use qubit_operation::ChildSettlement;
+    use qubit_operation::DiagnosticSummary;
+    use qubit_operation::ManagerOptions;
+    use qubit_operation::OperationId;
+    use qubit_operation::OperationOptions;
+    use qubit_operation::SettlementReport;
+    use qubit_operation::SettlementStatus;
+    use qubit_operation::StopReason;
+
     use super::is_cancelled_child_failure;
     use super::tree_released;
-    use qubit_operation::{
-        AsyncOperationManager, ChildOutcomeKind, ChildOutcomeSummary, ChildSettlement,
-        DiagnosticSummary, ManagerOptions, OperationId, OperationOptions, SettlementReport,
-        SettlementStatus, StopReason,
-    };
-    use std::sync::Arc;
 
     fn report(id: OperationId, status: SettlementStatus) -> SettlementReport {
         SettlementReport {
@@ -425,8 +404,7 @@ mod tests {
         assert!(!tree_released(&parent));
 
         let mut external = report(parent_id, SettlementStatus::Released);
-        external.external_settlement =
-            Some(Arc::new(report(child_id, SettlementStatus::Transferred)));
+        external.external_settlement = Some(Arc::new(report(child_id, SettlementStatus::Transferred)));
         assert!(!tree_released(&external));
     }
 

@@ -88,8 +88,7 @@ impl ValueDecoder<[u8]> for JsonCodec {
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
-    ValueBytesCodecDescriptor::of::<JsonCodec, ManagedPayload>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonCodec, ManagedPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new(CODEC_ID),
     &JSON_DESCRIPTOR,
@@ -151,8 +150,7 @@ async fn fixture(
     )?;
 
     let service = builder.build().await?;
-    let mut request =
-        TaskRequest::new(MANAGED_KIND, 1, ValueCodecId::new(CODEC_ID), ManagedPayload);
+    let mut request = TaskRequest::new(MANAGED_KIND, 1, ValueCodecId::new(CODEC_ID), ManagedPayload);
     request.resource_limit.cpu_slots = 1;
     Ok((service, request))
 }
@@ -173,11 +171,7 @@ impl qubit_task::handler::TaskHandler<ManagedPayload> for ProbeHandler {
         _payload: ManagedPayload,
         _context: qubit_task::handler::TaskContext,
     ) -> qubit_task::store::TaskFuture<'a, qubit_task::handler::TaskRunResult> {
-        Box::pin(async {
-            Ok(qubit_task::handler::TaskRunOutcome::Succeeded(
-                TaskOutput::default(),
-            ))
-        })
+        Box::pin(async { Ok(qubit_task::handler::TaskRunOutcome::Succeeded(TaskOutput::default())) })
     }
 }
 
@@ -186,9 +180,7 @@ fn new_operation_manager() -> Result<AsyncOperationManager, qubit_operation::Man
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
         let manager = new_operation_manager()?;
         let gates = AttemptGates::new();

@@ -13,9 +13,9 @@ use qubit_progress::AsyncProgress;
 use qubit_progress::AsyncProgressBuilder;
 use qubit_progress::AsyncReporter;
 
-use crate::model::typed::TaskId;
 #[cfg(feature = "operation")]
 use super::attempt_cancellation::AttemptCancellation;
+use crate::model::typed::TaskId;
 
 /// Per-attempt identity and cooperative cancellation state for typed handlers.
 ///
@@ -124,13 +124,14 @@ impl TypedTaskContext {
         Arc::clone(&self.cancelled)
     }
 
-    /// Waits for a persisted cooperative cancellation request from the task service.
+    /// Waits for a persisted cooperative cancellation request from the task
+    /// service.
     ///
     /// This notification can be awaited repeatedly. Writes made directly to
-    /// [`cancellation_signal`](Self::cancellation_signal) remain visible through
-    /// [`is_cancelled`](Self::is_cancelled), but do not publish this notification.
-    /// Under cancellation modes other than `Cooperative`, this future may remain
-    /// pending indefinitely.
+    /// [`cancellation_signal`](Self::cancellation_signal) remain visible
+    /// through [`is_cancelled`](Self::is_cancelled), but do not publish
+    /// this notification. Under cancellation modes other than
+    /// `Cooperative`, this future may remain pending indefinitely.
     #[cfg(feature = "operation")]
     pub async fn wait_cancel_requested(&self) {
         self.cancellation.wait_requested().await;

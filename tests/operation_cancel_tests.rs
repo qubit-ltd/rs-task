@@ -5,29 +5,44 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Service-level coverage for the operation feature's cooperative cancel bridge.
+//! Service-level coverage for the operation feature's cooperative cancel
+//! bridge.
 
 #![cfg(feature = "operation")]
 
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use qubit_codec::{
-    ValueBytesCodecDescriptor, ValueBytesCodecRegistry, ValueCodecId, ValueCodecRegistration,
-    ValueCodecRegistrationSource, ValueDecoder, ValueEncoder,
-};
-use qubit_id::{Id, IdGenerationError, IdGenerator};
-use qubit_model_id::{HasModelId, ModelId, ModelIdBuf};
-use qubit_task::handler::{TaskRunOutcome, TaskRunResult};
-use qubit_task::model::{ResourceCapacity, TaskRunError};
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistration;
+use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
+use qubit_model_id::ModelId;
+use qubit_model_id::ModelIdBuf;
+use qubit_task::CancellationMode;
+use qubit_task::TaskContext;
+use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskHandler;
+use qubit_task::TaskHandlerDescriptor;
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
+use qubit_task::model::ResourceCapacity;
+use qubit_task::model::TaskRunError;
 use qubit_task::service::CancelOutcome;
-use qubit_task::store::{MemoryTaskStore, TaskFuture};
-use qubit_task::{
-    CancellationMode, TaskContext, TaskExecutionServiceBuilder, TaskHandler, TaskHandlerDescriptor,
-};
+use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::TaskFuture;
 use tokio::sync::Notify;
 
 #[derive(Clone)]
@@ -78,10 +93,7 @@ impl TaskHandler<Payload> for WaitingHandler {
         let entered = Arc::clone(&self.0);
         Box::pin(async move {
             entered.notify_one();
-            tokio::join!(
-                context.wait_cancel_requested(),
-                context.wait_cancel_requested()
-            );
+            tokio::join!(context.wait_cancel_requested(), context.wait_cancel_requested());
             Ok(TaskRunOutcome::Cancelled)
         })
     }
@@ -122,10 +134,7 @@ impl TaskHandler<Payload> for AttemptHandler {
         let contexts = Arc::clone(&self.contexts);
         Box::pin(async move {
             let attempt = context.attempt();
-            contexts
-                .lock()
-                .expect("contexts mutex")
-                .push(context.clone());
+            contexts.lock().expect("contexts mutex").push(context.clone());
             if attempt == 1 {
                 return Err(TaskRunError {
                     category: "retryable".into(),
@@ -145,14 +154,11 @@ async fn build_service<H: TaskHandler<Payload> + 'static>(
     handler: Arc<H>,
     with_hook: bool,
 ) -> qubit_task::service::TaskExecutionService {
-    let codecs = Arc::new(
-        ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION])
-            .expect("payload codec registers"),
-    );
+    let codecs =
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).expect("payload codec registers"));
     let store = Arc::new(MemoryTaskStore::new(8));
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(81_000))))
-            .capacity(ResourceCapacity::default());
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(81_000))))
+        .capacity(ResourceCapacity::default());
     let descriptor = TaskHandlerDescriptor {
         kind_id: "test.operation_cancel".into(),
         payload_type_id: ModelIdBuf::try_from("test.OperationCancelPayload").unwrap(),
@@ -221,10 +227,7 @@ async fn cooperative_cancellation_reaches_multiple_waiters_and_repeated_cancel()
     })
     .await
     .expect("both cancellation waiters complete");
-    assert!(matches!(
-        terminal.state,
-        qubit_task::model::TaskState::Cancelled
-    ));
+    assert!(matches!(terminal.state, qubit_task::model::TaskState::Cancelled));
     service.shutdown().await.expect("service shuts down");
 }
 
@@ -320,19 +323,13 @@ async fn cancellation_is_isolated_between_attempts() {
         service.cancel(accepted.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        attempt_contexts[1].wait_cancel_requested(),
-    )
-    .await
-    .expect("current attempt observes cancellation");
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(20),
-            attempt_contexts[0].wait_cancel_requested()
-        )
+    tokio::time::timeout(Duration::from_secs(1), attempt_contexts[1].wait_cancel_requested())
         .await
-        .is_err()
+        .expect("current attempt observes cancellation");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), attempt_contexts[0].wait_cancel_requested())
+            .await
+            .is_err()
     );
     service.shutdown().await.expect("service shuts down");
 }

@@ -5,8 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-mod diagnostics;
 mod attempt_cancellation_guard;
+mod diagnostics;
 mod external_cancel_entry;
 mod external_cancel_flight;
 mod external_cancel_result;
@@ -19,8 +19,8 @@ mod shutdown_progress;
 mod submission_operation;
 mod typed_service_core;
 
-pub(in crate::service::typed_task_execution_service) use external_cancel_entry::ExternalCancelEntry;
 pub(in crate::service::typed_task_execution_service) use attempt_cancellation_guard::AttemptCancellationGuard;
+pub(in crate::service::typed_task_execution_service) use external_cancel_entry::ExternalCancelEntry;
 pub(in crate::service::typed_task_execution_service) use external_cancel_flight::ExternalCancelFlight;
 pub(in crate::service::typed_task_execution_service) use external_cancel_result::ExternalCancelResult;
 pub(in crate::service::typed_task_execution_service) use in_flight_guard::InFlightGuard;

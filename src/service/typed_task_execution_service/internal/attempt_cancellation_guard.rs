@@ -9,10 +9,9 @@
 
 use std::sync::Arc;
 
+use super::TypedServiceCore;
 use crate::handler::typed::attempt_cancellation::AttemptCancellation;
 use crate::model::typed::TaskId;
-
-use super::TypedServiceCore;
 
 /// Removes only the exact state registered by this execution attempt.
 pub(in crate::service::typed_task_execution_service) struct AttemptCancellationGuard {
@@ -49,7 +48,9 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     use qubit_codec::ValueBytesCodecRegistry;
-    use qubit_id::{Id, IdGenerationError, IdGenerator};
+    use qubit_id::Id;
+    use qubit_id::IdGenerationError;
+    use qubit_id::IdGenerator;
 
     use super::*;
     use crate::handler::typed::attempt_cancellation::AttemptCancellation;
@@ -61,9 +62,7 @@ mod tests {
 
     impl IdGenerator<Id, IdGenerationError> for TestIds {
         fn generate(&self) -> Result<Id, IdGenerationError> {
-            Ok(Id::new(
-                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            ))
+            Ok(Id::new(self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
         }
     }
 
