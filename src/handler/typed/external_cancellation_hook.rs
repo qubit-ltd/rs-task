@@ -42,6 +42,6 @@ use crate::store::TaskFuture;
 /// ```
 ///
 /// The registry receives this hook through
-/// [`HandlerOptions::with_external_cancellation`].
+/// [`crate::HandlerOptions::with_external_cancellation`].
 pub type ExternalCancellationHook =
     Arc<dyn Fn(TaskAttempt) -> TaskFuture<'static, Result<(), TaskRunError>> + Send + Sync>;
