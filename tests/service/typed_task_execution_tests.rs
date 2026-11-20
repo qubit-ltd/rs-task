@@ -2086,9 +2086,8 @@ async fn test_running_limit_counts_external_cancel_hook() {
     let handler_release = Arc::new(tokio::sync::Semaphore::new(0));
     let hook_started = Arc::new(Notify::new());
     let hook_release = Arc::new(tokio::sync::Semaphore::new(0));
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1402))))
-            .max_running_tasks(NonZeroUsize::new(2).expect("limit is nonzero"));
+    let mut builder = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(1402))))
+        .max_running_tasks(NonZeroUsize::new(2).expect("limit is nonzero"));
     builder
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),

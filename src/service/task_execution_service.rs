@@ -844,8 +844,8 @@ impl TaskExecutionService {
     ///
     /// # Parameters
     ///
-    /// - `runner`: Shared service operations for writing, signaling, and
-    ///   waking dispatch.
+    /// - `runner`: Shared service operations for writing, signaling, and waking
+    ///   dispatch.
     /// - `admission`: Owned read guard retained until persistence and its
     ///   follow-up notification finish.
     /// - `command`: Compare-and-set transition to persist.
@@ -880,10 +880,8 @@ impl TaskExecutionService {
                 runner.core.scheduler_changed.notify_one();
                 Ok(CancelOutcome::CancelledBeforeRun)
             } else {
-                if cooperative {
-                    if let Some(state) = runner.core.cancellations.lock().get(&cancellation_key) {
-                        state.request(true);
-                    }
+                if cooperative && let Some(state) = runner.core.cancellations.lock().get(&cancellation_key) {
+                    state.request(true);
                 }
                 Ok(CancelOutcome::CancellationRequested)
             }

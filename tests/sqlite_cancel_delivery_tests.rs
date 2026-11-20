@@ -1,23 +1,41 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 #![cfg(feature = "sqlite")]
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use qubit_codec::{
-    ValueBytesCodecDescriptor, ValueBytesCodecRegistration, ValueBytesCodecRegistry, ValueCodecId,
-    ValueCodecRegistrationSource,
-};
-use qubit_id::{Id, IdGenerationError, IdGenerator};
-use qubit_model_id::{HasModelId, ModelId};
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistration;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistrationSource;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
+use qubit_model_id::ModelId;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
+use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
-use qubit_task::model::{TaskRequest, TaskState, TransitionCommand};
+use qubit_task::model::TaskRequest;
+use qubit_task::model::TaskState;
+use qubit_task::model::TransitionCommand;
 use qubit_task::service::TaskServiceError;
+use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::StoreError;
-use qubit_task::store::{SqliteTaskStore, TaskFuture, TaskStore};
-use qubit_task::{HandlerOptions, TaskExecutionServiceBuilder, TaskHandlerDescriptor};
+use qubit_task::store::TaskFuture;
+use qubit_task::store::TaskStore;
 use tokio::sync::Notify;
 
 #[derive(Clone)]
@@ -129,14 +147,11 @@ impl TaskStore for GateStore {
 }
 
 fn temp_db() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "sqlite-cancel-delivery-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ))
+    std::env::temp_dir().join(format!("sqlite-cancel-delivery-{}.sqlite", uuid::Uuid::new_v4()))
 }
 
 #[tokio::test]
-async fn blocked_task_cancel_write_keeps_store_owner_until_cas_returns() {
+async fn test_blocked_task_cancel_write_keeps_store_owner_until_cas_returns() {
     let path = temp_db();
     let sqlite = Arc::new(SqliteTaskStore::open(&path).expect("sqlite opens"));
     let gate = Arc::new(GateStore {
@@ -216,7 +231,7 @@ async fn blocked_task_cancel_write_keeps_store_owner_until_cas_returns() {
 }
 
 #[tokio::test]
-async fn committed_running_cancel_survives_caller_abort_and_reaches_handler() {
+async fn test_committed_running_cancel_survives_caller_abort_and_reaches_handler() {
     let path = temp_db();
     let sqlite = Arc::new(SqliteTaskStore::open(&path).expect("sqlite opens"));
     let gate = Arc::new(GateStore {
@@ -232,8 +247,7 @@ async fn committed_running_cancel_survives_caller_abort_and_reaches_handler() {
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
-    let mut builder =
-        TaskExecutionServiceBuilder::new(gate.clone(), registry, Arc::new(Ids(AtomicU64::new(17))));
+    let mut builder = TaskExecutionServiceBuilder::new(gate.clone(), registry, Arc::new(Ids(AtomicU64::new(17))));
     let handler_started = Arc::new(Notify::new());
     let handler_observed_cancel = Arc::clone(&handler_started);
     let handler_cancelled = Arc::new(Notify::new());
@@ -272,10 +286,7 @@ async fn committed_running_cancel_survives_caller_abort_and_reaches_handler() {
         .expect("handler starts");
 
     let conflict = service.request_cancel(id).await;
-    assert!(matches!(
-        conflict,
-        Err(TaskServiceError::Store(StoreError::Conflict))
-    ));
+    assert!(matches!(conflict, Err(TaskServiceError::Store(StoreError::Conflict))));
     assert!(
         tokio::time::timeout(Duration::from_millis(50), handler_cancelled.notified())
             .await
@@ -289,10 +300,7 @@ async fn committed_running_cancel_survives_caller_abort_and_reaches_handler() {
         .await
         .expect("running cancel CAS commits");
     let summary = sqlite.get_summary(id).await.unwrap().unwrap();
-    assert!(
-        summary.cancel_requested,
-        "intent is visible before the wrapper returns"
-    );
+    assert!(summary.cancel_requested, "intent is visible before the wrapper returns");
     cancel.abort();
     let _ = cancel.await;
     gate.release.notify_one();
@@ -321,7 +329,7 @@ async fn committed_running_cancel_survives_caller_abort_and_reaches_handler() {
 }
 
 #[tokio::test]
-async fn cancellation_store_panic_is_latched_and_propagated() {
+async fn test_cancellation_store_panic_is_latched_and_propagated() {
     let path = temp_db();
     let sqlite = Arc::new(SqliteTaskStore::open(&path).expect("sqlite opens"));
     let gate = Arc::new(GateStore {
@@ -337,11 +345,10 @@ async fn cancellation_store_panic_is_latched_and_propagated() {
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
-    let service =
-        TaskExecutionServiceBuilder::new(gate.clone(), registry, Arc::new(Ids(AtomicU64::new(27))))
-            .build()
-            .await
-            .unwrap();
+    let service = TaskExecutionServiceBuilder::new(gate.clone(), registry, Arc::new(Ids(AtomicU64::new(27))))
+        .build()
+        .await
+        .unwrap();
     let accepted = service
         .submit(TaskRequest::new(
             "missing.handler",

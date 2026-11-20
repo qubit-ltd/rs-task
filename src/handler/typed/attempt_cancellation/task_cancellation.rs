@@ -47,8 +47,8 @@ impl TaskCancellation {
     }
 
     /// Waits until the service publishes a cooperative cancellation request.
-    /// External cancellation requests are visible through [`is_requested`]
-    /// but do not complete this future.
+    /// External cancellation requests are visible through
+    /// [`Self::is_requested`] but do not complete this future.
     ///
     /// This future remains pending if the service-side sender closes before a
     /// cooperative request is published.
