@@ -158,6 +158,7 @@ async fn fixture(
 }
 
 /// Creates a one-CPU request for the immediately successful probe handler.
+#[cfg(test)]
 fn probe_request() -> TaskRequest<ManagedPayload> {
     let mut request = TaskRequest::new(PROBE_KIND, 1, ValueCodecId::new(CODEC_ID), ManagedPayload);
     request.resource_limit.cpu_slots = 1;
