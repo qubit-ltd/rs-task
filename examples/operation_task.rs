@@ -211,7 +211,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         service.shutdown().await?;
         let summary = service.get(accepted.id).await?.expect("task summary");
         println!("任务 {:?}", summary.state);
-        manager.request_shutdown(ShutdownMode::Drain).wait().await?;
+        let drain = manager.request_shutdown(ShutdownMode::Drain).wait().await?;
+        assert_eq!(drain.snapshot.active_operations, 0);
+        assert_eq!(drain.snapshot.queued_operations, 0);
+        assert_eq!(drain.snapshot.unconfirmed_users, 0);
+        assert_eq!(drain.snapshot.cleaning_resources, 0);
+        assert_eq!(drain.snapshot.recovery_groups, 0);
+        assert_eq!(drain.snapshot.service_resources, 0);
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }
