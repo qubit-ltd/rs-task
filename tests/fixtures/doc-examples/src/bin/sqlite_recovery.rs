@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     register_handler(&mut reopened)?;
     let recovered_service = reopened.build().await?;
     let recovered = recovered_service
-        .get(accepted.id)
+        .get_summary(accepted.summary.id)
         .await?
         .expect("the persisted task remains queryable");
     assert_eq!(recovered.state, TaskState::Succeeded);

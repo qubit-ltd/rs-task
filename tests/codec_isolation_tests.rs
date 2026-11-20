@@ -31,8 +31,7 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
-use qubit_task::CancellationMode;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
@@ -168,16 +167,10 @@ async fn test_submit_codec_does_not_block_current_thread_runtime() {
         codecs,
         Arc::clone(&ids) as Arc<dyn IdGenerator<Id, IdGenerationError>>,
     );
-    builder
-        .handlers_mut()
-        .register::<Payload, _>(
-            TaskHandlerDescriptor {
-                kind_id: "test.codec".into(),
-                payload_type_id: ModelIdBuf::parse("test.CodecIsolationPayload").expect("valid model id"),
-                accepted_schema_versions: vec![1],
-                cancellation_mode: CancellationMode::Cooperative,
-            },
+    builder.register_handler_with_options::<Payload, _>(
+            TaskHandlerDescriptor::for_payload::<Payload>("test.codec", 1),
             Arc::new(Handler),
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service builds");
@@ -276,9 +269,9 @@ async fn test_submit_codec_does_not_block_current_thread_runtime() {
     tokio::time::timeout(Duration::from_secs(2), decoder_gate.reached.notified())
         .await
         .expect("decoder enters before cancellation and shutdown checks");
-    let _ = service.cancel(accepted.id).await.expect("cancel during preparation");
+    let _ = service.request_cancel(accepted.summary.id).await.expect("cancel during preparation");
     let summary = service
-        .get(accepted.id)
+            .get_summary(accepted.summary.id)
         .await
         .expect("read cancellation state")
         .expect("task is retained");

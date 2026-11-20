@@ -49,8 +49,7 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
-use qubit_task::CancellationMode;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
@@ -380,16 +379,10 @@ fn service_builder(
         Arc::new(TestServiceIds(AtomicU64::new(9_000_000))),
     );
     if let Some(starts) = starts {
-        builder
-            .handlers_mut()
-            .register::<CrashPayload, _>(
-                TaskHandlerDescriptor {
-                    kind_id: "crash-worker".into(),
-                    payload_type_id: ModelIdBuf::try_from(PAYLOAD_TYPE_ID).expect("payload model ID is valid"),
-                    accepted_schema_versions: vec![1],
-                    cancellation_mode: CancellationMode::Unsupported,
-                },
+        builder.register_handler_with_options::<CrashPayload, _>(
+                TaskHandlerDescriptor::for_payload::<CrashPayload>("crash-worker", 1),
                 Arc::new(RestartHandler { starts, count, gate }),
+                HandlerOptions::new(),
             )
             .expect("restart handler registers");
     }
@@ -400,7 +393,7 @@ async fn wait_for_state(service: &TaskExecutionService, id: TaskId, state: TaskS
     timeout(DEADLINE, async {
         loop {
             if service
-                .get(id)
+            .get_summary(id)
                 .await
                 .expect("task summary reads")
                 .is_some_and(|summary| summary.state == state)
@@ -418,7 +411,7 @@ async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> TaskSu
     timeout(DEADLINE, async {
         loop {
             let summary = service
-                .get(id)
+            .get_summary(id)
                 .await
                 .expect("task summary reads")
                 .expect("task remains retained");
@@ -474,7 +467,7 @@ async fn assert_recovery(mode: &str) {
 
     if mode == "terminal" {
         let recovered = service
-            .get(id)
+            .get_summary(id)
             .await
             .expect("terminal summary reads")
             .expect("terminal task remains retained");
@@ -486,7 +479,7 @@ async fn assert_recovery(mode: &str) {
 
     assert_eq!(observed.recv().await.expect("recovered handler starts"), id);
     let running = service
-        .get(id)
+            .get_summary(id)
         .await
         .expect("running summary reads")
         .expect("running task exists");
@@ -496,12 +489,9 @@ async fn assert_recovery(mode: &str) {
         .submit(request(id))
         .await
         .expect("idempotent resubmission succeeds");
-    assert_eq!(duplicate.id, id, "restart does not accept the same work twice");
+    assert_eq!(duplicate.summary.id, id, "restart does not accept the same work twice");
     let history = service
-        .query(TaskQuery {
-            limit: 16,
-            ..TaskQuery::default()
-        })
+        .query(TaskQuery::default().page_size(16).expect("valid page size"))
         .await
         .expect("history reads");
     assert_eq!(history.records.len(), 1, "idempotent resubmission adds no history row");
@@ -561,7 +551,7 @@ async fn test_killed_running_worker_blocks_without_matching_handler() {
     )
     .await;
     let blocked = service
-        .get(id)
+            .get_summary(id)
         .await
         .expect("blocked summary reads")
         .expect("task remains retained");
@@ -580,11 +570,7 @@ async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
     let mut ids = BTreeSet::new();
     for expected in [256, 256, 1] {
         let page = store
-            .list_encoded(TaskQuery {
-                after: cursor,
-                limit: 256,
-                ..TaskQuery::default()
-            })
+            .list_encoded(TaskQuery::default().after(cursor.expect("query cursor is present")).page_size(256).expect("valid page size"))
             .await
             .expect("committed recovery page reads");
         assert_eq!(page.records.len(), expected);

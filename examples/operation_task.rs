@@ -28,12 +28,11 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
 use qubit_operation::AsyncOperationManager;
 use qubit_operation::ManagerOptions;
 use qubit_operation::ShutdownMode;
-use qubit_task::handler::CancellationMode;
-use qubit_task::handler::TaskHandlerDescriptor;
+use qubit_task::HandlerOptions;
+use qubit_task::TaskKind;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
@@ -131,23 +130,15 @@ async fn fixture(
         std::time::Duration::from_millis(1),
     )?);
 
-    builder.handlers_mut().register::<ManagedPayload, _>(
-        TaskHandlerDescriptor {
-            kind_id: MANAGED_KIND.into(),
-            payload_type_id: ModelIdBuf::try_from(PAYLOAD_MODEL_ID)?,
-            accepted_schema_versions: vec![1],
-            cancellation_mode: CancellationMode::Cooperative,
-        },
+    builder.register_handler_with_options::<ManagedPayload, _>(
+        TaskKind::<ManagedPayload>::new(MANAGED_KIND, 1, ValueCodecId::new(CODEC_ID)).descriptor(),
         Arc::new(ManagedHandler::new(manager, attempts)),
+        HandlerOptions::new().with_cooperative_cancellation(),
     )?;
-    builder.handlers_mut().register::<ManagedPayload, _>(
-        TaskHandlerDescriptor {
-            kind_id: PROBE_KIND.into(),
-            payload_type_id: ModelIdBuf::try_from(PAYLOAD_MODEL_ID)?,
-            accepted_schema_versions: vec![1],
-            cancellation_mode: CancellationMode::Cooperative,
-        },
+    builder.register_handler_with_options::<ManagedPayload, _>(
+        TaskKind::<ManagedPayload>::new(PROBE_KIND, 1, ValueCodecId::new(CODEC_ID)).descriptor(),
         Arc::new(ProbeHandler),
+        HandlerOptions::new().with_cooperative_cancellation(),
     )?;
 
     let service = builder.build().await?;
@@ -193,7 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
         let accepted = service.submit(request).await?;
         AttemptGates::wait(&gates.activated).await;
-        let _cancel = service.cancel(accepted.id).await?;
+        let _cancel = service.request_cancel(accepted.summary.id).await?;
         AttemptGates::wait(&gates.stop_seen).await;
         println!("已请求停止");
         AttemptGates::wait(&gates.parent_outcome_seen).await;
@@ -203,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("输入已释放");
         AttemptGates::open(&gates.allow_cleanup);
         service.shutdown().await?;
-        let summary = service.get(accepted.id).await?.expect("task summary");
+        let summary = service.get_summary(accepted.summary.id).await?.expect("task summary");
         println!("任务 {:?}", summary.state);
         let drain = manager.request_shutdown(ShutdownMode::Drain).wait().await?;
         assert_eq!(drain.snapshot.active_operations, 0);

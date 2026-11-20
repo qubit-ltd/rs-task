@@ -519,7 +519,7 @@ async fn test_idempotent_submit_wakes_without_counting_lifecycle_write() {
         .build()
         .await
         .expect("service starts");
-    let first = service.get(id).await.expect("task lookup").expect("seed exists");
+    let first = service.get_summary(id).await.expect("task lookup").expect("seed exists");
     assert!(first.state.is_terminal());
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -554,7 +554,7 @@ async fn test_idempotent_submit_wakes_without_counting_lifecycle_write() {
     // while the test was checking the durable outbox.
     spi.release_publish.notify_one();
     let after = service.notification_stats();
-    assert_eq!(repeated.id, id);
+    assert_eq!(repeated.summary.id, id);
     assert_eq!(repeated_outbox_count, 0, "idempotent repeat adds no durable outbox row");
     assert_eq!(after.queued, before.queued);
     assert_eq!(after.published, before.published);
@@ -708,7 +708,7 @@ async fn test_service_cancellation_persists_snapshot_before_publication() {
         .expect("blocked task");
     let (bus, spi) = bus(NOT_ACCEPTED_ERROR, true);
     let service = service(store.clone(), bus).await.expect("service");
-    let _outcome = service.cancel(id).await.expect("cancel blocked task");
+    let _outcome = service.request_cancel(id).await.expect("cancel blocked task");
     let events = store.list_event_outbox(128).await.expect("committed snapshot");
     assert_eq!(events.len(), 1, "enabling notifications does not backfill old history");
     assert_eq!(events[0].state_version, 2);
@@ -843,12 +843,7 @@ async fn test_failed_head_can_be_inspected_and_quarantined_to_resume_ordered_del
     assert!(spi.ids.lock().expect("ids").is_empty(), "later events stay ordered");
 
     service
-        .quarantine_failed_notification(
-            failure.task_id,
-            failure.state_version,
-            &failure.event_id,
-            " operator approved ",
-        )
+        .quarantine_failed_notification(&failure, " operator approved ")
         .await
         .expect("quarantine exact failed head");
     assert_eq!(service.notification_failure(), None);
@@ -890,26 +885,22 @@ async fn test_notification_quarantine_rejects_invalid_reason_and_stale_identity(
     })
     .await
     .expect("failed head becomes observable");
+    let stale_failure = qubit_task::service::NotificationFailure { state_version: 99, ..failure.clone() };
     assert!(matches!(
         service
-            .quarantine_failed_notification(failure.task_id, 99, &failure.event_id, "reason",)
+            .quarantine_failed_notification(&stale_failure, "reason")
             .await,
         Err(TaskServiceError::Store(StoreError::Conflict))
     ));
     assert!(matches!(
         service
-            .quarantine_failed_notification(failure.task_id, failure.state_version, &failure.event_id, "  ",)
+            .quarantine_failed_notification(&failure, "  ")
             .await,
         Err(TaskServiceError::InvalidRequest(_))
     ));
     assert!(matches!(
         service
-            .quarantine_failed_notification(
-                failure.task_id,
-                failure.state_version,
-                &failure.event_id,
-                &"界".repeat(1366),
-            )
+            .quarantine_failed_notification(&failure, &"界".repeat(1366))
             .await,
         Err(TaskServiceError::InvalidRequest(_))
     ));
@@ -917,7 +908,7 @@ async fn test_notification_quarantine_rejects_invalid_reason_and_stale_identity(
     assert!(service.shutdown().await.is_err(), "bad head remains pending");
     assert!(matches!(
         service
-            .quarantine_failed_notification(failure.task_id, failure.state_version, &failure.event_id, "reason",)
+            .quarantine_failed_notification(&failure, "reason")
             .await,
         Err(TaskServiceError::ShuttingDown)
     ));
@@ -965,7 +956,9 @@ async fn test_notification_quarantine_reports_unsupported_without_a_publisher() 
     assert_eq!(service.notification_failure(), None);
     assert!(matches!(
         service
-            .quarantine_failed_notification(TaskId::from_id(Id::new(43)), 0, "task:43:0", "operator reason",)
+            .quarantine_failed_notification(&qubit_task::service::NotificationFailure {
+                task_id: TaskId::from_id(Id::new(43)), state_version: 0, event_id: "task:43:0".into(), error: String::new(),
+            }, "operator reason")
             .await,
         Err(TaskServiceError::Store(StoreError::UnsupportedCapability))
     ));
@@ -975,12 +968,7 @@ async fn test_notification_quarantine_reports_unsupported_without_a_publisher() 
 #[tokio::test]
 async fn test_accepted_quarantine_command_is_revalidated_before_shutdown_finishes() {
     let (service, spi, failure) = blocked_retry_service().await;
-    let quarantine = service.quarantine_failed_notification(
-        failure.task_id,
-        failure.state_version,
-        &failure.event_id,
-        "operator decision",
-    );
+    let quarantine = service.quarantine_failed_notification(&failure, "operator decision");
     tokio::pin!(quarantine);
     assert!(
         poll!(quarantine.as_mut()).is_pending(),
@@ -1009,12 +997,7 @@ async fn test_accepted_quarantine_command_is_revalidated_before_shutdown_finishe
 async fn test_cancelling_quarantine_waiter_does_not_cancel_accepted_command() {
     let (service, spi, failure) = blocked_retry_service().await;
     {
-        let quarantine = service.quarantine_failed_notification(
-            failure.task_id,
-            failure.state_version,
-            &failure.event_id,
-            "operator decision",
-        );
+        let quarantine = service.quarantine_failed_notification(&failure, "operator decision");
         tokio::pin!(quarantine);
         assert!(
             poll!(quarantine.as_mut()).is_pending(),
@@ -1049,8 +1032,13 @@ async fn test_worker_shutdown_failure_replies_to_an_accepted_quarantine_command(
     .await
     .expect("worker is blocked in provider publication");
 
-    let quarantine =
-        service.quarantine_failed_notification(TaskId::from_id(Id::new(42)), 0, "task:42:0", "operator decision");
+    let observed = qubit_task::service::NotificationFailure {
+        task_id: TaskId::from_id(Id::new(42)),
+        state_version: 0,
+        event_id: "task:42:0".into(),
+        error: String::new(),
+    };
+    let quarantine = service.quarantine_failed_notification(&observed, "operator decision");
     tokio::pin!(quarantine);
     assert!(
         poll!(quarantine.as_mut()).is_pending(),

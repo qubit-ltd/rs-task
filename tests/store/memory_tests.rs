@@ -104,10 +104,9 @@ async fn test_memory_store_rejects_encoded_idempotency_conflicts_and_duplicate_i
 
 #[tokio_test]
 async fn test_memory_store_encoded_acceptance_obeys_payload_and_unfinished_limits() {
-    let store = MemoryTaskStore::with_limits(
-        0,
-        NonZeroUsize::new(2).expect("payload budget is positive"),
-        NonZeroUsize::new(1).expect("record limit is positive"),
+    let store = MemoryTaskStore::with_options(
+        qubit_task::store::MemoryStoreOptions::new(0)
+            .max_payload_bytes(2).unwrap().max_unfinished_records(1).unwrap(),
     );
     assert!(matches!(
         TypedTaskStore::accept_encoded(&store, encoded_id(95), encoded_request(None, vec![1, 2, 3])).await,
@@ -127,7 +126,7 @@ async fn test_memory_store_encoded_acceptance_obeys_payload_and_unfinished_limit
 
 #[tokio_test]
 async fn test_memory_store_payload_rejection_preserves_retained_tasks() {
-    let store = MemoryTaskStore::with_payload_budget(8, NonZeroUsize::new(4).expect("payload budget is positive"));
+    let store = MemoryTaskStore::with_options(qubit_task::store::MemoryStoreOptions::new(8).max_payload_bytes(4).expect("valid payload budget"));
     let first = TypedTaskStore::accept_encoded(&store, encoded_id(200), encoded_request(None, vec![1, 2]))
         .await
         .expect("first payload is accepted");
@@ -161,7 +160,7 @@ async fn test_memory_store_payload_rejection_preserves_retained_tasks() {
 
 #[tokio_test]
 async fn test_memory_store_encoded_acceptance_evicts_terminal_legacy_payloads() {
-    let store = MemoryTaskStore::with_payload_budget(1, NonZeroUsize::new(6).expect("payload budget is positive"));
+    let store = MemoryTaskStore::with_options(qubit_task::store::MemoryStoreOptions::new(1).max_payload_bytes(6).expect("valid payload budget"));
     let terminal = TypedTaskStore::accept_encoded(&store, encoded_id(98), encoded_request(None, vec![1, 2, 3]))
         .await
         .expect("initial typed request is accepted");
@@ -338,10 +337,9 @@ async fn test_memory_store_start_and_progress_versions_are_independent() {
 /// Prunes only old typed terminal tasks and releases their payload and key.
 #[tokio_test]
 async fn test_memory_store_prunes_typed_terminal_records_and_releases_capacity() {
-    let store = MemoryTaskStore::with_limits(
-        8,
-        NonZeroUsize::new(3).expect("payload budget is positive"),
-        NonZeroUsize::new(2).expect("record limit is positive"),
+    let store = MemoryTaskStore::with_options(
+        qubit_task::store::MemoryStoreOptions::new(8)
+            .max_payload_bytes(3).unwrap().max_unfinished_records(2).unwrap(),
     );
     let old = TypedTaskStore::accept_encoded(&store, encoded_id(110), encoded_request(Some("pruned-key"), vec![1, 2]))
         .await
@@ -498,13 +496,7 @@ async fn test_memory_store_ready_scan_and_retry_deadline_respect_retry_time() {
     assert_eq!(ready.records[0].id, queued.id);
     let history = TypedTaskStore::list_encoded(
         &store,
-        TaskQuery {
-            states: vec![TaskStateKind::Queued],
-            category: Some("integration".to_owned()),
-            correlation_key: Some("correlation-1".to_owned()),
-            limit: 1,
-            ..TaskQuery::default()
-        },
+        TaskQuery::default().with_states(vec![TaskStateKind::Queued]).with_category("integration".to_owned()).with_correlation_key("correlation-1".to_owned()).page_size(1).expect("valid page size"),
     )
     .await
     .expect("typed history filters by state, category, and correlation key");
@@ -589,12 +581,7 @@ async fn test_memory_store_encoded_history_filters_and_paginates() {
 
     let first = TypedTaskStore::list_encoded(
         &store,
-        TaskQuery {
-            category: Some("wanted".to_owned()),
-            correlation_key: Some("history-correlation".to_owned()),
-            limit: 1,
-            ..TaskQuery::default()
-        },
+        TaskQuery::default().with_category("wanted".to_owned()).with_correlation_key("history-correlation".to_owned()).page_size(1).expect("valid page size"),
     )
     .await
     .expect("first filtered page succeeds");
@@ -603,13 +590,7 @@ async fn test_memory_store_encoded_history_filters_and_paginates() {
 
     let second = TypedTaskStore::list_encoded(
         &store,
-        TaskQuery {
-            states: vec![TaskStateKind::Queued],
-            category: Some("wanted".to_owned()),
-            correlation_key: Some("history-correlation".to_owned()),
-            after: Some(cursor),
-            limit: 1,
-        },
+        TaskQuery::default().with_states(vec![TaskStateKind::Queued]).with_category("wanted".to_owned()).with_correlation_key("history-correlation".to_owned()).after(cursor).page_size(1).expect("valid page size"),
     )
     .await
     .expect("continuation page succeeds");

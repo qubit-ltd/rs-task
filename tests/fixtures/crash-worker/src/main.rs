@@ -28,8 +28,7 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
-use qubit_task::CancellationMode;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
@@ -208,14 +207,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         codecs,
         Arc::new(WorkerIds(AtomicU64::new(1_000_000))),
     );
-    builder.handlers_mut().register::<WorkerPayload, _>(
-        TaskHandlerDescriptor {
-            kind_id: "crash-worker".into(),
-            payload_type_id: ModelIdBuf::try_from("fixture.CrashWorkerPayload")?,
-            accepted_schema_versions: vec![1],
-            cancellation_mode: CancellationMode::Unsupported,
-        },
+    builder.register_handler_with_options::<WorkerPayload, _>(
+        TaskHandlerDescriptor::for_payload::<WorkerPayload>("crash-worker", 1),
         Arc::new(WorkerHandler { gate, started }),
+        HandlerOptions::new(),
     )?;
     let service = builder.build().await?;
     if starts.recv().await != Some(id) {
@@ -225,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if service
-                    .get(id)
+                    .get_summary(id)
                     .await?
                     .is_some_and(|summary| summary.state.is_terminal())
                 {

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::HandlerOptions;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskSummary;
@@ -35,9 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         codec_registry()?,
         Arc::new(FixtureIds::new(1)),
     );
-    builder
-        .handlers_mut()
-        .register::<FixturePayload, _>(descriptor("fixture")?, Arc::new(FixtureHandler))?;
+    builder.register_handler_with_options::<FixturePayload, _>(
+        descriptor("fixture")?, Arc::new(FixtureHandler), HandlerOptions::new(),
+    )?;
     let service = builder.build().await?;
     let accepted = service
         .submit(request(
@@ -46,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "fixture-run-1".into(),
         ))
         .await?;
-    let completed = wait_for_terminal(&service, accepted.id).await?;
+    let completed = wait_for_terminal(&service, accepted.summary.id).await?;
     assert!(matches!(completed.state, TaskState::Succeeded));
     service.shutdown().await?;
     Ok(())
@@ -56,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// expires.
 async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> Result<TaskSummary, Box<dyn Error>> {
     for _ in 0..1_000 {
-        if let Some(summary) = service.get(id).await? {
+        if let Some(summary) = service.get_summary(id).await? {
             if summary.state.is_terminal() {
                 return Ok(summary);
             }

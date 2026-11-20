@@ -30,6 +30,12 @@ use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskStore;
 
+struct ForwardingStore<S> { inner: Box<S> }
+
+impl<S: TaskStore> TaskStore for ForwardingStore<S> {
+    qubit_task::store::delegate_task_store!(inner; except []);
+}
+
 /// Owns one temporary database namespace and removes it when the fixture exits.
 #[cfg(feature = "sqlite")]
 struct SqliteFixture {
@@ -60,12 +66,12 @@ impl Drop for SqliteFixture {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    exercise_store(Arc::new(MemoryTaskStore::new(16)), task_id(700)).await?;
+    exercise_store(Arc::new(ForwardingStore { inner: Box::new(MemoryTaskStore::new(16)) }), task_id(700)).await?;
 
     #[cfg(feature = "sqlite")]
     {
         let fixture = SqliteFixture::new()?;
-        let store = Arc::new(SqliteTaskStore::open(&fixture.database)?);
+        let store = Arc::new(ForwardingStore { inner: Box::new(SqliteTaskStore::open(&fixture.database)?) });
         exercise_store(store, task_id(800)).await?;
         drop(fixture);
     }
@@ -109,6 +115,7 @@ async fn exercise_store(store: Arc<dyn TaskStore>, id: TaskId) -> Result<(), Box
             state: TaskState::Succeeded,
             cancel_requested: false,
             cancel_error: None,
+            retry_not_before_ms: None,
             output: None,
             finished_at_ms: Some(now_ms()),
         })
@@ -116,12 +123,7 @@ async fn exercise_store(store: Arc<dyn TaskStore>, id: TaskId) -> Result<(), Box
     assert_eq!(finished.state, TaskState::Succeeded);
 
     let page = store
-        .list_encoded(TaskQuery {
-            states: vec![TaskStateKind::Succeeded],
-            category: Some("fixture-smoke".into()),
-            limit: 10,
-            ..TaskQuery::default()
-        })
+        .list_encoded(TaskQuery::default().with_states(vec![TaskStateKind::Succeeded]).with_category("fixture-smoke").page_size(10).expect("valid page size"))
         .await?;
     assert!(page.records.iter().any(|summary| summary.id == id));
 

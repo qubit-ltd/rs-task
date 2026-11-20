@@ -88,7 +88,7 @@ async fn with_timeout_diagnostics<F>(
     F: Future<Output = ()>,
 {
     if tokio::time::timeout(CASE_TIMEOUT, future).await.is_err() {
-        let summary = service.get(id).await.ok().flatten();
+        let summary = service.get_summary(id).await.ok().flatten();
         let operation_snapshot = manager.request_shutdown(ShutdownMode::Drain).snapshot();
         for gates in gates {
             open(&gates.allow_outcome);
@@ -117,7 +117,7 @@ async fn terminal(
     id: qubit_task::model::typed::TaskId,
 ) -> qubit_task::model::typed::TaskSummary {
     loop {
-        if let Some(summary) = service.get(id).await.expect("read task summary")
+        if let Some(summary) = service.get_summary(id).await.expect("read task summary")
             && summary.state.is_terminal()
         {
             return summary;
@@ -154,13 +154,13 @@ async fn test_cancel_holds_resources_until_cleanup() {
         async {
             activated(&gates).await;
             assert_eq!(
-                service.cancel(accepted.id).await.expect("request cancellation"),
+                service.request_cancel(accepted.summary.id).await.expect("request cancellation"),
                 CancelOutcome::CancellationRequested
             );
             gate(&mut gates.stop_seen.subscribe()).await;
             gate(&mut gates.parent_outcome_seen.subscribe()).await;
             assert_eq!(
-                service.get(accepted.id).await.unwrap().unwrap().state,
+                service.get_summary(accepted.summary.id).await.unwrap().unwrap().state,
                 TaskState::Running
             );
 
@@ -168,37 +168,37 @@ async fn test_cancel_holds_resources_until_cleanup() {
             // The managed attempt has reached its parent outcome but still owns
             // the task CPU reservation. Observe the probe remain queued while the
             // attempt's settlement gates are deliberately closed.
-            let probe_now = service.get(probe.id).await.unwrap().unwrap();
+            let probe_now = service.get_summary(probe.summary.id).await.unwrap().unwrap();
             assert_eq!(probe_now.state, TaskState::Queued);
             assert_eq!(
-                service.get(accepted.id).await.unwrap().unwrap().state,
+                service.get_summary(accepted.summary.id).await.unwrap().unwrap().state,
                 TaskState::Running
             );
 
             open(&gates.allow_input_release);
             gate(&mut gates.input_released.subscribe()).await;
             assert_eq!(
-                service.get(accepted.id).await.unwrap().unwrap().state,
+                service.get_summary(accepted.summary.id).await.unwrap().unwrap().state,
                 TaskState::Running
             );
             open(&gates.allow_domain_settlement);
             gate(&mut gates.domain_settled.subscribe()).await;
             assert_eq!(
-                service.get(accepted.id).await.unwrap().unwrap().state,
+                service.get_summary(accepted.summary.id).await.unwrap().unwrap().state,
                 TaskState::Running
             );
             open(&gates.allow_cleanup);
             gate(&mut gates.cleanup_finished.subscribe()).await;
 
-            let cancelled = terminal(&service, accepted.id).await;
+            let cancelled = terminal(&service, accepted.summary.id).await;
             assert_eq!(cancelled.state, TaskState::Cancelled);
-            let probe_done = terminal(&service, probe.id).await;
+            let probe_done = terminal(&service, probe.summary.id).await;
             assert_eq!(probe_done.state, TaskState::Succeeded);
             service.shutdown().await.expect("task service shutdown");
             shutdown_manager(&manager).await;
         },
         &service,
-        accepted.id,
+        accepted.summary.id,
         &[&gates],
         &manager,
     )
@@ -224,7 +224,7 @@ async fn test_drain_waits_for_managed_attempt() {
             let rejected = service.submit(probe_request()).await;
             assert!(rejected.is_err(), "shutdown must reject new submissions");
             assert_eq!(
-                service.get(accepted.id).await.unwrap().unwrap().state,
+                service.get_summary(accepted.summary.id).await.unwrap().unwrap().state,
                 TaskState::Running
             );
 
@@ -247,7 +247,7 @@ async fn test_drain_waits_for_managed_attempt() {
             shutdown_manager(&manager).await;
         },
         &service,
-        accepted.id,
+        accepted.summary.id,
         &[&gates],
         &manager,
     )
@@ -274,14 +274,14 @@ async fn test_retry_starts_only_after_settlement() {
             activated(&first).await;
             open(&first.allow_outcome);
             gate(&mut first.parent_outcome_seen.subscribe()).await;
-            assert_eq!(service.get(accepted.id).await.unwrap().unwrap().attempt, 1);
+            assert_eq!(service.get_summary(accepted.summary.id).await.unwrap().unwrap().attempt, 1);
             assert!(!*second.activated.borrow(), "attempt 2 waits for attempt 1 cleanup");
 
             open(&first.allow_input_release);
             gate(&mut first.input_released.subscribe()).await;
             open(&first.allow_domain_settlement);
             gate(&mut first.domain_settled.subscribe()).await;
-            assert_eq!(service.get(accepted.id).await.unwrap().unwrap().attempt, 1);
+            assert_eq!(service.get_summary(accepted.summary.id).await.unwrap().unwrap().attempt, 1);
             assert!(!*second.activated.borrow(), "settlement alone does not bypass cleanup");
             open(&first.allow_cleanup);
             gate(&mut first.cleanup_finished.subscribe()).await;
@@ -291,12 +291,12 @@ async fn test_retry_starts_only_after_settlement() {
             open(&second.allow_domain_settlement);
             open(&second.allow_cleanup);
             gate(&mut second.cleanup_finished.subscribe()).await;
-            assert_eq!(terminal(&service, accepted.id).await.state, TaskState::Succeeded);
+            assert_eq!(terminal(&service, accepted.summary.id).await.state, TaskState::Succeeded);
             service.shutdown().await.expect("task service shutdown");
             shutdown_manager(&manager).await;
         },
         &service,
-        accepted.id,
+        accepted.summary.id,
         &[&first, &second],
         &manager,
     )
@@ -324,23 +324,23 @@ async fn test_cancel_after_outcome_suppresses_retry() {
             open(&first.allow_outcome);
             gate(&mut first.parent_outcome_seen.subscribe()).await;
             assert_eq!(
-                service.cancel(accepted.id).await.expect("persist late cancellation"),
+                service.request_cancel(accepted.summary.id).await.expect("persist late cancellation"),
                 CancelOutcome::CancellationRequested
             );
-            assert!(service.get(accepted.id).await.unwrap().unwrap().cancel_requested);
+            assert!(service.get_summary(accepted.summary.id).await.unwrap().unwrap().cancel_requested);
             open(&first.allow_input_release);
             open(&first.allow_domain_settlement);
             gate(&mut first.domain_settled.subscribe()).await;
             open(&first.allow_cleanup);
             gate(&mut first.cleanup_finished.subscribe()).await;
-            let failed = terminal(&service, accepted.id).await;
+            let failed = terminal(&service, accepted.summary.id).await;
             assert!(matches!(failed.state, TaskState::Failed { .. }));
             assert!(!*second.activated.borrow(), "late cancellation suppresses retry");
             service.shutdown().await.expect("task service shutdown");
             shutdown_manager(&manager).await;
         },
         &service,
-        accepted.id,
+        accepted.summary.id,
         &[&first, &second],
         &manager,
     )
@@ -359,7 +359,7 @@ async fn test_rejected_root_does_not_activate_job() {
     with_timeout_diagnostics(
         "rejected_root_does_not_activate_job",
         async {
-            let failed = terminal(&service, accepted.id).await;
+            let failed = terminal(&service, accepted.summary.id).await;
             assert!(
                 matches!(failed.state, TaskState::Failed { ref category, .. } if category == "operation_admission")
             );
@@ -368,12 +368,12 @@ async fn test_rejected_root_does_not_activate_job() {
                 .submit(probe_request())
                 .await
                 .expect("probe retains service capacity");
-            assert_eq!(terminal(&service, probe.id).await.state, TaskState::Succeeded);
+            assert_eq!(terminal(&service, probe.summary.id).await.state, TaskState::Succeeded);
             service.shutdown().await.expect("task service shutdown");
             shutdown_manager(&manager).await;
         },
         &service,
-        accepted.id,
+        accepted.summary.id,
         &[&gates],
         &manager,
     )
@@ -400,7 +400,7 @@ async fn test_rejected_child_does_not_activate_job() {
             gate(&mut gates.cleanup_started.subscribe()).await;
             gate(&mut gates.input_released.subscribe()).await;
             gate(&mut gates.cleanup_finished.subscribe()).await;
-            let failed = terminal(&service, accepted.id).await;
+            let failed = terminal(&service, accepted.summary.id).await;
             assert!(
                 matches!(failed.state, TaskState::Failed { ref category, .. } if category == "operation_admission")
             );
@@ -411,7 +411,7 @@ async fn test_rejected_child_does_not_activate_job() {
             shutdown_manager(&manager).await;
         },
         &service,
-        accepted.id,
+        accepted.summary.id,
         &[&gates],
         &manager,
     )
