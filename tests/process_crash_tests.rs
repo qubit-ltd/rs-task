@@ -570,15 +570,11 @@ async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
     let mut cursor = None;
     let mut ids = BTreeSet::new();
     for expected in [256, 256, 1] {
-        let page = store
-            .list_encoded(
-                TaskQuery::default()
-                    .after(cursor.expect("query cursor is present"))
-                    .page_size(256)
-                    .expect("valid page size"),
-            )
-            .await
-            .expect("committed recovery page reads");
+        let mut query = TaskQuery::default().page_size(256).expect("valid page size");
+        if let Some(after) = cursor {
+            query = query.after(after);
+        }
+        let page = store.list_encoded(query).await.expect("committed recovery page reads");
         assert_eq!(page.records.len(), expected);
         for summary in &page.records {
             assert!(cursor.is_none_or(|previous| TaskCursor::from(summary) > previous));
