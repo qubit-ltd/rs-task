@@ -115,8 +115,8 @@ impl TaskQuery {
     ///
     /// # Parameters
     ///
-    /// * `cursor` marks the last observed history item; it is excluded from
-    ///   the next page.
+    /// * `cursor` marks the last observed history item; it is excluded from the
+    ///   next page.
     ///
     /// # Returns
     ///

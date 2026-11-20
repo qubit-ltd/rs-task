@@ -30,7 +30,8 @@ impl InMemoryIdGenerator {
 }
 
 impl IdGenerator<Id, IdGenerationError> for InMemoryIdGenerator {
-    /// Advances the sequence once, returning an overflow error without wrapping.
+    /// Advances the sequence once, returning an overflow error without
+    /// wrapping.
     fn generate(&self) -> Result<Id, IdGenerationError> {
         self.sequence
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| sequence.checked_add(1))

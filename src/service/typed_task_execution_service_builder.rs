@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::sync::Arc;
+
 use qubit_codec::ValueBytesCodecRegistry;
 #[cfg(feature = "event-bus")]
 use qubit_event_bus::AsyncEventBus;
@@ -128,8 +129,8 @@ impl TaskExecutionServiceBuilder {
     ///
     /// # Parameters
     ///
-    /// * `history_capacity` - Maximum number of terminal task summaries kept
-    ///   by the in-memory store.
+    /// * `history_capacity` - Maximum number of terminal task summaries kept by
+    ///   the in-memory store.
     /// * `codecs` - Registry used to encode and decode typed task payloads.
     ///
     /// # Returns
@@ -335,8 +336,8 @@ impl TaskExecutionServiceBuilder {
     ///
     /// # Parameters
     ///
-    /// * `descriptor` - Kind, payload model, schema, and codec metadata used
-    ///   to route stored tasks.
+    /// * `descriptor` - Kind, payload model, schema, and codec metadata used to
+    ///   route stored tasks.
     /// * `handler` - Shared implementation invoked for matching requests.
     ///
     /// # Errors
@@ -359,10 +360,11 @@ impl TaskExecutionServiceBuilder {
     ///
     /// # Parameters
     ///
-    /// * `descriptor` - Kind, payload model, schema, and codec metadata used
-    ///   to route stored tasks.
+    /// * `descriptor` - Kind, payload model, schema, and codec metadata used to
+    ///   route stored tasks.
     /// * `handler` - Shared implementation invoked for matching requests.
-    /// * `options` - Cancellation behavior and attempt settings for the handler.
+    /// * `options` - Cancellation behavior and attempt settings for the
+    ///   handler.
     ///
     /// # Errors
     ///
@@ -414,7 +416,8 @@ impl TaskExecutionServiceBuilder {
     /// * `descriptor` - Route metadata used to resolve this handler.
     /// * `handler` - Async function invoked with the decoded request and task
     ///   context.
-    /// * `options` - Cancellation behavior and attempt settings for the handler.
+    /// * `options` - Cancellation behavior and attempt settings for the
+    ///   handler.
     ///
     /// # Errors
     ///

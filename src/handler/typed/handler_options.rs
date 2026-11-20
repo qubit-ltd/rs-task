@@ -14,7 +14,8 @@ use crate::model::TaskAttempt;
 use crate::model::TaskRunError;
 use crate::store::TaskFuture;
 
-/// Configures diagnostic and cancellation behavior for one handler registration.
+/// Configures diagnostic and cancellation behavior for one handler
+/// registration.
 ///
 /// Options are consumed during registration. The source label is retained for
 /// duplicate-kind diagnostics, while cancellation settings determine which

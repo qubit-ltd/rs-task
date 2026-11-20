@@ -57,8 +57,8 @@ impl<'a> TaskPages<'a> {
     /// exhausted page.
     ///
     /// A query failure is returned without advancing the cursor, so callers
-    /// may retry the same page request. If an empty page includes a continuation
-    /// cursor, another call continues from that cursor.
+    /// may retry the same page request. If an empty page includes a
+    /// continuation cursor, another call continues from that cursor.
     ///
     /// # Errors
     ///

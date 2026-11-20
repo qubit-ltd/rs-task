@@ -86,7 +86,8 @@ impl MemoryStoreOptions {
         Ok(self)
     }
 
-    /// Sets the maximum number of nonterminal task records retained by the store.
+    /// Sets the maximum number of nonterminal task records retained by the
+    /// store.
     ///
     /// # Parameters
     ///

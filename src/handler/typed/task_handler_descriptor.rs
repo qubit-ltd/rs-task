@@ -95,11 +95,7 @@ impl TaskHandlerDescriptor {
     }
 
     /// Builds a descriptor from already validated identity components.
-    fn new(
-        kind_id: String,
-        payload_type_id: ModelIdBuf,
-        accepted_schema_versions: Vec<u32>,
-    ) -> Self {
+    fn new(kind_id: String, payload_type_id: ModelIdBuf, accepted_schema_versions: Vec<u32>) -> Self {
         Self {
             kind_id,
             payload_type_id,
@@ -148,10 +144,7 @@ impl TaskHandlerDescriptor {
     /// The updated descriptor; registration later rejects an empty list,
     /// duplicates, or version zero.
     #[must_use]
-    pub fn with_accepted_schema_versions(
-        mut self,
-        versions: impl IntoIterator<Item = u32>,
-    ) -> Self {
+    pub fn with_accepted_schema_versions(mut self, versions: impl IntoIterator<Item = u32>) -> Self {
         self.accepted_schema_versions = versions.into_iter().collect();
         self
     }

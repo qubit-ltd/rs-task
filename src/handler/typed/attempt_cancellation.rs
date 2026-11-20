@@ -10,8 +10,9 @@ use tokio::sync::watch;
 mod internal;
 mod task_cancellation;
 
-use self::internal::CancellationState;
 pub use task_cancellation::TaskCancellation;
+
+use self::internal::CancellationState;
 
 /// Service-side sender for one attempt's cancellation state.
 pub(crate) struct AttemptCancellation {
