@@ -1,129 +1,133 @@
 # Typed task API
 
-[简体中文](typed-task-api.zh_CN.md) · [User guide](user-guide.md) · [Migration to 0.11](migration.md)
+[简体中文](typed-task-api.zh_CN.md) · [User guide](user-guide.md)
 
-The typed API keeps application values typed until acceptance. Payload identity has three independent parts: `type_id` identifies the model, `schema_version` identifies its schema, and `codec_id` identifies the bytes encoding. A handler is registered by `kind_id`, accepts exactly one payload `type_id`, and declares the schema versions it supports. A codec can support many schema versions; schema compatibility belongs to the handler descriptor.
+The 0.12 typed API binds a payload model to a task kind, schema version, and codec before submission. A handler descriptor declares the model and schema versions it accepts; registration checks the payload's `HasModelId` against that descriptor. A codec can support multiple schemas, while compatibility belongs to the handler descriptor.
 
-`Payload<T>` derives its stable model identity from `T: HasModelId`; callers supply only schema version, codec ID, and value. `TaskRequest<T>::encode` resolves a `ValueBytesCodecDescriptor` from `ValueBytesCodecRegistry` and creates an `EncodedPayload<T>`; storage receives its type-erased `StoredPayload`. The bytes registry uses `ValueEncoder<T>` and `ValueDecoder<[u8]>`. Task metadata uses `rs-metadata::Metadata` and is limited to 32 entries and 16 KiB serialized bytes by the task request, in addition to `rs-metadata`'s wire budgets.
+`TaskKind<T>` derives its model identity from `T: HasModelId` and creates both the descriptor and typed requests. `TaskRequest<T>::encode` resolves a `ValueBytesCodecDescriptor` from `ValueBytesCodecRegistry` and creates an `EncodedPayload<T>`; storage receives its type-erased `StoredPayload`. The bytes registry uses `ValueEncoder<T>` and `ValueDecoder<[u8]>`. Task metadata uses `rs-metadata::Metadata` and is limited to 32 entries and 16 KiB serialized bytes by the task request, in addition to `rs-metadata`'s wire budgets.
 
 The 16 KiB metadata output budget is enforced while JSON is encoded. When `TaskRequestEncodeError::MetadataTooLarge(n)` is returned, `n` is a known lower bound (currently 16,385), not the exact complete encoded size. Callers should use it to identify an over-limit request and must not present it as the exact original size. The enum shape, successful encoding path, and `StoredTaskRequest` wire representation are unchanged; this lower-bound diagnostic is a deliberate error-semantics change.
 
 ## End-to-end outline
 
-This example follows one request from a typed value through codec registration and handler execution. Application code injects the ID generator. In production, a Snowflake-style generator requires distinct node IDs for each process and suitable clock configuration across those processes.
+This example follows a typed request through codec registration, handler execution, acceptance, and terminal-state observation. It uses the in-memory builder for a standalone process; applications that need durable recovery provide a `TaskStore` and ID generator.
 
 ```rust,no_run
-use std::sync::Arc;
-use qubit_codec::{ValueBytesCodecDescriptor, ValueBytesCodecRegistration, ValueBytesCodecRegistry, ValueCodecId, ValueCodecRegistration, ValueCodecRegistrationSource};
-use qubit_model_id::{HasModelId, ModelId, ModelIdBuf};
-use qubit_progress::{Metric, Stage};
-use qubit_task::handler::TaskRunOutcome;
-use qubit_task::handler::{CancellationMode, TaskContext, TaskHandlerDescriptor};
-use qubit_task::TaskHandler;
-use qubit_task::model::{ResourceCapacity, TaskOutput};
-use qubit_task::model::{ResourceRequest, TaskRequest};
-use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::store::{MemoryTaskStore, TaskFuture};
-use serde::{Deserialize, Serialize};
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+use std::error::Error;
+use std::time::Duration;
 
-#[derive(Serialize, Deserialize)]
-struct Resize { image: String, width: u32 }
-impl HasModelId for Resize {
-    const MODEL_ID: ModelId = ModelId::new("example.Resize");
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistration;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistration;
+use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
+use qubit_model_id::HasModelId;
+use qubit_model_id::ModelId;
+use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskKind;
+use qubit_task::TaskState;
+use qubit_task::handler::TaskContext;
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::handler::TaskRunResult;
+use serde::Deserialize;
+use serde::Serialize;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct EchoPayload {
+    message: String,
 }
+
+impl HasModelId for EchoPayload {
+    const MODEL_ID: ModelId = ModelId::new("example.EchoPayload");
+}
+
 #[derive(Default)]
 struct JsonCodec;
-impl qubit_codec::ValueEncoder<Resize> for JsonCodec {
-    type Output = Vec<u8>; type Error = serde_json::Error;
-    fn encode(&mut self, value: &Resize) -> Result<Vec<u8>, Self::Error> { serde_json::to_vec(value) }
+
+impl ValueEncoder<EchoPayload> for JsonCodec {
+    type Output = Vec<u8>;
+    type Error = serde_json::Error;
+
+    fn encode(&mut self, value: &EchoPayload) -> Result<Self::Output, Self::Error> {
+        serde_json::to_vec(value)
+    }
 }
-impl qubit_codec::ValueDecoder<[u8]> for JsonCodec {
-    type Output = Resize; type Error = serde_json::Error;
-    fn decode(&mut self, bytes: &[u8]) -> Result<Resize, Self::Error> { serde_json::from_slice(bytes) }
+
+impl ValueDecoder<[u8]> for JsonCodec {
+    type Output = EchoPayload;
+    type Error = serde_json::Error;
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<Self::Output, Self::Error> {
+        serde_json::from_slice(bytes)
+    }
 }
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonCodec, Resize>();
+
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
-    ValueCodecId::new("example.resize.json"), &JSON_DESCRIPTOR,
-    ValueCodecRegistrationSource::new("example", "typed_task", "guide", 1),
+    ValueCodecId::new("example.echo.json"),
+    &JSON_DESCRIPTOR,
+    ValueCodecRegistrationSource::new("example", "rs-task", "readme_quick_start", 1),
 );
 
-struct ResizeHandler;
-impl TaskHandler<Resize> for ResizeHandler {
-    fn run<'a>(&'a self, input: Resize, context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
-        Box::pin(async move {
-            let mut progress = context.progress_builder()
-                .stage(Stage::new("resize", "Resize image"))
-                .metric(Metric::new("images", "Images").total(1))
-                .start_async().await.map_err(|e| qubit_task::model::TaskRunError {
-                    category: "progress".into(), message: e.to_string(), retryable: false,
-                })?;
-            if context.is_cancelled() { return Ok(TaskRunOutcome::Cancelled); }
-            let images = progress.metric("images").expect("configured metric");
-            images.start(1).expect("one image starts");
-            let _ = (input.image, input.width); // perform application work here
-            images.succeed(1).expect("one image succeeds");
-            progress.report_async().await.map_err(|e| qubit_task::model::TaskRunError {
-                category: "progress".into(), message: e.to_string(), retryable: false,
-            })?;
-            progress.finish_async().await.map_err(|e| qubit_task::model::TaskRunError {
-                category: "progress".into(), message: e.to_string(), retryable: false,
-            })?;
-            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
-        })
-    }
+async fn run_echo(payload: EchoPayload, _context: TaskContext) -> TaskRunResult {
+    println!("{}", payload.message);
+    Ok(TaskRunOutcome::success())
 }
 
-struct Ids(std::sync::atomic::AtomicU64);
-impl qubit_id::IdGenerator for Ids {
-    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
-        Ok(qubit_id::Id::new(self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
-    }
-}
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let codecs = ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?;
+    let echo = TaskKind::<EchoPayload>::new(
+        "example.echo",
+        1,
+        ValueCodecId::new("example.echo.json"),
+    );
+    let mut builder = TaskExecutionServiceBuilder::in_memory(256, codecs);
+    builder.register_handler_fn(echo.descriptor(), run_echo)?;
 
-async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    let mut builder = TaskExecutionServiceBuilder::new(
-        Arc::new(MemoryTaskStore::new(256)),
-        Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?),
-        Arc::new(Ids(std::sync::atomic::AtomicU64::new(1))),
-    ).capacity(ResourceCapacity {
-        cpu_slots: 4, memory_bytes: Some(8_000_000_000), disk_bytes: Some(50_000_000_000),
-        ..ResourceCapacity::default()
-    });
-    builder.handlers_mut().register::<Resize, _>(TaskHandlerDescriptor {
-        kind_id: "images.resize".into(),
-        payload_type_id: ModelIdBuf::try_from("example.Resize").unwrap(),
-        accepted_schema_versions: vec![1, 2],
-        cancellation_mode: CancellationMode::Cooperative,
-    }, Arc::new(ResizeHandler))?;
-    let tasks = builder.build().await?;
-    let mut request = TaskRequest::new("images.resize", 2,
-        ValueCodecId::new("example.resize.json"), Resize { image: "a.png".into(), width: 640 });
-    request.category = Some("image-processing".into());
-    request.resource_limit = ResourceRequest {
-        cpu_slots: 1, memory_bytes: Some(256_000_000), disk_bytes: Some(64_000_000),
-        ..ResourceRequest::default()
-    };
-    let accepted = tasks.submit(request).await?;
-    let current = tasks.get(accepted.id).await?.expect("accepted task exists");
-    println!("{} {:?}", current.id.to_padded_decimal(), current.state);
-    // A REST endpoint may call tasks.cancel(accepted.id).
+    let service = builder.build().await?;
+    let accepted = service
+        .submit(echo.request(EchoPayload {
+            message: "typed task completed".into(),
+        }))
+        .await?;
+    println!("accepted={} task={}", accepted.created, accepted.summary.id);
+
+    let terminal = service
+        .wait_terminal(accepted.summary.id, Duration::from_secs(5))
+        .await?;
+    assert_eq!(terminal.state, TaskState::Succeeded);
+    println!("task {} is {:?}", terminal.id, terminal.state);
+
+    service.shutdown().await?;
     Ok(())
 }
 ```
 
 ## Runtime contracts
 
-`TaskStore` is the public typed persistence contract. `MemoryTaskStore` and `SqliteTaskStore` implement it directly; the former UUID `LegacyTaskStore` adapter and its `RecoveryPage`/`scan_unfinished` API are not part of the current public contract. Open SQLite with `SqliteTaskStore::open(path)`. Typed schema v4 through v7 migrate in place and transactionally to v8, preserving tasks, active outbox rows, and quarantine records while adding terminal state checkpoints. Legacy UUID schemas are rejected without modification.
+`TaskStore` is the public typed persistence contract. `MemoryTaskStore` and `SqliteTaskStore` implement it directly; the former UUID `LegacyTaskStore` adapter and its `RecoveryPage`/`scan_unfinished` API are not part of the current public contract. Open SQLite with `SqliteTaskStore::open_async(path).await`. Typed schema v4 through v7 migrate in place and transactionally to v8, preserving tasks, active outbox rows, and quarantine records while adding terminal state checkpoints. Legacy UUID schemas are rejected without modification.
 
-`TaskExecutionService::get(id)` and typed history queries return `TaskSummary`, which contains lifecycle, routing, metadata, resource, and progress information without loading or decoding the stored payload bytes. `get_state_checkpoint(id)` is a smaller recovery read: it returns only the current state and version needed to repair a consumer projection, including after a terminal SQLite row has been pruned. A checkpoint is not a task summary and cannot restore payload, progress, or intermediate transitions.
+`TaskExecutionService::get_summary(id)` and typed history queries return `TaskSummary`, which contains lifecycle, routing, metadata, resource, and progress information without loading or decoding the stored payload bytes. `get_state_checkpoint(id)` is a smaller recovery read: it returns only the current state and version needed to repair a consumer projection, including after a terminal SQLite row has been pruned. A checkpoint is not a task summary and cannot restore payload, progress, or intermediate transitions.
 
 - `TaskId` wraps `rs-id::Id`; the service requires an injected `IdGenerator` that produces IDs unique across process restarts. Snowflake cross-process uniqueness depends on distinct node IDs and clock conditions. `to_padded_decimal()` produces a fixed-width decimal key for stable lexical database ordering.
 - CPU slots, GPU devices and labels, optional memory/disk bytes, and custom integer units are admission quotas reserved for each attempt. They account for concurrent reservations; they do not pin CPUs, discover or isolate GPUs at the OS level, or enforce actual process memory/disk usage. A request above configured capacity is unsatisfiable. A temporarily unavailable request stays queued while the scheduler considers later resource-compatible work, so ordering is not strict FIFO.
 - Queued or blocked tasks can be cancelled directly. For running work, `CancellationMode::Cooperative` signals `TaskContext::is_cancelled()` and the handler must stop at a safe boundary and return `TaskRunOutcome::Cancelled`. `ExternalHook` requires a registered external hook. `Unsupported` cannot stop a running attempt.
 - `max_running_tasks` bounds active handlers and `scan_page_size` bounds queued-summary scans. The scheduler keeps queued work in the store and creates execution tasks only when it has a running slot.
-- Synchronous payload codec work runs on Tokio's blocking pool: `submit()` encodes before acceptance, and a started attempt decodes before its async handler runs. Cancelling before the encoded request is handed to the store stops acceptance, but does not stop an encode already running; the completed bytes may be discarded. After acceptance is dispatched, the service owns the store operation and scheduler/notification wakeup. Cancelling or timing out the caller's `submit()` future does not cancel that operation, so the task may already be accepted or may be accepted later; shutdown waits for it. Use a stable idempotency key on the first submit and retry the identical request to retrieve the same task. If its ID is known, use `get()` to check it; use `cancel()` to cancel the task itself. A running attempt keeps its slot and resource reservation while decoding, and shutdown waits for preparation as well as the handler. A decoder panic is recorded as that task's `Panicked` outcome when panic unwinding is enabled. Blocking work cannot be forcibly cancelled or given a hard timeout, so a stuck codec can delay shutdown and runtime teardown.
+- Synchronous payload codec work runs on Tokio's blocking pool: `submit()` encodes before acceptance, and a started attempt decodes before its async handler runs. Cancelling before the encoded request is handed to the store stops acceptance, but does not stop an encode already running; the completed bytes may be discarded. After acceptance is dispatched, the service owns the store operation and scheduler/notification wakeup. Cancelling or timing out the caller's `submit()` future does not cancel that operation, so the task may already be accepted or may be accepted later; shutdown waits for it. Use a stable idempotency key on the first submit and retry the identical request to retrieve the same task. If its ID is known, use `get_summary()` to check it; use `request_cancel()` to request cancellation. A running attempt keeps its slot and resource reservation while decoding, and shutdown waits for preparation as well as the handler. A decoder panic is recorded as that task's `Panicked` outcome when panic unwinding is enabled. Blocking work cannot be forcibly cancelled or given a hard timeout, so a stuck codec can delay shutdown and runtime teardown.
 - A handler's `TaskRunError.retryable` controls retries. The default `max_attempts` is three, with `RetryPolicy` delays from one to sixty seconds. Positive retry delays are rounded up to whole milliseconds when persisted; this adds less than one millisecond to the policy delay and can put the stored interval slightly above `max_delay`. It does not promise the same wall-clock wait. The queued state and `retry_not_before_ms` are stored together, so restart recovery honors the deadline. Non-retryable failures, panics, cancellation, and exhausted attempts are terminal.
-- `resume_blocked(id, expected_state_version)` requeues a blocked task after the caller repairs configuration and restarts with a compatible handler or codec. Read the latest summary before retrying a state-version conflict. A pending cancellation prevents resumption.
+- `resume_blocked(&observed_summary)` requeues a blocked task after the caller repairs configuration and restarts with a compatible handler or codec. Read the latest summary before retrying a state-version conflict. A pending cancellation prevents resumption.
 - Background store failures are latched: writes and scheduling stop, diagnostic reads remain available, and `shutdown()` returns the stored failure after draining active work. SQLite typed schema versions 4 through 7 migrate in place and transactionally to version 8; legacy UUID schemas still require explicit data mapping.
 - `TaskContext::progress_builder()` uses `rs-progress::AsyncReporter`. `report_async()` awaits persistence before returning. Current stage and metric snapshots appear on later task reads without changing lifecycle `state_version`; reporting errors are returned to the handler. The reporter allocates its next progress version before awaiting the store and never reuses it after a failed or cancelled report. The asynchronous store may already have committed when its caller is cancelled, so subsequent versions can contain gaps; progress versions are independent of lifecycle `state_version`.
 - Each running attempt starts with an empty progress baseline at version `0`; the first `TaskStore::update_progress` command must use a positive version (normally `1`). Versions must increase strictly within the attempt, but may skip values. A direct `MemoryTaskStore` caller that previously wrote version `0` must start at `1`; the built-in reporter already does this.
@@ -137,8 +141,23 @@ Call `TaskStore::prune_terminal_before(finished_before_ms, max_rows)` from an ap
 
 For consumer version gaps, call `TaskExecutionService::get_state_checkpoint(id)`. It returns the current task state while the task is retained and the terminal checkpoint after SQLite pruning. `None`, a query error, or a checkpoint older than the notification must leave the delivery unacknowledged and on the Retry path. A checkpoint repairs a current-state projection; it does not replay omitted transitions or their side effects.
 
+## 0.12 service, queries, cancellation, and stores
+
+`submit` returns `AcceptOutcome`, which carries the accepted `TaskSummary` and a `created` flag from the atomic store operation. An idempotency hit returns the existing summary with `created == false`. `submit_checked` performs the same acceptance only after validating the current handler, model ID, schema version, and codec. Those checks run before ID generation and acceptance, so a strict failure has no store or notification side effect. Ordinary `submit` intentionally accepts a request with an invalid route; the scheduler records it as `Blocked`. Encoding errors remain structured as `TaskServiceError::RequestEncoding(TaskRequestEncodeError)`.
+
+Use `get_summary(id)` when the caller needs lifecycle, metadata, and progress; use `get_state_checkpoint(id)` when reconciling only current state. `wait_terminal(id, timeout)` reads checkpoints until it sees Succeeded, Failed, Panicked, or Cancelled. Blocked is not terminal. The timeout covers reads and sleeps together; a zero timeout allows a checkpoint read that is immediately ready. SQLite keeps terminal checkpoints after pruning task rows, so this API can still read their final state.
+
+`TaskQuery::default()` requests 50 records. Its fields are private; use `with_state`, `with_states`, `with_category`, `with_correlation_key`, `after`, and the read-only getters. `page_size(n)` accepts only 1 through 256. `service.pages(query)` creates a `TaskPages` iterator whose `next_page()` returns one page at a time. A failed read leaves its cursor unchanged for retry, and the last nonempty page is returned before `None`.
+
+`request_cancel(id)` expresses a request, not a completed outcome. Queued and Blocked tasks can return `CancelledBeforeRun`; cooperative running tasks return `CancellationRequested` and receive a read-only `TaskCancellation` handle from `TaskContext::cancellation()`. `is_requested()` observes a persisted request, while `wait_requested()` waits only for cooperative cancellation. Unsupported running cancellation returns `CancellationUnsupported`. External hooks receive `TaskAttempt`, and concurrent retries for that same attempt share the service-owned hook operation.
+
+Pass the exact summary observed by an operator to `resume_blocked(&summary)`. The service rereads and conditionally updates the current record, so stale snapshots produce a conflict rather than overwriting a newer state. Notification isolation similarly takes a `&NotificationFailure` snapshot and compares its task ID, state version, and event ID atomically.
+
+`MemoryStoreOptions::new(history_capacity)` supplies validated named limits; `max_payload_bytes` and `max_unfinished_records` reject zero. `SqliteTaskStore::open_async(path)` performs the synchronous open on Tokio's blocking pool. For custom wrappers, `delegate_task_store!(inner; except [accept_encoded]);` forwards every other method, including trait defaults, and rejects unknown or duplicate exceptions.
+
+
 ## Submission and external cancellation errors
 
 The submit method reports expected capacity and duplicate-request rejections as `TaskServiceError::SubmissionCapacityExceeded`, `UnfinishedTaskLimitExceeded`, `IdempotencyConflict`, or `DuplicateTaskId`. These rejections affect only that request; the service remains available. Other store failures keep their operational error and may latch the service unavailable.
 
-For a running task using `CancellationMode::ExternalHook`, `cancel()` persists the request and starts a service-owned hook operation. Concurrent calls for the same task attempt share that operation. Dropping or aborting a caller waiting for `cancel()` does not stop the hook, and `shutdown()` waits for it to finish. If the hook fails, `cancel()` returns `TaskServiceError::ExternalCancellationFailed` and the failure message remains in `TaskSummary.cancel_error`, bounded to 4096 UTF-8 bytes; call `cancel()` again to retry while the task is still running. A successful retry clears the diagnostic, but the handler remains responsible for reporting its terminal outcome. Make the hook idempotent for each (`TaskId`, `attempt`), because an external effect may have succeeded even when its acknowledgement was lost.
+For a running task using `CancellationMode::ExternalHook`, `request_cancel()` persists the request and starts a service-owned hook operation. Concurrent calls for the same task attempt share that operation. Dropping or aborting a caller waiting for `request_cancel()` does not stop the hook, and `shutdown()` waits for it to finish. If the hook fails, `request_cancel()` returns `TaskServiceError::ExternalCancellationFailed` and the failure message remains in `TaskSummary.cancel_error`, bounded to 4096 UTF-8 bytes; call `request_cancel()` again to retry while the task is still running. A successful retry clears the diagnostic, but the handler remains responsible for reporting its terminal outcome. Make the hook idempotent for each (`TaskId`, `attempt`), because an external effect may have succeeded even when its acknowledgement was lost.

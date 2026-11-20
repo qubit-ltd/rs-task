@@ -15,9 +15,8 @@ import tomllib
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 README_FILES = (PROJECT_ROOT / "README.md", PROJECT_ROOT / "README.zh_CN.md")
 EXPECTED_DEPENDENCIES = {
-    "qubit-task": {"version": "0.11", "features": ["sqlite"]},
+    "qubit-task": {"version": "0.12"},
     "qubit-codec": {"version": "0.17", "features": ["registry"]},
-    "qubit-id": {"version": "0.7", "features": ["serde"]},
     "qubit-model-id": "0.2",
     "serde": {"version": "1.0", "features": ["derive"]},
     "serde_json": "1.0",

@@ -5,9 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::error::Error;
 use std::time::Duration;
 
 use qubit_codec::ValueBytesCodecDescriptor;
@@ -18,25 +16,14 @@ use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
 use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
-use qubit_id::Id;
-use qubit_id::IdGenerationError;
-use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
 use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::TaskHandler;
-use qubit_task::handler::CancellationMode;
+use qubit_task::TaskKind;
+use qubit_task::TaskState;
 use qubit_task::handler::TaskContext;
-use qubit_task::handler::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
-use qubit_task::model::ResourceCapacity;
-use qubit_task::model::TaskOutput;
-use qubit_task::model::TaskRequest;
-use qubit_task::model::TaskState;
-use qubit_task::store::MemoryTaskStore;
-use qubit_task::store::TaskFuture;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -70,79 +57,44 @@ impl ValueDecoder<[u8]> for JsonCodec {
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("example.echo.json"),
     &JSON_DESCRIPTOR,
     ValueCodecRegistrationSource::new("example", "rs-task", "readme_quick_start", 1),
 );
 
-struct EchoHandler;
-
-impl TaskHandler<EchoPayload> for EchoHandler {
-    fn run<'a>(&'a self, payload: EchoPayload, _context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
-        Box::pin(async move {
-            println!("{}", payload.message);
-            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
-        })
-    }
+async fn run_echo(payload: EchoPayload, _context: TaskContext) -> TaskRunResult {
+    println!("{}", payload.message);
+    Ok(TaskRunOutcome::success())
 }
 
-struct SequentialIds(AtomicU64);
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let codecs = ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?;
+    let echo = TaskKind::<EchoPayload>::new(
+        "example.echo",
+        1,
+        ValueCodecId::new("example.echo.json"),
+    );
+    let mut builder = TaskExecutionServiceBuilder::in_memory(256, codecs);
+    builder.register_handler_fn(echo.descriptor(), run_echo)?;
 
-impl IdGenerator for SequentialIds {
-    fn generate(&self) -> Result<Id, IdGenerationError> {
-        Ok(Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
-    }
-}
+    let service = builder.build().await?;
+    let accepted = service
+        .submit(echo.request(EchoPayload {
+            message: "typed task completed".into(),
+        }))
+        .await?;
+    println!("accepted={} task={}", accepted.created, accepted.summary.id);
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    runtime.block_on(async {
-        let codec_registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?);
-        let mut builder = TaskExecutionServiceBuilder::new(
-            Arc::new(MemoryTaskStore::new(256)),
-            codec_registry,
-            Arc::new(SequentialIds(AtomicU64::new(1))),
-        )
-        .capacity(ResourceCapacity {
-            cpu_slots: 4,
-            ..ResourceCapacity::default()
-        });
+    let terminal = service
+        .wait_terminal(accepted.summary.id, Duration::from_secs(5))
+        .await?;
+    assert_eq!(terminal.state, TaskState::Succeeded);
+    println!("task {} is {:?}", terminal.id, terminal.state);
 
-        builder.handlers_mut().register::<EchoPayload, _>(
-            TaskHandlerDescriptor {
-                kind_id: "example.echo".into(),
-                payload_type_id: ModelIdBuf::try_from("example.EchoPayload")?,
-                accepted_schema_versions: vec![1],
-                cancellation_mode: CancellationMode::Cooperative,
-            },
-            Arc::new(EchoHandler),
-        )?;
-
-        let service = builder.build().await?;
-        let request = TaskRequest::new(
-            "example.echo",
-            1,
-            ValueCodecId::new("example.echo.json"),
-            EchoPayload {
-                message: "typed task completed".into(),
-            },
-        );
-        let accepted = service.submit(request).await?;
-        let summary = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let summary = service.get(accepted.id).await?.expect("accepted task exists");
-                if summary.state.is_terminal() {
-                    return Ok::<_, Box<dyn std::error::Error>>(summary);
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await??;
-        assert_eq!(summary.state, TaskState::Succeeded);
-        println!("task {} is {:?}", accepted.id, summary.state);
-        service.shutdown().await?;
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })
+    service.shutdown().await?;
+    Ok(())
 }

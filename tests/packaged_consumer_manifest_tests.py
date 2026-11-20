@@ -30,19 +30,19 @@ class ManifestRewriteTests(unittest.TestCase):
         ]
         for dependency in cases:
             with self.subTest(dependency=dependency):
-                source = f'''[package]\nname = "consumer"\n\n[features]\ndefault = []\nsqlite = ["qubit-task/sqlite"]\n\n[dependencies]\nqubit-task = {{ {dependency}, version = "^0.11", default-features = false }}\nqubit-id = {{ version = "^0.7" }}\n'''
+                source = f'''[package]\nname = "consumer"\n\n[features]\ndefault = []\nsqlite = ["qubit-task/sqlite"]\n\n[dependencies]\nqubit-task = {{ {dependency}, version = "^0.12", default-features = false }}\nqubit-id = {{ version = "^0.7" }}\n'''
                 rewritten = helper.rewrite_dependency_path(source, package_dir)
                 parsed = helper.tomllib.loads(rewritten)
                 self.assertEqual(parsed["dependencies"]["qubit-task"]["path"], str(package_dir.resolve()))
                 original = helper.tomllib.loads(source)
                 self.assertEqual(parsed["features"], original["features"])
                 self.assertEqual(parsed["dependencies"]["qubit-id"], original["dependencies"]["qubit-id"])
-                self.assertEqual(parsed["dependencies"]["qubit-task"]["version"], "^0.11")
+                self.assertEqual(parsed["dependencies"]["qubit-task"]["version"], "^0.12")
 
     def test_rejects_missing_ambiguous_or_unsupported_dependency(self):
         cases = [
             '[dependencies]\nqubit-id = "^0.7"\n',
-            '[dependencies]\nqubit-task = { version = "^0.11" }\n',
+            '[dependencies]\nqubit-task = { version = "^0.12" }\n',
             '[dependencies]\nqubit-task = { path = "a", path = "b" }\n',
             '[dependencies]\nqubit-task = {\npath = "a"\n}\n',
             '[dev-dependencies]\nqubit-task = { path = "a" }\n',
@@ -85,7 +85,7 @@ class ManifestRewriteTests(unittest.TestCase):
 
 
 class PackagedConsumerScriptTests(unittest.TestCase):
-    def run_with_fake_cargo(self, mode="ok", version="0.11.0"):
+    def run_with_fake_cargo(self, mode="ok", version="0.12.0"):
         temporary = tempfile.TemporaryDirectory(prefix="packaged-consumer-test-")
         base = Path(temporary.name)
         project = base / "project"
@@ -107,7 +107,7 @@ class PackagedConsumerScriptTests(unittest.TestCase):
         return temporary, result, log.read_text() if log.exists() else ""
 
     def test_current_and_alternate_versions_use_isolated_targets(self):
-        for version in ("0.11.0", "0.12.3"):
+        for version in ("0.12.0", "0.13.3"):
             with self.subTest(version=version):
                 temporary, result, log = self.run_with_fake_cargo(version=version)
                 try:
@@ -145,7 +145,7 @@ log = pathlib.Path(os.environ["FAKE_CARGO_LOG"])
 with log.open("a") as stream:
     stream.write("cwd=" + os.getcwd() + " args=" + " ".join(args) + "\n")
 mode = os.environ.get("FAKE_CARGO_MODE", "ok")
-version = os.environ.get("FAKE_PACKAGE_VERSION", "0.11.0")
+version = os.environ.get("FAKE_PACKAGE_VERSION", "0.12.0")
 if args[0] == "package" and "--list" in args:
     print("Cargo.toml")
 elif args[0] == "package":

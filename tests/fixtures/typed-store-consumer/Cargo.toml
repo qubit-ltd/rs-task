@@ -10,7 +10,7 @@ sqlite = ["qubit-task/sqlite"]
 typed-contract = []
 
 [dependencies]
-qubit-task = { path = "../../../", default-features = false , version = "^0.11" }
+qubit-task = { path = "../../../", default-features = false , version = "^0.12" }
 qubit-id = { version = "^0.7" }
 qubit-metadata = { version = "^0.7", features = ["json"] }
 qubit-model-id = { version = "^0.2" }
