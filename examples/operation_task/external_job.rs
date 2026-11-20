@@ -1,3 +1,11 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+
 //! Controlled Tokio work used by the `operation_task` example.
 //!
 //! The adapter keeps outcome, input release, and domain settlement as separate
@@ -377,7 +385,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn early_stop_and_each_lifecycle_fact_are_independent() {
+    async fn test_early_stop_and_each_lifecycle_fact_are_independent() {
         let manager = OperationManager::new(ManagerOptions::default()).expect("manager");
         let (tx, rx) = oneshot::channel();
         let runtime = tokio::runtime::Handle::current();
@@ -426,7 +434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abandoning_a_bound_job_returns_input_without_starting_it() {
+    async fn test_abandoning_a_bound_job_returns_input_without_starting_it() {
         let manager = OperationManager::new(ManagerOptions::default()).expect("manager");
         let (tx, rx) = oneshot::channel();
         let runtime = tokio::runtime::Handle::current();
