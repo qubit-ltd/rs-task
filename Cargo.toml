@@ -49,6 +49,22 @@ harness = false
 name = "memory_ready_scan"
 harness = false
 
+[[test]]
+name = "api_registration_012"
+path = "tests/api_registration_012_tests.rs"
+
+[[test]]
+name = "api_reporting_012"
+path = "tests/api_reporting_012_tests.rs"
+
+[[test]]
+name = "api_service_012"
+path = "tests/api_service_012_tests.rs"
+
+[[test]]
+name = "api_store_012"
+path = "tests/api_store_012_tests.rs"
+
 [dependencies]
 futures = "^0.3"
 fs2 = { version = "^0.4", optional = true }

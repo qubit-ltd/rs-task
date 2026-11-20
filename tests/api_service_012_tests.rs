@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
@@ -57,7 +64,7 @@ static DESC: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<Codec, 
 static CODEC: ValueBytesCodecRegistration = ValueBytesCodecRegistration::new(
     ValueCodecId::new("example.codec"),
     &DESC,
-    ValueCodecRegistrationSource::new("qubit-task", "api_service_012", "tests/api_service_012.rs", 1),
+    ValueCodecRegistrationSource::new("qubit-task", "api_service_012", "tests/api_service_012_tests.rs", 1),
 );
 struct Ids(AtomicU64);
 impl IdGenerator<Id, IdGenerationError> for Ids {
@@ -103,7 +110,7 @@ impl qubit_task::store::TaskStore for FailListOnceStore {
 }
 
 #[tokio::test]
-async fn public_service_exposes_paged_queries_and_terminal_wait_errors() {
+async fn test_public_service_exposes_paged_queries_and_terminal_wait_errors() {
     let (service, _, _) = service().await;
     let mut pages: TaskPages<'_> = service.pages(TaskQuery::default());
     assert!(pages.next_page().await.expect("query succeeds").is_none());
@@ -116,7 +123,7 @@ async fn public_service_exposes_paged_queries_and_terminal_wait_errors() {
 }
 
 #[tokio::test]
-async fn strict_invalid_route_has_no_id_or_accept_side_effect_but_submit_blocks() {
+async fn test_strict_invalid_route_has_no_id_or_accept_side_effect_but_submit_blocks() {
     let (service, store, ids) = service().await;
     let invalid = TaskKind::<Input>::new("missing", 1, ValueCodecId::new("example.codec")).request(Input(3));
     assert!(matches!(
@@ -159,7 +166,7 @@ async fn strict_invalid_route_has_no_id_or_accept_side_effect_but_submit_blocks(
 }
 
 #[tokio::test]
-async fn pages_deliver_every_record_and_wait_terminal_accepts_immediate_terminal_reads() {
+async fn test_pages_deliver_every_record_and_wait_terminal_accepts_immediate_terminal_reads() {
     let (service, _, _) = service().await;
     for n in 0..2 {
         let request = TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(n));
@@ -190,7 +197,7 @@ async fn pages_deliver_every_record_and_wait_terminal_accepts_immediate_terminal
 }
 
 #[tokio::test]
-async fn pages_retry_after_store_error_reuses_the_observed_cursor() {
+async fn test_pages_retry_after_store_error_reuses_the_observed_cursor() {
     let inner = Arc::new(MemoryTaskStore::new(16));
     let store = Arc::new(FailListOnceStore {
         inner,
@@ -236,7 +243,7 @@ async fn pages_retry_after_store_error_reuses_the_observed_cursor() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn wait_terminal_reads_checkpoint_after_sqlite_prunes_terminal_row() {
+async fn test_wait_terminal_reads_checkpoint_after_sqlite_prunes_terminal_row() {
     let directory = std::env::temp_dir().join(format!(
         "qubit-task-api-service-{}-{}",
         std::process::id(),
