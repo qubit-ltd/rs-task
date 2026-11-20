@@ -13,9 +13,9 @@ use qubit_progress::AsyncProgress;
 use qubit_progress::AsyncProgressBuilder;
 use qubit_progress::AsyncReporter;
 
-use crate::model::typed::TaskId;
 #[cfg(feature = "operation")]
 use super::attempt_cancellation::AttemptCancellation;
+use crate::model::typed::TaskId;
 
 /// Per-attempt identity and cooperative cancellation state for typed handlers.
 ///
@@ -40,6 +40,7 @@ pub struct TypedTaskContext {
     attempt: u32,
     /// Shared flag observed by this handler and its child work.
     cancelled: Arc<AtomicBool>,
+    /// Notification channel shared with the service's attempt cancellation state.
     #[cfg(feature = "operation")]
     cancellation: Arc<AttemptCancellation>,
     /// Reporter that persists progress events for this attempt.
