@@ -15,6 +15,7 @@ use crate::store::StoreError;
 /// # Examples
 ///
 /// ```
+/// use qubit_id::Id;
 /// use qubit_task::TaskId;
 /// use qubit_task::service::WaitTaskError;
 ///
