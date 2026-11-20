@@ -40,7 +40,8 @@ pub struct TypedTaskContext {
     attempt: u32,
     /// Shared flag observed by this handler and its child work.
     cancelled: Arc<AtomicBool>,
-    /// Notification channel shared with the service's attempt cancellation state.
+    /// Notification channel shared with the service's attempt cancellation
+    /// state.
     #[cfg(feature = "operation")]
     cancellation: Arc<AttemptCancellation>,
     /// Reporter that persists progress events for this attempt.

@@ -24,10 +24,17 @@ pub(in crate::service::typed_task_execution_service) struct AttemptCancellationG
 }
 
 impl AttemptCancellationGuard {
-    /// Creates a guard for a cancellation-map entry already inserted by the runner.
+    /// Creates a guard for a cancellation-map entry already inserted by the
+    /// runner.
     ///
     /// The guard removes the entry on every exit path, including early returns
     /// and unwinding, and checks pointer identity before removal.
+    ///
+    /// # Parameters
+    ///
+    /// - `core`: Service state containing the cancellation registration map.
+    /// - `key`: Task identity and attempt number registered by the runner.
+    /// - `state`: Exact cancellation state stored under `key`.
     pub(in crate::service::typed_task_execution_service) fn new(
         core: Arc<TypedServiceCore>,
         key: (TaskId, u32),
@@ -60,7 +67,8 @@ mod tests {
     use qubit_id::IdGenerationError;
     use qubit_id::IdGenerator;
 
-    use super::*;
+    use super::AttemptCancellationGuard;
+    use super::TypedServiceCore;
     use crate::handler::typed::attempt_cancellation::AttemptCancellation;
     use crate::model::typed::TaskId;
     use crate::service::TaskExecutionServiceBuilder;
