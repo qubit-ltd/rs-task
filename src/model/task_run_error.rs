@@ -57,8 +57,13 @@ impl TaskRunError {
     ///
     /// # Parameters
     ///
-    /// - `category`: Stable identifier used to classify the failure.
-    /// - `message`: Human-readable diagnostic associated with the failure.
+    /// * `category` is a stable application-defined failure category.
+    /// * `message` describes the failure for operators and logs.
+    ///
+    /// # Returns
+    ///
+    /// An error marked as safe to retry, subject to application idempotency
+    /// and side-effect rules.
     pub fn retryable(category: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             category: category.into(),
@@ -71,8 +76,12 @@ impl TaskRunError {
     ///
     /// # Parameters
     ///
-    /// - `category`: Stable identifier used to classify the failure.
-    /// - `message`: Human-readable diagnostic associated with the failure.
+    /// * `category` is a stable application-defined failure category.
+    /// * `message` describes the failure for operators and logs.
+    ///
+    /// # Returns
+    ///
+    /// An error marked as non-retryable.
     pub fn permanent(category: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             category: category.into(),

@@ -105,17 +105,42 @@ impl TypedTaskHandlerRegistry {
     ///
     /// `Some` borrows the registered descriptor; `None` means no handler uses
     /// that kind ID.
+    ///
+    /// # Parameters
+    ///
+    /// * `kind_id` is the stable routing key to look up.
+    #[must_use]
     #[inline]
     pub fn descriptor(&self, kind_id: &str) -> Option<&TaskHandlerDescriptor> {
-        self.handlers.get(kind_id).map(|registration| &registration.descriptor)
+        self.handlers
+            .get(kind_id)
+            .map(|registration| &registration.descriptor)
     }
 
     /// Removes a registered kind and all of its associated handler metadata.
+    ///
+    /// # Parameters
+    ///
+    /// * `kind_id` selects the registration to remove.
+    ///
+    /// # Returns
+    ///
+    /// `true` if a registration was removed, or `false` if no handler used the
+    /// kind ID.
     pub fn unregister(&mut self, kind_id: &str) -> bool {
         self.handlers.remove(kind_id).is_some()
     }
 
     /// Returns the cancellation mode for a registered kind.
+    ///
+    /// # Parameters
+    ///
+    /// * `kind_id` selects the registered handler.
+    ///
+    /// # Returns
+    ///
+    /// `Some` contains the configured mode; `None` means no handler uses the
+    /// kind ID.
     pub fn cancellation_mode(&self, kind_id: &str) -> Option<CancellationMode> {
         self.handlers
             .get(kind_id)
@@ -140,7 +165,7 @@ impl TypedTaskHandlerRegistry {
             .is_some_and(|registration| registration.external_cancellation_hook.is_some())
     }
 
-    /// Registers one typed handler from a direct application registration.
+    /// Registers one typed handler using default registration options.
     ///
     /// # Type Parameters
     ///
@@ -149,9 +174,9 @@ impl TypedTaskHandlerRegistry {
     ///
     /// # Parameters
     ///
-    /// * `descriptor` declares the stable kind, payload schema, and
-    ///   cancellation mode.
-    /// * `handler` is retained and shared for dispatches of this kind.
+    /// * `descriptor` identifies the kind and payload schema accepted by the
+    ///   handler.
+    /// * `handler` is the typed implementation retained for dispatch.
     ///
     /// # Returns
     ///
@@ -159,8 +184,9 @@ impl TypedTaskHandlerRegistry {
     ///
     /// # Errors
     ///
-    /// Returns an error if the descriptor is invalid, external cancellation
-    /// requires a hook, or its kind identifier is already registered.
+    /// Returns an error if the descriptor or payload model is invalid,
+    /// cancellation configuration is inconsistent, or the kind identifier
+    /// is already registered.
     #[inline]
     pub fn register<T, H>(
         &mut self,
@@ -175,6 +201,26 @@ impl TypedTaskHandlerRegistry {
     }
 
     /// Registers an async function handler without a handler struct.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` is the decoded payload type passed to the function.
+    /// * `F` is the function type.
+    /// * `Fut` is the future returned by the function.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` declares the handler kind, payload model, and schema.
+    /// * `handler` processes one payload and its execution context.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when registration succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the descriptor is invalid, its payload model does
+    /// not match `T`, or the kind is already registered.
     pub fn register_handler_fn<T, F, Fut>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -189,6 +235,27 @@ impl TypedTaskHandlerRegistry {
     }
 
     /// Registers an async function handler with cancellation options.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` is the decoded payload type passed to the function.
+    /// * `F` is the function type.
+    /// * `Fut` is the future returned by the function.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` declares the handler kind, payload model, and schema.
+    /// * `handler` processes one payload and its execution context.
+    /// * `options` configures diagnostic and cancellation behavior.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when registration succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the descriptor or cancellation options are
+    /// invalid, or the kind is already registered.
     pub fn register_handler_fn_with_options<T, F, Fut>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -200,8 +267,11 @@ impl TypedTaskHandlerRegistry {
         F: Fn(T, TypedTaskContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = crate::handler::TaskRunResult> + Send + 'static,
     {
+        /// Adapts a function and its output future to the handler trait.
         struct FunctionHandler<F, Fut> {
+            /// Application callback invoked for each prepared payload.
             function: F,
+            /// Retains the future type without storing a future before dispatch.
             marker: PhantomData<fn() -> Fut>,
         }
         impl<T, F, Fut> TypedTaskHandler<T> for FunctionHandler<F, Fut>
@@ -210,7 +280,12 @@ impl TypedTaskHandlerRegistry {
             F: Fn(T, TypedTaskContext) -> Fut + Send + Sync + 'static,
             Fut: Future<Output = crate::handler::TaskRunResult> + Send + 'static,
         {
-            fn run<'a>(&'a self, input: T, context: TypedTaskContext) -> TaskFuture<'a, crate::handler::TaskRunResult> {
+            /// Calls the application function and boxes its returned future.
+            fn run<'a>(
+                &'a self,
+                input: T,
+                context: TypedTaskContext,
+            ) -> TaskFuture<'a, crate::handler::TaskRunResult> {
                 Box::pin((self.function)(input, context))
             }
         }
@@ -224,7 +299,7 @@ impl TypedTaskHandlerRegistry {
         )
     }
 
-    /// Registers one typed handler and retains its source for conflict errors.
+    /// Registers a typed handler with its cancellation and diagnostic options.
     ///
     /// # Type Parameters
     ///
@@ -236,18 +311,18 @@ impl TypedTaskHandlerRegistry {
     /// * `descriptor` declares the stable kind, payload schema, and
     ///   cancellation mode.
     /// * `handler` is retained and shared for dispatches of this kind.
-    /// * `source` labels this registration in duplicate-kind errors.
+    /// * `options` controls the diagnostic source and cancellation behavior.
     ///
     /// # Returns
     ///
     /// `Ok(())` when registration succeeds.
     ///
-    /// Registers a typed handler with its cancellation and source options.
+    /// The payload type's model ID must match the descriptor before insertion.
     ///
-    /// The payload type's model ID must match the descriptor before the
-    /// handler is inserted.
-    #[inline]
-    /// Registers a typed handler with its cancellation and diagnostic options.
+    /// # Errors
+    ///
+    /// Returns an error when the descriptor, payload model, or cancellation
+    /// options are invalid, or the kind is already registered.
     pub fn register_with_options<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -274,9 +349,7 @@ impl TypedTaskHandlerRegistry {
     /// * `descriptor` declares the handler kind, payload schema, and
     ///   cancellation mode.
     /// * `handler` is retained and adapted for erased registry dispatch.
-    /// * `source` identifies this registration in duplicate-kind errors.
-    /// * `external_cancellation_hook` provides external cancellation behavior
-    ///   when required by the descriptor's cancellation mode.
+    /// * `options` supplies the diagnostic source and cancellation behavior.
     ///
     /// # Returns
     ///
@@ -284,9 +357,9 @@ impl TypedTaskHandlerRegistry {
     ///
     /// # Errors
     ///
-    /// Returns an error when the descriptor is invalid, the cancellation hook
-    /// does not match the descriptor's mode, or the kind identifier is already
-    /// registered.
+    /// Returns an error when the descriptor or payload model is invalid,
+    /// cancellation configuration is inconsistent, or the kind identifier is
+    /// already registered.
     fn insert<T, H>(
         &mut self,
         descriptor: TaskHandlerDescriptor,
@@ -304,7 +377,10 @@ impl TypedTaskHandlerRegistry {
                 actual: ModelIdBuf::from(T::MODEL_ID).to_string(),
             });
         }
-        match (options.cancellation_mode, options.external_cancellation_hook.is_some()) {
+        match (
+            options.cancellation_mode,
+            options.external_cancellation_hook.is_some(),
+        ) {
             (CancellationMode::ExternalHook, false) => {
                 return Err(HandlerRegistrationError::MissingExternalHook(
                     descriptor.kind_id().to_owned(),
