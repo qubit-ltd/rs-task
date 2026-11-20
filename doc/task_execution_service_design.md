@@ -2,7 +2,7 @@
 
 [English design document](task_execution_service_design.en.md)
 
-本文面向 `qubit-task` 0.11。带类型 SQLite 存储使用 `SqliteTaskStore::open` 打开，typed schema v4 到 v7 会在事务中原位迁移到 v8；旧 UUID schema 会被拒绝且不作修改。升级步骤见[迁移指南](migration.zh_CN.md)。
+本文描述当前 `qubit-task` 0.12 API。使用 `SqliteTaskStore::open_async(path).await` 异步打开 SQLite；typed schema v4 到 v7 会通过事务迁移到 v8，旧 UUID schema 会被拒绝且不作修改。0.12 API 重构不改变 schema 或已存任务契约。
 
 本文描述当前的 typed task API。旧的字节数组 request、精确 `(task_type, handler_version)` 路由、本地闭包提交和旧服务 builder 属于历史实现细节，不再构成公开契约。
 
@@ -16,11 +16,11 @@
 
 - `kind_id` 选择已注册的处理器。
 - `category` 是应用查询过滤条件，不影响处理器路由。
-- `Payload<T>` 将值与 `type_id`、`schema_version` 和 `codec_id` 绑定。
+- `TaskKind<T>` 将 kind、schema 版本、codec ID 和 payload model 绑定；`Payload<T>` 会随值保存模型身份。
 
 针对一个 `kind_id` 注册的处理器只接受一种 payload `type_id`，并声明支持的 schema 版本。codec 注册表独立映射 bytes codec，一个 codec 可以服务多个 schema 版本。编码会验证 typed request，并存储包含身份信息和字节的 `EncodedPayload`。任务开始后再执行解码与处理器分发。
 
-同步 codec 编码和解码会放到 Tokio blocking pool。编码完成后请求才会被接纳。在编码请求交给 store 前取消会停止后续接纳，但无法中断已经开始的编码；编码结果可能被丢弃。接纳派发后，服务持有的任务会完成 store 操作、映射结果并唤醒 scheduler 和可选 publisher。取消或超时调用方的 `submit()` future 不会取消该操作，因此任务可能已接纳，也可能稍后才接纳；shutdown 会等待这条接纳路径完成后才释放 store ownership。调用方应在首次提交前设置稳定幂等键，并以完全相同的请求重提来取回同一任务；若已知道任务 ID，可用 `get()` 查询；要取消任务本身，请调用 `cancel()`。任务开始后才解码；此时 running 名额和资源预留已经生效，会一直保留到准备阶段和异步 handler 都完成。in-flight guard 会让 shutdown 等待准备阶段。启用 panic unwind 时，decoder panic 会成为该任务的 `Panicked` 终态。blocking 调用无法强制取消，也没有硬超时，因此 codec 卡住可能拖延 shutdown 和 runtime 退出。
+同步 codec 编码和解码会放到 Tokio blocking pool。编码完成后请求才会被接纳。在编码请求交给 store 前取消会停止后续接纳，但无法中断已经开始的编码；编码结果可能被丢弃。接纳派发后，服务持有的任务会完成 store 操作、映射结果并唤醒 scheduler 和可选 publisher。取消或超时调用方的 `submit()` future 不会取消该操作，因此任务可能已接纳，也可能稍后才接纳；shutdown 会等待这条接纳路径完成后才释放 store ownership。调用方应在首次提交前设置稳定幂等键，并以完全相同的请求重提来取回同一任务；若已知道任务 ID，可用 `get_summary()` 查询；调用 `request_cancel()` 表达取消请求。任务开始后才解码；此时 running 名额和资源预留已经生效，会一直保留到准备阶段和异步 handler 都完成。in-flight guard 会让 shutdown 等待准备阶段。启用 panic unwind 时，decoder panic 会成为该任务的 `Panicked` 终态。blocking 调用无法强制取消，也没有硬超时，因此 codec 卡住可能拖延 shutdown 和 runtime 退出。
 
 `TaskSummary` 用于状态和历史查询，不会加载或解码持久化的 payload 字节。`get_state_checkpoint` 是更精简的消费者恢复查询，只包含当前状态和版本；SQLite 清理任务后仍可恢复终态投影，但不能恢复 payload、进度或中间状态迁移。
 
@@ -28,9 +28,11 @@
 
 `TaskExecutionServiceBuilder` 接收 typed `TaskStore`、bytes codec 注册表和 ID generator。`capacity(ResourceCapacity)` 配置本地执行引擎的资源预留额度。builder 持有 `TypedTaskHandlerRegistry`；服务构建完成后注册表固定。服务通过 store 写入已受理任务，并以不含 payload 的 `TaskSummary` 返回状态和历史查询结果。
 
+当前 API 还提供 `in_memory(history_capacity, codecs)`，用于构建进程内 memory 服务；builder 可直接调用 `register_handler`、`register_handler_fn` 和 `unregister_handler`。`TaskKind<T>` 从同一份 payload 定义生成 descriptor 与 request。`submit()` 返回 store 原子操作的 `AcceptOutcome { summary, created }`；`submit_checked()` 会在生成 ID 或写入前检查 handler、model、schema 和 codec。普通提交仍可接纳暂时无效的路由，之后由调度器标记为 `Blocked`。服务用 `get_summary` 读取完整摘要，用 `get_state_checkpoint` 读取较小恢复快照，并通过 `wait_terminal` 和 `TaskPages` 提供终态等待与逐页查询。`request_cancel` 返回请求结果，不会声称运行中的任务已经停止。`resume_blocked` 与通知隔离 API 接受已观察的摘要/诊断快照，并沿用条件更新 fencing。
+
 内存与 SQLite store 实现相同的 typed store 契约。SQLite 使用 typed numeric-ID schema；遇到不兼容的旧 UUID schema 时会返回诊断错误，不会静默重新解释数据。Store ownership 用于隔离并发服务实例；恢复会在取得 ownership 后继续处理保留的 queued 任务。服务在取得 owner 前启动清理 worker。若取得 owner 后取消 `build()` future，仍持有 owner 的 guard 会让该 worker 异步清理，并立即尝试释放。返回 `Failure` 后会使用同一 store 和 epoch 退避重试，等待从 25ms 开始并逐步加倍，最多 5 秒；不设最大次数，也不保证完成时限。永久 Failure 会持续重试并保留 store 引用。`OwnerConflict` 会结束旧 epoch 的清理，但不能据此认定 store 当前没有 owner。其他错误或 panic 也会结束该清理任务；永久挂起的释放和进程退出不由进程内 worker 恢复。因此在旧 ownership 实际释放前，替代 build 仍可能遇到 owner 冲突。
 
-单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 8 中，重启后仍会遵守；计算持久化期限前，正延迟会向上取整到整毫秒，最多增加不足 1 毫秒，但不构成实际墙钟等待保证；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可携带观察到的 state version 恢复 Blocked 任务。
+单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 8 中，重启后仍会遵守；计算持久化期限前，正延迟会向上取整到整毫秒，最多增加不足 1 毫秒，但不构成实际墙钟等待保证；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可将观察到的 `TaskSummary` 传给 `resume_blocked` 恢复 Blocked 任务。
 
 ## 执行与资源准入
 
@@ -54,6 +56,6 @@ service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UT
 
 配置 `TaskExecutionServiceBuilder::event_bus` 后，服务会启用 store outbox，并在任务恢复后启动异步 publisher。每个生命周期快照与任务状态迁移写入同一个 SQLite 事务。provider 确认接纳前，outbox 行会保留并重试，因此发布可能重复；收到 `Accepted` 后才删除该行。`Accepted` 不保证 Redis 已持久化或消费者已收到：若 Redis 在持久化前故障，SQLite 行已删除的通知仍会丢失，因此不能承诺通知至少一次送达。该语义与任务 handler 的至少一次执行不同。此功能要求 store 提供持久 outbox，`MemoryTaskStore` 不具备此能力，也不适合作为 durable 配置。outbox 启用前提交的状态不会在启动时回填。
 
-发布回执不确定，或 bus 已接纳事件但进程在删除 outbox 行前停止，都可能导致同一快照再次发布。消费者应按 `(TaskId, state_version)` 去重、忽略旧版本，并在发现版本缺口时调用 `get_state_checkpoint`。结果为 `None`、查询错误或检查点版本低于通知版本时不得 ACK，必须保留在 Retry 路径。检查点只能恢复当前状态，不能重放缺失的每次迁移及其业务副作用。尾部通知丢失后可能再无事件暴露缺口；需要有界收敛的应用应持久登记已接纳的任务 ID，并按业务设定的陈旧阈值分批对账。查询检查点应在消费者事务外进行，事务内重读 consumer 版本，仅权威版本更高时写入；查询失败、`None` 或检查点落后时保留跟踪。终态投影提交后再退役跟踪。对账只能修复当前状态，不承诺 exactly-once 处理。可通过 `TaskExecutionService::notification_failure()` 查看失败头部，并显式调用 `quarantine_failed_notification(...)` 将其归档隔离；隔离会有意形成通知缺口，不会自动补发归档记录。应监控 outbox 行数与最老行年龄；使用 Redis Streams 时，还应查看 `XLEN` 和 `XPENDING`。具体配置和运维边界见[带类型 API 指南](typed-task-api.zh_CN.md)与[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。应用仍可显式调用有界 `TaskStore::prune_terminal_before` 清理终态历史。SQLite 会跳过仍有活动 outbox 行的任务，并在删除前以同一事务保存终态状态检查点；检查点不会自动过期，会随清理任务增长。清理会释放幂等键供复用，但 SQLite 在终态检查点存在期间保留已清理任务的 `TaskId`；`MemoryTaskStore` 不保留已清理身份。
+发布回执不确定，或 bus 已接纳事件但进程在删除 outbox 行前停止，都可能导致同一快照再次发布。消费者应按 `(TaskId, state_version)` 去重、忽略旧版本，并在发现版本缺口时调用 `get_state_checkpoint`。结果为 `None`、查询错误或检查点版本低于通知版本时不得 ACK，必须保留在 Retry 路径。检查点只能恢复当前状态，不能重放缺失的每次迁移及其业务副作用。尾部通知丢失后可能再无事件暴露缺口；需要有界收敛的应用应持久登记已接纳的任务 ID，并按业务设定的陈旧阈值分批对账。查询检查点应在消费者事务外进行，事务内重读 consumer 版本，仅权威版本更高时写入；查询失败、`None` 或检查点落后时保留跟踪。终态投影提交后再退役跟踪。对账只能修复当前状态，不承诺 exactly-once 处理。可通过 `TaskExecutionService::notification_failure()` 查看失败头部，并显式调用 `quarantine_failed_notification(&diagnostic, reason)` 将其归档隔离；隔离会有意形成通知缺口，不会自动补发归档记录。应监控 outbox 行数与最老行年龄；使用 Redis Streams 时，还应查看 `XLEN` 和 `XPENDING`。具体配置和运维边界见[带类型 API 指南](typed-task-api.zh_CN.md)与[用户指南](user-guide.zh_CN.md#发布任务生命周期变化)。应用仍可显式调用有界 `TaskStore::prune_terminal_before` 清理终态历史。SQLite 会跳过仍有活动 outbox 行的任务，并在删除前以同一事务保存终态状态检查点；检查点不会自动过期，会随清理任务增长。清理会释放幂等键供复用，但 SQLite 在终态检查点存在期间保留已清理任务的 `TaskId`；`MemoryTaskStore` 不保留已清理身份。
 
-预期的提交拒绝（容量、未完成任务数上限、幂等冲突和重复任务 ID）返回结构化请求错误，不会锁存服务；其他操作性 store 故障仍按原逻辑处理。外部取消 hook 由服务托管：同一 attempt 的并发调用共享 hook，取消调用方不会中断 hook，`shutdown()` 会等待 hook 完成。hook 失败会留下可查询诊断；任务仍运行时可再次调用 `cancel()` 重试。hook 必须对 (`TaskId`, attempt) 幂等。
+预期的提交拒绝（容量、未完成任务数上限、幂等冲突和重复任务 ID）返回结构化请求错误，不会锁存服务；其他操作性 store 故障仍按原逻辑处理。外部取消 hook 由服务托管：同一 attempt 的并发调用共享 hook，取消调用方不会中断 hook，`shutdown()` 会等待 hook 完成。hook 失败会留下可查询诊断；任务仍运行时可再次调用 `request_cancel()` 重试。hook 必须对 (`TaskId`, attempt) 幂等。

@@ -63,21 +63,21 @@ fn test_typed_task_guides_link_and_describe_lifecycle_events() {
     );
 }
 
-/// Keeps the current migration instructions tied to a compiled typed request.
+/// Keeps the current bilingual API guides aligned with the public 0.12 entry points.
 #[test]
-fn test_migration_guides_match_the_current_typed_request_contract() {
-    let english = include_str!("../doc/migration.md");
-    let chinese = include_str!("../doc/migration.zh_CN.md");
-    let fixture = include_str!("fixtures/doc-examples/src/typed_support.rs");
+fn test_current_api_guides_describe_the_public_012_contract() {
+    let english = include_str!("../doc/typed-task-api.md");
+    let chinese = include_str!("../doc/typed-task-api.zh_CN.md");
 
     for guide in [english, chinese] {
-        assert!(guide.contains("TaskRequest::new(kind_id, schema_version, codec_id, data)"));
-        assert!(guide.contains("HasModelId"));
-        assert!(guide.contains("payload_type_id"));
-        assert!(guide.contains("schema_version") && guide.contains("codec_id"));
+        assert!(guide.contains("TaskKind"));
+        assert!(guide.contains("register_handler_fn"));
+        assert!(guide.contains("submit_checked"));
+        assert!(guide.contains("AcceptOutcome"));
+        assert!(guide.contains("wait_terminal"));
+        assert!(guide.contains("TaskPages"));
+        assert!(guide.contains("request_cancel"));
     }
-    assert!(fixture.contains("impl HasModelId for ExamplePayload"));
-    assert!(fixture.contains("let mut request = TaskRequest::new("));
 }
 
 /// Keeps README dependencies and source identical to the consumer fixture and
@@ -92,9 +92,8 @@ fn test_readme_quick_start_matches_and_compiles_as_a_consumer() {
     let chinese_dependencies = fenced_block(section(chinese, "安装"), "toml");
     assert_eq!(english_dependencies, chinese_dependencies);
     for dependency in [
-        "qubit-task = { version = \"0.11\", features = [\"sqlite\"] }",
+        "qubit-task = { version = \"0.12\" }",
         "qubit-codec = { version = \"0.17\", features = [\"registry\"] }",
-        "qubit-id = { version = \"0.7\", features = [\"serde\"] }",
         "qubit-model-id = \"0.2\"",
         "serde = { version = \"1.0\", features = [\"derive\"] }",
         "serde_json = \"1.0\"",
@@ -102,11 +101,10 @@ fn test_readme_quick_start_matches_and_compiles_as_a_consumer() {
     ] {
         assert!(english_dependencies.contains(dependency), "missing {dependency}");
     }
-    assert!(fixture_manifest.contains("version = \"^0.11\""));
-    assert!(fixture_manifest.contains("features = [\"sqlite\"]"));
+    assert!(fixture_manifest.contains("version = \"^0.12\""));
+    assert!(!fixture_manifest.contains("features = [\"sqlite\"]"));
     for dependency in [
         "qubit-codec = { version = \"^0.17\", features = [\"registry\"] }",
-        "qubit-id = { version = \"^0.7\", features = [\"serde\"] }",
         "qubit-model-id = { version = \"^0.2\" }",
         "serde = { version = \"1.0\", features = [\"derive\"] }",
         "serde_json = \"1.0\"",

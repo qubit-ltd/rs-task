@@ -1,26 +1,38 @@
 # 用户指南
 
-[English](user-guide.md) · [0.11 迁移指南](migration.zh_CN.md) · [带类型任务 API](typed-task-api.zh_CN.md)
+[English](user-guide.md) · [带类型任务 API](typed-task-api.zh_CN.md)
 
 `qubit-task` 接受带类型和版本的 payload，并将任务交给已注册的处理器执行。本指南以 typed API 为准；旧的字节数组 `TaskRequest`、按 `(task_type, handler_version)` 路由、旧查询示例和闭包式服务 API 已不再是公开契约。
 
-需要持久化任务历史时，使用 `SqliteTaskStore::open(path)` 打开 SQLite 后端。它会将 typed schema v4 到 v7 原位迁移到 v8，并保留任务、活动 outbox 行和隔离归档记录；旧 UUID schema 会被拒绝且不会被改写。升级已有数据库前请先阅读[0.11 迁移指南](migration.zh_CN.md)。
+需要持久化任务历史时，使用 `SqliteTaskStore::open_async(path).await` 打开 SQLite 后端。它会通过事务将 typed schema v4 到 v7 迁移到 v8，并保留任务、活动 outbox 行和隔离归档记录；旧 UUID schema 会被拒绝且不会被改写。0.12 的 API 调整不改变数据库 schema 或已存任务的契约。
 
 ## 从这里开始
 
-完整提交与处理器示例见[带类型任务 API 指南](typed-task-api.zh_CN.md)。其中介绍 `TaskId`、`kind_id`、`category`、`Payload<T>`、codec 注册、schema 兼容性、metadata 配额、资源准入、取消、异步进度，以及历史分页的排序契约。
+完整提交与处理器示例见[带类型任务 API 指南](typed-task-api.zh_CN.md)。其中介绍 `TaskId`、`TaskKind<T>`、`kind_id`、`category`、codec 注册、schema 兼容性、metadata 配额、资源准入、取消、异步进度，以及历史分页的排序契约。
 
 可运行示例见 [`examples/task_service.rs`](../examples/task_service.rs) 和 [`examples/blocked_maintenance.rs`](../examples/blocked_maintenance.rs)。前者演示处理器注册与提交；后者演示带过滤条件的历史查询和运维处理。
+
+## 0.12 API 工作流
+
+每种 payload 类型用一个 `TaskKind<T>` 描述当前的 kind、schema 版本和 codec。向 builder 注册 handler 时，`register_handler_fn` 可接收异步函数或闭包；需要状态时，实现 handler trait 并调用 `register_handler`。用 `HandlerOptions` 一起配置取消模式和来源信息。进程内服务可使用 `TaskExecutionServiceBuilder::in_memory(history_capacity, codecs)`；需要重启后恢复已接纳任务时，使用 `SqliteTaskStore::open_async(path).await` 并注入 ID generator。
+
+`submit(request)` 返回 `AcceptOutcome { summary, created }`。`created == false` 表示幂等键命中已有请求，只说明请求已接纳，不代表 handler 已完成。`submit_checked(request)` 会先检查 handler、payload model、schema 和 codec，再进行相同的接纳过程；严格校验失败不会分配任务 ID，也不会写入 store。普通 `submit` 则允许接纳当前无法路由的请求，调度器会将其留在 `Blocked`，供配置修复后处理。编码错误通过 `TaskServiceError::RequestEncoding` 保留结构化来源。
+
+读取完整的无 payload 摘要用 `get_summary(id)`；消费者对账只需当前状态时用 `get_state_checkpoint(id)`。`wait_terminal(id, timeout)` 在单一总超时内轮询 checkpoint；Succeeded、Failed、Panicked 和 Cancelled 是终态，Blocked 不是。零超时仍会尝试一次可立即完成的读取；SQLite 清理任务行后，仍可能返回保留的终态 checkpoint。`pages(query)` 每次读取一页：`TaskQuery::default()` 默认 50 条，`page_size` 只接受 1 到 256。页读取失败时保留当前游标供重试，最后一个非空页会先返回，再报告没有更多记录。
+
+`request_cancel(id)` 表示发出取消请求。Queued 或 Blocked 任务可返回 `CancelledBeforeRun`；运行中的 cooperative handler 返回 `CancellationRequested` 后，仍须由 handler 在安全边界检查 `TaskContext::cancellation().wait_requested().await` 或 `is_requested()` 并结束工作。该结果不表示运行中的任务已经终止。修复配置后，把观察到的 `TaskSummary` 传给 `resume_blocked(&observed_summary)`；服务会用该快照版本进行条件更新。隔离失败通知时，将完整的 `NotificationFailure` 诊断传给 `quarantine_failed_notification(&diagnostic, reason)`，store 会原子比较任务、版本和事件标识。
+
+内存存储使用 `MemoryStoreOptions` 配置并校验 payload 字节预算与未完成任务上限。`SqliteTaskStore::open_async` 会将同步打开过程放入 Tokio blocking pool。自定义 `TaskStore` 包装器可使用 `delegate_task_store!` 并声明自行覆盖的方法；其他方法（包括 trait 默认实现）会转发到内层 store。
 
 ## 核心概念
 
 - **任务标识：** 每个已受理任务都有一个由 `TaskId` 包装的 `rs-id::Id`。注入能够跨进程重启生成唯一 ID 的 `IdGenerator`；跨进程使用 Snowflake 生成器时，各进程必须使用不同节点编号，并配置合适的时钟条件。同步生成会在 Tokio 阻塞线程池中运行。取消提交不会停止已经开始的生成调用，因此可能消耗一个 ID 但不接纳任务；未取消的提交仍处于服务关闭的接纳边界内。自定义生成器应最终返回，且不能依赖 executor-local 状态。运行时关闭可能等待阻塞调用；该线程切换会增加调度开销，但不提供硬超时或无限并发保证。
 - **路由与分类：** `kind_id` 选择处理器，`category` 是独立的业务分类，用于查询过滤。
-- **Payload 兼容性：** `Payload<T>` 将 `type_id`、`schema_version` 和 `codec_id` 与值绑定。一个处理器只接受一种 payload type ID，并显式声明支持的 schema 版本。一个 codec 可以服务多个 schema 版本。
-- **Codec 执行与提交取消：** `submit()` 中的同步 payload 编码，以及任务开始前的解码，都会放到 Tokio blocking pool 运行。在编码请求交给 store 前取消，会停止后续接纳，但无法中断已经开始的编码；编码结果可能被丢弃。接纳派发后，store 操作及 scheduler/通知唤醒由服务持有；取消或超时 `submit()` 等待不会取消该操作，因此任务可能已接纳，也可能稍后才接纳；`shutdown()` 会等待它完成。首次提交前设置稳定的幂等键，并以完全相同的请求重提，可取回同一任务。若已知道任务 ID，可用 `get()` 查询；要取消任务本身，请调用 `cancel()`。运行中的任务在解码期间仍占用运行名额和资源预留；`shutdown()` 会等待解码和 handler 完成。blocking 工作没有硬超时，codec 卡住会拖延关闭。
+- **Payload 兼容性：** `TaskKind<T>` 将 kind、schema 版本、codec ID 与 payload model 绑定。一个处理器只接受一种 model，并显式声明支持的 schema 版本。一个 codec 可以服务多个 schema 版本。
+- **Codec 执行与提交取消：** `submit()` 中的同步 payload 编码，以及任务开始前的解码，都会放到 Tokio blocking pool 运行。在编码请求交给 store 前取消，会停止后续接纳，但无法中断已经开始的编码；编码结果可能被丢弃。接纳派发后，store 操作及 scheduler/通知唤醒由服务持有；取消或超时 `submit()` 等待不会取消该操作，因此任务可能已接纳，也可能稍后才接纳；`shutdown()` 会等待它完成。首次提交前设置稳定的幂等键，并以完全相同的请求重提，可取回同一任务。若已知道任务 ID，可用 `get_summary()` 查询；要取消任务本身，请调用 `request_cancel()`。运行中的任务在解码期间仍占用运行名额和资源预留；`shutdown()` 会等待解码和 handler 完成。blocking 工作没有硬超时，codec 卡住会拖延关闭。
 - **资源准入：** CPU、GPU、内存、磁盘和自定义单位是并发配额，由执行引擎内部预留；它们不会固定 CPU、隔离 GPU，也不会强制限制操作系统层面的内存或磁盘使用。
-- **生命周期与取消：** 排队中的任务可直接取消。运行中的处理器必须声明协作式取消能力或外部取消 hook；取消请求本身无法强行停止任意代码。外部 hook 失败会保留可查询诊断，任务仍在运行时可再次调用 `cancel()` 重试。同一 attempt 的并发调用共享一次 hook，取消调用方不会停止 hook，`shutdown()` 会等待 hook 完成。hook 应对每个 (`TaskId`, attempt) 幂等。
-- **进度：** 处理器通过 `rs-progress::AsyncReporter` 汇报进度。`report_async()` 等待持久化完成，之后读取任务会包含阶段和指标快照。版本在等待存储前分配；报告失败或取消后不会复用，允许出现版本空洞。进度版本与生命周期 `state_version` 相互独立。
+- **生命周期与取消：** 排队或阻塞中的任务可在 handler 运行前取消。运行中的处理器必须声明协作式取消能力或外部取消 hook；取消请求本身无法强行停止任意代码。外部 hook 失败会保留可查询诊断，任务仍在运行时可再次调用 `request_cancel()` 重试。同一 attempt 的并发调用共享一次 hook，取消调用方不会停止 hook，`shutdown()` 会等待 hook 完成。hook 应对每个 `TaskAttempt` 幂等。
+- **进度：** 处理器通过 `rs-progress::AsyncReporter` 汇报进度。`report_async()` 等待持久化完成，之后读取任务会包含阶段和指标快照。`TaskProgressExt::report_metric_delta()` 可应用单个指标增量并汇报快照；若汇报失败，本地增量仍已应用，重试时应重新汇报当前快照，不要重复应用增量。版本在等待存储前分配；报告失败或取消后不会复用，允许出现版本空洞。进度版本与生命周期 `state_version` 相互独立。
 - **历史：** typed 分页按 `(accepted_at_ms, numeric task id)` 升序排列。排他性的 `after` 游标是 keyset 游标；每次查询读取各自的存储快照。`TaskSummary` 包含生命周期和进度信息，不会加载或解码 payload 字节。`get_state_checkpoint()` 只返回消费者恢复投影所需的当前状态和版本；SQLite 清理任务后仍可读取，但它无法恢复 payload、进度或中间迁移。
 
 ## 启动与关闭服务
@@ -130,7 +142,7 @@ FROM task_event_outbox;
 
 1. 读取 `notification_failure()`，记录准确的 `task_id`、`state_version`、`event_id` 和 `error`。该诊断只是当前进程中失败头部的快照，不是持久告警。
 2. 使用 `service.get_state_checkpoint(task_id).await` 核对任务权威状态，并判断应用应如何处理缺失通知。隔离前先检查已有归档记录，并遵守应用的归档/保留策略。发布失败也可能只是 provider 暂时不可用；是否隔离由操作员决定。
-3. 确认需要隔离后，使用诊断返回的精确身份及有意义的原因调用 `service.quarantine_failed_notification(expected_task_id, expected_state_version, &expected_event_id, reason).await`。若头部已变化，操作会返回冲突；重新读取诊断后再判断。该操作会原子归档原始 outbox 行并将其从活动队列移除。
+3. 确认需要隔离后，使用诊断返回的精确身份及有意义的原因调用 `service.quarantine_failed_notification(&diagnostic, reason).await`。若头部已变化，操作会返回冲突；重新读取诊断后再判断。该操作会原子归档原始 outbox 行并将其从活动队列移除。
 4. 在 `task_event_outbox_quarantine` 中核实归档记录，并确认下一条活动 outbox 记录可以出队和发布。归档只保存证据：隔离会有意丢失该通知，也不会自动重新发布。
 5. 消费者必须发现由此产生的 `state_version` 缺口，并从任务服务刷新权威状态。随后按消费者自己的事务和确认策略提交刷新后的状态与 checkpoint。
 
@@ -196,4 +208,4 @@ COMMIT;
 
 失败时 rollback 本批并先调查；不要自动推进 cutoff，也不要继续清理尚未归档的数据。删除只会让页面可复用，不一定缩小文件。只有在明确维护窗口、备份已验证且确认剩余空间充足时才显式运行 `VACUUM`；它可能需要大量空间并阻塞数据库操作。本指南不提供删除 checkpoint 的 SQL，也不设默认保留期限。checkpoint 保存对账状态和已用任务 ID；应通过容量规划与外部归档策略管理其增长，而非日常删除。
 
-更多背景见[详细设计](task_execution_service_design.md)、[迁移指南](migration.zh_CN.md)和 [API 文档](https://docs.rs/qubit-task)。
+更多背景见[详细设计](task_execution_service_design.md)和 [API 文档](https://docs.rs/qubit-task)。
