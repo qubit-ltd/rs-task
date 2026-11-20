@@ -9,7 +9,7 @@ use crate::service::TaskServiceError;
 
 /// Retains one shutdown result for callers waiting on an attempt.
 #[derive(Clone)]
-pub(in crate::service::typed_task_execution_service) enum ShutdownOutcome {
+pub(in crate::service::task_execution_service) enum ShutdownOutcome {
     /// Shutdown completed and the store owner was released.
     Complete,
     /// Store ownership could not be released or a service fault was latched.
@@ -40,7 +40,7 @@ impl ShutdownOutcome {
     /// feature enabled, returns `TaskServiceError::NotificationClose` when the
     /// publisher failed to drain.
     #[inline]
-    pub(in crate::service::typed_task_execution_service) fn into_result(self) -> Result<(), TaskServiceError> {
+    pub(in crate::service::task_execution_service) fn into_result(self) -> Result<(), TaskServiceError> {
         match self {
             Self::Complete => Ok(()),
             Self::StoreUnavailable(error) => Err(TaskServiceError::StoreUnavailable(error)),

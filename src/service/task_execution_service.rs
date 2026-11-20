@@ -260,15 +260,15 @@ impl TaskExecutionService {
 
     /// Encodes, assigns an ID, durably accepts, and dispatches a typed request.
     ///
-    /// # Parameters
-    ///
-    /// * `request` - Typed request containing routing, payload, and scheduling
-    ///   metadata.
-    ///
     /// # Type Parameters
     ///
     /// * `T` - Request payload type, which supplies model identity and is safe
     ///   to share across threads for the duration of submission.
+    ///
+    /// # Parameters
+    ///
+    /// * `request` - Typed request containing routing, payload, and scheduling
+    ///   metadata.
     ///
     /// # Returns
     ///
@@ -286,6 +286,11 @@ impl TaskExecutionService {
     /// being accepted, but does not stop either blocking call after it starts.
     /// Once acceptance is dispatched, cancellation can leave its outcome
     /// uncertain; use a stable idempotency key to safely retry the request.
+    ///
+    /// # Panics
+    ///
+    /// Resumes a panic from the request encoder or ID generator after its
+    /// blocking task has been joined.
     pub async fn submit<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
@@ -301,6 +306,11 @@ impl TaskExecutionService {
     /// synchronously with submission, while [`Self::submit`] defers route
     /// validation until dispatch.
     ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Request payload type with model identity that can be shared
+    ///   between the service and its blocking encoder.
+    ///
     /// # Parameters
     ///
     /// * `request` - Typed request whose route metadata is checked before
@@ -314,6 +324,11 @@ impl TaskExecutionService {
     ///
     /// Returns an error if encoding or ID generation fails, the route is not
     /// registered, admission has stopped, or the store rejects the request.
+    ///
+    /// # Panics
+    ///
+    /// Resumes a panic from the request encoder or ID generator after its
+    /// blocking task has been joined.
     pub async fn submit_checked<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
@@ -321,6 +336,35 @@ impl TaskExecutionService {
         self.submit_inner(request, true).await
     }
 
+    /// Encodes and accepts a request while honoring the shared admission lock.
+    ///
+    /// Route validation is performed only when `checked` is true. Encoding,
+    /// ID generation, and store acceptance retain the service's cancellation
+    /// and shutdown behavior for both submission entry points.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Request payload type used by the typed encoder.
+    ///
+    /// # Parameters
+    ///
+    /// * `request` - Typed request to encode and submit.
+    /// * `checked` - Whether to validate handler and codec registration before
+    ///   allocating an ID.
+    ///
+    /// # Returns
+    ///
+    /// The accepted task outcome after the store records the request.
+    ///
+    /// # Errors
+    ///
+    /// Returns request encoding, route, ID generation, admission, or store
+    /// errors encountered during submission.
+    ///
+    /// # Panics
+    ///
+    /// Resumes a panic from the request encoder or ID generator after its
+    /// blocking task has been joined.
     async fn submit_inner<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
@@ -366,6 +410,20 @@ impl TaskExecutionService {
         }
     }
 
+    /// Validates stored request metadata against the configured handlers/codecs.
+    ///
+    /// # Parameters
+    ///
+    /// * `request` - Encoded payload metadata produced from the submitted request.
+    ///
+    /// # Returns
+    ///
+    /// Returns unit when the handler, payload type, schema, and codec match.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`crate::service::TaskRouteError`] describing a route
+    /// mismatch.
     fn validate_route(
         &self,
         request: &crate::model::typed::StoredTaskRequest,
@@ -785,13 +843,16 @@ impl TaskExecutionService {
         }
     }
 
-    /// Shares an existing external cancellation hook or starts the task
-    /// attempt's hook.
+    /// Reuses an active external cancellation hook or starts one for this attempt.
     ///
     /// # Parameters
     ///
-    /// * `key` - Task ID and attempt identifying the cancellation operation.
-    /// * `kind_id` - Registered task kind whose external hook is invoked.
+    /// * `key` - Task ID and attempt number identifying the cancellation.
+    /// * `kind_id` - Handler kind whose external hook should be invoked.
+    ///
+    /// # Returns
+    ///
+    /// The shared in-flight hook state, or `None` when no hook is configured.
     fn start_or_join_external_cancel(&self, key: (TaskId, u32), kind_id: &str) -> Option<Arc<ExternalCancelFlight>> {
         let (flight, start) = {
             let mut entries = self.core.external_cancellations.lock();

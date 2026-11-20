@@ -8,7 +8,7 @@
 /// Carries one external cancellation hook outcome to all waiting callers.
 #[must_use]
 #[derive(Clone)]
-pub(in crate::service::typed_task_execution_service) enum ExternalCancelResult {
+pub(in crate::service::task_execution_service) enum ExternalCancelResult {
     /// The hook succeeded and cancellation intent was persisted.
     Success,
     /// The task attempt ended before the hook result could be applied.
