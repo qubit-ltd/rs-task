@@ -7,9 +7,11 @@
 // =============================================================================
 //! Holds the private erased dispatch contract and its typed adapter.
 mod erased_handler;
+mod function_handler;
 mod registration;
 mod typed_adapter;
 
 pub(super) use erased_handler::ErasedHandler;
+pub(super) use function_handler::FunctionHandler;
 pub(super) use registration::Registration;
 pub(super) use typed_adapter::TypedAdapter;

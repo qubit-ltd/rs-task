@@ -25,10 +25,10 @@ use super::MAX_TASK_QUERY_LIMIT;
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum TaskQueryError {
-    /// The page size is outside the inclusive range 1 through 256.
+    /// The requested page size is below one or above the supported maximum.
     #[error("task query page size {requested} is outside 1..={MAX_TASK_QUERY_LIMIT}")]
     InvalidPageSize {
-        /// Page size requested by the caller.
+        /// Number of matching summaries per page requested by the caller.
         requested: usize,
     },
 }

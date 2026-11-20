@@ -32,10 +32,15 @@ pub const MAX_TASK_QUERY_LIMIT: usize = 256;
 /// ```
 #[derive(Debug, Clone)]
 pub struct TaskQuery {
+    /// Lifecycle states to include; an empty vector selects every state.
     states: Vec<TaskStateKind>,
+    /// Exact user-visible business category filter, when configured.
     category: Option<String>,
+    /// Exact caller-defined correlation key filter, when configured.
     correlation_key: Option<String>,
+    /// Exclusive continuation point for paginated history.
     after: Option<TaskCursor>,
+    /// Maximum number of matching summaries requested for one page.
     limit: usize,
 }
 

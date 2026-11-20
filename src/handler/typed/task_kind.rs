@@ -39,9 +39,13 @@ use crate::model::typed::TaskRequest;
 /// ```
 #[derive(Debug, Clone)]
 pub struct TaskKind<T> {
+    /// Stable handler routing identity.
     kind_id: String,
+    /// Payload schema version encoded by requests created from this kind.
     schema: u32,
+    /// Codec identity used to encode requests created from this kind.
     codec: ValueCodecId,
+    /// Associates this value with its payload type without storing a payload.
     marker: std::marker::PhantomData<fn() -> T>,
 }
 
