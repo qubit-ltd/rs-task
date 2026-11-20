@@ -233,11 +233,12 @@ async fn test_pages_retry_after_store_error_reuses_the_observed_cursor() {
     ));
     let second = pages.next_page().await.unwrap().expect("retry returns the second page");
     assert_eq!(second.records.len(), 1);
-    let cursors = store.cursors.lock().unwrap();
-    assert_eq!(cursors.len(), 3);
-    assert_eq!(cursors[1], cursors[2]);
-    assert!(cursors[1].is_some());
-    drop(cursors);
+    {
+        let cursors = store.cursors.lock().unwrap();
+        assert_eq!(cursors.len(), 3);
+        assert_eq!(cursors[1], cursors[2]);
+        assert!(cursors[1].is_some());
+    }
     service.shutdown().await.unwrap();
 }
 

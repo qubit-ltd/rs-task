@@ -15,14 +15,14 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 
 /// Generates monotonically increasing IDs for an in-memory builder.
-pub(super) struct InMemoryIdGenerator {
+pub(in crate::service::task_execution_service_builder) struct InMemoryIdGenerator {
     /// Next sequence position retained across concurrent generation calls.
     sequence: AtomicU64,
 }
 
 impl InMemoryIdGenerator {
     /// Creates a generator whose first issued ID has value one.
-    pub(super) fn new() -> Self {
+    pub(in crate::service::task_execution_service_builder) fn new() -> Self {
         Self {
             sequence: AtomicU64::new(0),
         }
@@ -40,5 +40,31 @@ impl IdGenerator<Id, IdGenerationError> for InMemoryIdGenerator {
                 sequence,
                 max: u64::MAX - 1,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU64;
+
+    use qubit_id::IdGenerationError;
+    use qubit_id::IdGenerator;
+
+    use super::InMemoryIdGenerator;
+
+    #[test]
+    fn test_sequence_never_wraps_or_repeats_after_overflow() {
+        let generator = InMemoryIdGenerator {
+            sequence: AtomicU64::new(u64::MAX - 1),
+        };
+        assert_eq!(generator.generate().unwrap().value(), u64::MAX);
+        assert!(matches!(
+            generator.generate(),
+            Err(IdGenerationError::SequenceOverflow { .. })
+        ));
+        assert!(matches!(
+            generator.generate(),
+            Err(IdGenerationError::SequenceOverflow { .. })
+        ));
     }
 }

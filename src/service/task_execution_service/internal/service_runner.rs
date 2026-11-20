@@ -468,9 +468,7 @@ impl ServiceRunner {
     /// # Errors
     ///
     /// Returns an error if listing tasks or restoring a task state fails.
-    pub(in crate::service::task_execution_service) async fn recover_unfinished(
-        &self,
-    ) -> Result<(), TaskServiceError> {
+    pub(in crate::service::task_execution_service) async fn recover_unfinished(&self) -> Result<(), TaskServiceError> {
         let mut after = None;
         loop {
             let mut query = crate::model::typed::TaskQuery::default()

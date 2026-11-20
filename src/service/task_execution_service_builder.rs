@@ -101,29 +101,6 @@ pub struct TaskExecutionServiceBuilder {
     notification_shutdown_timeout: std::time::Duration,
 }
 
-#[cfg(test)]
-mod id_generator_tests {
-    use qubit_id::IdGenerator;
-
-    use super::InMemoryIdGenerator;
-
-    #[test]
-    fn test_sequence_never_wraps_or_repeats_after_overflow() {
-        let generator = InMemoryIdGenerator {
-            sequence: std::sync::atomic::AtomicU64::new(u64::MAX - 1),
-        };
-        assert_eq!(generator.generate().unwrap().value(), u64::MAX);
-        assert!(matches!(
-            generator.generate(),
-            Err(qubit_id::IdGenerationError::SequenceOverflow { .. })
-        ));
-        assert!(matches!(
-            generator.generate(),
-            Err(qubit_id::IdGenerationError::SequenceOverflow { .. })
-        ));
-    }
-}
-
 impl TaskExecutionServiceBuilder {
     /// Creates an in-memory builder with an independent monotonic ID sequence.
     ///
@@ -399,7 +376,8 @@ impl TaskExecutionServiceBuilder {
     /// # Type Parameters
     ///
     /// * `T` - Payload type decoded before the handler is invoked.
-    /// * `F` - Async handler function receiving the decoded payload and context.
+    /// * `F` - Async handler function receiving the decoded payload and
+    ///   context.
     /// * `Fut` - Future returned by `F` with the handler result.
     ///
     /// # Parameters
@@ -430,7 +408,8 @@ impl TaskExecutionServiceBuilder {
     /// # Type Parameters
     ///
     /// * `T` - Payload type decoded before the handler is invoked.
-    /// * `F` - Async handler function receiving the decoded payload and context.
+    /// * `F` - Async handler function receiving the decoded payload and
+    ///   context.
     /// * `Fut` - Future returned by `F` with the handler result.
     ///
     /// # Parameters

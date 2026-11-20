@@ -34,9 +34,9 @@ impl AttemptCancellation {
     ///
     /// # Parameters
     ///
-    /// * `cooperative` records a cooperative request and wakes waiting
-    ///   handlers when `true`; `false` records a request visible to queries
-    ///   without waking cooperative waiters.
+    /// * `cooperative` records a cooperative request and wakes waiting handlers
+    ///   when `true`; `false` records a request visible to queries without
+    ///   waking cooperative waiters.
     pub(crate) fn request(&self, cooperative: bool) {
         self.state.send_modify(|state| {
             if cooperative {

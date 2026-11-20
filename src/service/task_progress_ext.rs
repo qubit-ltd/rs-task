@@ -84,17 +84,15 @@ impl TaskProgressExt for AsyncProgress<'_> {
     /// Returns [`TaskProgressError::UnknownMetric`] when the metric is absent,
     /// [`TaskProgressError::Metric`] when it rejects the delta, or
     /// [`TaskProgressError::Emission`] when reporting fails.
-    fn report_metric_delta<'a>(
+    async fn report_metric_delta<'a>(
         &'a mut self,
         metric_id: &'a str,
         delta: MetricDelta,
-    ) -> impl Future<Output = Result<(), TaskProgressError>> + Send + 'a {
-        async move {
-            let metric = self
-                .metric(metric_id)
-                .ok_or_else(|| TaskProgressError::UnknownMetric(metric_id.to_owned()))?;
-            metric.apply_delta(delta).map_err(TaskProgressError::Metric)?;
-            self.report_async().await.map_err(TaskProgressError::Emission)
-        }
+    ) -> Result<(), TaskProgressError> {
+        let metric = self
+            .metric(metric_id)
+            .ok_or_else(|| TaskProgressError::UnknownMetric(metric_id.to_owned()))?;
+        metric.apply_delta(delta).map_err(TaskProgressError::Metric)?;
+        self.report_async().await.map_err(TaskProgressError::Emission)
     }
 }

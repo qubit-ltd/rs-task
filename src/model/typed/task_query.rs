@@ -45,6 +45,7 @@ pub struct TaskQuery {
 }
 
 impl Default for TaskQuery {
+    /// Creates an unfiltered history query with a 50-record page size.
     fn default() -> Self {
         Self {
             states: Vec::new(),

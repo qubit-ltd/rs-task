@@ -22,7 +22,7 @@ use crate::store::TaskFuture;
 ///
 /// * `F` is the application callback type.
 /// * `Fut` is the future returned by that callback.
-pub(super) struct FunctionHandler<F, Fut> {
+pub(in crate::handler::typed::typed_task_handler_registry) struct FunctionHandler<F, Fut> {
     /// Application callback invoked for each prepared payload.
     function: F,
     /// Retains the future type without storing a future before dispatch.
@@ -39,7 +39,7 @@ impl<F, Fut> FunctionHandler<F, Fut> {
     /// # Returns
     ///
     /// A handler adapter that invokes the callback when dispatched.
-    pub(super) fn new(function: F) -> Self {
+    pub(in crate::handler::typed::typed_task_handler_registry) fn new(function: F) -> Self {
         Self {
             function,
             marker: PhantomData,

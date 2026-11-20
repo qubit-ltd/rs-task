@@ -7,6 +7,7 @@
 // =============================================================================
 use std::collections::HashMap;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
@@ -265,11 +266,7 @@ impl TypedTaskHandlerRegistry {
         F: Fn(T, TypedTaskContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = crate::handler::TaskRunResult> + Send + 'static,
     {
-        self.register_with_options::<T, _>(
-            descriptor,
-            Arc::new(FunctionHandler::new(handler)),
-            options,
-        )
+        self.register_with_options::<T, _>(descriptor, Arc::new(FunctionHandler::new(handler)), options)
     }
 
     /// Registers a typed handler with its cancellation and diagnostic options.

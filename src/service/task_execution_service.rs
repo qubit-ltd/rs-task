@@ -410,11 +410,13 @@ impl TaskExecutionService {
         }
     }
 
-    /// Validates stored request metadata against the configured handlers/codecs.
+    /// Validates stored request metadata against the configured
+    /// handlers/codecs.
     ///
     /// # Parameters
     ///
-    /// * `request` - Encoded payload metadata produced from the submitted request.
+    /// * `request` - Encoded payload metadata produced from the submitted
+    ///   request.
     ///
     /// # Returns
     ///
@@ -843,7 +845,8 @@ impl TaskExecutionService {
         }
     }
 
-    /// Reuses an active external cancellation hook or starts one for this attempt.
+    /// Reuses an active external cancellation hook or starts one for this
+    /// attempt.
     ///
     /// # Parameters
     ///
