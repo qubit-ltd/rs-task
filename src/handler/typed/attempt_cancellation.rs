@@ -13,7 +13,9 @@ use std::sync::atomic::Ordering;
 
 /// Cancellation state shared by the service and all contexts for one attempt.
 pub(crate) struct AttemptCancellation {
+    /// Legacy atomic flag shared with existing handler cancellation APIs.
     flag: Arc<AtomicBool>,
+    /// Monotonic notification state observed by operation-feature waiters.
     #[cfg(feature = "operation")]
     requested: tokio::sync::watch::Sender<bool>,
 }
@@ -50,6 +52,7 @@ impl AttemptCancellation {
 }
 
 impl Default for AttemptCancellation {
+    /// Creates an unset cancellation state for one task attempt.
     fn default() -> Self {
         Self::new()
     }
@@ -64,7 +67,7 @@ mod tests {
     use super::AttemptCancellation;
 
     #[tokio::test]
-    async fn request_before_subscription_is_observed() {
+    async fn test_request_before_subscription_is_observed() {
         let state = AttemptCancellation::new();
         state.request();
         tokio::time::timeout(Duration::from_secs(1), state.wait_requested())
@@ -73,7 +76,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_subscribers_observe_request() {
+    async fn test_all_subscribers_observe_request() {
         let state = Arc::new(AttemptCancellation::new());
         let first = {
             let state = Arc::clone(&state);
@@ -93,7 +96,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_waiter_can_wait_again() {
+    async fn test_dropped_waiter_can_wait_again() {
         let state = AttemptCancellation::new();
         let mut first = Box::pin(state.wait_requested());
         assert!(futures::poll!(&mut first).is_pending());
@@ -105,7 +108,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_flag_write_does_not_notify() {
+    async fn test_raw_flag_write_does_not_notify() {
         let state = AttemptCancellation::new();
         state.flag().store(true, Ordering::Release);
         assert!(

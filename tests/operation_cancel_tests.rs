@@ -194,7 +194,7 @@ fn request() -> qubit_task::model::TaskRequest<Payload> {
 }
 
 #[tokio::test]
-async fn cooperative_cancellation_reaches_multiple_waiters_and_repeated_cancel() {
+async fn test_cooperative_cancellation_reaches_multiple_waiters_and_repeated_cancel() {
     let entered = Arc::new(Notify::new());
     let service = build_service(
         CancellationMode::Cooperative,
@@ -278,7 +278,7 @@ async fn cancellation_mode_does_not_publish_operation_wait(
 }
 
 #[tokio::test]
-async fn unsupported_cancellation_does_not_publish_operation_wait() {
+async fn test_unsupported_cancellation_does_not_publish_operation_wait() {
     cancellation_mode_does_not_publish_operation_wait(
         CancellationMode::Unsupported,
         false,
@@ -288,7 +288,7 @@ async fn unsupported_cancellation_does_not_publish_operation_wait() {
 }
 
 #[tokio::test]
-async fn external_hook_cancellation_does_not_publish_operation_wait() {
+async fn test_external_hook_cancellation_does_not_publish_operation_wait() {
     cancellation_mode_does_not_publish_operation_wait(
         CancellationMode::ExternalHook,
         true,
@@ -298,7 +298,7 @@ async fn external_hook_cancellation_does_not_publish_operation_wait() {
 }
 
 #[tokio::test]
-async fn cancellation_is_isolated_between_attempts() {
+async fn test_cancellation_is_isolated_between_attempts() {
     let entered = Arc::new(Notify::new());
     let contexts = Arc::new(Mutex::new(Vec::new()));
     let service = build_service(

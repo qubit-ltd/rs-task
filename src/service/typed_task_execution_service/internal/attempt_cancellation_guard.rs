@@ -15,12 +15,19 @@ use crate::model::typed::TaskId;
 
 /// Removes only the exact state registered by this execution attempt.
 pub(in crate::service::typed_task_execution_service) struct AttemptCancellationGuard {
+    /// Service state whose attempt registration this guard owns.
     core: Arc<TypedServiceCore>,
+    /// Task identity and attempt number used as the cancellation-map key.
     key: (TaskId, u32),
+    /// Registered state used to avoid removing a replacement entry.
     state: Arc<AttemptCancellation>,
 }
 
 impl AttemptCancellationGuard {
+    /// Creates a guard for a cancellation-map entry already inserted by the runner.
+    ///
+    /// The guard removes the entry on every exit path, including early returns
+    /// and unwinding, and checks pointer identity before removal.
     pub(in crate::service::typed_task_execution_service) fn new(
         core: Arc<TypedServiceCore>,
         key: (TaskId, u32),
@@ -31,6 +38,7 @@ impl AttemptCancellationGuard {
 }
 
 impl Drop for AttemptCancellationGuard {
+    /// Removes the owned registration without disturbing a newer entry.
     fn drop(&mut self) {
         let mut entries = self.core.cancellations.lock();
         if entries
@@ -79,7 +87,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registration_is_removed_when_readback_returns_error() {
+    async fn test_registration_is_removed_when_readback_returns_error() {
         let core = service_core().await;
         let key = (TaskId::from_id(Id::new(10)), 1);
         let state = Arc::new(AttemptCancellation::new());
@@ -93,7 +101,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registration_is_removed_when_readback_unwinds() {
+    async fn test_registration_is_removed_when_readback_unwinds() {
         let core = service_core().await;
         let key = (TaskId::from_id(Id::new(11)), 1);
         let state = Arc::new(AttemptCancellation::new());
