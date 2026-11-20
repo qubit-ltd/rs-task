@@ -54,6 +54,7 @@ pub use task_progress_snapshot::MAX_TASK_PROGRESS_SNAPSHOT_BYTES;
 pub use task_progress_snapshot::TaskProgressSnapshot;
 pub use task_query::MAX_TASK_QUERY_LIMIT;
 pub use task_query::TaskQuery;
+pub use task_query::TaskQueryError;
 pub use task_request::MAX_TASK_METADATA_BYTES;
 pub use task_request::MAX_TASK_METADATA_ENTRIES;
 pub use task_request::TaskRequest;

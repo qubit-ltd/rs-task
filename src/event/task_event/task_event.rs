@@ -92,19 +92,4 @@ impl TaskEvent {
     pub const fn topic() -> qubit_event_bus::model::Topic<Self> {
         qubit_event_bus::model::Topic::new_static("task.lifecycle")
     }
-
-    /// Captures the identity, revision, state and correlation of a committed
-    /// typed summary.
-    ///
-    /// # Parameters
-    ///
-    /// - `summary`: the persisted typed task summary to snapshot.
-    ///
-    /// # Returns
-    ///
-    /// A version 1 event containing the summary's identity, state revision,
-    /// lifecycle state, and correlation key.
-    pub(crate) fn from_typed_summary(summary: &TaskSummary) -> Self {
-        Self::from(summary)
-    }
 }

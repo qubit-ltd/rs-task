@@ -22,24 +22,38 @@ mod tests;
 pub use handler::CancellationMode;
 pub use handler::ExternalCancellationHook;
 pub use handler::HandlerDispatchError;
+pub use handler::HandlerOptions;
 pub use handler::HandlerRegistrationError;
+pub use handler::TaskCancellation;
 pub use handler::TaskContext;
 pub use handler::TaskHandler;
 pub use handler::TaskHandlerDescriptor;
 pub use handler::TaskHandlerRegistry;
+pub use handler::TaskKind;
+pub use handler::TaskRunOutcome;
+pub use handler::TaskRunResult;
 pub use model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 pub use model::TaskOutput;
+pub use model::TaskRunError;
+pub use model::TaskState;
+pub use model::TaskStateKind;
 pub use model::typed::EncodedPayload;
 pub use model::typed::Payload;
 pub use model::typed::ResourceRequest;
+pub use model::typed::TaskAttempt;
 pub use model::typed::TaskId;
 pub use model::typed::TaskPage;
 pub use model::typed::TaskQuery;
 pub use model::typed::TaskRequest;
 pub use model::typed::TaskStateCheckpoint;
 pub use model::typed::TaskSummary;
+pub use model::typed::{AcceptOutcome, TaskQueryError};
 pub use service::RetryPolicy;
 pub use service::RetryPolicyError;
 pub use service::TaskExecutionService;
 pub use service::TaskExecutionServiceBuilder;
+pub use service::{
+    CancelOutcome, TaskPages, TaskProgressError, TaskProgressExt, TaskRouteError, TaskServiceError,
+    WaitTaskError,
+};
 pub use store::TaskStore;

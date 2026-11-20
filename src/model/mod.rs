@@ -51,6 +51,7 @@ pub use typed::TaskId;
 pub use typed::TaskPage;
 pub use typed::TaskProgressSnapshot;
 pub use typed::TaskQuery;
+pub use typed::TaskQueryError;
 pub use typed::TaskRequest;
 pub use typed::TaskRequestEncodeError;
 pub use typed::TaskStateCheckpoint;

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use futures::FutureExt;
 use parking_lot::Mutex;
@@ -37,6 +38,7 @@ use crate::engine::LocalTaskExecutionEngine;
 use crate::handler::typed::CancellationMode;
 use crate::handler::typed::TypedTaskHandlerRegistry;
 use crate::model::TaskState;
+use crate::model::typed::AcceptOutcome;
 use crate::model::typed::TaskId;
 use crate::model::typed::TaskPage;
 use crate::model::typed::TaskQuery;
@@ -47,6 +49,8 @@ use crate::service::CancelOutcome;
 #[cfg(feature = "event-bus")]
 use crate::service::NotificationFailure;
 use crate::service::TaskServiceError;
+use crate::service::task_route_error::validate_task_route;
+use crate::service::{TaskPages, WaitTaskError};
 use crate::store::TaskStore;
 
 mod internal;
@@ -85,14 +89,14 @@ pub(super) use typed_service_options::TypedServiceOptions;
 /// ```
 #[must_use = "keep the service handle alive until shutdown is requested"]
 #[derive(Clone)]
-pub struct TypedTaskExecutionService {
+pub struct TaskExecutionService {
     /// Shared state used by this public handle and its background workers.
     core: Arc<TypedServiceCore>,
     /// Requests graceful shutdown when the final public handle is dropped.
     _lifetime: Arc<PublicLifetime>,
 }
 
-impl TypedTaskExecutionService {
+impl TaskExecutionService {
     /// Creates the service after acquiring store ownership and recovering
     /// unfinished tasks, then starts its background workers.
     ///
@@ -120,7 +124,8 @@ impl TypedTaskExecutionService {
         handlers: TypedTaskHandlerRegistry,
         options: TypedServiceOptions,
     ) -> Result<Self, TaskServiceError> {
-        let cleanup_worker = OwnerReleaseWorker::shared().map_err(TaskServiceError::SchedulerUnavailable)?;
+        let cleanup_worker =
+            OwnerReleaseWorker::shared().map_err(TaskServiceError::SchedulerUnavailable)?;
         let owner = store.acquire_owner().await?;
         let mut owner_guard = OwnerReleaseGuard::new(Arc::clone(&store), owner, cleanup_worker);
         #[cfg(feature = "event-bus")]
@@ -134,17 +139,24 @@ impl TypedTaskExecutionService {
             let actual = bus.capabilities().publish_guarantee();
             if !matches!(
                 actual,
-                PublishGuarantee::Accepted | PublishGuarantee::Confirmed | PublishGuarantee::DurablyStored
+                PublishGuarantee::Accepted
+                    | PublishGuarantee::Confirmed
+                    | PublishGuarantee::DurablyStored
             ) {
                 owner_guard.release().await?;
-                return Err(TaskServiceError::NotificationProviderInsufficientGuarantee {
-                    provider_id: bus.provider_id().as_str().to_owned(),
-                    actual,
-                });
+                return Err(
+                    TaskServiceError::NotificationProviderInsufficientGuarantee {
+                        provider_id: bus.provider_id().as_str().to_owned(),
+                        actual,
+                    },
+                );
             }
             let prepared = async {
-                let publisher =
-                    TaskEventPublisher::new(Arc::clone(&store), bus, options.notification_shutdown_timeout)?;
+                let publisher = TaskEventPublisher::new(
+                    Arc::clone(&store),
+                    bus,
+                    options.notification_shutdown_timeout,
+                )?;
                 store.enable_event_outbox().await?;
                 Ok(publisher)
             }
@@ -223,7 +235,9 @@ impl TypedTaskExecutionService {
             {
                 scheduler.latch_fault("typed task scheduler panicked");
             }
-            scheduler_core.scheduler_stopped.store(true, Ordering::Release);
+            scheduler_core
+                .scheduler_stopped
+                .store(true, Ordering::Release);
             scheduler_core.scheduler_stopped_changed.notify_waiters();
         });
         let supervisor = service.runner();
@@ -237,7 +251,9 @@ impl TypedTaskExecutionService {
                 let armed_guard = supervisor_core.owner_guard.lock().await.take();
                 drop(armed_guard);
                 let mut progress = supervisor_core.shutdown_progress.lock();
-                let outcome = ShutdownOutcome::StoreUnavailable("typed task shutdown supervisor panicked".into());
+                let outcome = ShutdownOutcome::StoreUnavailable(
+                    "typed task shutdown supervisor panicked".into(),
+                );
                 let attempt = progress.attempt;
                 if progress.results.len() == attempt {
                     progress.results.push(outcome);
@@ -284,7 +300,22 @@ impl TypedTaskExecutionService {
     pub async fn submit<T: HasModelId + Send + Sync + 'static>(
         &self,
         request: TaskRequest<T>,
-    ) -> Result<TaskSummary, TaskServiceError> {
+    ) -> Result<AcceptOutcome, TaskServiceError> {
+        self.submit_inner(request, false).await
+    }
+
+    pub async fn submit_checked<T: HasModelId + Send + Sync + 'static>(
+        &self,
+        request: TaskRequest<T>,
+    ) -> Result<AcceptOutcome, TaskServiceError> {
+        self.submit_inner(request, true).await
+    }
+
+    async fn submit_inner<T: HasModelId + Send + Sync + 'static>(
+        &self,
+        request: TaskRequest<T>,
+        checked: bool,
+    ) -> Result<AcceptOutcome, TaskServiceError> {
         let admission = Arc::clone(&self.core.admission).read_owned().await;
         self.runner().check_fault()?;
         if self.core.shutting_down.load(Ordering::Acquire) {
@@ -293,7 +324,7 @@ impl TypedTaskExecutionService {
         let codecs = Arc::clone(&self.core.codecs);
         let stored = match spawn_blocking(move || request.encode(&codecs)).await {
             Ok(Ok(stored)) => stored,
-            Ok(Err(error)) => return Err(TaskServiceError::TypedRequest(error.to_string())),
+            Ok(Err(error)) => return Err(TaskServiceError::RequestEncoding(error)),
             Err(error) if error.is_panic() => resume_unwind(error.into_panic()),
             Err(error) => {
                 return Err(TaskServiceError::SchedulerUnavailable(format!(
@@ -301,6 +332,9 @@ impl TypedTaskExecutionService {
                 )));
             }
         };
+        if checked {
+            self.validate_route(&stored)?;
+        }
         let generator = Arc::clone(&self.core.id_generator);
         let allocated = match spawn_blocking(move || generator.generate()).await {
             Ok(result) => result?,
@@ -322,6 +356,20 @@ impl TypedTaskExecutionService {
         }
     }
 
+    fn validate_route(
+        &self,
+        request: &crate::model::typed::StoredTaskRequest,
+    ) -> Result<(), crate::service::TaskRouteError> {
+        validate_task_route(
+            &self.core.handlers,
+            &self.core.codecs,
+            &request.kind_id,
+            request.payload.type_id.as_str(),
+            request.payload.schema_version,
+            &request.payload.codec_id,
+        )
+    }
+
     /// Returns a typed task's current persisted summary.
     ///
     /// # Parameters
@@ -336,8 +384,38 @@ impl TypedTaskExecutionService {
     /// # Errors
     ///
     /// Returns an error if the store cannot read the task.
-    pub async fn get(&self, id: TaskId) -> Result<Option<TaskSummary>, TaskServiceError> {
+    pub async fn get_summary(&self, id: TaskId) -> Result<Option<TaskSummary>, TaskServiceError> {
         Ok(self.core.store.get_summary(id).await?)
+    }
+
+    pub fn pages(&self, query: TaskQuery) -> TaskPages<'_> {
+        TaskPages::new(self, query)
+    }
+
+    pub async fn wait_terminal(
+        &self,
+        id: TaskId,
+        timeout: Duration,
+    ) -> Result<crate::model::typed::TaskStateCheckpoint, WaitTaskError> {
+        let wait = async {
+            loop {
+                let checkpoint = self
+                    .core
+                    .store
+                    .get_state_checkpoint(id)
+                    .await
+                    .map_err(WaitTaskError::Read)?
+                    .ok_or(WaitTaskError::Unavailable(id))?;
+                if checkpoint.state.is_terminal() {
+                    return Ok(checkpoint);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(result) => result,
+            Err(_) => Err(WaitTaskError::Timeout(id)),
+        }
     }
 
     /// Returns the authoritative current state and revision when the store has
@@ -413,7 +491,10 @@ impl TypedTaskExecutionService {
     /// `None` means there is no publisher or no failing head.
     #[cfg(feature = "event-bus")]
     pub fn notification_failure(&self) -> Option<NotificationFailure> {
-        self.core.publisher.as_ref().and_then(TaskEventPublisher::failure)
+        self.core
+            .publisher
+            .as_ref()
+            .and_then(TaskEventPublisher::failure)
     }
 
     /// Archives and removes the exact currently failed notification head.
@@ -450,12 +531,12 @@ impl TypedTaskExecutionService {
     #[cfg(feature = "event-bus")]
     pub async fn quarantine_failed_notification(
         &self,
-        expected_task_id: TaskId,
-        expected_state_version: u64,
-        expected_event_id: &str,
+        observed: &crate::service::NotificationFailure,
         reason: &str,
     ) -> Result<(), TaskServiceError> {
-        if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
+        if self.core.shutting_down.load(Ordering::Acquire)
+            || self.core.owner_released.load(Ordering::Acquire)
+        {
             return Err(TaskServiceError::ShuttingDown);
         }
         let publisher = self
@@ -465,9 +546,9 @@ impl TypedTaskExecutionService {
             .ok_or(crate::store::StoreError::UnsupportedCapability)?;
         publisher
             .quarantine_failed(
-                expected_task_id,
-                expected_state_version,
-                expected_event_id,
+                observed.task_id,
+                observed.state_version,
+                &observed.event_id,
                 reason,
                 &self.core.shutting_down,
             )
@@ -493,12 +574,15 @@ impl TypedTaskExecutionService {
     /// the transition.
     pub async fn resume_blocked(
         &self,
-        id: TaskId,
-        expected_state_version: u64,
+        observed: &TaskSummary,
     ) -> Result<TaskSummary, TaskServiceError> {
+        let id = observed.id;
+        let expected_state_version = observed.state_version;
         let _admission = self.core.admission.read().await;
         self.runner().check_fault()?;
-        if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
+        if self.core.shutting_down.load(Ordering::Acquire)
+            || self.core.owner_released.load(Ordering::Acquire)
+        {
             return Err(TaskServiceError::ShuttingDown);
         }
         let summary = self
@@ -567,7 +651,14 @@ impl TypedTaskExecutionService {
             let notified = self.core.shutdown_completed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(outcome) = self.core.shutdown_progress.lock().results.get(attempt).cloned() {
+            if let Some(outcome) = self
+                .core
+                .shutdown_progress
+                .lock()
+                .results
+                .get(attempt)
+                .cloned()
+            {
                 return outcome.into_result();
             }
             notified.await;
@@ -589,13 +680,18 @@ impl TypedTaskExecutionService {
     ///
     /// Returns an error if shutdown has begun, the task is missing, storage
     /// fails, or an external cancellation hook fails.
-    pub async fn cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
+    pub async fn request_cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let _admission = self.core.admission.read().await;
         self.runner().check_fault()?;
-        if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
+        if self.core.shutting_down.load(Ordering::Acquire)
+            || self.core.owner_released.load(Ordering::Acquire)
+        {
             return Err(TaskServiceError::ShuttingDown);
         }
-        let Some(summary) = self.runner().store_result(self.core.store.get_summary(id).await)? else {
+        let Some(summary) = self
+            .runner()
+            .store_result(self.core.store.get_summary(id).await)?
+        else {
             return Err(TaskServiceError::Store(crate::store::StoreError::NotFound));
         };
         if summary.state.is_terminal() {
@@ -620,7 +716,7 @@ impl TypedTaskExecutionService {
             )?;
             let _ = updated;
             self.core.scheduler_changed.notify_one();
-            return Ok(CancelOutcome::CancelledBeforeStart);
+            return Ok(CancelOutcome::CancelledBeforeRun);
         }
         let Some(cancellation_mode) = self.core.handlers.cancellation_mode(&summary.kind_id) else {
             return Ok(CancelOutcome::CancellationUnsupported);
@@ -677,7 +773,11 @@ impl TypedTaskExecutionService {
     ///
     /// * `key` - Task ID and attempt identifying the cancellation operation.
     /// * `kind_id` - Registered task kind whose external hook is invoked.
-    fn start_or_join_external_cancel(&self, key: (TaskId, u32), kind_id: &str) -> Option<Arc<ExternalCancelFlight>> {
+    fn start_or_join_external_cancel(
+        &self,
+        key: (TaskId, u32),
+        kind_id: &str,
+    ) -> Option<Arc<ExternalCancelFlight>> {
         let (flight, start) = {
             let mut entries = self.core.external_cancellations.lock();
             match entries.get(&key) {
@@ -730,12 +830,16 @@ impl TypedTaskExecutionService {
                 return match result {
                     ExternalCancelResult::Success => Ok(CancelOutcome::CancellationRequested),
                     ExternalCancelResult::AlreadyTerminal => Ok(CancelOutcome::AlreadyTerminal),
-                    ExternalCancelResult::HookFailed(message) => Err(TaskServiceError::ExternalCancellationFailed {
-                        task_id: id,
-                        attempt,
-                        message,
-                    }),
-                    ExternalCancelResult::ServiceFailed(message) => Err(TaskServiceError::StoreUnavailable(message)),
+                    ExternalCancelResult::HookFailed(message) => {
+                        Err(TaskServiceError::ExternalCancellationFailed {
+                            task_id: id,
+                            attempt,
+                            message,
+                        })
+                    }
+                    ExternalCancelResult::ServiceFailed(message) => {
+                        Err(TaskServiceError::StoreUnavailable(message))
+                    }
                 };
             }
             if result.changed().await.is_err() {

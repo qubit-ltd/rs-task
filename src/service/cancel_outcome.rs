@@ -19,7 +19,7 @@
 #[must_use]
 pub enum CancelOutcome {
     /// The task was cancelled while it was queued.
-    CancelledBeforeStart,
+    CancelledBeforeRun,
     /// Cooperative cancellation was signalled to a running handler.
     CancellationRequested,
     /// The running handler has no cooperative or external cancellation path.

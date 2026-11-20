@@ -11,8 +11,10 @@ use qubit_event_bus::CapabilityError;
 use qubit_event_bus::spi::PublishGuarantee;
 use qubit_id::IdGenerationError;
 
+use super::TaskRouteError;
 use crate::model::TaskStateKind;
 use crate::model::typed::TaskId;
+use crate::model::typed::TaskRequestEncodeError;
 use crate::store::StoreError;
 
 /// Failure reported by a service operation.
@@ -37,10 +39,10 @@ pub enum TaskServiceError {
     ),
     /// Encoding or validating a typed task request failed.
     #[error("typed task request failed: {0}")]
-    TypedRequest(
-        /// Diagnostic describing the request encoding or validation failure.
-        String,
-    ),
+    RequestEncoding(#[from] TaskRequestEncodeError),
+    /// The request does not match a handler currently registered for its route.
+    #[error("invalid task route: {0}")]
+    InvalidRoute(#[from] TaskRouteError),
     /// The selected store failed an operation.
     #[error(transparent)]
     Store(
@@ -49,7 +51,9 @@ pub enum TaskServiceError {
         StoreError,
     ),
     /// The submission exceeds the available payload capacity.
-    #[error("task submission capacity exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available")]
+    #[error(
+        "task submission capacity exceeded: requested {requested_bytes} bytes, {available_bytes} bytes available"
+    )]
     SubmissionCapacityExceeded {
         /// Bytes requested by the rejected submission.
         requested_bytes: usize,
@@ -103,7 +107,9 @@ pub enum TaskServiceError {
         String,
     ),
     /// The notification bus cannot retain messages without active subscribers.
-    #[error("notification provider '{provider_id}' is not durable; task notifications require a durable provider")]
+    #[error(
+        "notification provider '{provider_id}' is not durable; task notifications require a durable provider"
+    )]
     NotificationProviderNotDurable {
         /// Identifier of the rejected event-bus provider.
         provider_id: String,
@@ -122,7 +128,9 @@ pub enum TaskServiceError {
     },
     /// The task notification topic requires a codec that is not registered.
     #[cfg(feature = "event-bus")]
-    #[error("notification codec unavailable for topic '{topic}' on provider '{provider_id}': {source}")]
+    #[error(
+        "notification codec unavailable for topic '{topic}' on provider '{provider_id}': {source}"
+    )]
     NotificationCodecUnavailable {
         /// Identifier of the event-bus provider whose configuration failed.
         provider_id: String,

@@ -13,9 +13,9 @@ use futures::FutureExt;
 
 use super::ServiceRunner;
 use super::TypedServiceCore;
+use crate::model::typed::AcceptOutcome;
 use crate::model::typed::StoredTaskRequest;
 use crate::model::typed::TaskId;
-use crate::model::typed::TaskSummary;
 use crate::service::TaskServiceError;
 
 /// Service-owned final acceptance and result-notification operation.
@@ -71,7 +71,9 @@ impl SubmissionOperation {
     /// # Errors
     ///
     /// Returns structured submission rejection errors or mapped store errors.
-    pub(in crate::service::typed_task_execution_service) async fn run(self) -> Result<TaskSummary, TaskServiceError> {
+    pub(in crate::service::typed_task_execution_service) async fn run(
+        self,
+    ) -> Result<AcceptOutcome, TaskServiceError> {
         let Self {
             core,
             admission,
@@ -102,11 +104,11 @@ impl SubmissionOperation {
                 }
             }
             core.scheduler_changed.notify_one();
-            let summary = accepted.summary.clone();
+            let result = accepted.clone();
             drop(admission);
-            return Ok(summary);
+            return Ok(result);
         }
         drop(admission);
-        result.map(|accepted| accepted.summary)
+        result
     }
 }

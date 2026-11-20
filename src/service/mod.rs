@@ -19,11 +19,14 @@ mod retry_policy;
 mod retry_policy_error;
 #[cfg(feature = "event-bus")]
 mod task_event_publisher;
-mod task_progress_reporter;
+mod task_pages;
 mod task_progress_ext;
+mod task_progress_reporter;
+mod task_route_error;
 mod task_service_error;
 mod typed_task_execution_service;
 mod typed_task_execution_service_builder;
+mod wait_task_error;
 
 pub use cancel_outcome::CancelOutcome;
 #[cfg(feature = "event-bus")]
@@ -32,8 +35,11 @@ pub use notification_failure::NotificationFailure;
 pub use notification_stats::NotificationStats;
 pub use retry_policy::RetryPolicy;
 pub use retry_policy_error::RetryPolicyError;
-pub use task_service_error::TaskServiceError;
+pub use task_pages::TaskPages;
 pub use task_progress_ext::TaskProgressError;
 pub use task_progress_ext::TaskProgressExt;
-pub use typed_task_execution_service::TypedTaskExecutionService as TaskExecutionService;
-pub use typed_task_execution_service_builder::TypedTaskExecutionServiceBuilder as TaskExecutionServiceBuilder;
+pub use task_route_error::TaskRouteError;
+pub use task_service_error::TaskServiceError;
+pub use typed_task_execution_service::TaskExecutionService;
+pub use typed_task_execution_service_builder::TaskExecutionServiceBuilder;
+pub use wait_task_error::WaitTaskError;

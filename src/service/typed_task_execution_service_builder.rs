@@ -16,8 +16,8 @@ use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 
+use super::typed_task_execution_service::TaskExecutionService;
 use super::typed_task_execution_service::TypedServiceOptions;
-use super::typed_task_execution_service::TypedTaskExecutionService;
 use crate::engine::LocalTaskExecutionEngine;
 use crate::handler::HandlerRegistrationError;
 use crate::handler::typed::HandlerOptions;
@@ -95,7 +95,7 @@ impl IdGenerator<Id, IdGenerationError> for InMemoryIdGenerator {
 ///     Ok(())
 /// }
 /// ```
-pub struct TypedTaskExecutionServiceBuilder {
+pub struct TaskExecutionServiceBuilder {
     /// Persistent task storage used by the service.
     store: Arc<dyn TaskStore>,
     /// Registry used to encode and decode task payloads.
@@ -146,7 +146,7 @@ mod id_generator_tests {
     }
 }
 
-impl TypedTaskExecutionServiceBuilder {
+impl TaskExecutionServiceBuilder {
     /// Creates an in-memory builder with an independent monotonic ID sequence.
     #[must_use]
     pub fn in_memory(history_capacity: usize, codecs: ValueBytesCodecRegistry) -> Self {
@@ -378,8 +378,8 @@ impl TypedTaskExecutionServiceBuilder {
     /// # Errors
     ///
     /// Returns an error if service initialization or recovery fails.
-    pub async fn build(self) -> Result<TypedTaskExecutionService, TaskServiceError> {
-        TypedTaskExecutionService::new(
+    pub async fn build(self) -> Result<TaskExecutionService, TaskServiceError> {
+        TaskExecutionService::new(
             self.store,
             self.codecs,
             self.id_generator,
