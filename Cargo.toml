@@ -68,12 +68,19 @@ qubit-metadata = { version = "^0.7", features = ["json"] }
 qubit-model-id = "^0.2"
 qubit-progress = "^0.9"
 qubit-spi = "^0.14"
+qubit-operation = { version = "^0.3.1", optional = true }
 
 [features]
 default = []
 inventory = ["qubit-spi/inventory"]
 sqlite = ["dep:rusqlite", "dep:fs2"]
 event-bus = ["dep:qubit-event-bus", "tokio/macros"]
+operation = ["dep:qubit-operation", "tokio/macros"]
+
+[[example]]
+name = "operation_task"
+path = "examples/operation_task.rs"
+required-features = ["operation"]
 
 
 [dev-dependencies]
