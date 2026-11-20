@@ -149,7 +149,7 @@ service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UT
 
 `TaskQuery::default()` 默认读取 50 条。查询字段为私有；用 `with_state`、`with_states`、`with_category`、`with_correlation_key`、`after` 和只读 getter 配置或读取条件。`page_size(n)` 只接受 1 到 256。`service.pages(query)` 创建逐页读取的 `TaskPages`，通过 `next_page()` 取下一页。存储读取失败时游标不会前进，可在修复错误后重试；最后一个非空页会先返回，再报告 `None`。
 
-`request_cancel(id)` 表达请求，不表示任务已经结束。Queued 和 Blocked 任务可返回 `CancelledBeforeRun`；运行中的 cooperative handler 返回 `CancellationRequested` 后，调用方可通过 `TaskContext::cancellation()` 获得只读 `TaskCancellation`。`is_requested()` 观察持久取消请求，`wait_requested()` 只等待 cooperative 取消信号。运行中取消不受支持时返回 `CancellationUnsupported`。外部 hook 接收 `TaskAttempt`；同一 attempt 上并发重试会共享由服务托管的 hook 操作。
+`request_cancel(id)` 表达请求，不表示任务已经结束。Queued 和 Blocked 任务可返回 `CancelledBeforeRun`；运行中的 cooperative handler 返回 `CancellationRequested` 后，调用方可通过 `TaskContext::cancellation()` 获得只读 `TaskCancellation`。`is_requested()` 观察持久取消请求。对于外部取消，服务先持久化意图，再于调用 hook 前将意图发布到该 handle；hook 失败不会清除意图。`wait_requested()` 只等待 cooperative 取消信号，因此外部请求可查询，但不会使该 future 完成。运行中取消不受支持时返回 `CancellationUnsupported`。外部 hook 接收 `TaskAttempt`；同一 attempt 上并发重试会共享由服务托管的 hook 操作。
 
 运维人员应将观察到的完整 `TaskSummary` 传给 `resume_blocked(&summary)`。服务会重新读取当前记录并执行条件更新，陈旧快照会产生冲突，不会覆盖新状态。通知隔离同样接收 `&NotificationFailure` 快照，并原子比较 task ID、state version 和 event ID。
 

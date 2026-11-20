@@ -13,6 +13,8 @@ use super::internal::CancellationState;
 ///
 /// The service supplies this handle through the typed task context. It can
 /// report persisted cancellation requests and wait for cooperative requests.
+/// For external cancellation, the service publishes the request after the
+/// durable intent is recorded and before it invokes the external hook.
 ///
 /// # Examples
 ///
@@ -37,13 +39,16 @@ impl TaskCancellation {
     /// # Returns
     ///
     /// `true` after either cancellation request mode has been published, and
-    /// `false` while the attempt has no request.
+    /// `false` while the attempt has no request. For external cancellation,
+    /// publication follows the durable intent write and precedes the hook.
     #[must_use]
     pub fn is_requested(&self) -> bool {
         *self.state.borrow() != CancellationState::Clear
     }
 
     /// Waits until the service publishes a cooperative cancellation request.
+    /// External cancellation requests are visible through [`is_requested`]
+    /// but do not complete this future.
     ///
     /// This future remains pending if the service-side sender closes before a
     /// cooperative request is published.
