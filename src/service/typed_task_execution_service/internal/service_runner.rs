@@ -8,7 +8,6 @@
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use futures::FutureExt;
@@ -19,6 +18,7 @@ use super::super::super::task_progress_reporter::TaskProgressReporter;
 use super::super::now_ms;
 use super::super::prepare_handler;
 use super::ExternalCancelEntry;
+use super::AttemptCancellationGuard;
 use super::ExternalCancelFlight;
 use super::ExternalCancelResult;
 use super::InFlightGuard;
@@ -1085,29 +1085,49 @@ impl ServiceRunner {
                 return;
             }
         };
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::new(crate::handler::typed::attempt_cancellation::AttemptCancellation::new());
         self.core
             .cancellations
             .lock()
-            .insert((id, running.attempt), Arc::clone(&cancelled));
+            .insert((id, running.attempt), Arc::clone(&cancellation));
+        let cancellation_guard = AttemptCancellationGuard::new(
+            Arc::clone(&self.core),
+            (id, running.attempt),
+            Arc::clone(&cancellation),
+        );
         let latest_cancel_requested = match self.core.store.get_summary(id).await {
-            Ok(summary) => summary.is_some_and(|summary| summary.cancel_requested),
+            Ok(summary) => summary.is_some_and(|summary| {
+                summary.attempt == running.attempt && summary.cancel_requested
+            }),
             Err(error) => {
                 self.latch_fault(error);
                 return;
             }
         };
         if latest_cancel_requested {
-            cancelled.store(true, Ordering::Release);
+            cancellation.flag().store(true, Ordering::Release);
+            #[cfg(feature = "operation")]
+            if self.core.handlers.descriptor(&running.kind_id).is_some_and(|descriptor| {
+                descriptor.cancellation_mode == crate::handler::typed::CancellationMode::Cooperative
+            }) {
+                cancellation.request();
+            }
         }
         let reporter: Arc<dyn AsyncReporter> = Arc::new(TaskProgressReporter::new(
             Arc::clone(&self.core.store),
             id,
             running.attempt,
         ));
-        let context = TypedTaskContext::new(id, running.attempt, cancelled, reporter);
+        let context = TypedTaskContext::new(
+            id,
+            running.attempt,
+            cancellation.flag(),
+            #[cfg(feature = "operation")]
+            Arc::clone(&cancellation),
+            reporter,
+        );
         let execution = AssertUnwindSafe(prepared.run(context)).catch_unwind().await;
-        self.core.cancellations.lock().remove(&(id, running.attempt));
+        drop(cancellation_guard);
         drop(reservation);
         match execution {
             Ok(Ok(TaskRunOutcome::Succeeded(output))) => {

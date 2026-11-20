@@ -639,6 +639,11 @@ impl TypedTaskExecutionService {
             return Self::wait_external_cancel(id, summary.attempt, flight).await;
         }
         if summary.cancel_requested {
+            if descriptor.cancellation_mode == CancellationMode::Cooperative {
+                if let Some(state) = self.core.cancellations.lock().get(&(id, summary.attempt)) {
+                    state.request();
+                }
+            }
             return Ok(CancelOutcome::CancellationRequested);
         }
         let _cancellation_requested = self.runner().store_write_result(
@@ -660,8 +665,8 @@ impl TypedTaskExecutionService {
         match descriptor.cancellation_mode {
             CancellationMode::Unsupported => Ok(CancelOutcome::CancellationUnsupported),
             CancellationMode::Cooperative => {
-                if let Some(signal) = self.core.cancellations.lock().get(&(id, summary.attempt)) {
-                    signal.store(true, Ordering::Release);
+                if let Some(state) = self.core.cancellations.lock().get(&(id, summary.attempt)) {
+                    state.request();
                 }
                 Ok(CancelOutcome::CancellationRequested)
             }

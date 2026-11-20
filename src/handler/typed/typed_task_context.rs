@@ -14,6 +14,8 @@ use qubit_progress::AsyncProgressBuilder;
 use qubit_progress::AsyncReporter;
 
 use crate::model::typed::TaskId;
+#[cfg(feature = "operation")]
+use super::attempt_cancellation::AttemptCancellation;
 
 /// Per-attempt identity and cooperative cancellation state for typed handlers.
 ///
@@ -38,6 +40,8 @@ pub struct TypedTaskContext {
     attempt: u32,
     /// Shared flag observed by this handler and its child work.
     cancelled: Arc<AtomicBool>,
+    #[cfg(feature = "operation")]
+    cancellation: Arc<AttemptCancellation>,
     /// Reporter that persists progress events for this attempt.
     progress_reporter: Arc<dyn AsyncReporter>,
 }
@@ -60,12 +64,15 @@ impl TypedTaskContext {
         task_id: TaskId,
         attempt: u32,
         cancelled: Arc<AtomicBool>,
+        #[cfg(feature = "operation")] cancellation: Arc<AttemptCancellation>,
         progress_reporter: Arc<dyn AsyncReporter>,
     ) -> Self {
         Self {
             task_id,
             attempt,
             cancelled,
+            #[cfg(feature = "operation")]
+            cancellation,
             progress_reporter,
         }
     }
@@ -115,6 +122,18 @@ impl TypedTaskContext {
     #[inline]
     pub fn cancellation_signal(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancelled)
+    }
+
+    /// Waits for a persisted cooperative cancellation request from the task service.
+    ///
+    /// This notification can be awaited repeatedly. Writes made directly to
+    /// [`cancellation_signal`](Self::cancellation_signal) remain visible through
+    /// [`is_cancelled`](Self::is_cancelled), but do not publish this notification.
+    /// Under cancellation modes other than `Cooperative`, this future may remain
+    /// pending indefinitely.
+    #[cfg(feature = "operation")]
+    pub async fn wait_cancel_requested(&self) {
+        self.cancellation.wait_requested().await;
     }
 
     /// Creates a progress builder whose events are persisted for this task
