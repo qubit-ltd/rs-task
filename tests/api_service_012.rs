@@ -1,6 +1,10 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
+
+use qubit_task::model::TaskCursor;
+use qubit_task::store::{StoreError, TaskFuture, delegate_task_store};
 
 use qubit_codec::{
     ValueBytesCodecDescriptor, ValueBytesCodecRegistration, ValueBytesCodecRegistry, ValueCodecId,
@@ -76,6 +80,29 @@ async fn service() -> (
         )
         .unwrap();
     (builder.build().await.unwrap(), store, ids)
+}
+
+struct FailListOnceStore {
+    inner: Arc<MemoryTaskStore>,
+    calls: AtomicUsize,
+    cursors: Mutex<Vec<Option<TaskCursor>>>,
+}
+
+impl qubit_task::store::TaskStore for FailListOnceStore {
+    delegate_task_store!(inner; except [list_encoded]);
+
+    fn list_encoded<'a>(
+        &'a self,
+        query: TaskQuery,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, StoreError>> {
+        if query.limit() == 1 {
+            self.cursors.lock().unwrap().push(query.cursor());
+        }
+        if query.limit() == 1 && self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            return Box::pin(async { Err(StoreError::Failure("controlled list failure".into())) });
+        }
+        self.inner.list_encoded(query)
+    }
 }
 
 #[tokio::test]
@@ -180,4 +207,120 @@ async fn pages_deliver_every_record_and_wait_terminal_accepts_immediate_terminal
     assert_eq!(second.records.len(), 1);
     assert!(pages.next_page().await.unwrap().is_none());
     service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pages_retry_after_store_error_reuses_the_observed_cursor() {
+    let inner = Arc::new(MemoryTaskStore::new(16));
+    let store = Arc::new(FailListOnceStore {
+        inner,
+        calls: AtomicUsize::new(0),
+        cursors: Mutex::new(Vec::new()),
+    });
+    let ids = Arc::new(Ids(AtomicU64::new(900)));
+    let mut builder = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap()),
+        ids,
+    );
+    builder
+        .register_handler_fn::<Input, _, _>(
+            TaskHandlerDescriptor::for_payload::<Input>("known", 1),
+            |_, _| async { Ok(TaskRunOutcome::success()) },
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    for n in 0..2 {
+        let request = TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec"))
+            .request(Input(n));
+        let accepted = service.submit(request).await.unwrap();
+        service
+            .wait_terminal(accepted.summary.id, Duration::from_secs(2))
+            .await
+            .unwrap();
+    }
+    let mut pages = service.pages(TaskQuery::default().page_size(1).unwrap());
+    let first = pages.next_page().await.unwrap().expect("first page");
+    assert_eq!(first.records.len(), 1);
+    assert!(matches!(
+        pages.next_page().await,
+        Err(qubit_task::TaskServiceError::Store(StoreError::Failure(_)))
+    ));
+    let second = pages
+        .next_page()
+        .await
+        .unwrap()
+        .expect("retry returns the second page");
+    assert_eq!(second.records.len(), 1);
+    let cursors = store.cursors.lock().unwrap();
+    assert_eq!(cursors.len(), 3);
+    assert_eq!(cursors[1], cursors[2]);
+    assert!(cursors[1].is_some());
+    drop(cursors);
+    service.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn wait_terminal_reads_checkpoint_after_sqlite_prunes_terminal_row() {
+    let directory = std::env::temp_dir().join(format!(
+        "qubit-task-api-service-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("tasks.sqlite");
+    let store = Arc::new(qubit_task::store::SqliteTaskStore::open(&path).unwrap());
+    let mut builder = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap()),
+        Arc::new(Ids(AtomicU64::new(1_900))),
+    );
+    builder
+        .register_handler_fn::<Input, _, _>(
+            TaskHandlerDescriptor::for_payload::<Input>("known", 1),
+            |_, _| async { Ok(TaskRunOutcome::success()) },
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let request =
+        TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(9));
+    let accepted = service.submit(request).await.unwrap();
+    let terminal = service
+        .wait_terminal(accepted.summary.id, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let cutoff_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 1;
+    assert_eq!(
+        store
+            .prune_terminal_before(cutoff_ms, std::num::NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        store
+            .get_summary(accepted.summary.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        service
+            .wait_terminal(accepted.summary.id, Duration::ZERO)
+            .await
+            .unwrap(),
+        terminal
+    );
+    service.shutdown().await.unwrap();
+    drop(service);
+    drop(store);
+    std::fs::remove_dir_all(directory).unwrap();
 }
