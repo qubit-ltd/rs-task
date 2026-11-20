@@ -54,6 +54,16 @@ pub struct TaskRunError {
 
 impl TaskRunError {
     /// Creates a retryable classified handler failure.
+    ///
+    /// # Parameters
+    ///
+    /// * `category` is a stable application-defined failure category.
+    /// * `message` describes the failure for operators and logs.
+    ///
+    /// # Returns
+    ///
+    /// An error marked as safe to retry, subject to application idempotency
+    /// and side-effect rules.
     #[must_use]
     pub fn retryable(category: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
@@ -64,6 +74,15 @@ impl TaskRunError {
     }
 
     /// Creates a permanent classified handler failure.
+    ///
+    /// # Parameters
+    ///
+    /// * `category` is a stable application-defined failure category.
+    /// * `message` describes the failure for operators and logs.
+    ///
+    /// # Returns
+    ///
+    /// An error marked as non-retryable.
     #[must_use]
     pub fn permanent(category: impl Into<String>, message: impl Into<String>) -> Self {
         Self {

@@ -49,6 +49,14 @@ pub struct ResourceRequest {
 
 impl ResourceRequest {
     /// Creates a resource request with the given CPU slot count.
+    ///
+    /// # Parameters
+    ///
+    /// * `cpu_slots` is the number of CPU concurrency slots to reserve.
+    ///
+    /// # Returns
+    ///
+    /// A resource request with that CPU quota and all other quotas unset.
     #[must_use]
     pub fn cpu(cpu_slots: u32) -> Self {
         Self {
@@ -62,6 +70,10 @@ impl ResourceRequest {
     /// The validation rejects empty or oversized labels and custom resource
     /// names, duplicate GPU labels, labels without a requested GPU, and totals
     /// that exceed the description byte limit. It does not modify the request.
+    ///
+    /// # Parameters
+    ///
+    /// * `self` is the request whose descriptive resource limits are checked.
     ///
     /// # Errors
     ///

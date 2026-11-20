@@ -35,7 +35,10 @@ pub enum HandlerRegistrationError {
     ),
     /// Payload model ID could not be constructed from its configured value.
     #[error("invalid payload model ID: {0}")]
-    InvalidPayloadModel(String),
+    InvalidPayloadModel(
+        /// Conversion failure reported while parsing the configured model ID.
+        String,
+    ),
     /// Payload type's model ID differs from the descriptor model ID.
     #[error("payload model mismatch: expected `{expected}`, got `{actual}`")]
     PayloadModelMismatch {

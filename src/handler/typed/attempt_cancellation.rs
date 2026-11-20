@@ -2,28 +2,34 @@
 //    Copyright (c) 2025 - 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use tokio::sync::watch;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CancellationState {
-    Clear,
-    Requested,
-    CooperativeRequested,
-}
+mod internal;
+mod task_cancellation;
+
+use self::internal::CancellationState;
+pub use task_cancellation::TaskCancellation;
 
 /// Service-side sender for one attempt's cancellation state.
 pub(crate) struct AttemptCancellation {
+    /// Publishes cancellation updates to all handler-side receivers.
     state: watch::Sender<CancellationState>,
 }
 
 impl AttemptCancellation {
+    /// Creates a sender with no cancellation request published.
     pub(crate) fn new() -> Self {
         Self {
             state: watch::channel(CancellationState::Clear).0,
         }
     }
 
+    /// Publishes a cancellation request, preserving an existing request.
+    ///
+    /// Cooperative requests also wake subscribers waiting for notification.
     pub(crate) fn request(&self, cooperative: bool) {
         self.state.send_modify(|state| {
             if cooperative {
@@ -34,6 +40,7 @@ impl AttemptCancellation {
         });
     }
 
+    /// Creates a read-only receiver for the current attempt state.
     pub(crate) fn handle(&self) -> TaskCancellation {
         TaskCancellation {
             state: self.state.subscribe(),
@@ -42,36 +49,9 @@ impl AttemptCancellation {
 }
 
 impl Default for AttemptCancellation {
+    /// Creates an attempt cancellation sender with no request.
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Read-only cancellation state shared with a task handler.
-#[derive(Clone)]
-pub struct TaskCancellation {
-    state: watch::Receiver<CancellationState>,
-}
-
-impl TaskCancellation {
-    /// Returns whether cancellation has been durably requested for this
-    /// attempt.
-    #[must_use]
-    pub fn is_requested(&self) -> bool {
-        *self.state.borrow() != CancellationState::Clear
-    }
-
-    /// Waits until the service publishes a cooperative cancellation request.
-    pub async fn wait_requested(&self) {
-        let mut state = self.state.clone();
-        loop {
-            if *state.borrow() == CancellationState::CooperativeRequested {
-                return;
-            }
-            if state.changed().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-        }
     }
 }
 
@@ -82,7 +62,7 @@ mod tests {
     use super::AttemptCancellation;
 
     #[tokio::test]
-    async fn cooperative_wait_is_latched_and_repeatable() {
+    async fn test_cooperative_wait_is_latched_and_repeatable() {
         let sender = AttemptCancellation::new();
         let handle = sender.handle();
         assert!(!handle.is_requested());
@@ -96,7 +76,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_non_cooperative_request_is_queryable_but_not_waitable() {
+    async fn test_persisted_non_cooperative_request_is_queryable_but_not_waitable() {
         let sender = AttemptCancellation::new();
         let handle = sender.handle();
         sender.request(false);
@@ -109,7 +89,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_sender_does_not_signal_cancellation() {
+    async fn test_closed_sender_does_not_signal_cancellation() {
         let sender = AttemptCancellation::new();
         let handle = sender.handle();
         drop(sender);
@@ -122,7 +102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_and_shared_subscribers_observe_cooperative_request() {
+    async fn test_late_and_shared_subscribers_observe_cooperative_request() {
         let sender = std::sync::Arc::new(AttemptCancellation::new());
         let first = sender.handle();
         let second = sender.handle();
@@ -142,7 +122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_a_waiter_does_not_consume_the_request() {
+    async fn test_dropping_a_waiter_does_not_consume_the_request() {
         let sender = AttemptCancellation::new();
         let handle = sender.handle();
         let mut waiter = Box::pin(handle.wait_requested());
