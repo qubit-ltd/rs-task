@@ -519,7 +519,11 @@ async fn test_idempotent_submit_wakes_without_counting_lifecycle_write() {
         .build()
         .await
         .expect("service starts");
-    let first = service.get_summary(id).await.expect("task lookup").expect("seed exists");
+    let first = service
+        .get_summary(id)
+        .await
+        .expect("task lookup")
+        .expect("seed exists");
     assert!(first.state.is_terminal());
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -885,17 +889,16 @@ async fn test_notification_quarantine_rejects_invalid_reason_and_stale_identity(
     })
     .await
     .expect("failed head becomes observable");
-    let stale_failure = qubit_task::service::NotificationFailure { state_version: 99, ..failure.clone() };
+    let stale_failure = qubit_task::service::NotificationFailure {
+        state_version: 99,
+        ..failure.clone()
+    };
     assert!(matches!(
-        service
-            .quarantine_failed_notification(&stale_failure, "reason")
-            .await,
+        service.quarantine_failed_notification(&stale_failure, "reason").await,
         Err(TaskServiceError::Store(StoreError::Conflict))
     ));
     assert!(matches!(
-        service
-            .quarantine_failed_notification(&failure, "  ")
-            .await,
+        service.quarantine_failed_notification(&failure, "  ").await,
         Err(TaskServiceError::InvalidRequest(_))
     ));
     assert!(matches!(
@@ -907,9 +910,7 @@ async fn test_notification_quarantine_rejects_invalid_reason_and_stale_identity(
     assert_eq!(service.notification_failure(), Some(failure.clone()));
     assert!(service.shutdown().await.is_err(), "bad head remains pending");
     assert!(matches!(
-        service
-            .quarantine_failed_notification(&failure, "reason")
-            .await,
+        service.quarantine_failed_notification(&failure, "reason").await,
         Err(TaskServiceError::ShuttingDown)
     ));
 }
@@ -956,9 +957,15 @@ async fn test_notification_quarantine_reports_unsupported_without_a_publisher() 
     assert_eq!(service.notification_failure(), None);
     assert!(matches!(
         service
-            .quarantine_failed_notification(&qubit_task::service::NotificationFailure {
-                task_id: TaskId::from_id(Id::new(43)), state_version: 0, event_id: "task:43:0".into(), error: String::new(),
-            }, "operator reason")
+            .quarantine_failed_notification(
+                &qubit_task::service::NotificationFailure {
+                    task_id: TaskId::from_id(Id::new(43)),
+                    state_version: 0,
+                    event_id: "task:43:0".into(),
+                    error: String::new(),
+                },
+                "operator reason"
+            )
             .await,
         Err(TaskServiceError::Store(StoreError::UnsupportedCapability))
     ));

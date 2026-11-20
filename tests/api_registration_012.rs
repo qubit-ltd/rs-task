@@ -28,11 +28,7 @@ impl HasModelId for Other {
 struct Handler;
 
 impl TaskHandler<Echo> for Handler {
-    fn run<'a>(
-        &'a self,
-        value: Echo,
-        _context: qubit_task::handler::TaskContext,
-    ) -> TaskFuture<'a, TaskRunResult> {
+    fn run<'a>(&'a self, value: Echo, _context: qubit_task::handler::TaskContext) -> TaskFuture<'a, TaskRunResult> {
         let _ = value.0;
         Box::pin(async move { Ok(TaskRunOutcome::success()) })
     }
@@ -64,24 +60,12 @@ fn kind_builds_request_and_descriptor() {
 fn descriptor_validates_schema_and_payload_identity_at_registration() {
     let mut registry = qubit_task::handler::TaskHandlerRegistry::new();
     let empty = descriptor("empty").with_accepted_schema_versions([]);
-    assert!(
-        registry
-            .register::<Echo, _>(empty, Arc::new(Handler))
-            .is_err()
-    );
+    assert!(registry.register::<Echo, _>(empty, Arc::new(Handler)).is_err());
 
     let repeated = descriptor("repeated").with_accepted_schema_versions([1, 1]);
-    assert!(
-        registry
-            .register::<Echo, _>(repeated, Arc::new(Handler))
-            .is_err()
-    );
+    assert!(registry.register::<Echo, _>(repeated, Arc::new(Handler)).is_err());
     let repeated = descriptor("zero").with_accepted_schema_versions([0]);
-    assert!(
-        registry
-            .register::<Echo, _>(repeated, Arc::new(Handler))
-            .is_err()
-    );
+    assert!(registry.register::<Echo, _>(repeated, Arc::new(Handler)).is_err());
 
     assert!(
         registry
@@ -155,15 +139,11 @@ fn registration_can_be_removed_and_replaced_without_overwriting_duplicates() {
 #[test]
 fn builder_registers_async_functions_and_can_unregister_and_reregister() {
     let mut builder = TaskExecutionServiceBuilder::in_memory(16, ValueBytesCodecRegistry::empty());
-    let handler = |_value: Echo, _context: qubit_task::handler::TaskContext| async {
-        Ok(TaskRunOutcome::success())
-    };
+    let handler = |_value: Echo, _context: qubit_task::handler::TaskContext| async { Ok(TaskRunOutcome::success()) };
     builder
         .register_handler_fn::<Echo, _, _>(descriptor("echo"), handler)
         .unwrap();
-    let duplicate = |_value: Echo, _context: qubit_task::handler::TaskContext| async {
-        Ok(TaskRunOutcome::success())
-    };
+    let duplicate = |_value: Echo, _context: qubit_task::handler::TaskContext| async { Ok(TaskRunOutcome::success()) };
     assert!(
         builder
             .register_handler_fn::<Echo, _, _>(descriptor("echo"), duplicate)
@@ -171,9 +151,7 @@ fn builder_registers_async_functions_and_can_unregister_and_reregister() {
     );
     assert!(builder.unregister_handler("echo"));
     assert!(!builder.unregister_handler("echo"));
-    let handler = |_value: Echo, _context: qubit_task::handler::TaskContext| async {
-        Ok(TaskRunOutcome::success())
-    };
+    let handler = |_value: Echo, _context: qubit_task::handler::TaskContext| async { Ok(TaskRunOutcome::success()) };
     builder
         .register_handler_fn::<Echo, _, _>(descriptor("echo"), handler)
         .unwrap();
@@ -181,10 +159,7 @@ fn builder_registers_async_functions_and_can_unregister_and_reregister() {
 
 #[test]
 fn run_result_convenience_constructors_preserve_classification() {
-    assert!(matches!(
-        TaskRunOutcome::success(),
-        TaskRunOutcome::Succeeded(_)
-    ));
+    assert!(matches!(TaskRunOutcome::success(), TaskRunOutcome::Succeeded(_)));
     assert!(qubit_task::model::TaskRunError::retryable("temporary", "retry").retryable);
     assert!(!qubit_task::model::TaskRunError::permanent("invalid", "stop").retryable);
 }

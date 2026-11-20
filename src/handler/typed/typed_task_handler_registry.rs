@@ -107,9 +107,7 @@ impl TypedTaskHandlerRegistry {
     /// that kind ID.
     #[inline]
     pub fn descriptor(&self, kind_id: &str) -> Option<&TaskHandlerDescriptor> {
-        self.handlers
-            .get(kind_id)
-            .map(|registration| &registration.descriptor)
+        self.handlers.get(kind_id).map(|registration| &registration.descriptor)
     }
 
     /// Removes a registered kind and all of its associated handler metadata.
@@ -212,11 +210,7 @@ impl TypedTaskHandlerRegistry {
             F: Fn(T, TypedTaskContext) -> Fut + Send + Sync + 'static,
             Fut: Future<Output = crate::handler::TaskRunResult> + Send + 'static,
         {
-            fn run<'a>(
-                &'a self,
-                input: T,
-                context: TypedTaskContext,
-            ) -> TaskFuture<'a, crate::handler::TaskRunResult> {
+            fn run<'a>(&'a self, input: T, context: TypedTaskContext) -> TaskFuture<'a, crate::handler::TaskRunResult> {
                 Box::pin((self.function)(input, context))
             }
         }
@@ -310,10 +304,7 @@ impl TypedTaskHandlerRegistry {
                 actual: ModelIdBuf::from(T::MODEL_ID).to_string(),
             });
         }
-        match (
-            options.cancellation_mode,
-            options.external_cancellation_hook.is_some(),
-        ) {
+        match (options.cancellation_mode, options.external_cancellation_hook.is_some()) {
             (CancellationMode::ExternalHook, false) => {
                 return Err(HandlerRegistrationError::MissingExternalHook(
                     descriptor.kind_id().to_owned(),

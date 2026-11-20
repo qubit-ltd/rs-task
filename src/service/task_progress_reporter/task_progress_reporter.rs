@@ -146,8 +146,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::TaskProgressReporter;
-    use crate::service::TaskProgressError;
-    use crate::service::TaskProgressExt;
     #[cfg(feature = "sqlite")]
     use super::unix_time_ms;
     use crate::model::TaskState;
@@ -157,6 +155,8 @@ mod tests {
     use crate::model::typed::StoredPayload;
     use crate::model::typed::StoredTaskRequest;
     use crate::model::typed::TaskId;
+    use crate::service::TaskProgressError;
+    use crate::service::TaskProgressExt;
     use crate::store::MemoryTaskStore;
     use crate::store::StoreError;
     use crate::store::TaskStore;

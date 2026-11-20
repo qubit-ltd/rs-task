@@ -71,9 +71,7 @@ impl SubmissionOperation {
     /// # Errors
     ///
     /// Returns structured submission rejection errors or mapped store errors.
-    pub(in crate::service::typed_task_execution_service) async fn run(
-        self,
-    ) -> Result<AcceptOutcome, TaskServiceError> {
+    pub(in crate::service::typed_task_execution_service) async fn run(self) -> Result<AcceptOutcome, TaskServiceError> {
         let Self {
             core,
             admission,

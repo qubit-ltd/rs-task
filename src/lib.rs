@@ -37,6 +37,7 @@ pub use model::TaskOutput;
 pub use model::TaskRunError;
 pub use model::TaskState;
 pub use model::TaskStateKind;
+pub use model::typed::AcceptOutcome;
 pub use model::typed::EncodedPayload;
 pub use model::typed::Payload;
 pub use model::typed::ResourceRequest;
@@ -44,16 +45,19 @@ pub use model::typed::TaskAttempt;
 pub use model::typed::TaskId;
 pub use model::typed::TaskPage;
 pub use model::typed::TaskQuery;
+pub use model::typed::TaskQueryError;
 pub use model::typed::TaskRequest;
 pub use model::typed::TaskStateCheckpoint;
 pub use model::typed::TaskSummary;
-pub use model::typed::{AcceptOutcome, TaskQueryError};
+pub use service::CancelOutcome;
 pub use service::RetryPolicy;
 pub use service::RetryPolicyError;
 pub use service::TaskExecutionService;
 pub use service::TaskExecutionServiceBuilder;
-pub use service::{
-    CancelOutcome, TaskPages, TaskProgressError, TaskProgressExt, TaskRouteError, TaskServiceError,
-    WaitTaskError,
-};
+pub use service::TaskPages;
+pub use service::TaskProgressError;
+pub use service::TaskProgressExt;
+pub use service::TaskRouteError;
+pub use service::TaskServiceError;
+pub use service::WaitTaskError;
 pub use store::TaskStore;

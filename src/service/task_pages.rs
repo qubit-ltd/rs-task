@@ -1,5 +1,7 @@
-use crate::model::typed::{TaskPage, TaskQuery};
-use crate::service::{TaskExecutionService, TaskServiceError};
+use crate::model::typed::TaskPage;
+use crate::model::typed::TaskQuery;
+use crate::service::TaskExecutionService;
+use crate::service::TaskServiceError;
 
 pub struct TaskPages<'a> {
     service: &'a TaskExecutionService,

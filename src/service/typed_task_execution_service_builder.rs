@@ -15,6 +15,7 @@ use qubit_event_bus::AsyncEventBus;
 use qubit_id::Id;
 use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
 
 use super::typed_task_execution_service::TaskExecutionService;
 use super::typed_task_execution_service::TypedServiceOptions;
@@ -29,7 +30,6 @@ use crate::service::RetryPolicy;
 use crate::service::TaskServiceError;
 use crate::store::MemoryTaskStore;
 use crate::store::TaskStore;
-use qubit_model_id::HasModelId;
 
 struct InMemoryIdGenerator {
     sequence: AtomicU64,
@@ -46,9 +46,7 @@ impl InMemoryIdGenerator {
 impl IdGenerator<Id, IdGenerationError> for InMemoryIdGenerator {
     fn generate(&self) -> Result<Id, IdGenerationError> {
         self.sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| {
-                sequence.checked_add(1)
-            })
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| sequence.checked_add(1))
             .map(|previous| Id::new(previous + 1))
             .map_err(|sequence| IdGenerationError::SequenceOverflow {
                 sequence,
@@ -126,8 +124,9 @@ pub struct TaskExecutionServiceBuilder {
 
 #[cfg(test)]
 mod id_generator_tests {
-    use super::InMemoryIdGenerator;
     use qubit_id::IdGenerator;
+
+    use super::InMemoryIdGenerator;
 
     #[test]
     fn sequence_never_wraps_or_repeats_after_overflow() {
@@ -176,8 +175,7 @@ impl TaskExecutionServiceBuilder {
         codecs: Arc<ValueBytesCodecRegistry>,
         id_generator: Arc<dyn IdGenerator<Id, IdGenerationError>>,
     ) -> Self {
-        let cpu_slots =
-            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32;
+        let cpu_slots = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32;
         Self {
             store,
             codecs,
@@ -187,8 +185,7 @@ impl TaskExecutionServiceBuilder {
                 ..ResourceCapacity::default()
             },
             handlers: TypedTaskHandlerRegistry::new(),
-            max_running_tasks: std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get),
+            max_running_tasks: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
             scan_page_size: 128,
             max_resource_bypasses: 32,
             max_attempts: 3,

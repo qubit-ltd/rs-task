@@ -335,7 +335,10 @@ async fn test_sqlite_typed_history_ready_retry_and_terminal_prune_paths() {
 
     let history = TypedTaskStore::list_encoded(
         &store,
-        TaskQuery::default().with_category("reports").page_size(1).expect("valid page size"),
+        TaskQuery::default()
+            .with_category("reports")
+            .page_size(1)
+            .expect("valid page size"),
     )
     .await
     .expect("typed history page is read");

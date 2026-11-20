@@ -28,9 +28,7 @@ impl AsyncReporter for NoopReporter {
 
 #[test]
 fn test_debug_shows_the_prepared_task_type_without_exposing_handler_state() {
-    let task = PreparedTask::new(Box::new(|_| {
-        Box::pin(async { Ok(TaskRunOutcome::Cancelled) })
-    }));
+    let task = PreparedTask::new(Box::new(|_| Box::pin(async { Ok(TaskRunOutcome::Cancelled) })));
 
     let formatted = format!("{task:?}");
 

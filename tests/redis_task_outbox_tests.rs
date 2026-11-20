@@ -523,7 +523,10 @@ async fn test_typed_lifecycle_and_cancellation_reach_durable_consumer() -> TestR
     let done = service
         .submit(typed_support::request(serde_json::json!({}), "success"))
         .await?;
-    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(done.summary.id));
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, started.recv()).await?,
+        Some(done.summary.id)
+    );
     assert_eq!(terminal(&service, done.summary.id).await?, TaskState::Succeeded);
     let cancelled = service
         .submit(typed_support::request(serde_json::json!({"cancel": true}), "cancel"))
@@ -634,7 +637,10 @@ async fn test_reconcile_missing_terminal_notification() -> TestResult {
         .await?;
     let mut projection = DurableProjection::open(projection_database.path()).map_err(test_error)?;
     projection.track(accepted.summary.id).map_err(test_error)?;
-    assert_eq!(tokio::time::timeout(DEADLINE, started.recv()).await?, Some(accepted.summary.id));
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, started.recv()).await?,
+        Some(accepted.summary.id)
+    );
     assert_eq!(terminal(&service, accepted.summary.id).await?, TaskState::Succeeded);
     service.shutdown().await?;
     let _report = bus.shutdown(ShutdownMode::Immediate).await?;
@@ -670,7 +676,8 @@ async fn test_reconcile_missing_terminal_notification() -> TestResult {
             .build()?,
         move |delivery| {
             let event = delivery.payload();
-            let retained = (event.task_id == accepted.summary.id && event.state == TaskState::Running).then(|| event.clone());
+            let retained =
+                (event.task_id == accepted.summary.id && event.state == TaskState::Running).then(|| event.clone());
             let _ = sender.send(retained);
             Ok::<(), DeliveryError>(())
         },
@@ -687,7 +694,8 @@ async fn test_reconcile_missing_terminal_notification() -> TestResult {
     projection
         .commit_snapshot(running.task_id, running.state_version, running.state.clone())
         .map_err(test_error)?;
-    let before_reconcile = DurableProjection::snapshot(projection_database.path(), accepted.summary.id).map_err(test_error)?;
+    let before_reconcile =
+        DurableProjection::snapshot(projection_database.path(), accepted.summary.id).map_err(test_error)?;
     assert_eq!(before_reconcile, (Some((1, TaskState::Running)), vec![1]));
     assert!(projection.is_tracked(accepted.summary.id).map_err(test_error)?);
     drop(projection);
@@ -701,15 +709,21 @@ async fn test_reconcile_missing_terminal_notification() -> TestResult {
     let mut reopened = DurableProjection::open(projection_database.path()).map_err(test_error)?;
     assert!(
         reopened
-            .reconcile(accepted.summary.id, |_| Ok(Some((latest.state_version, latest.state.clone()))))
+            .reconcile(accepted.summary.id, |_| Ok(Some((
+                latest.state_version,
+                latest.state.clone()
+            ))))
             .map_err(test_error)?
     );
-    let terminal_snapshot = DurableProjection::snapshot(projection_database.path(), accepted.summary.id).map_err(test_error)?;
+    let terminal_snapshot =
+        DurableProjection::snapshot(projection_database.path(), accepted.summary.id).map_err(test_error)?;
     assert_eq!(terminal_snapshot, (Some((2, TaskState::Succeeded)), vec![1, 2]));
     assert!(!reopened.is_tracked(accepted.summary.id).map_err(test_error)?);
     assert!(
         !reopened
-            .reconcile(accepted.summary.id, |_| panic!("retired task must not be queried again"))
+            .reconcile(accepted.summary.id, |_| panic!(
+                "retired task must not be queried again"
+            ))
             .map_err(test_error)?,
         "a retired task must be skipped without querying or repeating its business effect"
     );
@@ -818,7 +832,8 @@ async fn test_lost_xadd_reply_replays_the_same_event_identity() -> TestResult {
         projection_database.path(),
         &second,
     )?;
-    let first_snapshot = DurableProjection::snapshot(projection_database.path(), done.summary.id).map_err(test_error)?;
+    let first_snapshot =
+        DurableProjection::snapshot(projection_database.path(), done.summary.id).map_err(test_error)?;
     assert_eq!(first_snapshot.0, Some((2, TaskState::Succeeded)));
     assert_eq!(first_snapshot.1, vec![0, 1, 2]);
     consume_durable(

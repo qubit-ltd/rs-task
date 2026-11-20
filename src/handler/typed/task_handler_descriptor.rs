@@ -41,11 +41,7 @@ impl TaskHandlerDescriptor {
         Ok(Self::new(kind.into(), model, vec![schema]))
     }
 
-    fn new(
-        kind_id: String,
-        payload_type_id: ModelIdBuf,
-        accepted_schema_versions: Vec<u32>,
-    ) -> Self {
+    fn new(kind_id: String, payload_type_id: ModelIdBuf, accepted_schema_versions: Vec<u32>) -> Self {
         Self {
             kind_id,
             payload_type_id,
@@ -73,10 +69,7 @@ impl TaskHandlerDescriptor {
 
     /// Replaces the accepted schema versions.
     #[must_use]
-    pub fn with_accepted_schema_versions(
-        mut self,
-        versions: impl IntoIterator<Item = u32>,
-    ) -> Self {
+    pub fn with_accepted_schema_versions(mut self, versions: impl IntoIterator<Item = u32>) -> Self {
         self.accepted_schema_versions = versions.into_iter().collect();
         self
     }

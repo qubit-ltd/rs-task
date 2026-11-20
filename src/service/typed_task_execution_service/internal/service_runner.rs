@@ -38,7 +38,8 @@ use crate::model::typed::TaskId;
 use crate::model::typed::TaskSummary;
 use crate::model::typed::TransitionCommand;
 use crate::service::TaskServiceError;
-use crate::service::task_route_error::{TaskRouteError, validate_task_route};
+use crate::service::task_route_error::TaskRouteError;
+use crate::service::task_route_error::validate_task_route;
 
 #[cfg(test)]
 struct SchedulerStopGateRegistration {
@@ -47,9 +48,8 @@ struct SchedulerStopGateRegistration {
 }
 
 #[cfg(test)]
-static SCHEDULER_STOP_GATE: std::sync::OnceLock<
-    parking_lot::Mutex<Option<SchedulerStopGateRegistration>>,
-> = std::sync::OnceLock::new();
+static SCHEDULER_STOP_GATE: std::sync::OnceLock<parking_lot::Mutex<Option<SchedulerStopGateRegistration>>> =
+    std::sync::OnceLock::new();
 
 #[cfg(test)]
 struct ExternalCancelGateRegistration {
@@ -58,9 +58,8 @@ struct ExternalCancelGateRegistration {
 }
 
 #[cfg(test)]
-static EXTERNAL_CANCEL_SUCCESS_GATE: std::sync::OnceLock<
-    parking_lot::Mutex<Option<ExternalCancelGateRegistration>>,
-> = std::sync::OnceLock::new();
+static EXTERNAL_CANCEL_SUCCESS_GATE: std::sync::OnceLock<parking_lot::Mutex<Option<ExternalCancelGateRegistration>>> =
+    std::sync::OnceLock::new();
 
 #[cfg(test)]
 struct ExternalCancelSuccessGate {
@@ -82,8 +81,7 @@ async fn external_cancel_success_gate(core: &std::sync::Arc<TypedServiceCore>) {
     if let Some(gate) = gate.filter(|gate| gate.pause_next.swap(false, Ordering::AcqRel)) {
         gate.reached.notify_one();
         gate.finish_handler.notify_one();
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(5), gate.release.notified()).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), gate.release.notified()).await;
     }
 }
 
@@ -156,12 +154,12 @@ impl ServiceRunner {
     /// # Errors
     ///
     /// Returns the first fault recorded by the service.
-    pub(in crate::service::typed_task_execution_service) fn check_fault(
-        &self,
-    ) -> Result<(), TaskServiceError> {
-        self.core.fault.lock().clone().map_or(Ok(()), |fault| {
-            Err(TaskServiceError::StoreUnavailable(fault))
-        })
+    pub(in crate::service::typed_task_execution_service) fn check_fault(&self) -> Result<(), TaskServiceError> {
+        self.core
+            .fault
+            .lock()
+            .clone()
+            .map_or(Ok(()), |fault| Err(TaskServiceError::StoreUnavailable(fault)))
     }
 
     /// Runs the registered external cancellation hook and reconciles its result
@@ -233,9 +231,7 @@ impl ServiceRunner {
             })) {
                 Ok(Some(hook)) => hook,
                 Ok(None) => {
-                    return ExternalCancelResult::ServiceFailed(
-                        "external cancellation hook is unavailable".into(),
-                    );
+                    return ExternalCancelResult::ServiceFailed("external cancellation hook is unavailable".into());
                 }
                 Err(panic) => {
                     let message = Self::external_cancel_panic_message(panic);
@@ -286,9 +282,7 @@ impl ServiceRunner {
                         }
                     }
                 },
-                Ok(Err(error)) => {
-                    Self::record_external_cancel_failure(&core, id, attempt, error.message).await
-                }
+                Ok(Err(error)) => Self::record_external_cancel_failure(&core, id, attempt, error.message).await,
                 Err(panic) => {
                     let message = Self::external_cancel_panic_message(panic);
                     Self::record_external_cancel_failure(&core, id, attempt, message).await
@@ -376,10 +370,7 @@ impl ServiceRunner {
     /// # Parameters
     ///
     /// - `error`: Displayable description of the fault to latch.
-    pub(in crate::service::typed_task_execution_service) fn latch_fault(
-        &self,
-        error: impl std::fmt::Display,
-    ) {
+    pub(in crate::service::typed_task_execution_service) fn latch_fault(&self, error: impl std::fmt::Display) {
         let mut fault = self.core.fault.lock();
         if fault.is_none() {
             *fault = Some(error.to_string());
@@ -458,9 +449,7 @@ impl ServiceRunner {
             Err(crate::store::StoreError::UnfinishedRecordLimitExceeded { limit }) => {
                 Err(TaskServiceError::UnfinishedTaskLimitExceeded { limit })
             }
-            Err(crate::store::StoreError::IdempotencyConflict) => {
-                Err(TaskServiceError::IdempotencyConflict)
-            }
+            Err(crate::store::StoreError::IdempotencyConflict) => Err(TaskServiceError::IdempotencyConflict),
             Err(crate::store::StoreError::DuplicateTask) => Err(TaskServiceError::DuplicateTaskId),
             other => self.store_result(other),
         }
@@ -518,10 +507,7 @@ impl ServiceRunner {
                                 state,
                                 cancel_requested: keep_cancel,
                                 cancel_error: summary.cancel_error.clone().map(|message| {
-                                    bound_diagnostic(
-                                        message,
-                                        crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES,
-                                    )
+                                    bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES)
                                 }),
                                 finished_at_ms: None,
                                 output: None,
@@ -550,9 +536,7 @@ impl ServiceRunner {
             {
                 // Model the old pre-registration stop check so the test gate
                 // stays between that check and waiter registration.
-                if self.core.shutting_down.load(Ordering::Acquire)
-                    || self.core.fault.lock().is_some()
-                {
+                if self.core.shutting_down.load(Ordering::Acquire) || self.core.fault.lock().is_some() {
                     return;
                 }
                 scheduler_stop_gate(&self.core).await;
@@ -660,9 +644,7 @@ impl ServiceRunner {
                 }
                 Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
             };
-            if summary.state.is_terminal()
-                || summary.attempt != attempt
-                || !matches!(summary.state, TaskState::Running)
+            if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running)
             {
                 return ExternalCancelResult::AlreadyTerminal;
             }
@@ -847,8 +829,7 @@ impl ServiceRunner {
                 .store
                 .list_ready_queued(
                     after,
-                    std::num::NonZeroUsize::new(self.core.scan_page_size)
-                        .expect("scan size is nonzero"),
+                    std::num::NonZeroUsize::new(self.core.scan_page_size).expect("scan size is nonzero"),
                     now,
                 )
                 .await?;
@@ -893,9 +874,7 @@ impl ServiceRunner {
                     .await
                 {
                     Ok(running) => running,
-                    Err(
-                        crate::store::StoreError::Conflict | crate::store::StoreError::NotFound,
-                    ) => {
+                    Err(crate::store::StoreError::Conflict | crate::store::StoreError::NotFound) => {
                         drop(admission);
                         drop(reservation);
                         continue;
@@ -978,8 +957,7 @@ impl ServiceRunner {
         ) {
             Ok(()) => true,
             Err(TaskRouteError::MissingHandler { .. }) => {
-                self.mark_blocked(summary, "handler is not registered")
-                    .await;
+                self.mark_blocked(summary, "handler is not registered").await;
                 false
             }
             Err(TaskRouteError::MissingCodec { .. }) => {
@@ -1055,12 +1033,7 @@ impl ServiceRunner {
     /// - `id`: ID of the admitted task to load and execute.
     /// - `running`: Persisted summary for the attempt that was started.
     /// - `reservation`: Resource lease held until handler execution completes.
-    async fn run_one(
-        &self,
-        id: TaskId,
-        running: TaskSummary,
-        reservation: TypedResourceReservation,
-    ) {
+    async fn run_one(&self, id: TaskId, running: TaskSummary, reservation: TypedResourceReservation) {
         let task = match self.core.store.get_encoded_task(id).await {
             Ok(Some(task)) => task,
             Ok(None) => return,
@@ -1084,9 +1057,7 @@ impl ServiceRunner {
         let preparation = match preparation {
             Ok(preparation) => preparation,
             Err(error) => {
-                self.latch_fault(format!(
-                    "task payload preparation worker unavailable: {error}"
-                ));
+                self.latch_fault(format!("task payload preparation worker unavailable: {error}"));
                 return;
             }
         };
@@ -1118,21 +1089,17 @@ impl ServiceRunner {
                 return;
             }
         };
-        let cancellation =
-            Arc::new(crate::handler::typed::attempt_cancellation::AttemptCancellation::new());
+        let cancellation = Arc::new(crate::handler::typed::attempt_cancellation::AttemptCancellation::new());
         self.core
             .cancellations
             .lock()
             .insert((id, running.attempt), Arc::clone(&cancellation));
-        let cancellation_guard = AttemptCancellationGuard::new(
-            Arc::clone(&self.core),
-            (id, running.attempt),
-            Arc::clone(&cancellation),
-        );
+        let cancellation_guard =
+            AttemptCancellationGuard::new(Arc::clone(&self.core), (id, running.attempt), Arc::clone(&cancellation));
         let latest_cancel_requested = match self.core.store.get_summary(id).await {
-            Ok(summary) => summary.is_some_and(|summary| {
-                summary.attempt == running.attempt && summary.cancel_requested
-            }),
+            Ok(summary) => {
+                summary.is_some_and(|summary| summary.attempt == running.attempt && summary.cancel_requested)
+            }
             Err(error) => {
                 self.latch_fault(error);
                 return;
@@ -1159,8 +1126,7 @@ impl ServiceRunner {
         match execution {
             Ok(Ok(TaskRunOutcome::Succeeded(output))) => {
                 if output.summary.len() <= MAX_TASK_OUTPUT_SUMMARY_BYTES {
-                    self.finish(&running, TaskState::Succeeded, Some(output), false)
-                        .await;
+                    self.finish(&running, TaskState::Succeeded, Some(output), false).await;
                 } else {
                     self.finish(
                         &running,
@@ -1177,10 +1143,7 @@ impl ServiceRunner {
                     .await;
                 }
             }
-            Ok(Ok(TaskRunOutcome::Cancelled)) => {
-                self.finish(&running, TaskState::Cancelled, None, false)
-                    .await
-            }
+            Ok(Ok(TaskRunOutcome::Cancelled)) => self.finish(&running, TaskState::Cancelled, None, false).await,
             Ok(Err(error)) => {
                 let retryable = error.retryable;
                 self.finish(
@@ -1225,9 +1188,7 @@ impl ServiceRunner {
                 expected_state_version: summary.state_version,
                 expected_attempt: summary.attempt,
                 retry_not_before_ms: None,
-                state: bound_state_diagnostics(TaskState::Blocked {
-                    reason: reason.into(),
-                }),
+                state: bound_state_diagnostics(TaskState::Blocked { reason: reason.into() }),
                 cancel_requested: false,
                 cancel_error: None,
                 finished_at_ms: None,
@@ -1240,8 +1201,7 @@ impl ServiceRunner {
                 self.notify_notifications();
             }
             Err(crate::store::StoreError::Conflict) => {
-                self.check_competing_transition(summary.id, summary.state_version)
-                    .await
+                self.check_competing_transition(summary.id, summary.state_version).await
             }
             Err(error) => self.latch_fault(error),
         }
@@ -1260,13 +1220,7 @@ impl ServiceRunner {
     /// - `state`: State to persist if the attempt is not retried.
     /// - `output`: Optional output produced by the attempt.
     /// - `retryable`: Whether retry policy may schedule another attempt.
-    async fn finish(
-        &self,
-        started: &TaskSummary,
-        state: TaskState,
-        output: Option<TaskOutput>,
-        retryable: bool,
-    ) {
+    async fn finish(&self, started: &TaskSummary, state: TaskState, output: Option<TaskOutput>, retryable: bool) {
         let state = bound_state_diagnostics(state);
         let mut conflicted_version = None;
         loop {
@@ -1289,9 +1243,7 @@ impl ServiceRunner {
                 return;
             }
             if conflicted_version.take() == Some(latest.state_version) {
-                self.latch_fault(
-                    "task lifecycle compare-and-set conflicted without a competing revision",
-                );
+                self.latch_fault("task lifecycle compare-and-set conflicted without a competing revision");
                 return;
             }
             if latest.attempt != started.attempt || !matches!(latest.state, TaskState::Running) {
@@ -1299,20 +1251,10 @@ impl ServiceRunner {
                 return;
             }
 
-            let retry =
-                retryable && !latest.cancel_requested && started.attempt < self.core.max_attempts;
-            let retry_deadline = retry.then(|| {
-                now_ms().saturating_add(
-                    self.core
-                        .retry_policy
-                        .delay_millis_for_attempt(started.attempt),
-                )
-            });
-            let final_state = if retry {
-                TaskState::Queued
-            } else {
-                state.clone()
-            };
+            let retry = retryable && !latest.cancel_requested && started.attempt < self.core.max_attempts;
+            let retry_deadline = retry
+                .then(|| now_ms().saturating_add(self.core.retry_policy.delay_millis_for_attempt(started.attempt)));
+            let final_state = if retry { TaskState::Queued } else { state.clone() };
             match self
                 .core
                 .store
@@ -1323,9 +1265,9 @@ impl ServiceRunner {
                     retry_not_before_ms: retry_deadline,
                     state: final_state,
                     cancel_requested: latest.cancel_requested,
-                    cancel_error: latest.cancel_error.map(|message| {
-                        bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES)
-                    }),
+                    cancel_error: latest
+                        .cancel_error
+                        .map(|message| bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES)),
                     finished_at_ms: Some(now_ms()),
                     output: output.clone(),
                 })
@@ -1361,12 +1303,8 @@ impl ServiceRunner {
     async fn check_competing_transition(&self, id: TaskId, expected_version: u64) {
         match self.core.store.get_summary(id).await {
             Ok(Some(summary)) if summary.state_version != expected_version => {}
-            Ok(Some(_)) => self.latch_fault(
-                "task lifecycle compare-and-set conflicted without a competing revision",
-            ),
-            Ok(None) => {
-                self.latch_fault("task disappeared after lifecycle compare-and-set conflict")
-            }
+            Ok(Some(_)) => self.latch_fault("task lifecycle compare-and-set conflicted without a competing revision"),
+            Ok(None) => self.latch_fault("task disappeared after lifecycle compare-and-set conflict"),
             Err(error) => self.latch_fault(error),
         }
     }
@@ -1415,11 +1353,10 @@ mod scheduler_shutdown_tests {
         });
         let store = std::sync::Arc::new(crate::store::MemoryTaskStore::new(4));
         let store_identity = std::sync::Arc::as_ptr(&store) as usize;
-        *SCHEDULER_STOP_GATE.get_or_init(Default::default).lock() =
-            Some(SchedulerStopGateRegistration {
-                store_identity,
-                gate: std::sync::Arc::clone(&gate),
-            });
+        *SCHEDULER_STOP_GATE.get_or_init(Default::default).lock() = Some(SchedulerStopGateRegistration {
+            store_identity,
+            gate: std::sync::Arc::clone(&gate),
+        });
         let _cleanup = SchedulerStopGateCleanup(store_identity);
         let service = crate::service::TaskExecutionServiceBuilder::new(
             store,
@@ -1429,21 +1366,16 @@ mod scheduler_shutdown_tests {
         .build()
         .await
         .expect("service starts");
-        let reached =
-            tokio::time::timeout(std::time::Duration::from_secs(2), gate.reached.notified()).await;
+        let reached = tokio::time::timeout(std::time::Duration::from_secs(2), gate.reached.notified()).await;
         if reached.is_err() {
             gate.release.notify_one();
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown()).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), service.shutdown()).await;
             panic!("scheduler reaches deterministic stop-check gate");
         }
         let shutdown_service = service.clone();
         let shutdown = tokio::spawn(async move { shutdown_service.shutdown().await });
-        let shutdown_notified = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            gate.shutdown_notified.notified(),
-        )
-        .await;
+        let shutdown_notified =
+            tokio::time::timeout(std::time::Duration::from_secs(2), gate.shutdown_notified.notified()).await;
         if shutdown_notified.is_err() {
             gate.release.notify_one();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), shutdown).await;
@@ -1490,8 +1422,7 @@ mod external_cancel_race_tests {
     struct Payload;
 
     impl HasModelId for Payload {
-        const MODEL_ID: qubit_model_id::ModelId =
-            qubit_model_id::ModelId::new("test.ExternalCancelRacePayload");
+        const MODEL_ID: qubit_model_id::ModelId = qubit_model_id::ModelId::new("test.ExternalCancelRacePayload");
     }
 
     #[derive(Default)]
@@ -1515,22 +1446,18 @@ mod external_cancel_race_tests {
         }
     }
 
-    static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor =
-        ValueBytesCodecDescriptor::of::<PayloadCodec, Payload>();
-    static CODEC_REGISTRATION: ValueCodecRegistration<ValueBytesCodecDescriptor> =
-        ValueCodecRegistration::new(
-            ValueCodecId::new("test.external_cancel_race.codec"),
-            &CODEC_DESCRIPTOR,
-            ValueCodecRegistrationSource::new("qubit-task", "service_runner", "unit-test", 1),
-        );
+    static CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<PayloadCodec, Payload>();
+    static CODEC_REGISTRATION: ValueCodecRegistration<ValueBytesCodecDescriptor> = ValueCodecRegistration::new(
+        ValueCodecId::new("test.external_cancel_race.codec"),
+        &CODEC_DESCRIPTOR,
+        ValueCodecRegistrationSource::new("qubit-task", "service_runner", "unit-test", 1),
+    );
 
     struct TestIds(AtomicU64);
 
     impl IdGenerator<Id, IdGenerationError> for TestIds {
         fn generate(&self) -> Result<Id, IdGenerationError> {
-            Ok(Id::new(
-                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            ))
+            Ok(Id::new(self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
         }
     }
 
@@ -1554,9 +1481,7 @@ mod external_cancel_race_tests {
 
     impl Drop for GateCleanup {
         fn drop(&mut self) {
-            let mut registration = EXTERNAL_CANCEL_SUCCESS_GATE
-                .get_or_init(Default::default)
-                .lock();
+            let mut registration = EXTERNAL_CANCEL_SUCCESS_GATE.get_or_init(Default::default).lock();
             if registration
                 .as_ref()
                 .is_some_and(|entry| entry.store_identity == self.0)
@@ -1577,15 +1502,12 @@ mod external_cancel_race_tests {
             release: tokio::sync::Notify::new(),
             finish_handler: Arc::new(tokio::sync::Notify::new()),
         });
-        *EXTERNAL_CANCEL_SUCCESS_GATE
-            .get_or_init(Default::default)
-            .lock() = Some(ExternalCancelGateRegistration {
+        *EXTERNAL_CANCEL_SUCCESS_GATE.get_or_init(Default::default).lock() = Some(ExternalCancelGateRegistration {
             store_identity,
             gate: Arc::clone(&gate),
         });
         let _cleanup = GateCleanup(store_identity);
-        let hook: crate::handler::typed::ExternalCancellationHook =
-            Arc::new(move |_| Box::pin(async move { Ok(()) }));
+        let hook: crate::handler::typed::ExternalCancellationHook = Arc::new(move |_| Box::pin(async move { Ok(()) }));
         let mut builder = crate::service::TaskExecutionServiceBuilder::new(
             store,
             Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap()),
@@ -1626,12 +1548,8 @@ mod external_cancel_race_tests {
         .await
         .expect("handler starts");
         let cancel_service = service.clone();
-        let cancel =
-            tokio::spawn(async move { cancel_service.request_cancel(accepted.summary.id).await });
-        if tokio::time::timeout(TIMEOUT, gate.reached.notified())
-            .await
-            .is_err()
-        {
+        let cancel = tokio::spawn(async move { cancel_service.request_cancel(accepted.summary.id).await });
+        if tokio::time::timeout(TIMEOUT, gate.reached.notified()).await.is_err() {
             gate.release.notify_one();
             gate.finish_handler.notify_one();
             let _ = tokio::time::timeout(TIMEOUT, cancel).await;
@@ -1641,16 +1559,8 @@ mod external_cancel_race_tests {
         let key = (accepted.summary.id, 1);
         let finish = tokio::time::timeout(TIMEOUT, async {
             loop {
-                let summary = service
-                    .get_summary(accepted.summary.id)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                let cache_is_empty = !service
-                    .core
-                    .external_cancellations
-                    .lock()
-                    .contains_key(&key);
+                let summary = service.get_summary(accepted.summary.id).await.unwrap().unwrap();
+                let cache_is_empty = !service.core.external_cancellations.lock().contains_key(&key);
                 if summary.state.is_terminal() && cache_is_empty {
                     break summary;
                 }
@@ -1665,13 +1575,7 @@ mod external_cancel_race_tests {
             let _ = tokio::time::timeout(TIMEOUT, service.shutdown()).await;
             panic!("handler finishes while success path is gated");
         }
-        assert!(
-            !service
-                .core
-                .external_cancellations
-                .lock()
-                .contains_key(&key)
-        );
+        assert!(!service.core.external_cancellations.lock().contains_key(&key));
         gate.release.notify_one();
         assert_eq!(
             tokio::time::timeout(TIMEOUT, cancel)
@@ -1681,13 +1585,7 @@ mod external_cancel_race_tests {
                 .expect("external cancel succeeds"),
             crate::service::CancelOutcome::CancellationRequested,
         );
-        assert!(
-            !service
-                .core
-                .external_cancellations
-                .lock()
-                .contains_key(&key)
-        );
+        assert!(!service.core.external_cancellations.lock().contains_key(&key));
         tokio::time::timeout(TIMEOUT, service.shutdown())
             .await
             .expect("service shutdown completes")

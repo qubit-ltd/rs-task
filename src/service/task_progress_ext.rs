@@ -16,7 +16,8 @@ use qubit_progress::MetricError;
 
 /// Applies a metric update and persists the resulting progress snapshot.
 pub trait TaskProgressExt {
-    /// Applies `delta` to a configured metric, then persists the current snapshot.
+    /// Applies `delta` to a configured metric, then persists the current
+    /// snapshot.
     ///
     /// If persistence fails, the delta remains applied locally. A retry should
     /// report the current snapshot again rather than applying the delta twice.
@@ -52,12 +53,8 @@ impl TaskProgressExt for AsyncProgress<'_> {
             let metric = self
                 .metric(metric_id)
                 .ok_or_else(|| TaskProgressError::UnknownMetric(metric_id.to_owned()))?;
-            metric
-                .apply_delta(delta)
-                .map_err(TaskProgressError::Metric)?;
-            self.report_async()
-                .await
-                .map_err(TaskProgressError::Emission)
+            metric.apply_delta(delta).map_err(TaskProgressError::Metric)?;
+            self.report_async().await.map_err(TaskProgressError::Emission)
         }
     }
 }

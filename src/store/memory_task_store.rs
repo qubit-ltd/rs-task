@@ -22,9 +22,9 @@ use std::time::UNIX_EPOCH;
 use internal::MemoryState;
 use parking_lot::Mutex;
 
+use super::MemoryStoreOptions;
 use super::StoreError;
 use super::TaskFuture;
-use super::MemoryStoreOptions;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
@@ -611,8 +611,12 @@ impl super::TaskStore for MemoryTaskStore {
             let mut candidates = BinaryHeap::with_capacity(fetch_limit);
             for task in state.encoded_tasks.values().filter(|task| {
                 (query.states().is_empty() || query.states().contains(&task.summary.state.kind()))
-                    && query.category().is_none_or(|category| task.summary.category.as_deref() == Some(category))
-                    && query.correlation_key().is_none_or(|key| task.summary.correlation_key.as_deref() == Some(key))
+                    && query
+                        .category()
+                        .is_none_or(|category| task.summary.category.as_deref() == Some(category))
+                    && query
+                        .correlation_key()
+                        .is_none_or(|key| task.summary.correlation_key.as_deref() == Some(key))
                     && query.cursor().is_none_or(|after| {
                         (task.summary.accepted_at_ms, task.summary.id) > (after.accepted_at_ms, after.id)
                     })

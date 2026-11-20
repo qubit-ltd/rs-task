@@ -167,7 +167,8 @@ async fn test_submit_codec_does_not_block_current_thread_runtime() {
         codecs,
         Arc::clone(&ids) as Arc<dyn IdGenerator<Id, IdGenerationError>>,
     );
-    builder.register_handler_with_options::<Payload, _>(
+    builder
+        .register_handler_with_options::<Payload, _>(
             TaskHandlerDescriptor::for_payload::<Payload>("test.codec", 1),
             Arc::new(Handler),
             HandlerOptions::new().with_cooperative_cancellation(),
@@ -269,9 +270,12 @@ async fn test_submit_codec_does_not_block_current_thread_runtime() {
     tokio::time::timeout(Duration::from_secs(2), decoder_gate.reached.notified())
         .await
         .expect("decoder enters before cancellation and shutdown checks");
-    let _ = service.request_cancel(accepted.summary.id).await.expect("cancel during preparation");
+    let _ = service
+        .request_cancel(accepted.summary.id)
+        .await
+        .expect("cancel during preparation");
     let summary = service
-            .get_summary(accepted.summary.id)
+        .get_summary(accepted.summary.id)
         .await
         .expect("read cancellation state")
         .expect("task is retained");

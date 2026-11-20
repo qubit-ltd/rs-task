@@ -13,7 +13,8 @@ pub struct TaskAttempt {
 }
 
 impl TaskAttempt {
-    /// Creates an attempt identity from its task ID and one-based attempt number.
+    /// Creates an attempt identity from its task ID and one-based attempt
+    /// number.
     #[must_use]
     pub const fn new(task_id: TaskId, attempt: u32) -> Self {
         Self { task_id, attempt }

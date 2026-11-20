@@ -14,17 +14,8 @@ fn query_uses_private_builder_and_validates_limits() {
     let query = TaskQuery::default();
     assert_eq!(query.limit(), 50);
     assert!(TaskQuery::default().page_size(0).is_err());
-    assert_eq!(
-        TaskQuery::default().page_size(50).expect("valid").limit(),
-        50
-    );
-    assert_eq!(
-        TaskQuery::default()
-            .page_size(256)
-            .expect("maximum")
-            .limit(),
-        256
-    );
+    assert_eq!(TaskQuery::default().page_size(50).expect("valid").limit(), 50);
+    assert_eq!(TaskQuery::default().page_size(256).expect("maximum").limit(), 256);
     assert!(TaskQuery::default().page_size(257).is_err());
 }
 
@@ -37,18 +28,13 @@ fn memory_options_validate_nonzero_limits() {
         .expect("positive unfinished limit");
     let _store = MemoryTaskStore::with_options(options);
     assert!(MemoryStoreOptions::new(1).max_payload_bytes(0).is_err());
-    assert!(
-        MemoryStoreOptions::new(1)
-            .max_unfinished_records(0)
-            .is_err()
-    );
+    assert!(MemoryStoreOptions::new(1).max_unfinished_records(0).is_err());
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_async_open_observes_owner_conflict() {
-    let directory =
-        std::env::temp_dir().join(format!("qubit-task-api-store-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("qubit-task-api-store-{}", std::process::id()));
     std::fs::create_dir(&directory).expect("create unique test directory");
     let path = directory.join("tasks.sqlite");
     let first = qubit_task::store::SqliteTaskStore::open_async(&path)

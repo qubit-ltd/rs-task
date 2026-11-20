@@ -34,8 +34,7 @@ impl MemoryStoreOptions {
     pub fn new(history_capacity: usize) -> Self {
         Self {
             history_capacity,
-            max_payload_bytes: NonZeroUsize::new(64 * 1024 * 1024)
-                .expect("default payload budget is positive"),
+            max_payload_bytes: NonZeroUsize::new(64 * 1024 * 1024).expect("default payload budget is positive"),
             max_unfinished_records: NonZeroUsize::new(DEFAULT_MAX_UNFINISHED_RECORDS)
                 .expect("default limit is positive"),
         }
@@ -43,15 +42,13 @@ impl MemoryStoreOptions {
 
     /// Sets the total payload budget.
     pub fn max_payload_bytes(mut self, bytes: usize) -> Result<Self, MemoryStoreOptionsError> {
-        self.max_payload_bytes =
-            NonZeroUsize::new(bytes).ok_or(MemoryStoreOptionsError::ZeroPayloadBudget)?;
+        self.max_payload_bytes = NonZeroUsize::new(bytes).ok_or(MemoryStoreOptionsError::ZeroPayloadBudget)?;
         Ok(self)
     }
 
     /// Sets the maximum number of retained nonterminal tasks.
     pub fn max_unfinished_records(mut self, limit: usize) -> Result<Self, MemoryStoreOptionsError> {
-        self.max_unfinished_records =
-            NonZeroUsize::new(limit).ok_or(MemoryStoreOptionsError::ZeroUnfinishedRecords)?;
+        self.max_unfinished_records = NonZeroUsize::new(limit).ok_or(MemoryStoreOptionsError::ZeroUnfinishedRecords)?;
         Ok(self)
     }
 }

@@ -247,7 +247,7 @@ async fn retry_deadline_crossing_boundary(store: Arc<dyn TaskStore>, id: TaskId)
                 release: handler_release,
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .expect("handler registration");
     let service = builder.build().await.expect("service build");
@@ -688,7 +688,7 @@ async fn bypass_fixture(
                 release: Arc::clone(&release),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .expect("handler registration");
     (
@@ -778,7 +778,7 @@ async fn test_ready_scan_yields_between_pages_and_honors_shutdown() {
                 release: Arc::clone(&handler_release),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .expect("handler registration");
     let service = builder.build().await.expect("service builds");
@@ -937,7 +937,7 @@ async fn test_typed_resource_request_above_capacity_is_blocked() {
                 release: Arc::new(Semaphore::new(0)),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1003,7 +1003,7 @@ async fn test_scheduler_waits_without_scanning_when_max_running_is_full() {
                 release: Arc::clone(&release),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .expect("handler registration");
     let service = builder.build().await.expect("service builds");
@@ -1072,7 +1072,7 @@ async fn test_typed_resource_reservation_waits_until_capacity_is_released() {
                 release: Arc::clone(&release),
                 calls,
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1128,7 +1128,7 @@ async fn test_scheduler_skips_resource_blocked_task_without_consuming_run_slot()
                 release: Arc::clone(&release),
                 calls: Arc::clone(&calls),
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1177,7 +1177,10 @@ async fn test_resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_ta
         .submit(request_resources(1, 0))
         .await
         .expect("first bypass accepted");
-    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.summary.id, first_bypass.summary.id]);
+    assert_eq!(
+        wait_for_starts(&trace, 2).await,
+        vec![running.summary.id, first_bypass.summary.id]
+    );
     assert_eq!(
         wait_for(&service, first_bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
@@ -1192,7 +1195,7 @@ async fn test_resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_ta
     assert_eq!(trace.ids.lock().expect("start trace lock is not poisoned").len(), 2);
     assert!(matches!(
         service
-                .get_summary(second_bypass.summary.id)
+            .get_summary(second_bypass.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1203,7 +1206,12 @@ async fn test_resource_bypass_limit_starts_old_gpu_task_before_second_new_cpu_ta
     release.add_permits(1);
     assert_eq!(
         wait_for_starts(&trace, 4).await,
-        vec![running.summary.id, first_bypass.summary.id, anchor.summary.id, second_bypass.summary.id]
+        vec![
+            running.summary.id,
+            first_bypass.summary.id,
+            anchor.summary.id,
+            second_bypass.summary.id
+        ]
     );
     service.shutdown().await.expect("service shutdown");
 }
@@ -1223,7 +1231,10 @@ async fn test_resource_bypass_limit_clears_when_anchor_is_cancelled() {
         .submit(request_resources(1, 0))
         .await
         .expect("first bypass accepted");
-    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.summary.id, first_bypass.summary.id]);
+    assert_eq!(
+        wait_for_starts(&trace, 2).await,
+        vec![running.summary.id, first_bypass.summary.id]
+    );
     assert_eq!(
         wait_for(&service, first_bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
@@ -1237,7 +1248,7 @@ async fn test_resource_bypass_limit_clears_when_anchor_is_cancelled() {
     complete_gated_scan(&gate).await;
     assert!(matches!(
         service
-                .get_summary(waiting.summary.id)
+            .get_summary(waiting.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1246,7 +1257,10 @@ async fn test_resource_bypass_limit_clears_when_anchor_is_cancelled() {
     ));
 
     assert_eq!(
-        service.request_cancel(anchor.summary.id).await.expect("anchor cancellation"),
+        service
+            .request_cancel(anchor.summary.id)
+            .await
+            .expect("anchor cancellation"),
         CancelOutcome::CancelledBeforeRun
     );
     assert_eq!(
@@ -1283,7 +1297,10 @@ async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
         .await
         .expect("first bypass accepted");
     complete_gated_scan(&gate).await;
-    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.summary.id, first_bypass.summary.id]);
+    assert_eq!(
+        wait_for_starts(&trace, 2).await,
+        vec![running.summary.id, first_bypass.summary.id]
+    );
     assert_eq!(
         wait_for(&service, first_bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
@@ -1317,7 +1334,7 @@ async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
     complete_gated_scan(&gate).await;
     assert!(matches!(
         service
-                .get_summary(waiting_a.summary.id)
+            .get_summary(waiting_a.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1326,7 +1343,7 @@ async fn test_resource_bypass_limit_preserves_anchor_across_ready_pages() {
     ));
     assert!(matches!(
         service
-                .get_summary(waiting_b.summary.id)
+            .get_summary(waiting_b.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1371,14 +1388,17 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
         .expect("conflict trace lock is not poisoned")
         .extend([earlier_a.summary.id, earlier_b.summary.id]);
     complete_gated_scan(&gate).await;
-    assert_eq!(wait_for_starts(&trace, 2).await, vec![running.summary.id, first_bypass.summary.id]);
+    assert_eq!(
+        wait_for_starts(&trace, 2).await,
+        vec![running.summary.id, first_bypass.summary.id]
+    );
     assert_eq!(
         wait_for(&service, first_bypass.summary.id, TaskState::is_terminal).await,
         TaskState::Succeeded
     );
     assert!(matches!(
         service
-                .get_summary(earlier_a.summary.id)
+            .get_summary(earlier_a.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1386,7 +1406,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
         TaskState::Queued
     ));
     let earlier_b_summary = service
-                .get_summary(earlier_b.summary.id)
+        .get_summary(earlier_b.summary.id)
         .await
         .expect("task lookup")
         .expect("task exists");
@@ -1431,7 +1451,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     assert_eq!(trace.ids.lock().expect("start trace lock is not poisoned").len(), 2);
     assert!(matches!(
         service
-                .get_summary(earlier_a.summary.id)
+            .get_summary(earlier_a.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1440,7 +1460,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     ));
     assert!(matches!(
         service
-                .get_summary(earlier_b.summary.id)
+            .get_summary(earlier_b.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1449,7 +1469,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     ));
     assert!(matches!(
         service
-                .get_summary(anchor.summary.id)
+            .get_summary(anchor.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1458,7 +1478,7 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     ));
     assert!(matches!(
         service
-                .get_summary(waiting.summary.id)
+            .get_summary(waiting.summary.id)
             .await
             .expect("task lookup")
             .expect("task exists")
@@ -1469,7 +1489,12 @@ async fn test_resource_bypass_limit_rescans_anchor_beyond_persistent_first_page(
     release.add_permits(1);
     assert_eq!(
         wait_for_starts(&trace, 4).await,
-        vec![running.summary.id, first_bypass.summary.id, anchor.summary.id, waiting.summary.id]
+        vec![
+            running.summary.id,
+            first_bypass.summary.id,
+            anchor.summary.id,
+            waiting.summary.id
+        ]
     );
     service.shutdown().await.expect("service shutdown");
 }
@@ -1505,7 +1530,7 @@ async fn test_resource_release_during_ready_scan_is_not_lost() {
                 release: Arc::clone(&release_handler),
                 calls: Arc::new(AtomicUsize::new(0)),
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1570,7 +1595,7 @@ async fn test_cancel_during_start_cas_releases_reservation_without_running_handl
                 release: Arc::clone(&release_handler),
                 calls: Arc::clone(&calls),
             }),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();

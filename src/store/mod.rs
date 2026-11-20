@@ -17,7 +17,6 @@ mod store_error;
 mod task_future;
 mod task_store;
 
-pub use crate::delegate_task_store;
 pub use event_outbox_entry::EventOutboxEntry;
 pub use memory_store_options::MemoryStoreOptions;
 pub use memory_store_options::MemoryStoreOptionsError;
@@ -28,3 +27,5 @@ pub use sqlite_task_store::SqliteTaskStore;
 pub use store_error::StoreError;
 pub use task_future::TaskFuture;
 pub use task_store::TaskStore;
+
+pub use crate::delegate_task_store;

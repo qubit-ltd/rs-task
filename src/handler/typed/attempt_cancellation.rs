@@ -54,7 +54,8 @@ pub struct TaskCancellation {
 }
 
 impl TaskCancellation {
-    /// Returns whether cancellation has been durably requested for this attempt.
+    /// Returns whether cancellation has been durably requested for this
+    /// attempt.
     #[must_use]
     pub fn is_requested(&self) -> bool {
         *self.state.borrow() != CancellationState::Clear

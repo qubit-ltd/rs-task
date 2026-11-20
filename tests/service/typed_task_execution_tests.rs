@@ -29,11 +29,11 @@ use qubit_model_id::ModelIdBuf;
 use qubit_progress as progress;
 use qubit_task as task;
 use qubit_task::CancellationMode;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
-use qubit_task::HandlerOptions;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::ResourceCapacity;
 use qubit_task::model::ResourceRequest;
@@ -461,12 +461,15 @@ async fn test_typed_service_lifecycle_uses_default_summary_fallback() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
     let accepted = service.submit(request()).await.expect("task is accepted");
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
     assert!(store.encoded_reads.load(Ordering::Acquire) >= 2);
     service.shutdown().await.expect("legacy store lifecycle completes");
 }
@@ -534,7 +537,7 @@ async fn assert_state_coordination_summary_reads(store: Arc<FailingListStore>, i
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
@@ -556,7 +559,10 @@ async fn assert_state_coordination_summary_reads(store: Arc<FailingListStore>, i
     assert!(reads.1 > 0, "state coordination reads the task summary");
 
     release.add_permits(1);
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
     service.shutdown().await.expect("service shuts down");
     let reads = store
         .read_counts
@@ -640,7 +646,10 @@ async fn assert_cancel_reads_summary_only(state: TaskState, retry_not_before_ms:
             .expect("service starts");
     store.read_counts.lock().unwrap().clear();
 
-    assert_eq!(service.request_cancel(id).await.unwrap(), CancelOutcome::CancelledBeforeRun);
+    assert_eq!(
+        service.request_cancel(id).await.unwrap(),
+        CancelOutcome::CancelledBeforeRun
+    );
     let counts = store.read_counts.lock().unwrap().get(&id).copied().unwrap_or_default();
     assert_eq!(counts.0, 0, "cancel does not read the encoded payload");
     assert!(counts.1 > 0, "cancel reads the current summary");
@@ -1502,7 +1511,7 @@ async fn long_diagnostics_do_not_fault_service(store: Arc<dyn TaskStore>) {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(LongDiagnosticHandler),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
@@ -1574,7 +1583,7 @@ async fn test_decoder_panic_is_task_local() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(LongDiagnosticHandler),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
@@ -1617,7 +1626,10 @@ async fn test_decoder_panic_is_task_local() {
         .submit(request_with(Counter(42)))
         .await
         .expect("subsequent request is accepted");
-    assert_eq!(wait_for_terminal(&service, normal.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, normal.summary.id).await,
+        TaskState::Succeeded
+    );
     service.shutdown().await.expect("decoder panic does not fault shutdown");
 }
 
@@ -1678,19 +1690,28 @@ async fn test_typed_submit_decodes_runs_and_persists_terminal_state() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
     let accepted = service.submit(request()).await.unwrap();
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
     let completed = service.get_summary(accepted.summary.id).await.unwrap().unwrap();
     assert_eq!(completed.output.unwrap().summary, b"typed-result");
 }
 
 #[tokio::test]
 async fn test_typed_submit_rejection_unfinished_limit_keeps_service_running() {
-    let store = Arc::new(MemoryTaskStore::with_options(task::store::MemoryStoreOptions::new(16).max_payload_bytes(1024).unwrap().max_unfinished_records(1).unwrap()));
+    let store = Arc::new(MemoryTaskStore::with_options(
+        task::store::MemoryStoreOptions::new(16)
+            .max_payload_bytes(1024)
+            .unwrap()
+            .max_unfinished_records(1)
+            .unwrap(),
+    ));
     let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2001))))
         .build()
         .await
@@ -1716,10 +1737,16 @@ async fn test_typed_submit_rejection_unfinished_limit_keeps_service_running() {
         Err(task::service::TaskServiceError::UnfinishedTaskLimitExceeded { limit: 1 })
     ));
     assert_eq!(
-        service.request_cancel(first.summary.id).await.expect("blocked task can be cancelled"),
+        service
+            .request_cancel(first.summary.id)
+            .await
+            .expect("blocked task can be cancelled"),
         CancelOutcome::CancelledBeforeRun
     );
-    assert_eq!(wait_for_terminal(&service, first.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, first.summary.id).await,
+        TaskState::Cancelled
+    );
     service
         .submit(request())
         .await
@@ -1738,7 +1765,9 @@ async fn test_typed_submit_rejection_payload_budget_keeps_service_running() {
             .len(),
         4
     );
-    let store = Arc::new(MemoryTaskStore::with_options(task::store::MemoryStoreOptions::new(16).max_payload_bytes(4).unwrap()));
+    let store = Arc::new(MemoryTaskStore::with_options(
+        task::store::MemoryStoreOptions::new(16).max_payload_bytes(4).unwrap(),
+    ));
     let service = TaskExecutionServiceBuilder::new(store, registry(), Arc::new(Ids(AtomicU64::new(2021))))
         .build()
         .await
@@ -1767,10 +1796,16 @@ async fn test_typed_submit_rejection_payload_budget_keeps_service_running() {
         })
     ));
     assert_eq!(
-        service.request_cancel(first.summary.id).await.expect("blocked task can be cancelled"),
+        service
+            .request_cancel(first.summary.id)
+            .await
+            .expect("blocked task can be cancelled"),
         CancelOutcome::CancelledBeforeRun
     );
-    assert_eq!(wait_for_terminal(&service, first.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, first.summary.id).await,
+        TaskState::Cancelled
+    );
     service
         .submit(request())
         .await
@@ -1817,12 +1852,15 @@ async fn test_typed_submit_rejection_duplicate_id_keeps_service_running() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
     let first = service.submit(request()).await.expect("first task is accepted");
-    assert_eq!(wait_for_terminal(&service, first.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, first.summary.id).await,
+        TaskState::Succeeded
+    );
     assert!(matches!(
         service.submit(request()).await,
         Err(task::service::TaskServiceError::DuplicateTaskId)
@@ -1858,7 +1896,7 @@ async fn test_retryable_handler_error_is_persisted_and_retried_after_deadline() 
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(RetryOnceHandler(AtomicU64::new(0))),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -1877,8 +1915,14 @@ async fn test_retryable_handler_error_is_persisted_and_retried_after_deadline() 
     .await
     .expect("retry transition is persisted");
     assert_eq!(queued_retry.attempt, 1);
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Succeeded);
-    assert_eq!(service.get_summary(accepted.summary.id).await.unwrap().unwrap().attempt, 2);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
+    assert_eq!(
+        service.get_summary(accepted.summary.id).await.unwrap().unwrap().attempt,
+        2
+    );
     service.shutdown().await.unwrap();
     let reads = store
         .read_counts
@@ -1900,7 +1944,7 @@ async fn test_max_attempts_one_persists_retryable_failure_as_terminal() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(RetryOnceHandler(AtomicU64::new(0))),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.expect("service starts");
@@ -1910,7 +1954,11 @@ async fn test_max_attempts_one_persists_retryable_failure_as_terminal() {
         wait_for_terminal(&service, accepted.summary.id).await,
         TaskState::Failed { .. }
     ));
-    let failed = service.get_summary(accepted.summary.id).await.unwrap().expect("task remains persisted");
+    let failed = service
+        .get_summary(accepted.summary.id)
+        .await
+        .unwrap()
+        .expect("task remains persisted");
     assert_eq!(failed.attempt, 1);
     service.shutdown().await.expect("service shuts down cleanly");
 }
@@ -1934,7 +1982,7 @@ async fn test_sqlite_retry_deadline_survives_service_restart() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(RetryOnceHandler(AtomicU64::new(0))),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let first = first_builder.build().await.unwrap();
@@ -1963,7 +2011,7 @@ async fn test_sqlite_retry_deadline_survives_service_restart() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let second = second_builder.build().await.unwrap();
@@ -1979,7 +2027,10 @@ async fn test_sqlite_retry_deadline_survives_service_restart() {
     assert_eq!(still_waiting.attempt, 1);
     assert!(matches!(still_waiting.state, TaskState::Queued));
     assert_eq!(still_waiting.retry_not_before_ms, retry.retry_not_before_ms);
-    assert_eq!(wait_for_terminal(&second, accepted.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&second, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
     second.shutdown().await.unwrap();
     drop(second);
     drop(reopened);
@@ -2004,7 +2055,7 @@ async fn test_scheduler_never_exceeds_configured_running_limit() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             handler.clone(),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -2038,7 +2089,7 @@ async fn test_scheduler_store_failure_is_latched_and_reported_by_shutdown() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -2059,12 +2110,12 @@ async fn test_typed_service_latches_get_and_start_failures() {
             TaskExecutionServiceBuilder::new(store.clone(), registry(), Arc::new(Ids(AtomicU64::new(1551))));
         builder
             .register_handler_with_options::<Counter, _>(
-            descriptor(CancellationMode::Cooperative),
-            Arc::new(Handler {
+                descriptor(CancellationMode::Cooperative),
+                Arc::new(Handler {
                     cooperative_cancel: false,
                 }),
-            HandlerOptions::new().with_cooperative_cancellation()
-        )
+                HandlerOptions::new().with_cooperative_cancellation(),
+            )
             .unwrap();
         let service = builder.build().await.unwrap();
         if fail_get {
@@ -2091,7 +2142,7 @@ async fn test_typed_service_latches_finalizer_transition_failure() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -2118,7 +2169,7 @@ async fn assert_finalizer_summary_failure_is_latched(return_none: bool, id_seed:
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
@@ -2175,7 +2226,7 @@ async fn test_typed_service_latches_finalizer_conflict_without_revision() {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("handler registers");
     let service = builder.build().await.expect("service starts");
@@ -2219,7 +2270,7 @@ async fn finish_retries_after_cancel_revision(inner: Arc<dyn TaskStore>) -> Resu
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder
@@ -2314,7 +2365,7 @@ async fn test_retryable_finish_observes_latest_cancel_request() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(RetryableFailureHandler(Arc::clone(&calls))),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -2361,7 +2412,9 @@ async fn test_finish_preserves_external_cancel_hook_failure_diagnostic() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_source("test").with_external_cancellation(move |attempt| hook(attempt))
+            HandlerOptions::new()
+                .with_source("test")
+                .with_external_cancellation(move |attempt| hook(attempt)),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -2403,7 +2456,7 @@ async fn test_finish_preserves_competing_terminal_transition() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -2456,13 +2509,16 @@ async fn test_typed_context_exposes_attempt_cancellation_and_persisted_progress(
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(ContextProgressHandler),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
     let accepted = service.submit(request()).await.unwrap();
 
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
     let summary = service.get_summary(accepted.summary.id).await.unwrap().unwrap();
     let progress = summary.progress.expect("handler progress remains queryable");
     assert_eq!(progress.attempt, 1);
@@ -2485,7 +2541,7 @@ async fn test_typed_running_cancel_is_persisted_then_acknowledged_by_handler() {
             Arc::new(Handler {
                 cooperative_cancel: true,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -2505,7 +2561,10 @@ async fn test_typed_running_cancel_is_persisted_then_acknowledged_by_handler() {
         service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Cancelled
+    );
 }
 
 #[tokio::test]
@@ -2531,7 +2590,10 @@ async fn test_missing_handler_is_retained_as_blocked_and_can_be_cancelled() {
         service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancelledBeforeRun
     );
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Cancelled
+    );
 }
 
 #[tokio::test]
@@ -2562,13 +2624,16 @@ async fn test_blocked_task_can_be_resumed_after_restarting_with_its_handler() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let second = builder.build().await.unwrap();
     let queued = second.resume_blocked(&blocked).await.unwrap();
     assert_eq!(queued.state, TaskState::Queued);
-    assert_eq!(wait_for_terminal(&second, accepted.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&second, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
     second.shutdown().await.unwrap();
 }
 
@@ -2602,7 +2667,10 @@ async fn test_typed_service_query_filters_and_get_handles_missing_task() {
         .expect("correlation query succeeds");
     assert_eq!(correlation_page.records.len(), 1);
     assert_eq!(correlation_page.records[0].category.as_deref(), Some("operations"));
-    assert_eq!(service.get_summary(TaskId::from_id(id::Id::new(9999))).await.unwrap(), None);
+    assert_eq!(
+        service.get_summary(TaskId::from_id(id::Id::new(9999))).await.unwrap(),
+        None
+    );
     service.shutdown().await.expect("service shuts down cleanly");
 }
 
@@ -2621,7 +2689,10 @@ async fn test_typed_service_get_query_and_cancel_map_store_failures() {
             task::store::StoreError::Failure(message)
         )) if message == "injected summary failure"
     ));
-    assert_eq!(service.get_summary(TaskId::from_id(id::Id::new(9998))).await.unwrap(), None);
+    assert_eq!(
+        service.get_summary(TaskId::from_id(id::Id::new(9998))).await.unwrap(),
+        None
+    );
 
     store.fail_next_summary.store(true, Ordering::Release);
     assert!(matches!(
@@ -2698,7 +2769,12 @@ async fn test_resume_blocked_rejects_stale_revision_and_terminal_task() {
     .expect("unhandled task reaches blocked state");
 
     assert!(matches!(
-        service.resume_blocked(&task::model::TaskSummary { state_version: blocked.state_version + 1, ..blocked.clone() }).await,
+        service
+            .resume_blocked(&task::model::TaskSummary {
+                state_version: blocked.state_version + 1,
+                ..blocked.clone()
+            })
+            .await,
         Err(task::service::TaskServiceError::Store(
             task::store::StoreError::Conflict
         ))
@@ -2809,7 +2885,7 @@ async fn test_cancelled_submit_acceptance_still_dispatches() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.expect("service starts");
@@ -2884,7 +2960,7 @@ async fn test_cancelled_submit_before_sqlite_commit_still_dispatches() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.expect("service starts");
@@ -2982,7 +3058,7 @@ async fn test_cancelled_submit_wakes_durable_outbox_publisher() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.expect("service starts");
@@ -3241,7 +3317,7 @@ async fn test_unsupported_schema_is_retained_as_blocked() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -3277,7 +3353,7 @@ async fn test_queued_typed_task_can_be_cancelled_before_resource_admission() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Cooperative),
             Arc::new(PendingHandler),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -3298,7 +3374,10 @@ async fn test_queued_typed_task_can_be_cancelled_before_resource_admission() {
         service.request_cancel(queued.summary.id).await.unwrap(),
         CancelOutcome::CancelledBeforeRun
     );
-    assert_eq!(wait_for_terminal(&service, queued.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, queued.summary.id).await,
+        TaskState::Cancelled
+    );
 }
 
 #[tokio::test]
@@ -3333,15 +3412,31 @@ async fn test_typed_service_resume_missing_task_returns_not_found() {
     .expect("service starts");
 
     assert!(matches!(
-        service.resume_blocked(&task::model::TaskSummary {
-            id: TaskId::from_id(id::Id::new(9992)), kind_id: String::new(), category: None,
-            payload_type_id: String::new(), payload_schema_version: 1, payload_codec_id: String::new(),
-            metadata: metadata::Metadata::new(), resource_limit: ResourceRequest::default(),
-            correlation_key: None, idempotency_key: None, state: TaskState::Queued,
-            cancel_requested: false, cancel_error: None, state_version: 0, attempt: 0,
-            retry_not_before_ms: None, accepted_at_ms: 0, started_at_ms: None, finished_at_ms: None,
-            progress: None, output: None,
-        }).await,
+        service
+            .resume_blocked(&task::model::TaskSummary {
+                id: TaskId::from_id(id::Id::new(9992)),
+                kind_id: String::new(),
+                category: None,
+                payload_type_id: String::new(),
+                payload_schema_version: 1,
+                payload_codec_id: String::new(),
+                metadata: metadata::Metadata::new(),
+                resource_limit: ResourceRequest::default(),
+                correlation_key: None,
+                idempotency_key: None,
+                state: TaskState::Queued,
+                cancel_requested: false,
+                cancel_error: None,
+                state_version: 0,
+                attempt: 0,
+                retry_not_before_ms: None,
+                accepted_at_ms: 0,
+                started_at_ms: None,
+                finished_at_ms: None,
+                progress: None,
+                output: None,
+            })
+            .await,
         Err(task::service::TaskServiceError::Store(
             task::store::StoreError::NotFound
         ))
@@ -3388,7 +3483,7 @@ async fn test_running_handler_without_cancel_support_reports_unsupported() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::Unsupported),
             Arc::new(PendingHandler),
-            HandlerOptions::new()
+            HandlerOptions::new(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -3420,7 +3515,7 @@ async fn test_repeated_idempotency_key_returns_the_existing_typed_task() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -3465,7 +3560,7 @@ async fn test_recovery_blocks_unsupported_schema_and_missing_codec() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -3514,7 +3609,9 @@ async fn test_external_cancel_retries_failed_hook() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(FinishOnExternalCancel(hook_finished)),
-            HandlerOptions::new().with_source("test").with_external_cancellation(move |attempt| hook(attempt))
+            HandlerOptions::new()
+                .with_source("test")
+                .with_external_cancellation(move |attempt| hook(attempt)),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -3544,7 +3641,10 @@ async fn test_external_cancel_retries_failed_hook() {
         CancelOutcome::CancellationRequested
     );
     assert_eq!(hook_calls.load(Ordering::Relaxed), 2);
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Cancelled
+    );
     assert_eq!(
         service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::AlreadyTerminal
@@ -3620,7 +3720,9 @@ async fn run_long_cancel_hook_failure_case(
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(CancelAwareHandler(handler_finished)),
-            HandlerOptions::new().with_source("test").with_external_cancellation(move |attempt| hook(attempt))
+            HandlerOptions::new()
+                .with_source("test")
+                .with_external_cancellation(move |attempt| hook(attempt)),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -3654,7 +3756,13 @@ async fn run_long_cancel_hook_failure_case(
     };
     assert_eq!(exact_message.len(), task::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
     assert_eq!(
-        service.get_summary(accepted.summary.id).await.unwrap().unwrap().cancel_error.as_deref(),
+        service
+            .get_summary(accepted.summary.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .cancel_error
+            .as_deref(),
         Some(exact_message.as_str())
     );
     assert!(!exact_message.contains("must-not-be-persisted"));
@@ -3662,8 +3770,19 @@ async fn run_long_cancel_hook_failure_case(
         service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
-    assert_eq!(service.get_summary(accepted.summary.id).await.unwrap().unwrap().cancel_error, None);
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        service
+            .get_summary(accepted.summary.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .cancel_error,
+        None
+    );
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Cancelled
+    );
     service.shutdown().await.unwrap();
     drop(service);
     if let Some(path) = sqlite_path {
@@ -3806,7 +3925,7 @@ async fn test_recovery_normalizes_historical_long_cancel_error() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.expect("service recovers the historical row");
@@ -3884,7 +4003,9 @@ async fn test_external_cancel_terminal_race_preserves_terminal_state() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(FinishWhenReleased(Arc::clone(&handler_release))),
-            HandlerOptions::new().with_source("test").with_external_cancellation(move |attempt| hook(attempt))
+            HandlerOptions::new()
+                .with_source("test")
+                .with_external_cancellation(move |attempt| hook(attempt)),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -3904,7 +4025,10 @@ async fn test_external_cancel_terminal_race_preserves_terminal_state() {
     let cancel = tokio::spawn(async move { cancel_service.request_cancel(accepted.summary.id).await });
     hook_started.notified().await;
     handler_release.notify_one();
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
     hook_release.notify_one();
     assert_eq!(cancel.await.unwrap().unwrap(), CancelOutcome::AlreadyTerminal);
     let terminal = service.get_summary(accepted.summary.id).await.unwrap().unwrap();
@@ -3965,7 +4089,9 @@ async fn test_external_cancel_concurrent_callers_share_hook() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(FinishOnHook(hook_finished)),
-            HandlerOptions::new().with_source("test").with_external_cancellation(move |attempt| hook(attempt))
+            HandlerOptions::new()
+                .with_source("test")
+                .with_external_cancellation(move |attempt| hook(attempt)),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -4030,7 +4156,9 @@ async fn test_external_cancel_aborted_waiter_does_not_abort_hook() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(FinishOnHook(Arc::clone(&hook_finished))),
-            HandlerOptions::new().with_source("test").with_external_cancellation(move |attempt| hook(attempt))
+            HandlerOptions::new()
+                .with_source("test")
+                .with_external_cancellation(move |attempt| hook(attempt)),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -4079,7 +4207,9 @@ async fn test_external_cancel_hook_panics_are_reported_and_retryable() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(PendingHandler),
-            HandlerOptions::new().with_source("test").with_external_cancellation(move |attempt| hook(attempt))
+            HandlerOptions::new()
+                .with_source("test")
+                .with_external_cancellation(move |attempt| hook(attempt)),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -4105,7 +4235,13 @@ async fn test_external_cancel_hook_panics_are_reported_and_retryable() {
     assert!(factory_panic_message.starts_with("界🙂"));
     assert!(factory_panic_message.ends_with("..."));
     assert_eq!(
-        service.get_summary(accepted.summary.id).await.unwrap().unwrap().cancel_error.as_deref(),
+        service
+            .get_summary(accepted.summary.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .cancel_error
+            .as_deref(),
         Some(factory_panic_message.as_str())
     );
     assert!(matches!(
@@ -4116,7 +4252,13 @@ async fn test_external_cancel_hook_panics_are_reported_and_retryable() {
         }) if message == "hook future failed"
     ));
     assert_eq!(
-        service.get_summary(accepted.summary.id).await.unwrap().unwrap().cancel_error.as_deref(),
+        service
+            .get_summary(accepted.summary.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .cancel_error
+            .as_deref(),
         Some("hook future failed")
     );
     assert_eq!(
@@ -4136,7 +4278,7 @@ async fn test_shutdown_rejects_new_work_and_waits_for_running_attempts() {
             Arc::new(Handler {
                 cooperative_cancel: true,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -4163,7 +4305,10 @@ async fn test_shutdown_rejects_new_work_and_waits_for_running_attempts() {
         service.submit(request()).await,
         Err(task::service::TaskServiceError::ShuttingDown)
     ));
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Cancelled
+    );
 }
 
 async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Arc<dyn TaskStore>) {
@@ -4178,7 +4323,7 @@ async fn assert_dropping_last_service_handle_drains_and_releases_owner(store: Ar
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("gated handler registers");
     let service = builder.build().await.expect("first service acquires owner");
@@ -4290,7 +4435,7 @@ async fn test_aborted_shutdown_waiter_does_not_cancel_owner_release() {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .expect("gated handler registers");
     let service = builder.build().await.expect("first service acquires owner");
@@ -4450,7 +4595,7 @@ async fn test_shutdown_fences_cancel_calls_from_previous_owner() {
             Arc::new(Handler {
                 cooperative_cancel: true,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let second = second_builder.build().await.unwrap();
@@ -4479,7 +4624,10 @@ async fn test_shutdown_fences_cancel_calls_from_previous_owner() {
         second.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
-    assert_eq!(wait_for_terminal(&second, accepted.summary.id).await, TaskState::Cancelled);
+    assert_eq!(
+        wait_for_terminal(&second, accepted.summary.id).await,
+        TaskState::Cancelled
+    );
     second.shutdown().await.unwrap();
 }
 
@@ -4520,7 +4668,9 @@ async fn test_shutdown_waits_for_external_cancel_hook() {
         .register_handler_with_options::<Counter, _>(
             descriptor(CancellationMode::ExternalHook),
             Arc::new(HookWaitHandler(Arc::clone(&hook_finished))),
-            HandlerOptions::new().with_source("test").with_external_cancellation(move |attempt| hook(attempt))
+            HandlerOptions::new()
+                .with_source("test")
+                .with_external_cancellation(move |attempt| hook(attempt)),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
@@ -4568,12 +4718,15 @@ async fn test_typed_service_persists_sqlite_terminal_transition() {
             Arc::new(Handler {
                 cooperative_cancel: false,
             }),
-            HandlerOptions::new().with_cooperative_cancellation()
+            HandlerOptions::new().with_cooperative_cancellation(),
         )
         .unwrap();
     let service = builder.build().await.unwrap();
     let accepted = service.submit(request()).await.unwrap();
-    assert_eq!(wait_for_terminal(&service, accepted.summary.id).await, TaskState::Succeeded);
+    assert_eq!(
+        wait_for_terminal(&service, accepted.summary.id).await,
+        TaskState::Succeeded
+    );
     service.shutdown().await.unwrap();
     drop(service);
     drop(store);

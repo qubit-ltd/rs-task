@@ -379,7 +379,8 @@ fn service_builder(
         Arc::new(TestServiceIds(AtomicU64::new(9_000_000))),
     );
     if let Some(starts) = starts {
-        builder.register_handler_with_options::<CrashPayload, _>(
+        builder
+            .register_handler_with_options::<CrashPayload, _>(
                 TaskHandlerDescriptor::for_payload::<CrashPayload>("crash-worker", 1),
                 Arc::new(RestartHandler { starts, count, gate }),
                 HandlerOptions::new(),
@@ -393,7 +394,7 @@ async fn wait_for_state(service: &TaskExecutionService, id: TaskId, state: TaskS
     timeout(DEADLINE, async {
         loop {
             if service
-            .get_summary(id)
+                .get_summary(id)
                 .await
                 .expect("task summary reads")
                 .is_some_and(|summary| summary.state == state)
@@ -411,7 +412,7 @@ async fn wait_for_terminal(service: &TaskExecutionService, id: TaskId) -> TaskSu
     timeout(DEADLINE, async {
         loop {
             let summary = service
-            .get_summary(id)
+                .get_summary(id)
                 .await
                 .expect("task summary reads")
                 .expect("task remains retained");
@@ -479,7 +480,7 @@ async fn assert_recovery(mode: &str) {
 
     assert_eq!(observed.recv().await.expect("recovered handler starts"), id);
     let running = service
-            .get_summary(id)
+        .get_summary(id)
         .await
         .expect("running summary reads")
         .expect("running task exists");
@@ -551,7 +552,7 @@ async fn test_killed_running_worker_blocks_without_matching_handler() {
     )
     .await;
     let blocked = service
-            .get_summary(id)
+        .get_summary(id)
         .await
         .expect("blocked summary reads")
         .expect("task remains retained");
@@ -570,7 +571,12 @@ async fn test_killed_worker_preserves_513_committed_tasks_across_pages() {
     let mut ids = BTreeSet::new();
     for expected in [256, 256, 1] {
         let page = store
-            .list_encoded(TaskQuery::default().after(cursor.expect("query cursor is present")).page_size(256).expect("valid page size"))
+            .list_encoded(
+                TaskQuery::default()
+                    .after(cursor.expect("query cursor is present"))
+                    .page_size(256)
+                    .expect("valid page size"),
+            )
             .await
             .expect("committed recovery page reads");
         assert_eq!(page.records.len(), expected);

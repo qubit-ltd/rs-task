@@ -1,24 +1,36 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use qubit_task::model::TaskCursor;
-use qubit_task::store::{StoreError, TaskFuture, delegate_task_store};
-
-use qubit_codec::{
-    ValueBytesCodecDescriptor, ValueBytesCodecRegistration, ValueBytesCodecRegistry, ValueCodecId,
-    ValueCodecRegistrationSource, ValueDecoder, ValueEncoder,
-};
-use qubit_id::{Id, IdGenerationError, IdGenerator};
-use qubit_model_id::{HasModelId, ModelId};
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistration;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistrationSource;
+use qubit_codec::ValueDecoder;
+use qubit_codec::ValueEncoder;
+use qubit_id::Id;
+use qubit_id::IdGenerationError;
+use qubit_id::IdGenerator;
+use qubit_model_id::HasModelId;
+use qubit_model_id::ModelId;
+use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskHandlerDescriptor;
+use qubit_task::TaskId;
+use qubit_task::TaskKind;
+use qubit_task::TaskPages;
+use qubit_task::TaskQuery;
 use qubit_task::TaskStore;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::model::TaskCursor;
 use qubit_task::service::WaitTaskError;
 use qubit_task::store::MemoryTaskStore;
-use qubit_task::{
-    TaskExecutionServiceBuilder, TaskHandlerDescriptor, TaskId, TaskKind, TaskPages, TaskQuery,
-};
+use qubit_task::store::StoreError;
+use qubit_task::store::TaskFuture;
+use qubit_task::store::delegate_task_store;
 
 #[derive(Clone)]
 struct Input(u32);
@@ -38,21 +50,14 @@ impl ValueDecoder<[u8]> for Codec {
     type Output = Input;
     type Error = std::io::Error;
     fn decode(&mut self, b: &[u8]) -> Result<Input, Self::Error> {
-        Ok(Input(u32::from_le_bytes(
-            b.try_into().map_err(std::io::Error::other)?,
-        )))
+        Ok(Input(u32::from_le_bytes(b.try_into().map_err(std::io::Error::other)?)))
     }
 }
 static DESC: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<Codec, Input>();
 static CODEC: ValueBytesCodecRegistration = ValueBytesCodecRegistration::new(
     ValueCodecId::new("example.codec"),
     &DESC,
-    ValueCodecRegistrationSource::new(
-        "qubit-task",
-        "api_service_012",
-        "tests/api_service_012.rs",
-        1,
-    ),
+    ValueCodecRegistrationSource::new("qubit-task", "api_service_012", "tests/api_service_012.rs", 1),
 );
 struct Ids(AtomicU64);
 impl IdGenerator<Id, IdGenerationError> for Ids {
@@ -61,11 +66,7 @@ impl IdGenerator<Id, IdGenerationError> for Ids {
     }
 }
 
-async fn service() -> (
-    qubit_task::TaskExecutionService,
-    Arc<MemoryTaskStore>,
-    Arc<Ids>,
-) {
+async fn service() -> (qubit_task::TaskExecutionService, Arc<MemoryTaskStore>, Arc<Ids>) {
     let store = Arc::new(MemoryTaskStore::new(16));
     let ids = Arc::new(Ids(AtomicU64::new(700)));
     let mut builder = TaskExecutionServiceBuilder::new(
@@ -74,10 +75,9 @@ async fn service() -> (
         ids.clone(),
     );
     builder
-        .register_handler_fn::<Input, _, _>(
-            TaskHandlerDescriptor::for_payload::<Input>("known", 1),
-            |_, _| async { Ok(TaskRunOutcome::success()) },
-        )
+        .register_handler_fn::<Input, _, _>(TaskHandlerDescriptor::for_payload::<Input>("known", 1), |_, _| async {
+            Ok(TaskRunOutcome::success())
+        })
         .unwrap();
     (builder.build().await.unwrap(), store, ids)
 }
@@ -91,10 +91,7 @@ struct FailListOnceStore {
 impl qubit_task::store::TaskStore for FailListOnceStore {
     delegate_task_store!(inner; except [list_encoded]);
 
-    fn list_encoded<'a>(
-        &'a self,
-        query: TaskQuery,
-    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, StoreError>> {
+    fn list_encoded<'a>(&'a self, query: TaskQuery) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, StoreError>> {
         if query.limit() == 1 {
             self.cursors.lock().unwrap().push(query.cursor());
         }
@@ -121,14 +118,12 @@ async fn public_service_exposes_paged_queries_and_terminal_wait_errors() {
 #[tokio::test]
 async fn strict_invalid_route_has_no_id_or_accept_side_effect_but_submit_blocks() {
     let (service, store, ids) = service().await;
-    let invalid =
-        TaskKind::<Input>::new("missing", 1, ValueCodecId::new("example.codec")).request(Input(3));
+    let invalid = TaskKind::<Input>::new("missing", 1, ValueCodecId::new("example.codec")).request(Input(3));
     assert!(matches!(
         service.submit_checked(invalid.clone()).await,
         Err(qubit_task::TaskServiceError::InvalidRoute(_))
     ));
-    let zero_schema =
-        TaskKind::<Input>::new("known", 0, ValueCodecId::new("example.codec")).request(Input(4));
+    let zero_schema = TaskKind::<Input>::new("known", 0, ValueCodecId::new("example.codec")).request(Input(4));
     assert!(matches!(
         service.submit_checked(zero_schema).await,
         Err(qubit_task::TaskServiceError::InvalidRoute(
@@ -136,18 +131,8 @@ async fn strict_invalid_route_has_no_id_or_accept_side_effect_but_submit_blocks(
         ))
     ));
     assert_eq!(ids.0.load(Ordering::Relaxed), 700);
-    assert!(
-        service
-            .query(TaskQuery::default())
-            .await
-            .unwrap()
-            .records
-            .is_empty()
-    );
-    let accepted = service
-        .submit(invalid)
-        .await
-        .expect("ordinary submission is accepted");
+    assert!(service.query(TaskQuery::default()).await.unwrap().records.is_empty());
+    let accepted = service.submit(invalid).await.expect("ordinary submission is accepted");
     assert_eq!(ids.0.load(Ordering::Relaxed), 701);
     let id = accepted.summary.id;
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -177,8 +162,7 @@ async fn strict_invalid_route_has_no_id_or_accept_side_effect_but_submit_blocks(
 async fn pages_deliver_every_record_and_wait_terminal_accepts_immediate_terminal_reads() {
     let (service, _, _) = service().await;
     for n in 0..2 {
-        let request = TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec"))
-            .request(Input(n));
+        let request = TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(n));
         let accepted = service.submit(request).await.expect("request accepted");
         let checkpoint = service
             .wait_terminal(accepted.summary.id, Duration::from_secs(2))
@@ -193,11 +177,7 @@ async fn pages_deliver_every_record_and_wait_terminal_accepts_immediate_terminal
     }
     let query = TaskQuery::default().page_size(1).unwrap();
     let mut pages = service.pages(query);
-    let first = pages
-        .next_page()
-        .await
-        .unwrap()
-        .expect("first nonempty page");
+    let first = pages.next_page().await.unwrap().expect("first nonempty page");
     let second = pages
         .next_page()
         .await
@@ -224,15 +204,13 @@ async fn pages_retry_after_store_error_reuses_the_observed_cursor() {
         ids,
     );
     builder
-        .register_handler_fn::<Input, _, _>(
-            TaskHandlerDescriptor::for_payload::<Input>("known", 1),
-            |_, _| async { Ok(TaskRunOutcome::success()) },
-        )
+        .register_handler_fn::<Input, _, _>(TaskHandlerDescriptor::for_payload::<Input>("known", 1), |_, _| async {
+            Ok(TaskRunOutcome::success())
+        })
         .unwrap();
     let service = builder.build().await.unwrap();
     for n in 0..2 {
-        let request = TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec"))
-            .request(Input(n));
+        let request = TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(n));
         let accepted = service.submit(request).await.unwrap();
         service
             .wait_terminal(accepted.summary.id, Duration::from_secs(2))
@@ -246,11 +224,7 @@ async fn pages_retry_after_store_error_reuses_the_observed_cursor() {
         pages.next_page().await,
         Err(qubit_task::TaskServiceError::Store(StoreError::Failure(_)))
     ));
-    let second = pages
-        .next_page()
-        .await
-        .unwrap()
-        .expect("retry returns the second page");
+    let second = pages.next_page().await.unwrap().expect("retry returns the second page");
     assert_eq!(second.records.len(), 1);
     let cursors = store.cursors.lock().unwrap();
     assert_eq!(cursors.len(), 3);
@@ -280,14 +254,12 @@ async fn wait_terminal_reads_checkpoint_after_sqlite_prunes_terminal_row() {
         Arc::new(Ids(AtomicU64::new(1_900))),
     );
     builder
-        .register_handler_fn::<Input, _, _>(
-            TaskHandlerDescriptor::for_payload::<Input>("known", 1),
-            |_, _| async { Ok(TaskRunOutcome::success()) },
-        )
+        .register_handler_fn::<Input, _, _>(TaskHandlerDescriptor::for_payload::<Input>("known", 1), |_, _| async {
+            Ok(TaskRunOutcome::success())
+        })
         .unwrap();
     let service = builder.build().await.unwrap();
-    let request =
-        TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(9));
+    let request = TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(9));
     let accepted = service.submit(request).await.unwrap();
     let terminal = service
         .wait_terminal(accepted.summary.id, Duration::from_secs(2))
@@ -305,13 +277,7 @@ async fn wait_terminal_reads_checkpoint_after_sqlite_prunes_terminal_row() {
             .unwrap(),
         1
     );
-    assert!(
-        store
-            .get_summary(accepted.summary.id)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(store.get_summary(accepted.summary.id).await.unwrap().is_none());
     assert_eq!(
         service
             .wait_terminal(accepted.summary.id, Duration::ZERO)

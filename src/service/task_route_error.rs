@@ -1,6 +1,7 @@
-use crate::handler::typed::TypedTaskHandlerRegistry;
 use qubit_codec::ValueBytesCodecRegistry;
 use thiserror::Error;
+
+use crate::handler::typed::TypedTaskHandlerRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TaskRouteError {
@@ -22,23 +23,18 @@ pub(crate) fn validate_task_route(
     schema_version: u32,
     codec_id: &str,
 ) -> Result<(), TaskRouteError> {
-    let descriptor =
-        handlers
-            .descriptor(kind_id)
-            .ok_or_else(|| TaskRouteError::MissingHandler {
-                kind_id: kind_id.to_owned(),
-            })?;
+    let descriptor = handlers
+        .descriptor(kind_id)
+        .ok_or_else(|| TaskRouteError::MissingHandler {
+            kind_id: kind_id.to_owned(),
+        })?;
     if type_id != descriptor.payload_type_id().as_str() {
         return Err(TaskRouteError::PayloadTypeMismatch {
             expected: descriptor.payload_type_id().to_string(),
             actual: type_id.to_owned(),
         });
     }
-    if schema_version == 0
-        || !descriptor
-            .accepted_schema_versions()
-            .contains(&schema_version)
-    {
+    if schema_version == 0 || !descriptor.accepted_schema_versions().contains(&schema_version) {
         return Err(TaskRouteError::UnsupportedSchemaVersion {
             version: schema_version,
         });

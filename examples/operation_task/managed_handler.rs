@@ -80,7 +80,8 @@ impl AsyncCleanup<Vec<u8>> for CleanupPolicy {
 impl TaskHandler<ManagedPayload> for ManagedHandler {
     fn run<'a>(&'a self, _payload: ManagedPayload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
         Box::pin(async move {
-            let attempt_index = usize::try_from(context.task_attempt().attempt().saturating_sub(1)).unwrap_or(usize::MAX);
+            let attempt_index =
+                usize::try_from(context.task_attempt().attempt().saturating_sub(1)).unwrap_or(usize::MAX);
             let gates = self
                 .attempts
                 .lock()

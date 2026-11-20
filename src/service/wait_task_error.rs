@@ -1,4 +1,5 @@
-use crate::{TaskId, store::StoreError};
+use crate::TaskId;
+use crate::store::StoreError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WaitTaskError {

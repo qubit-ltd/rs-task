@@ -272,11 +272,18 @@ fn run_dataset(runtime: &Runtime, size: usize) -> Result<DatasetReport, Box<dyn 
     let indexed_database_bytes = file_size(&dataset.database_path)?;
     let deep_no_filter_plan = production_plan(
         &sqlite,
-        TaskQuery::default().after(dataset.cursor).page_size(PAGE_SIZE).expect("valid page size"),
+        TaskQuery::default()
+            .after(dataset.cursor)
+            .page_size(PAGE_SIZE)
+            .expect("valid page size"),
     )?;
     let deep_single_correlation_plan = production_plan(
         &sqlite,
-        TaskQuery::default().with_correlation_key(dataset.correlation_key.clone()).after(dataset.cursor).page_size(PAGE_SIZE).expect("valid page size"),
+        TaskQuery::default()
+            .with_correlation_key(dataset.correlation_key.clone())
+            .after(dataset.cursor)
+            .page_size(PAGE_SIZE)
+            .expect("valid page size"),
     )?;
     let unfinished_recovery_plan = explain(
         &sqlite,
@@ -315,19 +322,36 @@ fn run_dataset(runtime: &Runtime, size: usize) -> Result<DatasetReport, Box<dyn 
     })?;
     let deep_no_filter_page = measure(runtime, || async {
         let page = runtime_store
-            .list_encoded(TaskQuery::default().after(dataset.cursor).page_size(PAGE_SIZE).expect("valid page size"))
+            .list_encoded(
+                TaskQuery::default()
+                    .after(dataset.cursor)
+                    .page_size(PAGE_SIZE)
+                    .expect("valid page size"),
+            )
             .await?;
         Ok(page.records.len())
     })?;
     let deep_single_correlation_page = measure(runtime, || async {
         let page = runtime_store
-            .list_encoded(TaskQuery::default().with_correlation_key(dataset.correlation_key.clone()).after(dataset.cursor).page_size(PAGE_SIZE).expect("valid page size"))
+            .list_encoded(
+                TaskQuery::default()
+                    .with_correlation_key(dataset.correlation_key.clone())
+                    .after(dataset.cursor)
+                    .page_size(PAGE_SIZE)
+                    .expect("valid page size"),
+            )
             .await?;
         Ok(page.records.len())
     })?;
     let unfinished_recovery_page = measure(runtime, || async {
         let page = runtime_store
-            .list_encoded(TaskQuery::default().with_states(vec![TaskStateKind::Queued, TaskStateKind::Running]).after(dataset.cursor).page_size(256).expect("valid page size"))
+            .list_encoded(
+                TaskQuery::default()
+                    .with_states(vec![TaskStateKind::Queued, TaskStateKind::Running])
+                    .after(dataset.cursor)
+                    .page_size(256)
+                    .expect("valid page size"),
+            )
             .await?;
         Ok(page.records.len())
     })?;

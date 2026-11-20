@@ -177,7 +177,12 @@ pub async fn check_core_contract(store: &dyn TaskStore) {
         .expect("retry deadline is stored with the queued transition");
     assert_eq!(queued.retry_not_before_ms, Some(retry_not_before_ms));
     let page = store
-        .list_encoded(TaskQuery::default().with_states(vec![TaskStateKind::Queued]).page_size(256).expect("valid page size"))
+        .list_encoded(
+            TaskQuery::default()
+                .with_states(vec![TaskStateKind::Queued])
+                .page_size(256)
+                .expect("valid page size"),
+        )
         .await
         .expect("queued retry candidate can be queried");
     let persisted = page

@@ -31,13 +31,13 @@ use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_task::CancellationMode;
-use qubit_task::TaskContext;
+use qubit_task::HandlerOptions;
 use qubit_task::TaskAttempt;
 use qubit_task::TaskCancellation;
+use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
-use qubit_task::HandlerOptions;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::handler::TaskRunResult;
 use qubit_task::model::ResourceCapacity;
@@ -136,7 +136,10 @@ impl TaskHandler<Payload> for AttemptHandler {
         let contexts = Arc::clone(&self.contexts);
         Box::pin(async move {
             let attempt = context.task_attempt();
-            contexts.lock().expect("contexts mutex").push((attempt, context.cancellation()));
+            contexts
+                .lock()
+                .expect("contexts mutex")
+                .push((attempt, context.cancellation()));
             if attempt.attempt() == 1 {
                 return Err(TaskRunError {
                     category: "retryable".into(),
@@ -169,7 +172,8 @@ async fn build_service<H: TaskHandler<Payload> + 'static>(
             .with_external_cancellation(|_attempt| async { Ok(()) }),
         _ => HandlerOptions::new(),
     };
-    builder.register_handler_with_options::<Payload, _>(descriptor, handler, options)
+    builder
+        .register_handler_with_options::<Payload, _>(descriptor, handler, options)
         .expect("handler registers");
     builder.build().await.expect("service starts")
 }
@@ -251,7 +255,7 @@ async fn cancellation_mode_does_not_publish_operation_wait(
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if service
-            .get_summary(accepted.summary.id)
+                .get_summary(accepted.summary.id)
                 .await
                 .unwrap()
                 .is_some_and(|summary| summary.state.is_terminal())

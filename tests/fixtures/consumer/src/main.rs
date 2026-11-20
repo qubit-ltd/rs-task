@@ -13,9 +13,9 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
+use qubit_task::HandlerOptions;
 use qubit_task::TaskExecutionService;
 use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::HandlerOptions;
 use qubit_task::model::TaskId;
 use qubit_task::model::TaskState;
 use qubit_task::model::TaskSummary;
@@ -37,7 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(FixtureIds::new(1)),
     );
     builder.register_handler_with_options::<FixturePayload, _>(
-        descriptor("fixture")?, Arc::new(FixtureHandler), HandlerOptions::new(),
+        descriptor("fixture")?,
+        Arc::new(FixtureHandler),
+        HandlerOptions::new(),
     )?;
     let service = builder.build().await?;
     let accepted = service

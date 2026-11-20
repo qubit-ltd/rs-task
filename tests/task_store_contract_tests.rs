@@ -300,7 +300,11 @@ async fn test_memory_state_checkpoint_disappears_after_capacity_eviction() {
 
 #[tokio_test]
 async fn test_memory_terminal_prune_releases_payload_budget() {
-    let store = MemoryTaskStore::with_options(qubit_task::store::MemoryStoreOptions::new(16).max_payload_bytes(4).expect("valid payload budget"));
+    let store = MemoryTaskStore::with_options(
+        qubit_task::store::MemoryStoreOptions::new(16)
+            .max_payload_bytes(4)
+            .expect("valid payload budget"),
+    );
     support::store_contract::check_memory_prune_reclaims_payload(&store).await;
 }
 

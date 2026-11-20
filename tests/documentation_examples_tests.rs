@@ -63,7 +63,8 @@ fn test_typed_task_guides_link_and_describe_lifecycle_events() {
     );
 }
 
-/// Keeps the current bilingual API guides aligned with the public 0.12 entry points.
+/// Keeps the current bilingual API guides aligned with the public 0.12 entry
+/// points.
 #[test]
 fn test_current_api_guides_describe_the_public_012_contract() {
     let english = include_str!("../doc/typed-task-api.md");

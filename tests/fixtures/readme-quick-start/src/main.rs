@@ -57,8 +57,7 @@ impl ValueDecoder<[u8]> for JsonCodec {
     }
 }
 
-static JSON_DESCRIPTOR: ValueBytesCodecDescriptor =
-    ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
+static JSON_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<JsonCodec, EchoPayload>();
 static JSON_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("example.echo.json"),
     &JSON_DESCRIPTOR,
@@ -73,11 +72,7 @@ async fn run_echo(payload: EchoPayload, _context: TaskContext) -> TaskRunResult 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let codecs = ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?;
-    let echo = TaskKind::<EchoPayload>::new(
-        "example.echo",
-        1,
-        ValueCodecId::new("example.echo.json"),
-    );
+    let echo = TaskKind::<EchoPayload>::new("example.echo", 1, ValueCodecId::new("example.echo.json"));
     let mut builder = TaskExecutionServiceBuilder::in_memory(256, codecs);
     builder.register_handler_fn(echo.descriptor(), run_echo)?;
 

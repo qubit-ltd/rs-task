@@ -154,7 +154,10 @@ async fn test_cancel_holds_resources_until_cleanup() {
         async {
             activated(&gates).await;
             assert_eq!(
-                service.request_cancel(accepted.summary.id).await.expect("request cancellation"),
+                service
+                    .request_cancel(accepted.summary.id)
+                    .await
+                    .expect("request cancellation"),
                 CancelOutcome::CancellationRequested
             );
             gate(&mut gates.stop_seen.subscribe()).await;
@@ -274,14 +277,20 @@ async fn test_retry_starts_only_after_settlement() {
             activated(&first).await;
             open(&first.allow_outcome);
             gate(&mut first.parent_outcome_seen.subscribe()).await;
-            assert_eq!(service.get_summary(accepted.summary.id).await.unwrap().unwrap().attempt, 1);
+            assert_eq!(
+                service.get_summary(accepted.summary.id).await.unwrap().unwrap().attempt,
+                1
+            );
             assert!(!*second.activated.borrow(), "attempt 2 waits for attempt 1 cleanup");
 
             open(&first.allow_input_release);
             gate(&mut first.input_released.subscribe()).await;
             open(&first.allow_domain_settlement);
             gate(&mut first.domain_settled.subscribe()).await;
-            assert_eq!(service.get_summary(accepted.summary.id).await.unwrap().unwrap().attempt, 1);
+            assert_eq!(
+                service.get_summary(accepted.summary.id).await.unwrap().unwrap().attempt,
+                1
+            );
             assert!(!*second.activated.borrow(), "settlement alone does not bypass cleanup");
             open(&first.allow_cleanup);
             gate(&mut first.cleanup_finished.subscribe()).await;
@@ -291,7 +300,10 @@ async fn test_retry_starts_only_after_settlement() {
             open(&second.allow_domain_settlement);
             open(&second.allow_cleanup);
             gate(&mut second.cleanup_finished.subscribe()).await;
-            assert_eq!(terminal(&service, accepted.summary.id).await.state, TaskState::Succeeded);
+            assert_eq!(
+                terminal(&service, accepted.summary.id).await.state,
+                TaskState::Succeeded
+            );
             service.shutdown().await.expect("task service shutdown");
             shutdown_manager(&manager).await;
         },
@@ -324,10 +336,20 @@ async fn test_cancel_after_outcome_suppresses_retry() {
             open(&first.allow_outcome);
             gate(&mut first.parent_outcome_seen.subscribe()).await;
             assert_eq!(
-                service.request_cancel(accepted.summary.id).await.expect("persist late cancellation"),
+                service
+                    .request_cancel(accepted.summary.id)
+                    .await
+                    .expect("persist late cancellation"),
                 CancelOutcome::CancellationRequested
             );
-            assert!(service.get_summary(accepted.summary.id).await.unwrap().unwrap().cancel_requested);
+            assert!(
+                service
+                    .get_summary(accepted.summary.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .cancel_requested
+            );
             open(&first.allow_input_release);
             open(&first.allow_domain_settlement);
             gate(&mut first.domain_settled.subscribe()).await;

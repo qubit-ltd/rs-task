@@ -184,8 +184,7 @@ mod tests {
         assert!(built.sql.ends_with("LIMIT ?6"));
         assert_eq!(built.params.len(), 6);
 
-        let overflowing = TaskQuery::default()
-            .after(TaskCursor::new(u64::MAX, TaskId::from_id(qubit_id::Id::new(7))));
+        let overflowing = TaskQuery::default().after(TaskCursor::new(u64::MAX, TaskId::from_id(qubit_id::Id::new(7))));
         assert!(matches!(
             build_encoded_history_query(&overflowing, 10),
             Err(StoreError::InvalidRequest("task history cursor timestamp is too large"))

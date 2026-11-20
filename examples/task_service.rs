@@ -7,7 +7,6 @@
 // =============================================================================
 //! Submits a typed payload and waits for its task summary.
 
-
 use qubit_codec::ValueBytesCodecDescriptor;
 use qubit_codec::ValueBytesCodecRegistration;
 use qubit_codec::ValueBytesCodecRegistry;
@@ -18,9 +17,9 @@ use qubit_codec::ValueDecoder;
 use qubit_codec::ValueEncoder;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
-use qubit_task::TaskKind;
 use qubit_task::HandlerOptions;
 use qubit_task::TaskExecutionServiceBuilder;
+use qubit_task::TaskKind;
 use qubit_task::handler::TaskContext;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::ResourceCapacity;
@@ -69,11 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let kind = TaskKind::<EchoPayload>::new("example.echo", 1, ValueCodecId::new("example.echo.json"));
-        let mut builder = TaskExecutionServiceBuilder::in_memory(256, ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?)
-        .capacity(ResourceCapacity {
-            cpu_slots: 4,
-            ..ResourceCapacity::default()
-        });
+        let mut builder =
+            TaskExecutionServiceBuilder::in_memory(256, ValueBytesCodecRegistry::from_registrations([&JSON_CODEC])?)
+                .capacity(ResourceCapacity {
+                    cpu_slots: 4,
+                    ..ResourceCapacity::default()
+                });
 
         builder.register_handler_fn_with_options(
             kind.descriptor(),
@@ -85,13 +85,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         let service = builder.build().await?;
-        let request = kind.request(
-            EchoPayload {
-                message: "typed task completed".into(),
-            },
-        );
+        let request = kind.request(EchoPayload {
+            message: "typed task completed".into(),
+        });
         let accepted = service.submit(request).await?;
-        let checkpoint = service.wait_terminal(accepted.summary.id, std::time::Duration::from_secs(5)).await?;
+        let checkpoint = service
+            .wait_terminal(accepted.summary.id, std::time::Duration::from_secs(5))
+            .await?;
         println!("task {} is {:?}", accepted.summary.id, checkpoint.state);
         service.shutdown().await?;
         Ok::<(), Box<dyn std::error::Error>>(())
