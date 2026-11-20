@@ -24,9 +24,9 @@ use qubit_task::model::TaskState;
 use qubit_task::service::CancelOutcome;
 use tokio::sync::watch;
 
-use super::external_job::AttemptGates;
-use super::fixture;
-use super::probe_request;
+use super::super::external_job::AttemptGates;
+use super::super::fixture;
+use super::super::probe_request;
 
 const CASE_TIMEOUT: Duration = Duration::from_secs(10);
 const FAILURE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
