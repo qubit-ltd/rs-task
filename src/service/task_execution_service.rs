@@ -764,6 +764,10 @@ impl TaskExecutionService {
     ///
     /// Returns an error if shutdown has begun, the task is missing, storage
     /// fails, or an external cancellation hook fails.
+    ///
+    /// # Panics
+    ///
+    /// Resumes a panic from the store after latching a service fault.
     pub async fn request_cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
         let _admission = Arc::clone(&self.core.admission).read_owned().await;
         self.runner().check_fault()?;
@@ -855,7 +859,11 @@ impl TaskExecutionService {
     /// # Errors
     ///
     /// Returns the mapped store error, or a scheduler-unavailable error if
-    /// the service-owned operation panics.
+    /// the service-owned task is cancelled.
+    ///
+    /// # Panics
+    ///
+    /// Resumes a panic from the store after latching a service fault.
     async fn run_cancel_transition(
         runner: ServiceRunner,
         admission: tokio::sync::OwnedRwLockReadGuard<()>,
@@ -882,12 +890,13 @@ impl TaskExecutionService {
         });
         match task.await {
             Ok(result) => result,
-            Err(error) => {
+            Err(error) if error.is_panic() => {
                 runner_on_join_error.latch_fault(format!("task cancellation operation failed: {error}"));
-                Err(TaskServiceError::SchedulerUnavailable(format!(
-                    "task cancellation operation failed: {error}"
-                )))
+                resume_unwind(error.into_panic())
             }
+            Err(error) => Err(TaskServiceError::SchedulerUnavailable(format!(
+                "task cancellation worker unavailable: {error}"
+            ))),
         }
     }
 
