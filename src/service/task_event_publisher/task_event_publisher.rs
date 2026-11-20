@@ -13,7 +13,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use qubit_event_bus::AsyncEventBus;
-use qubit_event_bus::model::Topic;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -21,6 +20,7 @@ use tokio::task::JoinHandle;
 
 use super::QuarantineCommand;
 use super::internal::PublisherState;
+use crate::event::TaskEvent;
 use crate::model::typed::TaskId;
 use crate::service::NotificationFailure;
 use crate::service::NotificationStats;
@@ -66,8 +66,7 @@ impl TaskEventPublisher {
         bus: Arc<AsyncEventBus>,
         shutdown_timeout: Duration,
     ) -> Result<Self, TaskServiceError> {
-        let topic = Topic::new("task.lifecycle")
-            .map_err(|error| TaskServiceError::InvalidRequest(format!("invalid task notification topic: {error}")))?;
+        let topic = TaskEvent::topic();
         bus.check_publish_codec(&topic)
             .map_err(|source| TaskServiceError::NotificationCodecUnavailable {
                 provider_id: bus.provider_id().as_str().to_owned(),

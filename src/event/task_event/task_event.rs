@@ -47,7 +47,7 @@ use crate::model::typed::TaskSummary;
 ///     progress: None,
 ///     output: None,
 /// };
-/// let event = TaskEvent::from_typed_summary(&summary);
+/// let event = TaskEvent::from(&summary);
 /// assert_eq!(event.state_version, 3);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,11 +72,27 @@ impl From<&TaskSummary> for TaskEvent {
     ///
     /// * `summary` - Persisted typed summary to convert.
     fn from(summary: &TaskSummary) -> Self {
-        Self::from_typed_summary(summary)
+        Self {
+            schema_version: 1,
+            task_id: summary.id,
+            state_version: summary.state_version,
+            state: summary.state.clone(),
+            correlation_key: summary.correlation_key.clone(),
+        }
     }
 }
 
 impl TaskEvent {
+    /// Returns the stable task lifecycle event topic.
+    ///
+    /// # Returns
+    ///
+    /// The static `task.lifecycle` topic.
+    #[cfg(feature = "event-bus")]
+    pub const fn topic() -> qubit_event_bus::model::Topic<Self> {
+        qubit_event_bus::model::Topic::new_static("task.lifecycle")
+    }
+
     /// Captures the identity, revision, state and correlation of a committed
     /// typed summary.
     ///
@@ -88,13 +104,7 @@ impl TaskEvent {
     ///
     /// A version 1 event containing the summary's identity, state revision,
     /// lifecycle state, and correlation key.
-    pub fn from_typed_summary(summary: &TaskSummary) -> Self {
-        Self {
-            schema_version: 1,
-            task_id: summary.id,
-            state_version: summary.state_version,
-            state: summary.state.clone(),
-            correlation_key: summary.correlation_key.clone(),
-        }
+    pub(crate) fn from_typed_summary(summary: &TaskSummary) -> Self {
+        Self::from(summary)
     }
 }

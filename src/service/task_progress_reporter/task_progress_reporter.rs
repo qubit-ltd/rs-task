@@ -146,6 +146,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::TaskProgressReporter;
+    use crate::service::TaskProgressError;
+    use crate::service::TaskProgressExt;
     #[cfg(feature = "sqlite")]
     use super::unix_time_ms;
     use crate::model::TaskState;
@@ -778,6 +780,41 @@ mod tests {
             Some("recovered")
         );
         assert_eq!(snapshot.metrics[0].id, "items");
+    }
+
+    #[tokio::test]
+    async fn test_progress_extension_keeps_delta_applied_after_report_failure() {
+        let (store, id) = running_task().await;
+        let gate = Arc::new(CommitGateStore::new(store.clone()));
+        let reporter = Arc::new(TaskProgressReporter::new(gate.clone(), id, 1));
+        let mut progress = AsyncProgress::builder_arc(reporter)
+            .metric(Metric::new("items", "Items"))
+            .start_async()
+            .await
+            .expect("initial snapshot commits");
+        gate.fail_next();
+
+        let error = progress
+            .report_metric_delta("items", MetricDelta::new().started(1).succeeded(1))
+            .await
+            .expect_err("injected store failure is returned");
+        assert!(matches!(error, TaskProgressError::Emission(_)));
+        let local = progress.metric("items").unwrap().snapshot();
+        assert_eq!(local.completed(), 1);
+        assert_eq!(local.succeeded(), 1);
+
+        progress.report_async().await.expect("current snapshot retries");
+        let snapshot = store
+            .get_encoded_task(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .progress
+            .unwrap();
+        assert_eq!(snapshot.progress_version, 3);
+        assert_eq!(snapshot.metrics[0].completed, 1);
+        assert_eq!(snapshot.metrics[0].succeeded, 1);
     }
 
     #[cfg(feature = "sqlite")]
