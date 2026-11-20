@@ -387,11 +387,17 @@ mod tests {
         let _ = second.wait_outcome().await.expect("second outcome");
         let _ = first.wait_settlement().await;
         let _ = second.wait_settlement().await;
-        manager
+        let drain = manager
             .request_shutdown(qubit_operation::ShutdownMode::Drain)
             .wait()
             .await
             .expect("manager drain");
+        assert_eq!(drain.snapshot.active_operations, 0);
+        assert_eq!(drain.snapshot.queued_operations, 0);
+        assert_eq!(drain.snapshot.unconfirmed_users, 0);
+        assert_eq!(drain.snapshot.cleaning_resources, 0);
+        assert_eq!(drain.snapshot.recovery_groups, 0);
+        assert_eq!(drain.snapshot.service_resources, 0);
         ids
     }
 
