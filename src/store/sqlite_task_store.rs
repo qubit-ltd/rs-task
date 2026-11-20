@@ -168,6 +168,20 @@ impl SqliteTaskStore {
     }
 
     /// Opens a SQLite task store on Tokio's blocking thread pool.
+    ///
+    /// # Parameters
+    ///
+    /// * `path` - SQLite database path to open or create.
+    ///
+    /// # Returns
+    ///
+    /// The opened store after its database identity, schema, and owner lock are
+    /// initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Failure` if the blocking task cannot be joined, or the same
+    /// storage and ownership errors as [`Self::open`].
     pub async fn open_async(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         task::spawn_blocking(move || Self::open(path)).await.map_err(failure)?

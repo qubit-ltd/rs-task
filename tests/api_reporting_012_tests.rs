@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::sync::Arc;
 
 use qubit_event_bus::model::Topic;
@@ -20,7 +27,7 @@ impl AsyncReporter for NoopReporter {
 }
 
 #[tokio::test]
-async fn public_progress_extension_reports_metric_delta() {
+async fn test_public_progress_extension_reports_metric_delta() {
     let mut progress = AsyncProgress::builder_arc(Arc::new(NoopReporter))
         .metric(Metric::new("items", "Items"))
         .start_async()
@@ -34,7 +41,7 @@ async fn public_progress_extension_reports_metric_delta() {
 }
 
 #[tokio::test]
-async fn public_progress_extension_classifies_unknown_metrics() {
+async fn test_public_progress_extension_classifies_unknown_metrics() {
     let mut progress = AsyncProgress::builder_arc(Arc::new(NoopReporter))
         .metric(Metric::new("items", "Items"))
         .start_async()
@@ -51,7 +58,7 @@ async fn public_progress_extension_classifies_unknown_metrics() {
 
 #[cfg(feature = "event-bus")]
 #[test]
-fn task_event_exposes_the_lifecycle_topic() {
+fn test_task_event_exposes_the_lifecycle_topic() {
     let topic: Topic<TaskEvent> = TaskEvent::topic();
 
     assert_eq!(topic.name(), "task.lifecycle");

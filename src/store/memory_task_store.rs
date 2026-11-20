@@ -89,6 +89,14 @@ impl MemoryTaskStore {
     }
 
     /// Creates an in-memory store with named retention and payload limits.
+    ///
+    /// # Parameters
+    ///
+    /// * `options` - Retention and payload limits for the new store.
+    ///
+    /// # Returns
+    ///
+    /// A volatile store configured with the supplied limits.
     #[must_use]
     pub fn with_options(options: MemoryStoreOptions) -> Self {
         Self {

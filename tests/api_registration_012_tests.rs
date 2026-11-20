@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
@@ -39,7 +46,7 @@ fn descriptor(kind: &str) -> TaskHandlerDescriptor {
 }
 
 #[test]
-fn kind_builds_request_and_descriptor() {
+fn test_kind_builds_request_and_descriptor() {
     let kind = TaskKind::<Echo>::new("echo", 2, ValueCodecId::new("example.codec"));
     let request = kind
         .request(Echo("hello".into()))
@@ -57,7 +64,7 @@ fn kind_builds_request_and_descriptor() {
 }
 
 #[test]
-fn descriptor_validates_schema_and_payload_identity_at_registration() {
+fn test_descriptor_validates_schema_and_payload_identity_at_registration() {
     let mut registry = qubit_task::handler::TaskHandlerRegistry::new();
     let empty = descriptor("empty").with_accepted_schema_versions([]);
     assert!(registry.register::<Echo, _>(empty, Arc::new(Handler)).is_err());
@@ -79,7 +86,7 @@ fn descriptor_validates_schema_and_payload_identity_at_registration() {
 }
 
 #[tokio::test]
-async fn registration_options_select_cancellation_and_hook_receives_attempt() {
+async fn test_registration_options_select_cancellation_and_hook_receives_attempt() {
     use qubit_id::Id;
     use qubit_task::handler::CancellationMode;
     use qubit_task::handler::HandlerOptions;
@@ -119,7 +126,7 @@ async fn registration_options_select_cancellation_and_hook_receives_attempt() {
 }
 
 #[test]
-fn registration_can_be_removed_and_replaced_without_overwriting_duplicates() {
+fn test_registration_can_be_removed_and_replaced_without_overwriting_duplicates() {
     let mut registry = qubit_task::handler::TaskHandlerRegistry::new();
     registry
         .register::<Echo, _>(descriptor("echo"), Arc::new(Handler))
@@ -137,7 +144,7 @@ fn registration_can_be_removed_and_replaced_without_overwriting_duplicates() {
 }
 
 #[test]
-fn builder_registers_async_functions_and_can_unregister_and_reregister() {
+fn test_builder_registers_async_functions_and_can_unregister_and_reregister() {
     let mut builder = TaskExecutionServiceBuilder::in_memory(16, ValueBytesCodecRegistry::empty());
     let handler = |_value: Echo, _context: qubit_task::handler::TaskContext| async { Ok(TaskRunOutcome::success()) };
     builder
@@ -158,7 +165,7 @@ fn builder_registers_async_functions_and_can_unregister_and_reregister() {
 }
 
 #[test]
-fn run_result_convenience_constructors_preserve_classification() {
+fn test_run_result_convenience_constructors_preserve_classification() {
     assert!(matches!(TaskRunOutcome::success(), TaskRunOutcome::Succeeded(_)));
     assert!(qubit_task::model::TaskRunError::retryable("temporary", "retry").retryable);
     assert!(!qubit_task::model::TaskRunError::permanent("invalid", "stop").retryable);

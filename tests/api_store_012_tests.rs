@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::sync::Arc;
 
 use qubit_task::model::TaskQuery;
@@ -10,7 +17,7 @@ use qubit_task::store::TaskStore;
 use qubit_task::store::delegate_task_store;
 
 #[test]
-fn query_uses_private_builder_and_validates_limits() {
+fn test_query_uses_private_builder_and_validates_limits() {
     let query = TaskQuery::default();
     assert_eq!(query.limit(), 50);
     assert!(TaskQuery::default().page_size(0).is_err());
@@ -20,7 +27,7 @@ fn query_uses_private_builder_and_validates_limits() {
 }
 
 #[test]
-fn memory_options_validate_nonzero_limits() {
+fn test_memory_options_validate_nonzero_limits() {
     let options = MemoryStoreOptions::new(0)
         .max_payload_bytes(1024)
         .expect("positive payload budget")
@@ -33,7 +40,7 @@ fn memory_options_validate_nonzero_limits() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_async_open_observes_owner_conflict() {
+async fn test_sqlite_async_open_observes_owner_conflict() {
     let directory = std::env::temp_dir().join(format!("qubit-task-api-store-{}", std::process::id()));
     std::fs::create_dir(&directory).expect("create unique test directory");
     let path = directory.join("tasks.sqlite");
@@ -100,7 +107,7 @@ impl TaskStore for Forwarder {
 }
 
 #[test]
-fn delegate_macro_is_available_to_external_crates() {
+fn test_delegate_macro_is_available_to_external_crates() {
     let wrapped = Forwarder {
         inner: Arc::new(CustomDefault {
             inner: Arc::new(MemoryTaskStore::new(4)),
