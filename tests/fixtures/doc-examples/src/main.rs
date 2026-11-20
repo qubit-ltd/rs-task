@@ -7,7 +7,9 @@
 // =============================================================================
 //! Compiles typed task execution with automatic lifecycle publication.
 
+use std::env::temp_dir;
 use std::error::Error;
+use std::fs::remove_file;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +23,7 @@ use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 use qubit_task::event::TaskEvent;
+use qubit_task::store::SqliteTaskStore;
 
 mod task_event_codec;
 mod typed_support;
@@ -28,7 +31,7 @@ mod typed_support;
 use task_event_codec::TaskEventJsonCodec;
 use typed_support::register_handler;
 use typed_support::request;
-use typed_support::service_builder;
+use typed_support::service_builder_with_store;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -52,7 +55,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .with_facade_config(facade);
     let bus = Arc::new(AsyncEventBusRegistry::discover()?.create(&config).await?);
-    let mut builder = service_builder()?;
+    let database_path = temp_dir().join(format!("qubit-task-doc-examples-{}.sqlite", std::process::id()));
+    let _ = remove_file(&database_path);
+    let store = Arc::new(SqliteTaskStore::open(&database_path)?);
+    let mut builder = service_builder_with_store(store.clone())?;
     register_handler(&mut builder)?;
     builder = builder.event_bus(bus.clone());
     let service = builder.build().await?;
@@ -75,5 +81,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await??;
     service.shutdown().await?;
     let _ = bus.shutdown(ShutdownMode::Immediate).await?;
+    drop(service);
+    drop(store);
+    remove_file(database_path)?;
     Ok(())
 }

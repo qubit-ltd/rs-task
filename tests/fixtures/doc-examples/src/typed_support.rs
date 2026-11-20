@@ -34,6 +34,7 @@ use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskRequest;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::TaskFuture;
+use qubit_task::store::TaskStore;
 use serde_json::Error as JsonError;
 use serde_json::Value;
 use serde_json::from_slice;
@@ -111,8 +112,18 @@ impl IdGenerator<Id, IdGenerationError> for SequentialIds {
 /// The builder starts generated IDs at 100. Returns an error if codec setup
 /// fails.
 pub fn service_builder() -> Result<TaskExecutionServiceBuilder, Box<dyn std::error::Error>> {
+    service_builder_with_store(Arc::new(MemoryTaskStore::new(256)))
+}
+
+/// Creates a service builder using the supplied store and example codecs.
+///
+/// The builder starts generated IDs at 100. Returns an error if codec setup
+/// fails.
+pub fn service_builder_with_store(
+    store: Arc<dyn TaskStore>,
+) -> Result<TaskExecutionServiceBuilder, Box<dyn std::error::Error>> {
     Ok(TaskExecutionServiceBuilder::new(
-        Arc::new(MemoryTaskStore::new(256)),
+        store,
         Arc::new(codecs()?),
         Arc::new(SequentialIds::new(100)),
     ))
