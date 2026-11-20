@@ -16,8 +16,8 @@ use qubit_task::model::TaskState;
 use tokio::sync::watch;
 
 use super::external_job::AttemptGates;
-use super::managed_handler::fixture;
-use super::managed_handler::probe_request;
+use super::fixture;
+use super::probe_request;
 
 const CASE_TIMEOUT: Duration = Duration::from_secs(10);
 
