@@ -74,6 +74,33 @@ struct Forwarder {
     inner: Arc<dyn TaskStore>,
 }
 
+struct PlainForwarder {
+    inner: Arc<dyn TaskStore>,
+}
+
+impl TaskStore for PlainForwarder {
+    delegate_task_store!(inner; except []);
+}
+
+struct CustomDefault {
+    inner: Arc<dyn TaskStore>,
+}
+
+impl TaskStore for CustomDefault {
+    delegate_task_store!(inner; except [enable_event_outbox, get_summary]);
+
+    fn enable_event_outbox<'a>(&'a self) -> TaskFuture<'a, Result<(), StoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn get_summary<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<qubit_task::model::typed::TaskSummary>, StoreError>> {
+        self.inner.get_summary(id)
+    }
+}
+
 impl TaskStore for Forwarder {
     delegate_task_store!(inner; except [accept_encoded]);
 
@@ -89,7 +116,14 @@ impl TaskStore for Forwarder {
 #[test]
 fn delegate_macro_is_available_to_external_crates() {
     let wrapped = Forwarder {
-        inner: Arc::new(MemoryTaskStore::new(4)),
+        inner: Arc::new(CustomDefault {
+            inner: Arc::new(MemoryTaskStore::new(4)),
+        }),
     };
     assert_eq!(wrapped.capabilities(), wrapped.inner.capabilities());
+    assert!(futures::executor::block_on(wrapped.enable_event_outbox()).is_ok());
+    let plain = PlainForwarder {
+        inner: Arc::new(MemoryTaskStore::new(4)),
+    };
+    assert_eq!(plain.capabilities(), plain.inner.capabilities());
 }
