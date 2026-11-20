@@ -123,7 +123,7 @@ impl TaskHandler<ManagedPayload> for ManagedHandler {
                             },
                         )
                         .map_err(|error| {
-                            ManagedError::Execution(format!("resource registration: {error}"))
+                            ManagedError::Execution(format!("resource registration: {error:?}"))
                         })?;
                     let job =
                         ExternalJob::new(runtime_in_root.clone(), input, Arc::clone(&job_gates));
@@ -161,7 +161,7 @@ impl TaskHandler<ManagedPayload> for ManagedHandler {
                         Ok(OperationOutcome::Stopped(_)) => Ok(Vec::new()),
                         Ok(OperationOutcome::Failed(error)) => Err(ManagedError::Execution(error)),
                         Ok(OperationOutcome::ChildFailed(error)) => Err(ManagedError::Execution(
-                            format!("nested child failed: {}", error.operation_id),
+                            format!("nested child failed: {:?}", error.operation_id),
                         )),
                         Ok(OperationOutcome::Panicked(error)) => Err(ManagedError::Execution(
                             format!("nested child panicked: {error:?}"),
