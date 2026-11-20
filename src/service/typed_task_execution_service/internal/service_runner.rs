@@ -950,9 +950,9 @@ impl ServiceRunner {
             self.mark_blocked(summary, "handler is not registered").await;
             return false;
         };
-        if summary.payload_type_id != descriptor.payload_type_id.as_str()
+        if summary.payload_type_id != descriptor.payload_type_id().as_str()
             || !descriptor
-                .accepted_schema_versions
+                .accepted_schema_versions()
                 .contains(&summary.payload_schema_version)
         {
             self.mark_blocked(
@@ -1100,18 +1100,9 @@ impl ServiceRunner {
             }
         };
         if latest_cancel_requested {
-            cancellation.flag().store(true, Ordering::Release);
-            #[cfg(feature = "operation")]
-            if self
-                .core
-                .handlers
-                .descriptor(&running.kind_id)
-                .is_some_and(|descriptor| {
-                    descriptor.cancellation_mode == crate::handler::typed::CancellationMode::Cooperative
-                })
-            {
-                cancellation.request();
-            }
+            let cooperative = self.core.handlers.cancellation_mode(&running.kind_id)
+                == Some(crate::handler::typed::CancellationMode::Cooperative);
+            cancellation.request(cooperative);
         }
         let reporter: Arc<dyn AsyncReporter> = Arc::new(TaskProgressReporter::new(
             Arc::clone(&self.core.store),
@@ -1119,11 +1110,8 @@ impl ServiceRunner {
             running.attempt,
         ));
         let context = TypedTaskContext::new(
-            id,
-            running.attempt,
-            cancellation.flag(),
-            #[cfg(feature = "operation")]
-            Arc::clone(&cancellation),
+            crate::model::TaskAttempt::new(id, running.attempt),
+            cancellation.handle(),
             reporter,
         );
         let execution = AssertUnwindSafe(prepared.run(context)).catch_unwind().await;
@@ -1411,14 +1399,12 @@ mod external_cancel_race_tests {
     use qubit_id::IdGenerationError;
     use qubit_id::IdGenerator;
     use qubit_model_id::HasModelId;
-    use qubit_model_id::ModelIdBuf;
 
     use super::EXTERNAL_CANCEL_SUCCESS_GATE;
     use super::ExternalCancelGateRegistration;
     use super::ExternalCancelSuccessGate;
     use crate::handler::TaskHandler;
     use crate::handler::TaskRunOutcome;
-    use crate::handler::typed::CancellationMode;
     use crate::handler::typed::TaskHandlerDescriptor;
     use crate::handler::typed::TypedTaskContext;
     use crate::model::TaskState;
@@ -1516,7 +1502,7 @@ mod external_cancel_race_tests {
         });
         let _cleanup = GateCleanup(store_identity);
         let hook: crate::handler::typed::ExternalCancellationHook =
-            Arc::new(move |_, _| Box::pin(async move { Ok(()) }));
+            Arc::new(move |_| Box::pin(async move { Ok(()) }));
         let mut builder = crate::service::TaskExecutionServiceBuilder::new(
             store,
             Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap()),
@@ -1524,17 +1510,12 @@ mod external_cancel_race_tests {
         )
         .max_running_tasks(NonZeroUsize::new(1).unwrap());
         builder
-            .handlers_mut()
-            .register_with_cancellation_hook::<Payload, _>(
-                TaskHandlerDescriptor {
-                    kind_id: "test.external-cancel-race".into(),
-                    payload_type_id: ModelIdBuf::parse("test.ExternalCancelRacePayload").unwrap(),
-                    accepted_schema_versions: vec![1],
-                    cancellation_mode: CancellationMode::ExternalHook,
-                },
+            .register_handler_with_options::<Payload, _>(
+                TaskHandlerDescriptor::for_payload::<Payload>("test.external-cancel-race", 1),
                 Arc::new(FinishWhenGateReached(Arc::clone(&gate.finish_handler))),
-                "unit-test",
-                hook,
+                crate::handler::HandlerOptions::new()
+                    .with_source("unit-test")
+                    .with_external_cancellation(move |attempt| hook(attempt)),
             )
             .unwrap();
         let service = builder.build().await.expect("service starts");

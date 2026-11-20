@@ -33,6 +33,20 @@ pub enum HandlerRegistrationError {
         /// Schema version repeated in the handler descriptor.
         u32,
     ),
+    /// Payload model ID could not be constructed from its configured value.
+    #[error("invalid payload model ID: {0}")]
+    InvalidPayloadModel(String),
+    /// Payload type's model ID differs from the descriptor model ID.
+    #[error("payload model mismatch: expected `{expected}`, got `{actual}`")]
+    PayloadModelMismatch {
+        /// Model ID declared in the descriptor.
+        expected: String,
+        /// Model ID declared by the handler payload type.
+        actual: String,
+    },
+    /// Schema version zero is reserved and cannot be registered.
+    #[error("schema version 0 is reserved")]
+    ZeroSchemaVersion,
     /// The kind is already registered, regardless of payload versions.
     #[error(
         "handler kind_id `{kind_id}` is already registered by `{first_source}`; conflicting registration came from `{second_source}`"

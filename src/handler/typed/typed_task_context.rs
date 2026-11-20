@@ -6,16 +6,13 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 use qubit_progress::AsyncProgress;
 use qubit_progress::AsyncProgressBuilder;
 use qubit_progress::AsyncReporter;
 
-#[cfg(feature = "operation")]
-use super::attempt_cancellation::AttemptCancellation;
-use crate::model::typed::TaskId;
+use super::attempt_cancellation::TaskCancellation;
+use crate::model::TaskAttempt;
 
 /// Per-attempt identity and cooperative cancellation state for typed handlers.
 ///
@@ -35,15 +32,9 @@ use crate::model::typed::TaskId;
 #[derive(Clone)]
 pub struct TypedTaskContext {
     /// Stable identifier shared by every attempt of the task.
-    task_id: TaskId,
-    /// One-based number of this execution attempt.
-    attempt: u32,
-    /// Shared flag observed by this handler and its child work.
-    cancelled: Arc<AtomicBool>,
-    /// Notification channel shared with the service's attempt cancellation
-    /// state.
-    #[cfg(feature = "operation")]
-    cancellation: Arc<AttemptCancellation>,
+    attempt: TaskAttempt,
+    /// Read-only cancellation view for this attempt.
+    cancellation: TaskCancellation,
     /// Reporter that persists progress events for this attempt.
     progress_reporter: Arc<dyn AsyncReporter>,
 }
@@ -63,17 +54,12 @@ impl TypedTaskContext {
     /// A context that shares the supplied cancellation flag and progress
     /// reporter.
     pub(crate) fn new(
-        task_id: TaskId,
-        attempt: u32,
-        cancelled: Arc<AtomicBool>,
-        #[cfg(feature = "operation")] cancellation: Arc<AttemptCancellation>,
+        attempt: TaskAttempt,
+        cancellation: TaskCancellation,
         progress_reporter: Arc<dyn AsyncReporter>,
     ) -> Self {
         Self {
-            task_id,
             attempt,
-            cancelled,
-            #[cfg(feature = "operation")]
             cancellation,
             progress_reporter,
         }
@@ -86,8 +72,8 @@ impl TypedTaskContext {
     /// The identifier shared by all attempts of this task.
     #[must_use]
     #[inline]
-    pub const fn task_id(&self) -> TaskId {
-        self.task_id
+    pub const fn task_id(&self) -> crate::model::typed::TaskId {
+        self.attempt.task_id()
     }
 
     /// Returns the one-based attempt number.
@@ -98,7 +84,7 @@ impl TypedTaskContext {
     #[must_use]
     #[inline]
     pub const fn attempt(&self) -> u32 {
-        self.attempt
+        self.attempt.attempt()
     }
 
     /// Reports whether cancellation was requested for this attempt.
@@ -109,32 +95,28 @@ impl TypedTaskContext {
     #[must_use]
     #[inline]
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.cancellation.is_requested()
     }
 
-    /// Returns the signal that this handler may share with its child work.
-    ///
-    /// Cloning the `Arc` does not create a new cancellation state; updates to
-    /// the returned flag remain visible to this context and its other holders.
-    ///
-    /// # Returns
-    ///
-    /// A shared handle to this attempt's cancellation flag.
+    /// Returns the attempt identity shared with external cancellation hooks.
     #[must_use]
-    #[inline]
-    pub fn cancellation_signal(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.cancelled)
+    pub const fn task_attempt(&self) -> TaskAttempt {
+        self.attempt
+    }
+
+    /// Returns a read-only cloneable view of the attempt cancellation state.
+    #[must_use]
+    pub fn cancellation(&self) -> TaskCancellation {
+        self.cancellation.clone()
     }
 
     /// Waits for a persisted cooperative cancellation request from the task
     /// service.
     ///
-    /// This notification can be awaited repeatedly. Writes made directly to
-    /// [`cancellation_signal`](Self::cancellation_signal) remain visible
-    /// through [`is_cancelled`](Self::is_cancelled), but do not publish
-    /// this notification. Under cancellation modes other than
-    /// `Cooperative`, this future may remain pending indefinitely.
-    #[cfg(feature = "operation")]
+    /// This notification can be awaited repeatedly. The read-only handle
+    /// returned by [`cancellation`](Self::cancellation) observes every durable
+    /// cancellation request, while this future completes only for cooperative
+    /// requests.
     pub async fn wait_cancel_requested(&self) {
         self.cancellation.wait_requested().await;
     }

@@ -105,7 +105,12 @@ impl<T: HasModelId> TaskRequest<T> {
     /// ```
     #[must_use]
     #[inline]
-    pub fn new(kind_id: impl Into<String>, schema_version: u32, codec_id: ValueCodecId, data: T) -> Self {
+    pub fn new(
+        kind_id: impl Into<String>,
+        schema_version: u32,
+        codec_id: ValueCodecId,
+        data: T,
+    ) -> Self {
         Self {
             kind_id: kind_id.into(),
             category: None,
@@ -115,6 +120,43 @@ impl<T: HasModelId> TaskRequest<T> {
             correlation_key: None,
             idempotency_key: None,
         }
+    }
+}
+
+impl<T> TaskRequest<T> {
+    /// Sets the user-visible task category.
+    #[must_use]
+    pub fn with_category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+
+    /// Sets a caller-defined correlation key.
+    #[must_use]
+    pub fn with_correlation_key(mut self, key: impl Into<String>) -> Self {
+        self.correlation_key = Some(key.into());
+        self
+    }
+
+    /// Sets a caller-defined idempotency key.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
+    /// Replaces the structured metadata.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Sets the requested resource quota.
+    #[must_use]
+    pub fn with_resources(mut self, resources: ResourceRequest) -> Self {
+        self.resource_limit = resources;
+        self
     }
 }
 
@@ -136,7 +178,10 @@ impl<T: HasModelId + 'static> TaskRequest<T> {
     /// Returns an error when metadata exceeds the task entry/byte limits, its
     /// JSON encoding violates `rs-metadata` wire budgets, or payload codec
     /// lookup/encoding fails.
-    pub fn encode(self, registry: &ValueBytesCodecRegistry) -> Result<StoredTaskRequest, TaskRequestEncodeError> {
+    pub fn encode(
+        self,
+        registry: &ValueBytesCodecRegistry,
+    ) -> Result<StoredTaskRequest, TaskRequestEncodeError> {
         if self.kind_id.trim().is_empty() {
             return Err(TaskRequestEncodeError::EmptyKindId);
         }
@@ -144,16 +189,23 @@ impl<T: HasModelId + 'static> TaskRequest<T> {
             .validate_limits()
             .map_err(|error| TaskRequestEncodeError::Resource(error.to_string()))?;
         if self.metadata.len() > MAX_TASK_METADATA_ENTRIES {
-            return Err(TaskRequestEncodeError::TooManyMetadataEntries(self.metadata.len()));
+            return Err(TaskRequestEncodeError::TooManyMetadataEntries(
+                self.metadata.len(),
+            ));
         }
         let encode_limits = default_json_encode_limits()
             .into_builder()
-            .output_bytes_limit(ResourceLimit::new(JsonResource::OutputBytes, MAX_TASK_METADATA_BYTES))
+            .output_bytes_limit(ResourceLimit::new(
+                JsonResource::OutputBytes,
+                MAX_TASK_METADATA_BYTES,
+            ))
             .build();
         self.metadata
             .validate_json_with_limits(encode_limits)
             .map_err(|error| match error {
-                MetadataWireEncodeError::Budget(ref source) if *source.resource() == JsonResource::OutputBytes => {
+                MetadataWireEncodeError::Budget(ref source)
+                    if *source.resource() == JsonResource::OutputBytes =>
+                {
                     TaskRequestEncodeError::MetadataTooLarge(MAX_TASK_METADATA_BYTES + 1)
                 }
                 other => TaskRequestEncodeError::Metadata(other),

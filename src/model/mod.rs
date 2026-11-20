@@ -45,6 +45,7 @@ pub use typed::StartCommand;
 pub use typed::StoredPayload;
 pub use typed::StoredTask;
 pub use typed::StoredTaskRequest;
+pub use typed::TaskAttempt;
 pub use typed::TaskCursor;
 pub use typed::TaskId;
 pub use typed::TaskPage;

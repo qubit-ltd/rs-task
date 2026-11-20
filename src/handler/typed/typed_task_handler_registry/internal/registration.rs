@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use super::ErasedHandler;
+use crate::handler::typed::CancellationMode;
 use crate::handler::typed::ExternalCancellationHook;
 use crate::handler::typed::TaskHandlerDescriptor;
 
@@ -17,6 +18,8 @@ pub(in crate::handler::typed::typed_task_handler_registry) struct Registration {
     pub(in crate::handler::typed::typed_task_handler_registry) source: String,
     /// Descriptor exposed to callers and used during dispatch validation.
     pub(in crate::handler::typed::typed_task_handler_registry) descriptor: TaskHandlerDescriptor,
+    /// Cancellation behavior selected by registration options.
+    pub(in crate::handler::typed::typed_task_handler_registry) cancellation_mode: CancellationMode,
     /// Type-erased handler implementation used to prepare payloads.
     pub(in crate::handler::typed::typed_task_handler_registry) handler: Arc<dyn ErasedHandler>,
     /// Optional hook for kinds configured for external cancellation.

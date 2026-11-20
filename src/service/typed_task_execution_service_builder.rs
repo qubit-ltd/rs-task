@@ -6,6 +6,8 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use qubit_codec::ValueBytesCodecRegistry;
 #[cfg(feature = "event-bus")]
@@ -17,13 +19,45 @@ use qubit_id::IdGenerator;
 use super::typed_task_execution_service::TypedServiceOptions;
 use super::typed_task_execution_service::TypedTaskExecutionService;
 use crate::engine::LocalTaskExecutionEngine;
+use crate::handler::HandlerRegistrationError;
+use crate::handler::typed::HandlerOptions;
+use crate::handler::typed::TaskHandlerDescriptor;
+use crate::handler::typed::TypedTaskHandler;
 use crate::handler::typed::TypedTaskHandlerRegistry;
 use crate::model::ResourceCapacity;
 use crate::service::RetryPolicy;
 use crate::service::TaskServiceError;
+use crate::store::MemoryTaskStore;
 use crate::store::TaskStore;
+use qubit_model_id::HasModelId;
 
-/// Builder for the typed task service. ID generation is always explicit.
+struct InMemoryIdGenerator {
+    sequence: AtomicU64,
+}
+
+impl InMemoryIdGenerator {
+    fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+        }
+    }
+}
+
+impl IdGenerator<Id, IdGenerationError> for InMemoryIdGenerator {
+    fn generate(&self) -> Result<Id, IdGenerationError> {
+        self.sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| {
+                sequence.checked_add(1)
+            })
+            .map(|previous| Id::new(previous + 1))
+            .map_err(|sequence| IdGenerationError::SequenceOverflow {
+                sequence,
+                max: u64::MAX - 1,
+            })
+    }
+}
+
+/// Builder for the typed task service.
 ///
 /// The builder owns the dependencies and configuration used to create the
 /// service. Its configuration methods consume and return the builder so they
@@ -90,7 +124,39 @@ pub struct TypedTaskExecutionServiceBuilder {
     notification_shutdown_timeout: std::time::Duration,
 }
 
+#[cfg(test)]
+mod id_generator_tests {
+    use super::InMemoryIdGenerator;
+    use qubit_id::IdGenerator;
+
+    #[test]
+    fn sequence_never_wraps_or_repeats_after_overflow() {
+        let generator = InMemoryIdGenerator {
+            sequence: std::sync::atomic::AtomicU64::new(u64::MAX - 1),
+        };
+        assert_eq!(generator.generate().unwrap().value(), u64::MAX);
+        assert!(matches!(
+            generator.generate(),
+            Err(qubit_id::IdGenerationError::SequenceOverflow { .. })
+        ));
+        assert!(matches!(
+            generator.generate(),
+            Err(qubit_id::IdGenerationError::SequenceOverflow { .. })
+        ));
+    }
+}
+
 impl TypedTaskExecutionServiceBuilder {
+    /// Creates an in-memory builder with an independent monotonic ID sequence.
+    #[must_use]
+    pub fn in_memory(history_capacity: usize, codecs: ValueBytesCodecRegistry) -> Self {
+        Self::new(
+            Arc::new(MemoryTaskStore::new(history_capacity)),
+            Arc::new(codecs),
+            Arc::new(InMemoryIdGenerator::new()),
+        )
+    }
+
     /// Creates a builder with a store, byte codec registry, and ID generator.
     ///
     /// Snowflake generators used across processes must have distinct node IDs
@@ -110,7 +176,8 @@ impl TypedTaskExecutionServiceBuilder {
         codecs: Arc<ValueBytesCodecRegistry>,
         id_generator: Arc<dyn IdGenerator<Id, IdGenerationError>>,
     ) -> Self {
-        let cpu_slots = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32;
+        let cpu_slots =
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32;
         Self {
             store,
             codecs,
@@ -120,7 +187,8 @@ impl TypedTaskExecutionServiceBuilder {
                 ..ResourceCapacity::default()
             },
             handlers: TypedTaskHandlerRegistry::new(),
-            max_running_tasks: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+            max_running_tasks: std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get),
             scan_page_size: 128,
             max_resource_bypasses: 32,
             max_attempts: 3,
@@ -242,14 +310,67 @@ impl TypedTaskExecutionServiceBuilder {
         self
     }
 
-    /// Returns mutable access to the registry of handlers being assembled.
-    ///
-    /// Register handlers through this reference before calling `build`; the
-    /// borrow ends with the mutable borrow of the builder.
-    #[must_use = "the handler registry can be configured through the returned reference"]
-    #[inline]
-    pub fn handlers_mut(&mut self) -> &mut TypedTaskHandlerRegistry {
-        &mut self.handlers
+    /// Registers a typed handler with default cancellation options.
+    pub fn register_handler<T, H>(
+        &mut self,
+        descriptor: TaskHandlerDescriptor,
+        handler: Arc<H>,
+    ) -> Result<(), HandlerRegistrationError>
+    where
+        T: HasModelId + Send + Sync + 'static,
+        H: TypedTaskHandler<T>,
+    {
+        self.handlers.register::<T, H>(descriptor, handler)
+    }
+
+    /// Registers a typed handler with explicit options.
+    pub fn register_handler_with_options<T, H>(
+        &mut self,
+        descriptor: TaskHandlerDescriptor,
+        handler: Arc<H>,
+        options: HandlerOptions,
+    ) -> Result<(), HandlerRegistrationError>
+    where
+        T: HasModelId + Send + Sync + 'static,
+        H: TypedTaskHandler<T>,
+    {
+        self.handlers
+            .register_with_options::<T, H>(descriptor, handler, options)
+    }
+
+    /// Registers an async function handler with default options.
+    pub fn register_handler_fn<T, F, Fut>(
+        &mut self,
+        descriptor: TaskHandlerDescriptor,
+        handler: F,
+    ) -> Result<(), HandlerRegistrationError>
+    where
+        T: HasModelId + Send + Sync + 'static,
+        F: Fn(T, crate::handler::TaskContext) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = crate::handler::TaskRunResult> + Send + 'static,
+    {
+        self.handlers.register_handler_fn(descriptor, handler)
+    }
+
+    /// Registers an async function handler with explicit options.
+    pub fn register_handler_fn_with_options<T, F, Fut>(
+        &mut self,
+        descriptor: TaskHandlerDescriptor,
+        handler: F,
+        options: HandlerOptions,
+    ) -> Result<(), HandlerRegistrationError>
+    where
+        T: HasModelId + Send + Sync + 'static,
+        F: Fn(T, crate::handler::TaskContext) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = crate::handler::TaskRunResult> + Send + 'static,
+    {
+        self.handlers
+            .register_handler_fn_with_options(descriptor, handler, options)
+    }
+
+    /// Removes a registered handler before the service is built.
+    pub fn unregister_handler(&mut self, kind: &str) -> bool {
+        self.handlers.unregister(kind)
     }
 
     /// Builds the service and begins recovering encoded queued tasks.

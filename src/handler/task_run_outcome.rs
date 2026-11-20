@@ -33,6 +33,14 @@ pub enum TaskRunOutcome {
     Cancelled,
 }
 
+impl TaskRunOutcome {
+    /// Creates a successful outcome with an empty output summary.
+    #[must_use]
+    pub fn success() -> Self {
+        Self::Succeeded(TaskOutput::default())
+    }
+}
+
 /// Handler result containing an explicit outcome or classified failure.
 ///
 /// The service persists a successful outcome or the error's category and
