@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Service-level acceptance scenarios for the managed operation handler.
 //!
 //! These tests use explicit watch gates for each externally visible stage.
@@ -135,7 +142,7 @@ async fn shutdown_manager(manager: &AsyncOperationManager) {
 }
 
 #[tokio::test]
-async fn cancel_holds_resources_until_cleanup() {
+async fn test_cancel_holds_resources_until_cleanup() {
     let manager = manager(4);
     let gates = AttemptGates::new();
     let (service, request) = fixture(
@@ -209,7 +216,7 @@ async fn cancel_holds_resources_until_cleanup() {
 }
 
 #[tokio::test]
-async fn drain_waits_for_managed_attempt() {
+async fn test_drain_waits_for_managed_attempt() {
     let manager = manager(4);
     let gates = AttemptGates::new();
     let (service, request) = fixture(
@@ -262,7 +269,7 @@ async fn drain_waits_for_managed_attempt() {
 }
 
 #[tokio::test]
-async fn retry_starts_only_after_settlement() {
+async fn test_retry_starts_only_after_settlement() {
     let manager = manager(4);
     let first = AttemptGates::new();
     let second = AttemptGates::new();
@@ -320,7 +327,7 @@ async fn retry_starts_only_after_settlement() {
 }
 
 #[tokio::test]
-async fn cancel_after_outcome_suppresses_retry() {
+async fn test_cancel_after_outcome_suppresses_retry() {
     let manager = manager(4);
     let first = AttemptGates::new();
     let second = AttemptGates::new();
@@ -377,7 +384,7 @@ async fn cancel_after_outcome_suppresses_retry() {
 }
 
 #[tokio::test]
-async fn rejected_root_does_not_activate_job() {
+async fn test_rejected_root_does_not_activate_job() {
     let manager = manager(4);
     manager.close_admission();
     let gates = AttemptGates::new();
@@ -409,7 +416,7 @@ async fn rejected_root_does_not_activate_job() {
 }
 
 #[tokio::test]
-async fn rejected_child_does_not_activate_job() {
+async fn test_rejected_child_does_not_activate_job() {
     let mut options = ManagerOptions::default();
     options.limits = ManagerLimits {
         unconsumed_outcomes: 1,
