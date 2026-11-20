@@ -72,7 +72,7 @@ pub(in crate::store::sqlite_task_store) fn list_encoded(
     connection: &Connection,
     query: TaskQuery,
 ) -> Result<TaskPage, StoreError> {
-    let page_size = query.checked_page_size()?;
+    let page_size = query.limit();
     let built = build_encoded_history_query(&query, page_size)?;
     let mut statement = connection.prepare(&built.sql).map_err(failure)?;
     let mut rows = statement.query(params_from_iter(built.params)).map_err(failure)?;

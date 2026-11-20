@@ -24,6 +24,7 @@ use parking_lot::Mutex;
 
 use super::StoreError;
 use super::TaskFuture;
+use super::MemoryStoreOptions;
 use crate::model::MAX_TASK_OUTPUT_SUMMARY_BYTES;
 use crate::model::OwnerEpoch;
 use crate::model::StoreCapabilities;
@@ -84,59 +85,16 @@ impl MemoryTaskStore {
     /// A volatile store with the default payload and unfinished-record limits.
     #[must_use]
     pub fn new(history_capacity: usize) -> Self {
-        Self::with_payload_budget(
-            history_capacity,
-            NonZeroUsize::new(64 * 1024 * 1024).expect("default budget is nonzero"),
-        )
+        Self::with_options(MemoryStoreOptions::new(history_capacity))
     }
 
-    /// Creates an in-memory store with an explicit payload budget and the
-    /// default nonterminal-record limit.
-    ///
-    /// # Parameters
-    ///
-    /// * `history_capacity` - Maximum number of terminal records to retain.
-    /// * `max_payload_bytes` - Maximum total retained payload bytes.
-    ///
-    /// # Returns
-    ///
-    /// A volatile store with the supplied payload budget.
+    /// Creates an in-memory store with named retention and payload limits.
     #[must_use]
-    pub fn with_payload_budget(history_capacity: usize, max_payload_bytes: NonZeroUsize) -> Self {
-        Self::with_limits(
-            history_capacity,
-            max_payload_bytes,
-            NonZeroUsize::new(DEFAULT_MAX_UNFINISHED_RECORDS).expect("default unfinished record limit is nonzero"),
-        )
-    }
-
-    /// Creates an in-memory store with explicit history, payload, and
-    /// nonterminal-record limits.
-    ///
-    /// Nonterminal records include queued, running, and blocked tasks. When the
-    /// limit is reached, new distinct tasks are rejected until an existing
-    /// task becomes terminal. Idempotent replays of retained tasks remain
-    /// available.
-    ///
-    /// # Parameters
-    ///
-    /// * `history_capacity` - Maximum number of retained terminal records.
-    /// * `max_payload_bytes` - Maximum retained bytes across task payloads.
-    /// * `max_unfinished_records` - Maximum retained nonterminal records.
-    ///
-    /// # Returns
-    ///
-    /// A memory store with the supplied retention limits.
-    #[must_use]
-    pub fn with_limits(
-        history_capacity: usize,
-        max_payload_bytes: NonZeroUsize,
-        max_unfinished_records: NonZeroUsize,
-    ) -> Self {
+    pub fn with_options(options: MemoryStoreOptions) -> Self {
         Self {
-            history_capacity,
-            max_payload_bytes: max_payload_bytes.get(),
-            max_unfinished_records: max_unfinished_records.get(),
+            history_capacity: options.history_capacity,
+            max_payload_bytes: options.max_payload_bytes.get(),
+            max_unfinished_records: options.max_unfinished_records.get(),
             state: Mutex::new(MemoryState {
                 owner_epoch: None,
                 last_owner_epoch: 0,
@@ -645,23 +603,17 @@ impl super::TaskStore for MemoryTaskStore {
     /// * `query` - Filters, exclusive cursor, and requested page size.
     fn list_encoded<'a>(&'a self, query: EncodedTaskQuery) -> TaskFuture<'a, Result<EncodedTaskPage, StoreError>> {
         Box::pin(async move {
-            let page_size = query.checked_page_size()?;
+            let page_size = query.limit();
             let fetch_limit = page_size
                 .checked_add(1)
                 .ok_or(StoreError::InvalidRequest("task history page limit is too large"))?;
             let state = self.state.lock();
             let mut candidates = BinaryHeap::with_capacity(fetch_limit);
             for task in state.encoded_tasks.values().filter(|task| {
-                (query.states.is_empty() || query.states.contains(&task.summary.state.kind()))
-                    && query
-                        .category
-                        .as_ref()
-                        .is_none_or(|category| task.summary.category.as_ref() == Some(category))
-                    && query
-                        .correlation_key
-                        .as_ref()
-                        .is_none_or(|key| task.summary.correlation_key.as_ref() == Some(key))
-                    && query.after.is_none_or(|after| {
+                (query.states().is_empty() || query.states().contains(&task.summary.state.kind()))
+                    && query.category().is_none_or(|category| task.summary.category.as_deref() == Some(category))
+                    && query.correlation_key().is_none_or(|key| task.summary.correlation_key.as_deref() == Some(key))
+                    && query.cursor().is_none_or(|after| {
                         (task.summary.accepted_at_ms, task.summary.id) > (after.accepted_at_ms, after.id)
                     })
             }) {
