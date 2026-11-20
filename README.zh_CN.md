@@ -20,7 +20,7 @@
 - `category` 用于应用侧任务分类和查询。
 - `TaskKind<T>` 将 kind、schema 版本、codec 和 payload model 绑定；`Payload<T>` 会随编码值保存该模型身份。
 
-[带类型任务 API 指南](doc/typed-task-api.zh_CN.md)提供完整示例，以及处理器注册、codec 复用、资源配额、取消、进度汇报、metadata 限额和 keyset 分页契约。[用户指南的启动与关闭步骤](doc/user-guide.zh_CN.md#启动与关闭服务)说明应用侧操作；[历史与隔离归档维护章节](doc/user-guide.zh_CN.md#维护历史与隔离归档)说明有界归档清理。可运行示例见 [`examples/task_service.rs`](examples/task_service.rs) 和 [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs)。
+[带类型任务 API 指南](doc/typed-task-api.zh_CN.md)提供完整示例，以及处理器注册、codec 复用、资源配额、取消、进度汇报、metadata 限额和 keyset 分页契约。[用户指南的启动与关闭步骤](doc/user-guide.zh_CN.md#启动与关闭服务)说明应用侧操作；[历史与隔离归档维护章节](doc/user-guide.zh_CN.md#维护历史与隔离归档)说明有界归档清理。Operation 托管任务见[接入指南](doc/user-guide.zh_CN.md#由任务托管-operation)和 [`examples/operation_task.rs`](examples/operation_task.rs)，需启用 `operation` feature。其他可运行示例见 [`examples/task_service.rs`](examples/task_service.rs) 和 [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs)。
 
 ## 安装
 

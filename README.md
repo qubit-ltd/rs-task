@@ -20,7 +20,7 @@ The public API keeps these identifiers separate:
 - `category` classifies tasks for application queries.
 - `TaskKind<T>` binds a kind, schema version, codec, and payload model; `Payload<T>` carries that model identity with the encoded value.
 
-The [typed task API guide](doc/typed-task-api.md) contains the complete example and contracts for handler registration, codec reuse, resource quotas, cancellation, progress reporting, metadata limits, and keyset pagination. The [user guide](doc/user-guide.md#start-and-shut-down-the-service) covers application startup and shutdown operations, and its [history and quarantine maintenance section](doc/user-guide.md#maintain-history-and-quarantine-archives) documents bounded archive cleanup. Runnable examples are [`examples/task_service.rs`](examples/task_service.rs) and [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs).
+The [typed task API guide](doc/typed-task-api.md) contains the complete example and contracts for handler registration, codec reuse, resource quotas, cancellation, progress reporting, metadata limits, and keyset pagination. The [user guide](doc/user-guide.md#start-and-shut-down-the-service) covers application startup and shutdown operations, and its [history and quarantine maintenance section](doc/user-guide.md#maintain-history-and-quarantine-archives) documents bounded archive cleanup. For operation-managed work, see the [operation example guide](doc/user-guide.md#manage-an-operation-from-a-task) and run [`examples/operation_task.rs`](examples/operation_task.rs) with the `operation` feature. Other runnable examples are [`examples/task_service.rs`](examples/task_service.rs) and [`examples/blocked_maintenance.rs`](examples/blocked_maintenance.rs).
 
 ## Installation
 

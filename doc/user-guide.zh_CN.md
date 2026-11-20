@@ -10,6 +10,8 @@
 
 完整提交与处理器示例见[带类型任务 API 指南](typed-task-api.zh_CN.md)。其中介绍 `TaskId`、`TaskKind<T>`、`kind_id`、`category`、codec 注册、schema 兼容性、metadata 配额、资源准入、取消、异步进度，以及历史分页的排序契约。
 
+Operation 托管任务见[接入说明](#由任务托管-operation)和 [`examples/operation_task.rs`](../examples/operation_task.rs)。
+
 可运行示例见 [`examples/task_service.rs`](../examples/task_service.rs) 和 [`examples/blocked_maintenance.rs`](../examples/blocked_maintenance.rs)。前者演示处理器注册与提交；后者演示带过滤条件的历史查询和运维处理。
 
 ## 0.12 API 工作流
@@ -21,6 +23,12 @@
 读取完整的无 payload 摘要用 `get_summary(id)`；消费者对账只需当前状态时用 `get_state_checkpoint(id)`。`wait_terminal(id, timeout)` 在单一总超时内轮询 checkpoint；Succeeded、Failed、Panicked 和 Cancelled 是终态，Blocked 不是。零超时仍会尝试一次可立即完成的读取；SQLite 清理任务行后，仍可能返回保留的终态 checkpoint。`pages(query)` 每次读取一页：`TaskQuery::default()` 默认 50 条，`page_size` 只接受 1 到 256。页读取失败时保留当前游标供重试，最后一个非空页会先返回，再报告没有更多记录。
 
 `request_cancel(id)` 表示发出取消请求。Queued 或 Blocked 任务可返回 `CancelledBeforeRun`；运行中的 cooperative handler 返回 `CancellationRequested` 后，仍须由 handler 在安全边界检查 `TaskContext::cancellation().wait_requested().await` 或 `is_requested()` 并结束工作。该结果不表示运行中的任务已经终止。修复配置后，把观察到的 `TaskSummary` 传给 `resume_blocked(&observed_summary)`；服务会用该快照版本进行条件更新。隔离失败通知时，将完整的 `NotificationFailure` 诊断传给 `quarantine_failed_notification(&diagnostic, reason)`，store 会原子比较任务、版本和事件标识。
+
+## 由任务托管 operation
+
+运行受控集成示例：`cargo run --locked --features operation --example operation_task`。它从 task handler 启动受管理的 operation；外部取消 hook 观察到请求后会输出“已请求停止”。任务结果可能早于 operation 输入释放；handler 会依次等待父级结果、输入释放、领域结算和清理完成后才返回。示例按此顺序打开门闩，并在关停完成后确认 manager 没有活跃、排队、未确认、清理或恢复中的工作。
+
+该示例使用受控的本地 Tokio 作业来说明生命周期所有权和资源释放证据，不是生产 provider 适配器。若服务无法证实外部资源已释放，生产 provider 需要自己的对账和处置机制。关停顺序为：停止应用入口、排空 `TaskExecutionService`，再请求并等待 `AsyncOperationManager` 关闭。manager 集成需要 `operation` feature；任务取消等待 API 本身仍可在不启用该 feature 时使用。
 
 内存存储使用 `MemoryStoreOptions` 配置并校验 payload 字节预算与未完成任务上限。`SqliteTaskStore::open_async` 会将同步打开过程放入 Tokio blocking pool。自定义 `TaskStore` 包装器可使用 `delegate_task_store!` 并声明自行覆盖的方法；其他方法（包括 trait 默认实现）会转发到内层 store。
 
@@ -116,7 +124,7 @@ publisher 启用后，每次生命周期状态提交都会与对应 outbox 行�
 
 ### 持久化消费者投影
 
-在以 `TaskId` 为键的持久表中保存每个任务已处理的最高 `state_version` 和业务投影状态。一个 SQLite 事务内先读取 checkpoint，再决定是否修改业务投影。事件版本不高于 checkpoint 时直接忽略；首次收到版本 0 可以直接应用，首次收到高于 0 的版本，或后续事件跳过一个及以上版本时，必须调用 `TaskExecutionService::get_state_checkpoint` 查询权威当前状态和版本。返回 `None`、查询出错或检查点版本低于通知版本，都不能安全应用：回滚事务且不得 ACK；返回会重新入队的 handler 错误，让消息保留在 pending 状态等待 Retry。检查点只能恢复最新状态，不能重放缺失的每次状态迁移及其业务副作用。其他情况下，将选定状态、消费者 checkpoint 和业务副作用写入同一事务后再提交。`tests/redis_task_outbox_tests.rs` 中的集成回归会关闭并重建 SQLite 消费者，再重放 Redis 中的重复记录。
+在以 `TaskId` 为键的持久表中保存每个任务已处理的最高 `state_version` 和业务投影状态。正常的连续事件可在一个 SQLite 事务内重读当前版本，并将业务效果与新版本一起提交。首次收到高于 0 的版本，或后续事件跳过一个及以上版本时，先在消费者事务外调用 `TaskExecutionService::get_state_checkpoint` 查询权威当前状态和版本，再开启事务并重读 consumer 版本。若其他事务已应用同版或更高版本，可幂等跳过；否则仅当权威版本高于当前版本时，才把选定状态、业务效果和 checkpoint 在同一事务中写入。返回 `None`、查询出错或检查点版本低于通知版本，都不能安全应用：回滚且不得 ACK；返回会重新入队的 handler 错误，让消息保留在 pending 状态等待 Retry。只有事务提交成功后才 ACK。检查点只能恢复最新状态，不能重放缺失的每次状态迁移及其业务副作用。`tests/redis_task_outbox_tests.rs` 中的集成回归会关闭并重建 SQLite 消费者，再重放 Redis 中的重复记录。
 
 版本缺口处理只有在后续事件到达时才会触发。provider 已回复接纳后，通知仍可能丢失；此时投影停在 `Running`，而后续也没有事件提示缺少终态。若应用需要有界地修复这类尾部丢失，应把每个已接纳的 `TaskId` 登记在应用自己的持久跟踪表中，并在业务设定的陈旧阈值后分批核对。先在 consumer 写事务外查询 `get_state_checkpoint`；事务内重新读取最新 consumer 版本，仅当检查点版本更高时，才连同业务副作用一起写入。查询失败、返回 `None` 或版本落后时，保留该 ID 以便重试，并记录可重试诊断。只有终态投影提交后才退役跟踪。重复对账或与新事件竞争时，不得覆盖更新的版本，也不能重复业务副作用。该应用显式执行的循环不会在库内增加定时器，也不会为从未收到的消息伪造 ACK。它只能修复当前投影，无法重建每次丢失的状态迁移或其副作用，也不承诺 exactly-once 处理。`test_reconcile_missing_terminal_notification` 演示了终态通知丢失、没有后续事件、重开消费者数据库后进行幂等对账的场景。
 

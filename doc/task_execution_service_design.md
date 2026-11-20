@@ -8,6 +8,8 @@
 
 容量观察与显式的有界归档清理步骤见[历史与隔离归档维护指南](user-guide.zh_CN.md#维护历史与隔离归档)。
 
+Operation 接入和当前运行契约见[用户指南](user-guide.zh_CN.md#由任务托管-operation)及 [`examples/operation_task.rs`](../examples/operation_task.rs)。中文专项 operation 设计与实施文件是历史草稿，不构成当前 API 或实施契约。
+
 ## 模型与路由
 
 每个任务都有一个稳定的 `TaskId`，它包装 `rs-id::Id`。应用注入 `IdGenerator`，且必须保证任务 ID 跨进程重启唯一；跨进程使用 Snowflake 类生成器时，各进程必须使用不同节点编号，并配置合适的时钟条件。
@@ -30,9 +32,11 @@
 
 当前 API 还提供 `in_memory(history_capacity, codecs)`，用于构建进程内 memory 服务；builder 可直接调用 `register_handler`、`register_handler_fn` 和 `unregister_handler`。`TaskKind<T>` 从同一份 payload 定义生成 descriptor 与 request。`submit()` 返回 store 原子操作的 `AcceptOutcome { summary, created }`；`submit_checked()` 会在生成 ID 或写入前检查 handler、model、schema 和 codec。普通提交仍可接纳暂时无效的路由，之后由调度器标记为 `Blocked`。服务用 `get_summary` 读取完整摘要，用 `get_state_checkpoint` 读取较小恢复快照，并通过 `wait_terminal` 和 `TaskPages` 提供终态等待与逐页查询。`request_cancel` 返回请求结果，不会声称运行中的任务已经停止。`resume_blocked` 与通知隔离 API 接受已观察的摘要/诊断快照，并沿用条件更新 fencing。
 
+`request_cancel` 派发后的写入由服务任务持有，直到条件状态迁移、错误映射和后续唤醒完成。派发后取消调用方等待不会丢弃已提交取消的通知；派发前取消则不会启动写入。shutdown 的 admission 屏障会等这些写入完成，再排空并释放 store owner。运行中的 cooperative 取消仍通过 task ID、attempt 和 state version fencing。
+
 内存与 SQLite store 实现相同的 typed store 契约。SQLite 使用 typed numeric-ID schema；遇到不兼容的旧 UUID schema 时会返回诊断错误，不会静默重新解释数据。Store ownership 用于隔离并发服务实例；恢复会在取得 ownership 后继续处理保留的 queued 任务。服务在取得 owner 前启动清理 worker。若取得 owner 后取消 `build()` future，仍持有 owner 的 guard 会让该 worker 异步清理，并立即尝试释放。返回 `Failure` 后会使用同一 store 和 epoch 退避重试，等待从 25ms 开始并逐步加倍，最多 5 秒；不设最大次数，也不保证完成时限。永久 Failure 会持续重试并保留 store 引用。`OwnerConflict` 会结束旧 epoch 的清理，但不能据此认定 store 当前没有 owner。其他错误或 panic 也会结束该清理任务；永久挂起的释放和进程退出不由进程内 worker 恢复。因此在旧 ownership 实际释放前，替代 build 仍可能遇到 owner 冲突。
 
-单个调度器按有界分页扫描 queued 摘要，只在有运行名额时启动 handler。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 8 中，重启后仍会遵守；计算持久化期限前，正延迟会向上取整到整毫秒，最多增加不足 1 毫秒，但不构成实际墙钟等待保证；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可将观察到的 `TaskSummary` 传给 `resume_blocked` 恢复 Blocked 任务。
+单个调度器按有界分页扫描 queued 摘要；只有共享 `in_flight` 计数低于配置上限时才启动 handler。该计数包括已派发的 handler attempt（包括解码和收尾）及外部取消 hook；活跃 attempt 启动 hook 后，计数可能超过 `max_running_tasks`。达到上限只会阻止调度器启动新的 handler，不限制 hook 准入。`max_running_tasks` 默认使用可用并行度；`scan_page_size` 默认 128，最大 256。重试期限保存在 SQLite schema 版本 8 中，重启后仍会遵守；计算持久化期限前，正延迟会向上取整到整毫秒，最多增加不足 1 毫秒，但不构成实际墙钟等待保证；仅显式标记可重试的 handler 错误会按尝试上限重试。运维人员修复配置后，可将观察到的 `TaskSummary` 传给 `resume_blocked` 恢复 Blocked 任务。
 
 ## 执行与资源准入
 
