@@ -765,7 +765,7 @@ impl TaskExecutionService {
     /// Returns an error if shutdown has begun, the task is missing, storage
     /// fails, or an external cancellation hook fails.
     pub async fn request_cancel(&self, id: TaskId) -> Result<CancelOutcome, TaskServiceError> {
-        let _admission = self.core.admission.read().await;
+        let _admission = Arc::clone(&self.core.admission).read_owned().await;
         self.runner().check_fault()?;
         if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
@@ -777,25 +777,23 @@ impl TaskExecutionService {
             return Ok(CancelOutcome::AlreadyTerminal);
         }
         if matches!(summary.state, TaskState::Queued | TaskState::Blocked { .. }) {
-            let updated = self.runner().store_write_result(
-                self.core
-                    .store
-                    .transition_encoded(TransitionCommand {
-                        id,
-                        expected_state_version: summary.state_version,
-                        expected_attempt: summary.attempt,
-                        retry_not_before_ms: None,
-                        state: TaskState::Cancelled,
-                        cancel_requested: false,
-                        cancel_error: None,
-                        finished_at_ms: Some(now_ms()),
-                        output: None,
-                    })
-                    .await,
-            )?;
-            let _ = updated;
-            self.core.scheduler_changed.notify_one();
-            return Ok(CancelOutcome::CancelledBeforeRun);
+            return Self::run_cancel_transition(
+                self.runner(),
+                _admission,
+                TransitionCommand {
+                    id,
+                    expected_state_version: summary.state_version,
+                    expected_attempt: summary.attempt,
+                    retry_not_before_ms: None,
+                    state: TaskState::Cancelled,
+                    cancel_requested: false,
+                    cancel_error: None,
+                    finished_at_ms: Some(now_ms()),
+                    output: None,
+                },
+                false,
+            )
+            .await;
         }
         let Some(cancellation_mode) = self.core.handlers.cancellation_mode(&summary.kind_id) else {
             return Ok(CancelOutcome::CancellationUnsupported);
@@ -817,31 +815,79 @@ impl TaskExecutionService {
             }
             return Ok(CancelOutcome::CancellationRequested);
         }
-        let _cancellation_requested = self.runner().store_write_result(
-            self.core
-                .store
-                .transition_encoded(TransitionCommand {
-                    id,
-                    expected_state_version: summary.state_version,
-                    expected_attempt: summary.attempt,
-                    retry_not_before_ms: None,
-                    state: TaskState::Running,
-                    cancel_requested: true,
-                    cancel_error: None,
-                    finished_at_ms: None,
-                    output: None,
-                })
-                .await,
-        )?;
-        match cancellation_mode {
-            CancellationMode::Unsupported => Ok(CancelOutcome::CancellationUnsupported),
-            CancellationMode::Cooperative => {
-                if let Some(state) = self.core.cancellations.lock().get(&(id, summary.attempt)) {
-                    state.request(true);
+        Self::run_cancel_transition(
+            self.runner(),
+            _admission,
+            TransitionCommand {
+                id,
+                expected_state_version: summary.state_version,
+                expected_attempt: summary.attempt,
+                retry_not_before_ms: None,
+                state: TaskState::Running,
+                cancel_requested: true,
+                cancel_error: None,
+                finished_at_ms: None,
+                output: None,
+            },
+            cancellation_mode == CancellationMode::Cooperative,
+        )
+        .await
+    }
+
+    /// Completes a local cancellation write and its follow-up notification in
+    /// a service-owned task so caller cancellation cannot release store
+    /// ownership between a committed transition and its wake or signal.
+    ///
+    /// # Parameters
+    ///
+    /// - `runner`: Shared service operations for writing, signaling, and
+    ///   waking dispatch.
+    /// - `admission`: Owned read guard retained until persistence and its
+    ///   follow-up notification finish.
+    /// - `command`: Compare-and-set transition to persist.
+    /// - `cooperative`: Whether a successful Running transition should signal
+    ///   the cooperative handler.
+    ///
+    /// # Returns
+    ///
+    /// The cancellation outcome after the transition and follow-up complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns the mapped store error, or a scheduler-unavailable error if
+    /// the service-owned operation panics.
+    async fn run_cancel_transition(
+        runner: ServiceRunner,
+        admission: tokio::sync::OwnedRwLockReadGuard<()>,
+        command: TransitionCommand,
+        cooperative: bool,
+    ) -> Result<CancelOutcome, TaskServiceError> {
+        let runner_on_join_error = runner.clone();
+        let before_run = matches!(command.state, TaskState::Cancelled);
+        let cancellation_key = (command.id, command.expected_attempt);
+        let task = tokio::spawn(async move {
+            let _admission = admission;
+            runner.store_write_result(runner.core.store.transition_encoded(command).await)?;
+            if before_run {
+                runner.core.scheduler_changed.notify_one();
+                Ok(CancelOutcome::CancelledBeforeRun)
+            } else {
+                if cooperative {
+                    if let Some(state) = runner.core.cancellations.lock().get(&cancellation_key) {
+                        state.request(true);
+                    }
                 }
                 Ok(CancelOutcome::CancellationRequested)
             }
-            CancellationMode::ExternalHook => unreachable!("external hooks are handled above"),
+        });
+        match task.await {
+            Ok(result) => result,
+            Err(error) => {
+                runner_on_join_error.latch_fault(format!("task cancellation operation failed: {error}"));
+                Err(TaskServiceError::SchedulerUnavailable(format!(
+                    "task cancellation operation failed: {error}"
+                )))
+            }
         }
     }
 
