@@ -448,6 +448,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1d145c12400a11b36a9aabd1e0fee87060e2498dfc5d023faa5e92697d15f95"
 
 [[package]]
+name = "qubit-operation"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a168736d00191891adfd90804caf5718983ee40a0977ccfc2a975abc87f58dd0"
+dependencies = [
+ "qubit-budget",
+]
+
+[[package]]
 name = "qubit-progress"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -505,6 +514,7 @@ dependencies = [
  "qubit-id",
  "qubit-metadata",
  "qubit-model-id",
+ "qubit-operation",
  "qubit-progress",
  "qubit-spi",
  "rusqlite",

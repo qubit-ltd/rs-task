@@ -44,6 +44,12 @@
       "features": ["inventory", "event-bus"]
     },
     {
+      "name": "operation",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["operation"]
+    },
+    {
       "name": "sqlite-inventory-event-bus",
       "commands": ["check", "test", "doc"],
       "defaultFeatures": false,
@@ -53,7 +59,7 @@
       "name": "all-features",
       "commands": ["check", "test", "doc"],
       "defaultFeatures": false,
-      "features": ["sqlite", "inventory", "event-bus"]
+      "features": ["sqlite", "inventory", "event-bus", "operation"]
     }
   ]
 }
