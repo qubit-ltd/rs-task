@@ -10,11 +10,31 @@
 use std::future::Future;
 
 use qubit_progress::AsyncProgress;
-use qubit_progress::EmissionError;
 use qubit_progress::MetricDelta;
-use qubit_progress::MetricError;
+
+use super::TaskProgressError;
 
 /// Applies a metric update and persists the resulting progress snapshot.
+///
+/// Implementations apply the delta before reporting. If reporting fails, the
+/// local metric has already changed, so a retry should report the current
+/// snapshot without applying the same delta again.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_progress::MetricDelta;
+/// use qubit_task::service::TaskProgressError;
+/// use qubit_task::service::TaskProgressExt;
+///
+/// async fn report<P: TaskProgressExt + ?Sized>(
+///     progress: &mut P,
+///     metric_id: &str,
+///     delta: MetricDelta,
+/// ) -> Result<(), TaskProgressError> {
+///     progress.report_metric_delta(metric_id, delta).await
+/// }
+/// ```
 pub trait TaskProgressExt {
     /// Applies `delta` to a configured metric, then persists the current
     /// snapshot.
@@ -57,19 +77,4 @@ impl TaskProgressExt for AsyncProgress<'_> {
             self.report_async().await.map_err(TaskProgressError::Emission)
         }
     }
-}
-
-/// Failure while applying and reporting a task progress update.
-#[derive(Debug, thiserror::Error)]
-#[must_use]
-pub enum TaskProgressError {
-    /// The requested metric is not part of this progress operation.
-    #[error("unknown task progress metric `{0}`")]
-    UnknownMetric(String),
-    /// The metric rejected the requested delta.
-    #[error("the metric rejected the progress delta: {0}")]
-    Metric(#[source] MetricError),
-    /// The updated snapshot could not be reported.
-    #[error("the progress snapshot could not be reported: {0}")]
-    Emission(#[source] EmissionError),
 }
