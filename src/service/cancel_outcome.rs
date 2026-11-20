@@ -18,7 +18,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 pub enum CancelOutcome {
-    /// The task was cancelled while it was queued.
+    /// The task was cancelled before any handler run, while queued or blocked.
     CancelledBeforeRun,
     /// Cooperative cancellation was signalled to a running handler.
     CancellationRequested,
