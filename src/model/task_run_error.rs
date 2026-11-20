@@ -51,3 +51,25 @@ pub struct TaskRunError {
     /// Whether the service may retry this attempt.
     pub retryable: bool,
 }
+
+impl TaskRunError {
+    /// Creates a retryable classified handler failure.
+    #[must_use]
+    pub fn retryable(category: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            category: category.into(),
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    /// Creates a permanent classified handler failure.
+    #[must_use]
+    pub fn permanent(category: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            category: category.into(),
+            message: message.into(),
+            retryable: false,
+        }
+    }
+}

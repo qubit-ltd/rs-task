@@ -48,6 +48,15 @@ pub struct ResourceRequest {
 }
 
 impl ResourceRequest {
+    /// Creates a resource request with the given CPU slot count.
+    #[must_use]
+    pub fn cpu(cpu_slots: u32) -> Self {
+        Self {
+            cpu_slots,
+            ..Self::default()
+        }
+    }
+
     /// Checks that resource labels and names satisfy encoding limits.
     ///
     /// The validation rejects empty or oversized labels and custom resource

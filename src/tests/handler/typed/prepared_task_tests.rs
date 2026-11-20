@@ -6,7 +6,6 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use qubit_id::Id;
 use qubit_progress::AsyncReporter;
@@ -16,6 +15,7 @@ use qubit_progress::ReportFuture;
 use crate::handler::TaskRunOutcome;
 use crate::handler::typed::PreparedTask;
 use crate::handler::typed::TypedTaskContext;
+use crate::model::TaskAttempt;
 use crate::model::typed::TaskId;
 
 struct NoopReporter;
@@ -28,7 +28,9 @@ impl AsyncReporter for NoopReporter {
 
 #[test]
 fn test_debug_shows_the_prepared_task_type_without_exposing_handler_state() {
-    let task = PreparedTask::new(Box::new(|_| Box::pin(async { Ok(TaskRunOutcome::Cancelled) })));
+    let task = PreparedTask::new(Box::new(|_| {
+        Box::pin(async { Ok(TaskRunOutcome::Cancelled) })
+    }));
 
     let formatted = format!("{task:?}");
 
@@ -40,11 +42,8 @@ fn test_debug_shows_the_prepared_task_type_without_exposing_handler_state() {
 async fn test_run_invokes_the_prepared_handler_with_its_task_context() {
     let task_id = TaskId::from_id(Id::new(17));
     let context = TypedTaskContext::new(
-        task_id,
-        3,
-        Arc::new(AtomicBool::new(false)),
-        #[cfg(feature = "operation")]
-        Arc::new(crate::handler::typed::attempt_cancellation::AttemptCancellation::new()),
+        TaskAttempt::new(task_id, 3),
+        crate::handler::typed::attempt_cancellation::AttemptCancellation::new().handle(),
         Arc::new(NoopReporter),
     );
     let task = PreparedTask::new(Box::new(move |context| {

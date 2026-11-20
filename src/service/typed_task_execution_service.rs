@@ -622,15 +622,13 @@ impl TypedTaskExecutionService {
             self.core.scheduler_changed.notify_one();
             return Ok(CancelOutcome::CancelledBeforeStart);
         }
-        let descriptor = self
-            .core
-            .handlers
-            .descriptor(&summary.kind_id)
-            .ok_or(TaskServiceError::CancellationUnsupported)?;
-        if descriptor.cancellation_mode == CancellationMode::Unsupported {
+        let Some(cancellation_mode) = self.core.handlers.cancellation_mode(&summary.kind_id) else {
+            return Ok(CancelOutcome::CancellationUnsupported);
+        };
+        if cancellation_mode == CancellationMode::Unsupported {
             return Ok(CancelOutcome::CancellationUnsupported);
         }
-        if descriptor.cancellation_mode == CancellationMode::ExternalHook {
+        if cancellation_mode == CancellationMode::ExternalHook {
             let key = (id, summary.attempt);
             let Some(flight) = self.start_or_join_external_cancel(key, &summary.kind_id) else {
                 return Ok(CancelOutcome::CancellationRequested);
@@ -639,10 +637,8 @@ impl TypedTaskExecutionService {
             return Self::wait_external_cancel(id, summary.attempt, flight).await;
         }
         if summary.cancel_requested {
-            if descriptor.cancellation_mode == CancellationMode::Cooperative
-                && let Some(state) = self.core.cancellations.lock().get(&(id, summary.attempt))
-            {
-                state.request();
+            if let Some(state) = self.core.cancellations.lock().get(&(id, summary.attempt)) {
+                state.request(cancellation_mode == CancellationMode::Cooperative);
             }
             return Ok(CancelOutcome::CancellationRequested);
         }
@@ -662,11 +658,11 @@ impl TypedTaskExecutionService {
                 })
                 .await,
         )?;
-        match descriptor.cancellation_mode {
+        match cancellation_mode {
             CancellationMode::Unsupported => Ok(CancelOutcome::CancellationUnsupported),
             CancellationMode::Cooperative => {
                 if let Some(state) = self.core.cancellations.lock().get(&(id, summary.attempt)) {
-                    state.request();
+                    state.request(true);
                 }
                 Ok(CancelOutcome::CancellationRequested)
             }

@@ -66,30 +66,32 @@ where
         payload: StoredPayload,
         codecs: &ValueBytesCodecRegistry,
     ) -> Result<PreparedTask, HandlerDispatchError> {
-        if payload.type_id != self.descriptor.payload_type_id {
+        if payload.type_id != *self.descriptor.payload_type_id() {
             return Err(HandlerDispatchError::PayloadTypeMismatch {
-                expected: self.descriptor.payload_type_id.to_string(),
+                expected: self.descriptor.payload_type_id().to_string(),
                 actual: payload.type_id.to_string(),
             });
         }
         if !self
             .descriptor
-            .accepted_schema_versions
+            .accepted_schema_versions()
             .contains(&payload.schema_version)
         {
-            return Err(HandlerDispatchError::UnsupportedSchemaVersion(payload.schema_version));
+            return Err(HandlerDispatchError::UnsupportedSchemaVersion(
+                payload.schema_version,
+            ));
         }
         let codec = codecs
             .get(&payload.codec_id)
             .ok_or_else(|| HandlerDispatchError::MissingCodec(payload.codec_id.clone()))?;
         let decoded = codec.descriptor().decode(&payload.bytes)?;
         let actual_type = decoded.as_ref().type_id();
-        let input = decoded
-            .downcast::<T>()
-            .map_err(|_| HandlerDispatchError::DecodedValueTypeMismatch {
+        let input = decoded.downcast::<T>().map_err(|_| {
+            HandlerDispatchError::DecodedValueTypeMismatch {
                 expected: type_name::<T>(),
                 actual: actual_type,
-            })?;
+            }
+        })?;
         let input = *input;
         let handler = Arc::clone(&self.handler);
         Ok(PreparedTask::new(Box::new(move |context| {

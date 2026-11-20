@@ -2,119 +2,141 @@
 //    Copyright (c) 2025 - 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
-//
-//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Shared cancellation state for one typed task attempt.
+use tokio::sync::watch;
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancellationState {
+    Clear,
+    Requested,
+    CooperativeRequested,
+}
 
-/// Cancellation state shared by the service and all contexts for one attempt.
+/// Service-side sender for one attempt's cancellation state.
 pub(crate) struct AttemptCancellation {
-    /// Legacy atomic flag shared with existing handler cancellation APIs.
-    flag: Arc<AtomicBool>,
-    /// Monotonic notification state observed by operation-feature waiters.
-    #[cfg(feature = "operation")]
-    requested: tokio::sync::watch::Sender<bool>,
+    state: watch::Sender<CancellationState>,
 }
 
 impl AttemptCancellation {
-    /// Creates cancellation state, with an operation notification channel only
-    /// when the optional operation feature is enabled.
     pub(crate) fn new() -> Self {
         Self {
-            flag: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "operation")]
-            requested: tokio::sync::watch::channel(false).0,
+            state: watch::channel(CancellationState::Clear).0,
         }
     }
 
-    /// Returns the legacy raw cancellation flag.
-    pub(crate) fn flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.flag)
+    pub(crate) fn request(&self, cooperative: bool) {
+        self.state.send_modify(|state| {
+            if cooperative {
+                *state = CancellationState::CooperativeRequested;
+            } else if *state == CancellationState::Clear {
+                *state = CancellationState::Requested;
+            }
+        });
     }
 
-    /// Sets the legacy flag and publishes the cooperative cancellation event.
-    pub(crate) fn request(&self) {
-        self.flag.store(true, Ordering::Release);
-        #[cfg(feature = "operation")]
-        self.requested.send_replace(true);
-    }
-
-    /// Waits until the service publishes cooperative cancellation.
-    #[cfg(feature = "operation")]
-    pub(crate) async fn wait_requested(&self) {
-        let mut receiver = self.requested.subscribe();
-        let _observed = receiver.wait_for(|requested| *requested).await;
+    pub(crate) fn handle(&self) -> TaskCancellation {
+        TaskCancellation {
+            state: self.state.subscribe(),
+        }
     }
 }
 
 impl Default for AttemptCancellation {
-    /// Creates an unset cancellation state for one task attempt.
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(all(test, feature = "operation"))]
+/// Read-only cancellation state shared with a task handler.
+#[derive(Clone)]
+pub struct TaskCancellation {
+    state: watch::Receiver<CancellationState>,
+}
+
+impl TaskCancellation {
+    /// Returns whether cancellation has been durably requested for this attempt.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        *self.state.borrow() != CancellationState::Clear
+    }
+
+    /// Waits until the service publishes a cooperative cancellation request.
+    pub async fn wait_requested(&self) {
+        let mut state = self.state.clone();
+        loop {
+            if *state.borrow() == CancellationState::CooperativeRequested {
+                return;
+            }
+            if state.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use super::AttemptCancellation;
 
     #[tokio::test]
-    async fn test_request_before_subscription_is_observed() {
-        let state = AttemptCancellation::new();
-        state.request();
-        tokio::time::timeout(Duration::from_secs(1), state.wait_requested())
+    async fn cooperative_wait_is_latched_and_repeatable() {
+        let sender = AttemptCancellation::new();
+        let handle = sender.handle();
+        assert!(!handle.is_requested());
+        sender.request(true);
+        tokio::time::timeout(Duration::from_secs(1), handle.wait_requested())
             .await
-            .expect("late subscriber observes the latched request");
-    }
-
-    #[tokio::test]
-    async fn test_all_subscribers_observe_request() {
-        let state = Arc::new(AttemptCancellation::new());
-        let first = {
-            let state = Arc::clone(&state);
-            tokio::spawn(async move { state.wait_requested().await })
-        };
-        let second = {
-            let state = Arc::clone(&state);
-            tokio::spawn(async move { state.wait_requested().await })
-        };
-        state.request();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            first.await.expect("first waiter completes");
-            second.await.expect("second waiter completes");
-        })
-        .await
-        .expect("both waiters observe the request");
-    }
-
-    #[tokio::test]
-    async fn test_dropped_waiter_can_wait_again() {
-        let state = AttemptCancellation::new();
-        let mut first = Box::pin(state.wait_requested());
-        assert!(futures::poll!(&mut first).is_pending());
-        drop(first);
-        state.request();
-        tokio::time::timeout(Duration::from_secs(1), state.wait_requested())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handle.wait_requested())
             .await
-            .expect("new waiter observes the latched request");
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn test_raw_flag_write_does_not_notify() {
-        let state = AttemptCancellation::new();
-        state.flag().store(true, Ordering::Release);
+    async fn persisted_non_cooperative_request_is_queryable_but_not_waitable() {
+        let sender = AttemptCancellation::new();
+        let handle = sender.handle();
+        sender.request(false);
+        assert!(handle.is_requested());
         assert!(
-            tokio::time::timeout(Duration::from_millis(10), state.wait_requested())
+            tokio::time::timeout(Duration::from_millis(10), handle.wait_requested())
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn late_and_shared_subscribers_observe_cooperative_request() {
+        let sender = std::sync::Arc::new(AttemptCancellation::new());
+        let first = sender.handle();
+        let second = sender.handle();
+        let first_wait = tokio::spawn(async move { first.wait_requested().await });
+        let second_wait = tokio::spawn(async move { second.wait_requested().await });
+        sender.request(true);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            first_wait.await.unwrap();
+            second_wait.await.unwrap();
+        })
+        .await
+        .unwrap();
+        let late = sender.handle();
+        tokio::time::timeout(Duration::from_secs(1), late.wait_requested())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_a_waiter_does_not_consume_the_request() {
+        let sender = AttemptCancellation::new();
+        let handle = sender.handle();
+        let mut waiter = Box::pin(handle.wait_requested());
+        assert!(futures::poll!(&mut waiter).is_pending());
+        drop(waiter);
+        sender.request(true);
+        tokio::time::timeout(Duration::from_secs(1), handle.wait_requested())
+            .await
+            .unwrap();
     }
 }
