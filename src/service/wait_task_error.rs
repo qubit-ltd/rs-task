@@ -18,7 +18,7 @@ use crate::store::StoreError;
 /// use qubit_task::TaskId;
 /// use qubit_task::service::WaitTaskError;
 ///
-/// let error = WaitTaskError::Timeout(TaskId::new(7));
+/// let error = WaitTaskError::Timeout(TaskId::from_id(7));
 /// assert!(matches!(error, WaitTaskError::Timeout(_)));
 /// ```
 #[derive(Debug, thiserror::Error)]
