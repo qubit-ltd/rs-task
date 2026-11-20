@@ -87,14 +87,22 @@ impl IdGenerator<Id, IdGenerationError> for Ids {
     }
 }
 
-struct WaitingHandler(Arc<Notify>);
+struct WaitingHandler {
+    entered: Arc<Notify>,
+    both_waiters_complete: Arc<Notify>,
+    release: Arc<Notify>,
+}
 
 impl TaskHandler<Payload> for WaitingHandler {
     fn run<'a>(&'a self, _: Payload, context: TaskContext) -> TaskFuture<'a, TaskRunResult> {
-        let entered = Arc::clone(&self.0);
+        let entered = Arc::clone(&self.entered);
+        let both_waiters_complete = Arc::clone(&self.both_waiters_complete);
+        let release = Arc::clone(&self.release);
         Box::pin(async move {
             entered.notify_one();
             tokio::join!(context.wait_cancel_requested(), context.wait_cancel_requested());
+            both_waiters_complete.notify_one();
+            release.notified().await;
             Ok(TaskRunOutcome::Cancelled)
         })
     }
@@ -261,9 +269,15 @@ fn request() -> qubit_task::model::TaskRequest<Payload> {
 #[tokio::test]
 async fn test_cooperative_cancellation_reaches_multiple_waiters_and_repeated_cancel() {
     let entered = Arc::new(Notify::new());
+    let both_waiters_complete = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
     let service = build_service(
         CancellationMode::Cooperative,
-        Arc::new(WaitingHandler(Arc::clone(&entered))),
+        Arc::new(WaitingHandler {
+            entered: Arc::clone(&entered),
+            both_waiters_complete: Arc::clone(&both_waiters_complete),
+            release: Arc::clone(&release),
+        }),
         false,
     )
     .await;
@@ -276,10 +290,14 @@ async fn test_cooperative_cancellation_reaches_multiple_waiters_and_repeated_can
         service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
+    tokio::time::timeout(Duration::from_secs(3), both_waiters_complete.notified())
+        .await
+        .expect("both cooperative waiters observe the first request");
     assert_eq!(
         service.request_cancel(accepted.summary.id).await.unwrap(),
         CancelOutcome::CancellationRequested
     );
+    release.notify_one();
     let terminal = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let Some(summary) = service.get_summary(accepted.summary.id).await.unwrap()
