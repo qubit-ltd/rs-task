@@ -39,7 +39,14 @@ fn test_debug_shows_the_prepared_task_type_without_exposing_handler_state() {
 #[tokio::test]
 async fn test_run_invokes_the_prepared_handler_with_its_task_context() {
     let task_id = TaskId::from_id(Id::new(17));
-    let context = TypedTaskContext::new(task_id, 3, Arc::new(AtomicBool::new(false)), Arc::new(NoopReporter));
+    let context = TypedTaskContext::new(
+        task_id,
+        3,
+        Arc::new(AtomicBool::new(false)),
+        #[cfg(feature = "operation")]
+        Arc::new(crate::handler::typed::attempt_cancellation::AttemptCancellation::new()),
+        Arc::new(NoopReporter),
+    );
     let task = PreparedTask::new(Box::new(move |context| {
         Box::pin(async move {
             assert_eq!(context.task_id(), task_id);

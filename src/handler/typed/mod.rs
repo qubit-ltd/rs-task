@@ -8,6 +8,7 @@
 //! Typed handler contracts and their runtime payload adapter.
 
 mod cancellation_mode;
+pub(crate) mod attempt_cancellation;
 mod external_cancellation_hook;
 mod handler_dispatch_error;
 mod handler_registration_error;

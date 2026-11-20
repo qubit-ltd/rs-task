@@ -41,7 +41,8 @@ pub(in crate::service::typed_task_execution_service) struct TypedServiceCore {
     /// Registered handlers available to the scheduler.
     pub(in crate::service::typed_task_execution_service) handlers: TypedTaskHandlerRegistry,
     /// Cooperative cancellation flags keyed by task and attempt.
-    pub(in crate::service::typed_task_execution_service) cancellations: Mutex<HashMap<(TaskId, u32), Arc<AtomicBool>>>,
+    pub(in crate::service::typed_task_execution_service) cancellations:
+        Mutex<HashMap<(TaskId, u32), Arc<crate::handler::typed::attempt_cancellation::AttemptCancellation>>>,
     /// External cancellation requests currently running or already successful.
     pub(in crate::service::typed_task_execution_service) external_cancellations:
         Mutex<HashMap<(TaskId, u32), ExternalCancelEntry>>,
