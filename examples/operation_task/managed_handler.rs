@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Managed operation orchestration for the controlled `operation_task` demo.
 //!
 //! If an operation report cannot prove recursive release, this handler keeps
@@ -381,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_evidence_rejects_truncated_children_and_nested_recovery_or_transfer() {
+    async fn test_release_evidence_rejects_truncated_children_and_nested_recovery_or_transfer() {
         let (parent_id, child_id) = operation_ids().await;
         let mut complete = report(parent_id, SettlementStatus::Released);
         assert!(tree_released(&complete));
@@ -409,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn child_stop_is_cancelled_only_when_every_bridge_fact_matches() {
+    fn test_child_stop_is_cancelled_only_when_every_bridge_fact_matches() {
         assert!(is_cancelled_child_failure(
             ChildOutcomeKind::Stopped,
             true,
