@@ -33,8 +33,12 @@ use crate::store::TaskFuture;
 /// ```
 #[derive(Clone)]
 pub struct HandlerOptions {
+    /// Source label included when a registration conflicts with an existing
+    /// handler kind.
     pub(crate) source: String,
+    /// Cancellation behavior exposed to handlers for this registration.
     pub(crate) cancellation_mode: CancellationMode,
+    /// Optional application callback used for external cancellation requests.
     pub(crate) external_cancellation_hook: Option<ExternalCancellationHook>,
 }
 
@@ -109,6 +113,13 @@ impl HandlerOptions {
 }
 
 impl Default for HandlerOptions {
+    /// Creates options with a default diagnostic label and cancellation
+    /// disabled.
+    ///
+    /// # Returns
+    ///
+    /// Options that require no cancellation hook and use the direct
+    /// registration source label.
     fn default() -> Self {
         Self {
             source: "direct registration".to_owned(),

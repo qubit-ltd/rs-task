@@ -36,8 +36,11 @@ use super::handler_registration_error::HandlerRegistrationError;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskHandlerDescriptor {
+    /// Stable routing identity used to select this handler.
     kind_id: String,
+    /// Payload model identity accepted by the handler.
     payload_type_id: ModelIdBuf,
+    /// Nonzero payload schema versions accepted by the handler.
     accepted_schema_versions: Vec<u32>,
 }
 
@@ -94,7 +97,19 @@ impl TaskHandlerDescriptor {
         Ok(Self::new(kind.into(), model, vec![schema]))
     }
 
-    /// Builds a descriptor from already validated identity components.
+    /// Builds a descriptor from owned identity components.
+    ///
+    /// The registry validates the kind and schema list before registration.
+    ///
+    /// # Parameters
+    ///
+    /// * `kind_id` is the stable routing identity.
+    /// * `payload_type_id` identifies the accepted payload model.
+    /// * `accepted_schema_versions` lists the accepted payload schemas.
+    ///
+    /// # Returns
+    ///
+    /// A descriptor containing the supplied components.
     fn new(kind_id: String, payload_type_id: ModelIdBuf, accepted_schema_versions: Vec<u32>) -> Self {
         Self {
             kind_id,

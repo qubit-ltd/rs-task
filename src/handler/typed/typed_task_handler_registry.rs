@@ -7,7 +7,6 @@
 // =============================================================================
 use std::collections::HashMap;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use qubit_codec::ValueBytesCodecRegistry;
@@ -15,6 +14,7 @@ use qubit_model_id::HasModelId;
 use qubit_model_id::ModelIdBuf;
 
 use self::internal::ErasedHandler;
+use self::internal::FunctionHandler;
 use self::internal::Registration;
 use self::internal::TypedAdapter;
 use super::CancellationMode;
@@ -265,31 +265,9 @@ impl TypedTaskHandlerRegistry {
         F: Fn(T, TypedTaskContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = crate::handler::TaskRunResult> + Send + 'static,
     {
-        /// Adapts a function and its output future to the handler trait.
-        struct FunctionHandler<F, Fut> {
-            /// Application callback invoked for each prepared payload.
-            function: F,
-            /// Retains the future type without storing a future before
-            /// dispatch.
-            marker: PhantomData<fn() -> Fut>,
-        }
-        impl<T, F, Fut> TypedTaskHandler<T> for FunctionHandler<F, Fut>
-        where
-            T: Send + Sync + 'static,
-            F: Fn(T, TypedTaskContext) -> Fut + Send + Sync + 'static,
-            Fut: Future<Output = crate::handler::TaskRunResult> + Send + 'static,
-        {
-            /// Calls the application function and boxes its returned future.
-            fn run<'a>(&'a self, input: T, context: TypedTaskContext) -> TaskFuture<'a, crate::handler::TaskRunResult> {
-                Box::pin((self.function)(input, context))
-            }
-        }
         self.register_with_options::<T, _>(
             descriptor,
-            Arc::new(FunctionHandler {
-                function: handler,
-                marker: PhantomData,
-            }),
+            Arc::new(FunctionHandler::new(handler)),
             options,
         )
     }

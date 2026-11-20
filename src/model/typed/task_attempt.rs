@@ -24,7 +24,9 @@ use super::TaskId;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskAttempt {
+    /// Task identity shared by all execution attempts.
     task_id: TaskId,
+    /// One-based number distinguishing this execution from prior retries.
     attempt: u32,
 }
 
