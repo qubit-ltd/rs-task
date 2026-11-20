@@ -94,11 +94,11 @@ mod tests {
         let core = service_core().await;
         let key = (TaskId::from_id(Id::new(10)), 1);
         let state = Arc::new(AttemptCancellation::new());
-        let result = (|| -> Result<(), &'static str> {
+        let result: Result<(), &'static str> = {
             core.cancellations.lock().insert(key, Arc::clone(&state));
             let _guard = AttemptCancellationGuard::new(Arc::clone(&core), key, Arc::clone(&state));
             Err("injected summary readback failure")
-        })();
+        };
         assert_eq!(result, Err("injected summary readback failure"));
         assert!(!core.cancellations.lock().contains_key(&key));
     }
