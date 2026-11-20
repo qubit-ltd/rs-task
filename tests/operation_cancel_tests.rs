@@ -152,10 +152,9 @@ impl TaskHandler<Payload> for ExternalIntentHandler {
             let cancellation = context.cancellation();
             requested.store(cancellation.is_requested(), Ordering::Release);
             let mut cooperative_wait = std::pin::pin!(cancellation.wait_requested());
-            let pending = std::future::poll_fn(|cx| {
-                std::task::Poll::Ready(cooperative_wait.as_mut().poll(cx).is_pending())
-            })
-            .await;
+            let pending =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(cooperative_wait.as_mut().poll(cx).is_pending()))
+                    .await;
             cooperative_wait_pending.store(pending, Ordering::Release);
             entered.notify_one();
             release.notified().await;
@@ -218,14 +217,11 @@ async fn build_slow_failing_external_service<H: TaskHandler<Payload> + 'static>(
     hook_entered: Arc<Notify>,
     hook_release: Arc<Notify>,
 ) -> qubit_task::service::TaskExecutionService {
-    let codecs = Arc::new(
-        ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION])
-            .expect("payload codec registers"),
-    );
+    let codecs =
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).expect("payload codec registers"));
     let store = Arc::new(MemoryTaskStore::new(8));
-    let mut builder =
-        TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(82_000))))
-            .capacity(ResourceCapacity::default());
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(Ids(AtomicU64::new(82_000))))
+        .capacity(ResourceCapacity::default());
     let descriptor = TaskHandlerDescriptor::for_payload::<Payload>("test.operation_cancel", 1);
     builder
         .register_handler_with_options::<Payload, _>(
@@ -391,8 +387,7 @@ async fn test_external_intent_is_published_before_slow_hook_and_survives_failure
         .expect("handler starts");
 
     let service_for_cancel = service.clone();
-    let cancel =
-        tokio::spawn(async move { service_for_cancel.request_cancel(accepted.summary.id).await });
+    let cancel = tokio::spawn(async move { service_for_cancel.request_cancel(accepted.summary.id).await });
     tokio::time::timeout(Duration::from_secs(3), hook_entered.notified())
         .await
         .expect("external hook starts");
