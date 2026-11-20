@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::ExternalCancelResult;
 
 /// Publishes one external cancellation result to concurrent waiters.
-pub(in crate::service::typed_task_execution_service) struct ExternalCancelFlight {
+pub(in crate::service::task_execution_service) struct ExternalCancelFlight {
     /// Result channel observed by all callers waiting on this hook.
-    pub(in crate::service::typed_task_execution_service) result: watch::Sender<Option<ExternalCancelResult>>,
+    pub(in crate::service::task_execution_service) result: watch::Sender<Option<ExternalCancelResult>>,
 }

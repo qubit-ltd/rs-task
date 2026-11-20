@@ -15,8 +15,8 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 
-use super::typed_task_execution_service::TaskExecutionService;
-use super::typed_task_execution_service::TypedServiceOptions;
+use super::task_execution_service::TaskExecutionService;
+use super::task_execution_service::TypedServiceOptions;
 use crate::engine::LocalTaskExecutionEngine;
 use crate::handler::HandlerRegistrationError;
 use crate::handler::typed::HandlerOptions;
@@ -108,7 +108,7 @@ mod id_generator_tests {
     use super::InMemoryIdGenerator;
 
     #[test]
-    fn sequence_never_wraps_or_repeats_after_overflow() {
+    fn test_sequence_never_wraps_or_repeats_after_overflow() {
         let generator = InMemoryIdGenerator {
             sequence: std::sync::atomic::AtomicU64::new(u64::MAX - 1),
         };
@@ -334,6 +334,11 @@ impl TaskExecutionServiceBuilder {
 
     /// Registers a typed handler with default cancellation options.
     ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Payload type decoded before the handler is invoked.
+    /// * `H` - Handler implementation for payload type `T`.
+    ///
     /// # Parameters
     ///
     /// * `descriptor` - Kind, payload model, schema, and codec metadata used to
@@ -357,6 +362,11 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Registers a typed handler with explicit cancellation options.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Payload type decoded before the handler is invoked.
+    /// * `H` - Handler implementation for payload type `T`.
     ///
     /// # Parameters
     ///
@@ -386,6 +396,12 @@ impl TaskExecutionServiceBuilder {
 
     /// Registers an async function handler with default cancellation options.
     ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Payload type decoded before the handler is invoked.
+    /// * `F` - Async handler function receiving the decoded payload and context.
+    /// * `Fut` - Future returned by `F` with the handler result.
+    ///
     /// # Parameters
     ///
     /// * `descriptor` - Route metadata used to resolve this handler.
@@ -410,6 +426,12 @@ impl TaskExecutionServiceBuilder {
     }
 
     /// Registers an async function handler with explicit cancellation options.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Payload type decoded before the handler is invoked.
+    /// * `F` - Async handler function receiving the decoded payload and context.
+    /// * `Fut` - Future returned by `F` with the handler result.
     ///
     /// # Parameters
     ///

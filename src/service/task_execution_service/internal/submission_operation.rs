@@ -22,7 +22,7 @@ use crate::service::TaskServiceError;
 ///
 /// The owned admission guard keeps shutdown from releasing store ownership
 /// until acceptance, result mapping, and required notifications have finished.
-pub(in crate::service::typed_task_execution_service) struct SubmissionOperation {
+pub(in crate::service::task_execution_service) struct SubmissionOperation {
     /// Service state used to accept and notify the submission.
     core: Arc<TypedServiceCore>,
     /// Admission lock held until the operation finishes.
@@ -43,7 +43,7 @@ impl SubmissionOperation {
     /// - `admission`: The guard that keeps shutdown from releasing the store.
     /// - `id`: The identifier reserved for the request.
     /// - `request`: The encoded task request to accept.
-    pub(in crate::service::typed_task_execution_service) fn new(
+    pub(in crate::service::task_execution_service) fn new(
         core: Arc<TypedServiceCore>,
         admission: tokio::sync::OwnedRwLockReadGuard<()>,
         id: TaskId,
@@ -71,7 +71,7 @@ impl SubmissionOperation {
     /// # Errors
     ///
     /// Returns structured submission rejection errors or mapped store errors.
-    pub(in crate::service::typed_task_execution_service) async fn run(self) -> Result<AcceptOutcome, TaskServiceError> {
+    pub(in crate::service::task_execution_service) async fn run(self) -> Result<AcceptOutcome, TaskServiceError> {
         let Self {
             core,
             admission,

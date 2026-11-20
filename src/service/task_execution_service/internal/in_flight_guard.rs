@@ -11,9 +11,9 @@ use std::sync::atomic::Ordering;
 use super::TypedServiceCore;
 
 /// Decrements active-operation counters and wakes shutdown waiters on drop.
-pub(in crate::service::typed_task_execution_service) struct InFlightGuard(
+pub(in crate::service::task_execution_service) struct InFlightGuard(
     /// Shared counters and wakeups updated when this operation ends.
-    pub(in crate::service::typed_task_execution_service) Arc<TypedServiceCore>,
+    pub(in crate::service::task_execution_service) Arc<TypedServiceCore>,
 );
 
 impl Drop for InFlightGuard {

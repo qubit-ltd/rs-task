@@ -46,6 +46,16 @@ pub struct TaskPages<'a> {
 
 impl<'a> TaskPages<'a> {
     /// Creates a paginator for a query originating from the borrowed service.
+    ///
+    /// # Parameters
+    ///
+    /// * `service` - Service whose store provides each requested page.
+    /// * `query` - Initial filters, cursor, and page size.
+    ///
+    /// # Returns
+    ///
+    /// A paginator that retains the service borrow and advances the query
+    /// cursor as pages are fetched.
     pub(crate) fn new(service: &'a TaskExecutionService, query: TaskQuery) -> Self {
         Self {
             service,

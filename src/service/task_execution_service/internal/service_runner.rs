@@ -138,9 +138,9 @@ fn scheduler_wait_completed(core: &std::sync::Arc<TypedServiceCore>) {
 
 /// Keeps shared service state available to background workers.
 #[derive(Clone)]
-pub(in crate::service::typed_task_execution_service) struct ServiceRunner {
+pub(in crate::service::task_execution_service) struct ServiceRunner {
     /// Shared service state used by scheduler and supervisor tasks.
-    pub(in crate::service::typed_task_execution_service) core: Arc<TypedServiceCore>,
+    pub(in crate::service::task_execution_service) core: Arc<TypedServiceCore>,
 }
 
 impl ServiceRunner {
@@ -154,7 +154,7 @@ impl ServiceRunner {
     /// # Errors
     ///
     /// Returns the first fault recorded by the service.
-    pub(in crate::service::typed_task_execution_service) fn check_fault(&self) -> Result<(), TaskServiceError> {
+    pub(in crate::service::task_execution_service) fn check_fault(&self) -> Result<(), TaskServiceError> {
         self.core
             .fault
             .lock()
@@ -174,7 +174,7 @@ impl ServiceRunner {
     /// - `kind_id`: The registered handler kind whose external hook is invoked.
     /// - `flight`: Shared result state observed by concurrent cancellation
     ///   callers.
-    pub(in crate::service::typed_task_execution_service) async fn run_external_cancel(
+    pub(in crate::service::task_execution_service) async fn run_external_cancel(
         core: Arc<TypedServiceCore>,
         key: (TaskId, u32),
         kind_id: String,
@@ -319,7 +319,7 @@ impl ServiceRunner {
     /// result.
     ///
     /// Shutdown is requested by a service handle or by a latched service fault.
-    pub(in crate::service::typed_task_execution_service) async fn shutdown_supervisor(&self) {
+    pub(in crate::service::task_execution_service) async fn shutdown_supervisor(&self) {
         self.wait_for_shutdown_request().await;
         self.stop_scheduler_and_wait().await;
         self.wait_for_active_operations().await;
@@ -332,7 +332,7 @@ impl ServiceRunner {
     ///
     /// No action is taken when the optional publisher is not configured.
     #[cfg(feature = "event-bus")]
-    pub(in crate::service::typed_task_execution_service) fn notify_notifications(&self) {
+    pub(in crate::service::task_execution_service) fn notify_notifications(&self) {
         if let Some(publisher) = &self.core.publisher {
             publisher.notify();
         }
@@ -355,7 +355,7 @@ impl ServiceRunner {
     /// # Errors
     ///
     /// Returns a service error when the store operation fails.
-    pub(in crate::service::typed_task_execution_service) fn store_write_result<T>(
+    pub(in crate::service::task_execution_service) fn store_write_result<T>(
         &self,
         result: Result<T, crate::store::StoreError>,
     ) -> Result<T, TaskServiceError> {
@@ -370,7 +370,7 @@ impl ServiceRunner {
     /// # Parameters
     ///
     /// - `error`: Displayable description of the fault to latch.
-    pub(in crate::service::typed_task_execution_service) fn latch_fault(&self, error: impl std::fmt::Display) {
+    pub(in crate::service::task_execution_service) fn latch_fault(&self, error: impl std::fmt::Display) {
         let mut fault = self.core.fault.lock();
         if fault.is_none() {
             *fault = Some(error.to_string());
@@ -398,7 +398,7 @@ impl ServiceRunner {
     ///
     /// Returns a service error for a failed store operation. Conflicts and
     /// missing records are returned without latching a service fault.
-    pub(in crate::service::typed_task_execution_service) fn store_result<T>(
+    pub(in crate::service::task_execution_service) fn store_result<T>(
         &self,
         result: Result<T, crate::store::StoreError>,
     ) -> Result<T, TaskServiceError> {
@@ -434,7 +434,7 @@ impl ServiceRunner {
     ///
     /// Returns a structured service error for a rejected submission or a
     /// service error for another failed store operation.
-    pub(in crate::service::typed_task_execution_service) fn submission_store_result<T>(
+    pub(in crate::service::task_execution_service) fn submission_store_result<T>(
         &self,
         result: Result<T, crate::store::StoreError>,
     ) -> Result<T, TaskServiceError> {
@@ -468,7 +468,7 @@ impl ServiceRunner {
     /// # Errors
     ///
     /// Returns an error if listing tasks or restoring a task state fails.
-    pub(in crate::service::typed_task_execution_service) async fn recover_unfinished(
+    pub(in crate::service::task_execution_service) async fn recover_unfinished(
         &self,
     ) -> Result<(), TaskServiceError> {
         let mut after = None;
@@ -529,7 +529,7 @@ impl ServiceRunner {
     ///
     /// Returns immediately when shutdown begins or a scheduler/store fault is
     /// latched; otherwise waits for new work or the next retry deadline.
-    pub(in crate::service::typed_task_execution_service) async fn scheduler_loop(&self) {
+    pub(in crate::service::task_execution_service) async fn scheduler_loop(&self) {
         let mut fairness = ResourceFairness::default();
         'scheduler: loop {
             #[cfg(test)]

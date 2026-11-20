@@ -64,6 +64,26 @@ pub trait TaskProgressExt {
 }
 
 impl TaskProgressExt for AsyncProgress<'_> {
+    /// Applies a configured metric delta and reports the updated progress.
+    ///
+    /// The metric is changed before asynchronous reporting begins. If
+    /// reporting fails, the caller should retry reporting the current snapshot
+    /// without reapplying this delta.
+    ///
+    /// # Parameters
+    ///
+    /// * `metric_id` - Identifier of a metric configured on this progress.
+    /// * `delta` - Update applied before the snapshot is reported.
+    ///
+    /// # Returns
+    ///
+    /// A future that resolves after the snapshot has been reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskProgressError::UnknownMetric`] when the metric is absent,
+    /// [`TaskProgressError::Metric`] when it rejects the delta, or
+    /// [`TaskProgressError::Emission`] when reporting fails.
     fn report_metric_delta<'a>(
         &'a mut self,
         metric_id: &'a str,

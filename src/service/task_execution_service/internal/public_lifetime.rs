@@ -11,10 +11,10 @@ use std::sync::atomic::Ordering;
 use super::TypedServiceCore;
 
 /// Requests graceful shutdown when the final public handle is dropped.
-pub(in crate::service::typed_task_execution_service) struct PublicLifetime {
+pub(in crate::service::task_execution_service) struct PublicLifetime {
     /// Weak reference used to request shutdown when the public handle
     /// disappears.
-    pub(in crate::service::typed_task_execution_service) core: Weak<TypedServiceCore>,
+    pub(in crate::service::task_execution_service) core: Weak<TypedServiceCore>,
 }
 
 impl Drop for PublicLifetime {

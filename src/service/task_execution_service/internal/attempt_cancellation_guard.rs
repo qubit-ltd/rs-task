@@ -14,7 +14,7 @@ use crate::handler::typed::attempt_cancellation::AttemptCancellation;
 use crate::model::typed::TaskId;
 
 /// Removes only the exact state registered by this execution attempt.
-pub(in crate::service::typed_task_execution_service) struct AttemptCancellationGuard {
+pub(in crate::service::task_execution_service) struct AttemptCancellationGuard {
     /// Service state whose attempt registration this guard owns.
     core: Arc<TypedServiceCore>,
     /// Task identity and attempt number used as the cancellation-map key.
@@ -35,7 +35,7 @@ impl AttemptCancellationGuard {
     /// - `core`: Service state containing the cancellation registration map.
     /// - `key`: Task identity and attempt number registered by the runner.
     /// - `state`: Exact cancellation state stored under `key`.
-    pub(in crate::service::typed_task_execution_service) fn new(
+    pub(in crate::service::task_execution_service) fn new(
         core: Arc<TypedServiceCore>,
         key: (TaskId, u32),
         state: Arc<AttemptCancellation>,

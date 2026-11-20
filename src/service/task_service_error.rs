@@ -39,10 +39,18 @@ pub enum TaskServiceError {
     ),
     /// Encoding or validating a typed task request failed.
     #[error("typed task request failed: {0}")]
-    RequestEncoding(#[from] TaskRequestEncodeError),
+    RequestEncoding(
+        /// Encoding or metadata validation failure from the typed request.
+        #[from]
+        TaskRequestEncodeError,
+    ),
     /// The request does not match a handler currently registered for its route.
     #[error("invalid task route: {0}")]
-    InvalidRoute(#[from] TaskRouteError),
+    InvalidRoute(
+        /// Route mismatch detected before accepting the request.
+        #[from]
+        TaskRouteError,
+    ),
     /// The selected store failed an operation.
     #[error(transparent)]
     Store(
