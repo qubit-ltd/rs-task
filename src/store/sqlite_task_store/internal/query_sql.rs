@@ -53,7 +53,7 @@ pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
         params: Vec::new(),
     };
     let mut has_predicate = false;
-    if let Some(after) = query.after {
+    if let Some(after) = query.cursor() {
         let time = bind_timestamp(
             &mut built.params,
             after.accepted_at_ms,
@@ -63,16 +63,16 @@ pub(in crate::store::sqlite_task_store) fn build_encoded_history_query(
         append_predicate(&mut built.sql, &mut has_predicate, "(accepted_at, id) > (");
         built.sql.push_str(&format!("{time}, {id})"));
     }
-    if let Some(category) = &query.category {
+    if let Some(category) = query.category() {
         append_predicate(&mut built.sql, &mut has_predicate, "category = ");
-        built.sql.push_str(&bind_text(&mut built.params, category.clone()));
+        built.sql.push_str(&bind_text(&mut built.params, category.to_owned()));
     }
-    if let Some(key) = &query.correlation_key {
+    if let Some(key) = query.correlation_key() {
         append_predicate(&mut built.sql, &mut has_predicate, "correlation_key = ");
-        built.sql.push_str(&bind_text(&mut built.params, key.clone()));
+        built.sql.push_str(&bind_text(&mut built.params, key.to_owned()));
     }
     let mut states = Vec::new();
-    for state in &query.states {
+    for state in query.states() {
         if !states.contains(state) {
             states.push(*state);
         }
@@ -168,16 +168,13 @@ mod tests {
 
     #[test]
     fn test_history_query_binds_filters_and_rejects_an_overflowing_cursor() {
-        let query = TaskQuery {
-            states: vec![TaskStateKind::Queued, TaskStateKind::Queued],
-            category: Some("billing".into()),
-            correlation_key: Some("batch-17".into()),
-            after: Some(TaskCursor {
-                accepted_at_ms: 42,
-                id: TaskId::from_id(qubit_id::Id::new(7)),
-            }),
-            limit: 10,
-        };
+        let query = TaskQuery::default()
+            .with_states([TaskStateKind::Queued, TaskStateKind::Queued])
+            .with_category("billing")
+            .with_correlation_key("batch-17")
+            .after(TaskCursor::new(42, TaskId::from_id(qubit_id::Id::new(7))))
+            .page_size(10)
+            .expect("valid page size");
 
         let built = build_encoded_history_query(&query, 10).expect("valid query builds");
         assert!(built.sql.contains("(accepted_at, id) > (?1, ?2)"));
@@ -187,13 +184,8 @@ mod tests {
         assert!(built.sql.ends_with("LIMIT ?6"));
         assert_eq!(built.params.len(), 6);
 
-        let overflowing = TaskQuery {
-            after: Some(TaskCursor {
-                accepted_at_ms: u64::MAX,
-                id: TaskId::from_id(qubit_id::Id::new(7)),
-            }),
-            ..TaskQuery::default()
-        };
+        let overflowing = TaskQuery::default()
+            .after(TaskCursor::new(u64::MAX, TaskId::from_id(qubit_id::Id::new(7))));
         assert!(matches!(
             build_encoded_history_query(&overflowing, 10),
             Err(StoreError::InvalidRequest("task history cursor timestamp is too large"))

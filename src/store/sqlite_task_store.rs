@@ -167,6 +167,12 @@ impl SqliteTaskStore {
         })
     }
 
+    /// Opens a SQLite task store on Tokio's blocking thread pool.
+    pub async fn open_async(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref().to_path_buf();
+        task::spawn_blocking(move || Self::open(path)).await.map_err(failure)?
+    }
+
     /// Enables subsequent transactional snapshots while holding the owner
     /// barrier.
     ///

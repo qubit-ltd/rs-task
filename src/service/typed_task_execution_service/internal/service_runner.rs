@@ -471,19 +471,17 @@ impl ServiceRunner {
     ) -> Result<(), TaskServiceError> {
         let mut after = None;
         loop {
+            let mut query = crate::model::typed::TaskQuery::default()
+                .with_states([crate::model::TaskStateKind::Queued, crate::model::TaskStateKind::Running])
+                .page_size(128)
+                .expect("recovery page size is valid");
+            if let Some(cursor) = after {
+                query = query.after(cursor);
+            }
             let page = self
                 .core
                 .store
-                .list_encoded(crate::model::typed::TaskQuery {
-                    states: vec![
-                        crate::model::TaskStateKind::Queued,
-                        crate::model::TaskStateKind::Running,
-                    ],
-                    category: None,
-                    correlation_key: None,
-                    after,
-                    limit: 128,
-                })
+                .list_encoded(query)
                 .await?;
             for summary in page.records {
                 if matches!(summary.state, TaskState::Running) {

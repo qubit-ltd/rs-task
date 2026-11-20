@@ -7,7 +7,9 @@
 // =============================================================================
 //! Pluggable task history and recovery storage.
 
+mod delegate_task_store;
 mod event_outbox_entry;
+mod memory_store_options;
 mod memory_task_store;
 #[cfg(feature = "sqlite")]
 mod sqlite_task_store;
@@ -15,7 +17,10 @@ mod store_error;
 mod task_future;
 mod task_store;
 
+pub use crate::delegate_task_store;
 pub use event_outbox_entry::EventOutboxEntry;
+pub use memory_store_options::MemoryStoreOptions;
+pub use memory_store_options::MemoryStoreOptionsError;
 pub use memory_task_store::DEFAULT_MAX_UNFINISHED_RECORDS;
 pub use memory_task_store::MemoryTaskStore;
 #[cfg(feature = "sqlite")]
