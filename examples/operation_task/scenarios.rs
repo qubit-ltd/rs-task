@@ -4,7 +4,7 @@
 //! Timeouts are diagnostic bounds only; no elapsed delay is treated as proof
 //! that an operation, input, or cleanup has been released.
 
-use std::num::NonZeroUsize;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -79,7 +79,7 @@ async fn cancel_holds_resources_until_cleanup() {
         let (service, request) = fixture(
             manager.clone(),
             vec![Arc::clone(&gates)],
-            NonZeroUsize::new(1).unwrap(),
+            NonZeroU32::new(1).unwrap(),
         )
         .await
         .expect("service fixture");
@@ -144,7 +144,7 @@ async fn drain_waits_for_managed_attempt() {
         let (service, request) = fixture(
             manager.clone(),
             vec![Arc::clone(&gates)],
-            NonZeroUsize::new(1).unwrap(),
+            NonZeroU32::new(1).unwrap(),
         )
         .await
         .expect("service fixture");
@@ -203,7 +203,7 @@ async fn retry_starts_only_after_settlement() {
         let (service, request) = fixture(
             manager.clone(),
             vec![Arc::clone(&first), Arc::clone(&second)],
-            NonZeroUsize::new(2).unwrap(),
+            NonZeroU32::new(2).unwrap(),
         )
         .await
         .expect("service fixture");
@@ -255,7 +255,7 @@ async fn cancel_after_outcome_suppresses_retry() {
         let (service, request) = fixture(
             manager.clone(),
             vec![Arc::clone(&first), Arc::clone(&second)],
-            NonZeroUsize::new(2).unwrap(),
+            NonZeroU32::new(2).unwrap(),
         )
         .await
         .expect("service fixture");
@@ -299,7 +299,7 @@ async fn rejected_root_does_not_activate_job() {
         let manager = manager(4);
         manager.close_admission();
         let gates = AttemptGates::new();
-        let (service, request) = fixture(manager.clone(), vec![Arc::clone(&gates)], NonZeroUsize::new(1).unwrap())
+        let (service, request) = fixture(manager.clone(), vec![Arc::clone(&gates)], NonZeroU32::new(1).unwrap())
             .await
             .expect("service fixture");
         let accepted = service.submit(request).await.expect("submit managed task");
@@ -322,7 +322,7 @@ async fn rejected_child_does_not_activate_job() {
         let manager = manager(1);
         let gates = AttemptGates::new();
         open(&gates.allow_cleanup);
-        let (service, request) = fixture(manager.clone(), vec![Arc::clone(&gates)], NonZeroUsize::new(1).unwrap())
+        let (service, request) = fixture(manager.clone(), vec![Arc::clone(&gates)], NonZeroU32::new(1).unwrap())
             .await
             .expect("service fixture");
         let accepted = service.submit(request).await.expect("submit managed task");
