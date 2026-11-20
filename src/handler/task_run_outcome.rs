@@ -35,7 +35,6 @@ pub enum TaskRunOutcome {
 
 impl TaskRunOutcome {
     /// Creates a successful outcome with an empty output summary.
-    #[must_use]
     pub fn success() -> Self {
         Self::Succeeded(TaskOutput::default())
     }
