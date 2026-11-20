@@ -68,7 +68,7 @@ impl TaskCancellation {
                 return;
             }
             if state.changed().await.is_err() {
-                return;
+                std::future::pending::<()>().await;
             }
         }
     }
@@ -100,6 +100,19 @@ mod tests {
         let handle = sender.handle();
         sender.request(false);
         assert!(handle.is_requested());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), handle.wait_requested())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_sender_does_not_signal_cancellation() {
+        let sender = AttemptCancellation::new();
+        let handle = sender.handle();
+        drop(sender);
+
         assert!(
             tokio::time::timeout(Duration::from_millis(10), handle.wait_requested())
                 .await
