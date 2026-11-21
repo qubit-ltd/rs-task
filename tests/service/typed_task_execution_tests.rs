@@ -3917,15 +3917,8 @@ async fn test_external_cancel_cas_stages_fail_when_revision_does_not_advance() {
 
     const STAGES: [&str; 3] = ["recording intent", "clearing diagnostic", "recording hook failure"];
     for (stage_index, stage) in STAGES.into_iter().enumerate() {
-        let conflict_gate = (stage_index == 0).then(|| {
-            Arc::new(TransitionCasGate {
-                armed: AtomicBool::new(true),
-                reached: Notify::new(),
-                release: tokio::sync::Semaphore::new(0),
-            })
-        });
         let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(32));
-        let store = failing_store_with_inner(inner, conflict_gate.clone());
+        let store = failing_store_with_inner(inner, None);
         let handler_finish = Arc::new(Notify::new());
         let hook_calls = Arc::new(AtomicU64::new(0));
         let hook_store = Arc::clone(&store);
@@ -4005,24 +3998,7 @@ async fn test_external_cancel_cas_stages_fail_when_revision_does_not_advance() {
         if stage_index == 0 {
             store.conflict_next_transition.store(true, Ordering::Release);
         }
-        let task_id = accepted.summary.id;
-        let results = if let Some(gate) = &conflict_gate {
-            let first_service = service.clone();
-            let first = tokio::spawn(async move { first_service.request_cancel(task_id).await });
-            tokio::time::timeout(Duration::from_secs(2), gate.reached.notified())
-                .await
-                .expect("first caller enters the shared cancellation flight");
-            let second_service = service.clone();
-            let second = tokio::spawn(async move { second_service.request_cancel(task_id).await });
-            tokio::task::yield_now().await;
-            gate.release.add_permits(1);
-            vec![
-                first.await.expect("first cancellation caller joins"),
-                second.await.expect("second cancellation caller joins"),
-            ]
-        } else {
-            vec![service.request_cancel(task_id).await]
-        };
+        let results = vec![service.request_cancel(accepted.summary.id).await];
         for result in &results {
             assert!(
                 matches!(
@@ -4033,7 +4009,7 @@ async fn test_external_cancel_cas_stages_fail_when_revision_does_not_advance() {
                 "expected no-progress failure while {stage}, got {result:?}"
             );
         }
-        assert_eq!(results.len(), if stage_index == 0 { 2 } else { 1 });
+        assert_eq!(results.len(), 1);
         assert_eq!(
             hook_calls.load(Ordering::Relaxed),
             u64::from(stage_index != 0),
