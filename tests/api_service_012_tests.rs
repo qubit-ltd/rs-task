@@ -221,7 +221,7 @@ async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
         Duration::ZERO,
         "the first checkpoint read should happen immediately",
     );
-    tokio::time::advance(Duration::from_millis(15)).await;
+    tokio::time::advance(Duration::from_millis(10)).await;
     let result = match tokio::time::timeout(TEST_LIMIT, &mut wait).await {
         Ok(result) => result.expect("wait_terminal task should join successfully"),
         Err(_) => {
@@ -243,9 +243,132 @@ async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
         .lock()
         .unwrap()
         .expect("terminal checkpoint was observed");
-    assert_eq!(observed_at.duration_since(wait_started), Duration::from_millis(55));
+    assert_eq!(observed_at.duration_since(wait_started), Duration::from_millis(50));
     assert!(observed_at.duration_since(wait_started) <= Duration::from_millis(60));
     assert!(observed_at.duration_since(commit_at) <= Duration::from_millis(15));
+    service.shutdown().await.unwrap();
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn test_wait_terminal_observes_a_90ms_commit_within_a_120ms_budget() {
+    const TEST_LIMIT: Duration = Duration::from_secs(2);
+
+    let store = Arc::new(ControlledWaitStore {
+        inner: Arc::new(MemoryTaskStore::new(16)),
+        checkpoint_reads: tokio::sync::Semaphore::new(0),
+        terminal_committed: tokio::sync::Semaphore::new(0),
+        reads_at: Mutex::new(Vec::new()),
+        commit_at: Mutex::new(None),
+        observed_at: Mutex::new(None),
+    });
+    let handler_started = Arc::new(tokio::sync::Notify::new());
+    let release_handler = Arc::new(tokio::sync::Notify::new());
+    let mut builder = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap()),
+        Arc::new(Ids(AtomicU64::new(1_100))),
+    );
+    let started = Arc::clone(&handler_started);
+    let release = Arc::clone(&release_handler);
+    builder
+        .register_handler_fn::<Input, _, _>(
+            TaskHandlerDescriptor::for_payload::<Input>("known", 1),
+            move |_, _| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(TaskRunOutcome::success())
+                }
+            },
+        )
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service
+        .submit(TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(90)))
+        .await
+        .unwrap();
+    tokio::time::timeout(TEST_LIMIT, handler_started.notified())
+        .await
+        .expect("handler startup should complete within the test deadline");
+
+    let id = accepted.summary.id;
+    let waiting_service = service.clone();
+    let wait_started = tokio::time::Instant::now();
+    let mut wait = tokio::spawn(async move {
+        waiting_service
+            .wait_terminal(id, Duration::from_millis(120))
+            .await
+    });
+    tokio::time::timeout(TEST_LIMIT, store.checkpoint_reads.acquire())
+        .await
+        .expect("first checkpoint read should start within the test deadline")
+        .expect("checkpoint read semaphore remains open")
+        .forget();
+    tokio::time::advance(Duration::from_millis(25)).await;
+    tokio::time::timeout(TEST_LIMIT, store.checkpoint_reads.acquire())
+        .await
+        .expect("second checkpoint read should start within the test deadline")
+        .expect("checkpoint read semaphore remains open")
+        .forget();
+    tokio::time::advance(Duration::from_millis(30)).await;
+    tokio::time::timeout(TEST_LIMIT, store.checkpoint_reads.acquire())
+        .await
+        .expect("third checkpoint read should start within the test deadline")
+        .expect("checkpoint read semaphore remains open")
+        .forget();
+    tokio::time::advance(Duration::from_millis(30)).await;
+    tokio::time::timeout(TEST_LIMIT, store.checkpoint_reads.acquire())
+        .await
+        .expect("fourth checkpoint read should start within the test deadline")
+        .expect("checkpoint read semaphore remains open")
+        .forget();
+    tokio::time::advance(Duration::from_millis(5)).await;
+    release_handler.notify_one();
+    tokio::time::timeout(TEST_LIMIT, store.terminal_committed.acquire())
+        .await
+        .expect("terminal commit should complete within the test deadline")
+        .expect("terminal commit semaphore remains open")
+        .forget();
+
+    let commit_at = store
+        .commit_at
+        .lock()
+        .unwrap()
+        .expect("target terminal transition committed");
+    assert_eq!(commit_at.duration_since(wait_started), Duration::from_millis(90));
+    assert_eq!(
+        store.reads_at.lock().unwrap()[0].duration_since(wait_started),
+        Duration::ZERO,
+        "the first checkpoint read should happen immediately",
+    );
+    tokio::time::advance(Duration::from_millis(25)).await;
+    let result = match tokio::time::timeout(TEST_LIMIT, &mut wait).await {
+        Ok(result) => result.expect("wait_terminal task should join successfully"),
+        Err(_) => {
+            wait.abort();
+            let _ = wait.await;
+            panic!("wait_terminal task did not finish within the outer test deadline");
+        }
+    };
+    let checkpoint = match result {
+        Ok(checkpoint) => checkpoint,
+        Err(WaitTaskError::Timeout(_)) => {
+            panic!("wait_terminal returned Timeout despite the 90ms terminal commit")
+        }
+        Err(error) => panic!("wait_terminal returned an unexpected error: {error:?}"),
+    };
+    assert!(checkpoint.state.is_terminal());
+    let observed_at = store
+        .observed_at
+        .lock()
+        .unwrap()
+        .expect("terminal checkpoint was observed");
+    assert_eq!(observed_at.duration_since(wait_started), Duration::from_millis(115));
+    assert!(observed_at.duration_since(wait_started) <= Duration::from_millis(120));
+    assert!(observed_at.duration_since(commit_at) <= Duration::from_millis(25));
     service.shutdown().await.unwrap();
 }
 

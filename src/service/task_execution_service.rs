@@ -494,8 +494,8 @@ impl TaskExecutionService {
     ///
     /// The store is read immediately, then polled at bounded intervals that
     /// back off from 25 ms up to 100 ms. The interval cap is also limited to
-    /// half the requested timeout, with a 25 ms minimum. Read latency and
-    /// polling intervals share the timeout budget. A timeout means no terminal
+    /// one quarter of the requested timeout, with a 25 ms minimum. Read latency
+    /// and polling intervals share the timeout budget. A timeout means no terminal
     /// checkpoint was observed before the deadline, not that the task is still
     /// running. Memory storage can evict terminal tasks, while SQLite retains
     /// terminal checkpoints after pruning task rows.
@@ -521,7 +521,7 @@ impl TaskExecutionService {
     ) -> Result<crate::model::typed::TaskStateCheckpoint, WaitTaskError> {
         let wait = async {
             let mut poll_interval = Duration::from_millis(25);
-            let poll_interval_cap = (timeout / 2)
+            let poll_interval_cap = (timeout / 4)
                 .max(Duration::from_millis(25))
                 .min(Duration::from_millis(100));
             loop {
