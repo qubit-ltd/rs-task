@@ -265,7 +265,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 overlaps = overlaps[strategy_index],
                 probes_planned = probe_totals[strategy_index].planned,
                 probes_launched = probe_totals[strategy_index].launched,
-                not_dispatched = probe_totals[strategy_index].planned.saturating_sub(probe_totals[strategy_index].launched),
+                not_dispatched = probe_totals[strategy_index]
+                    .planned
+                    .saturating_sub(probe_totals[strategy_index].launched),
                 probes_submitted = probe_totals[strategy_index].submitted,
                 not_submitted = probe_totals[strategy_index].not_submitted,
                 probes_accepted = probe_totals[strategy_index].accepted,
@@ -305,12 +307,7 @@ fn is_before_window_end(at: Instant, window_end: Instant) -> bool {
     at < window_end
 }
 
-fn classify_admission(
-    started: Instant,
-    returned: Instant,
-    succeeded: bool,
-    window_end: Instant,
-) -> AdmissionClass {
+fn classify_admission(started: Instant, returned: Instant, succeeded: bool, window_end: Instant) -> AdmissionClass {
     if !succeeded {
         AdmissionClass::Failed
     } else if returned < window_end {
@@ -350,6 +347,12 @@ fn self_test_probe_timing() -> Result<(), Box<dyn std::error::Error>> {
         ..ProbeMetrics::default()
     };
     metrics.validate()?;
+    let mut aggregate = ProbeMetrics::default();
+    aggregate.merge(metrics);
+    if aggregate.not_submitted != 1 {
+        return Err("probe aggregation lost not-submitted probes".into());
+    }
+    aggregate.validate()?;
     let submit_started = cutoff - Duration::from_millis(4);
     let store_started = cutoff - Duration::from_millis(2);
     let store_returned = cutoff - Duration::from_millis(1);
@@ -436,7 +439,8 @@ impl ProbeMetrics {
     fn validate(&self) -> Result<(), &'static str> {
         if self.launched > self.planned
             || self.launched != self.not_submitted + self.submitted
-            || self.submitted != self.accepted + self.accepted_outside + self.admission_overlap + self.failed + self.unresolved
+            || self.submitted
+                != self.accepted + self.accepted_outside + self.admission_overlap + self.failed + self.unresolved
             || self.started_in_window + self.not_started_in_window != self.accepted
         {
             return Err("probe counts do not reconcile");
@@ -447,6 +451,7 @@ impl ProbeMetrics {
     fn merge(&mut self, mut other: Self) {
         self.planned += other.planned;
         self.launched += other.launched;
+        self.not_submitted += other.not_submitted;
         self.accepted += other.accepted;
         self.submitted += other.submitted;
         self.accepted_outside += other.accepted_outside;
@@ -770,18 +775,28 @@ async fn run_real_store_round(
     let public_submit_replies = submit_replies.lock().expect("submit reply lock").clone();
     let actual_submissions = submitted_at.lock().expect("submission lock").clone();
     for plan in &plans {
-        probes.launch_lag_us.push(plan.launched_at.duration_since(plan.planned_at).as_micros());
+        probes
+            .launch_lag_us
+            .push(plan.launched_at.duration_since(plan.planned_at).as_micros());
         if let Some(submitted_at) = actual_submissions.get(&plan.sequence) {
             probes.submitted += 1;
-            probes.submit_lag_us.push(submitted_at.duration_since(plan.planned_at).as_micros());
-            match accept_intervals.get(&plan.sequence).map(|(started, returned, succeeded)| {
-                classify_admission(*started, *returned, *succeeded, window_end)
-            }) {
+            probes
+                .submit_lag_us
+                .push(submitted_at.duration_since(plan.planned_at).as_micros());
+            match accept_intervals
+                .get(&plan.sequence)
+                .map(|(started, returned, succeeded)| classify_admission(*started, *returned, *succeeded, window_end))
+            {
                 Some(AdmissionClass::ConfirmedInWindow) => probes.accepted += 1,
                 Some(AdmissionClass::ConfirmedOutside) => probes.accepted_outside += 1,
                 Some(AdmissionClass::Overlap) => probes.admission_overlap += 1,
                 Some(AdmissionClass::Failed) => probes.failed += 1,
-                None if public_submit_replies.get(&plan.sequence).is_some_and(|(_, failed)| *failed) => probes.failed += 1,
+                None if public_submit_replies
+                    .get(&plan.sequence)
+                    .is_some_and(|(_, failed)| *failed) =>
+                {
+                    probes.failed += 1
+                }
                 None => probes.unresolved += 1,
             }
         } else {
@@ -790,7 +805,9 @@ async fn run_real_store_round(
     }
     for (sequence, (reply, _failed)) in public_submit_replies {
         if let Some(submitted) = actual_submissions.get(&sequence) {
-            probes.submit_reply_us.push(reply.duration_since(*submitted).as_micros());
+            probes
+                .submit_reply_us
+                .push(reply.duration_since(*submitted).as_micros());
         }
     }
     let mut observations = Vec::with_capacity(waiters);
@@ -816,13 +833,17 @@ async fn run_real_store_round(
         }
         if returned < window_end {
             if let Some(submitted) = actual_submissions.get(&sequence) {
-                probes.admission_us.push(returned.duration_since(*submitted).as_micros());
+                probes
+                    .admission_us
+                    .push(returned.duration_since(*submitted).as_micros());
             }
             if let Some(handler) = handlers.get(&sequence).filter(|at| **at < window_end) {
                 probes.started_in_window += 1;
                 if *handler >= returned {
                     if let Some(submitted) = actual_submissions.get(&sequence) {
-                        probes.admission_handler_us.push(handler.duration_since(*submitted).as_micros());
+                        probes
+                            .admission_handler_us
+                            .push(handler.duration_since(*submitted).as_micros());
                     }
                 } else {
                     probes.handler_admission_overlap += 1;
