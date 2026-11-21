@@ -47,3 +47,22 @@ cargo bench --locked --features sqlite --bench sqlite_history -- --sizes 10000 -
 ```
 
 At both 10% and 90% cursor depth, the old and range query returned identical rows in the same order. The actual SQLite progress handler is invoked every 1,000 VM instructions and interrupts on its second callback (approximately 2,000 VM instructions). The old query was interrupted at both depths and completed through the same split-index fallback used by production; the range query completed without interruption. The report records bare-query VM steps, actual interruption, fallback steps, and budgeted timings separately. Warmup also follows the interrupted-query fallback path.
+
+## Concurrent probe and terminal-sample run (2026-11-21)
+
+The appended run in the raw output uses one absolute 1 ms arrival schedule per trial. The launcher spawns each submit task and continues to the next due probe without waiting for the prior public `submit()` reply. `CountingStore` decodes the existing payload sequence and records the real `accept_encoded()` start and return interval. The report keeps store acceptance return separate from the public submit reply, and compares handler entry with the store interval. A handler entry before acceptance returns is recorded as an overlapping interval, not as a zero-latency sample.
+
+Checkpoint request totals count API calls that began and calls that returned; errors are counted among returns. `started - returned` therefore reports API calls still pending or cancelled at the caller, not SQLite statements that necessarily remain active. A blocking SQLite operation can continue after its caller stops waiting. The 400 ms terminal-wait budget and shared 2 s probe observation window are separate. Planned and launched probes, store acceptance within or beyond the shared window, submit errors, and unresolved requests are reported independently.
+
+| Waiters | Strategy | Checkpoint requests started / returned / errors | Successful observations / effective samples / overlap | Timeout / error | Planned / launched / accepted in window / accepted after window | Handler started / not started in window | Launch-to-store return p95 | Launch-to-submit reply p95 | Store return-to-handler p95 |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | Fixed 25 ms | 751 / 659 / 0 | 67 / 67 / 0 | 93 / 0 | 160 / 160 / 160 / 0 | 144 / 16 | 581.8 ms | 581.9 ms | 1,853.8 ms |
+| 32 | Current backoff | 549 / 549 / 0 | 96 / 96 / 0 | 64 / 0 | 160 / 160 / 160 / 0 | 160 / 0 | 268.2 ms | 268.4 ms | 723.7 ms |
+| 128 | Fixed 25 ms | 1,664 / 1,024 / 0 | 0 / 0 / 0 | 640 / 0 | 640 / 640 / 408 / 169 | 298 / 110 | 536.0 ms | 537.3 ms | 1,336.2 ms |
+| 128 | Current backoff | 1,664 / 1,024 / 0 | 0 / 0 / 0 | 640 / 0 | 640 / 640 / 414 / 118 | 229 / 185 | 660.5 ms | 6,033.4 ms | 1,292.8 ms |
+| 512 | Fixed 25 ms | 6,826 / 4,461 / 0 | 0 / 0 / 0 | 2,560 / 0 | 2,560 / 2,560 / 1,546 / 1,014 | 0 / 1,546 | 1,583.6 ms | 4,012.1 ms | N/A |
+| 512 | Current backoff | 7,099 / 5,002 / 0 | 0 / 0 / 0 | 2,560 / 0 | 2,560 / 2,560 / 1,878 / 682 | 0 / 1,878 | 1,542.2 ms | 2,076.4 ms | N/A |
+
+The final run's wait outcomes reconcile at each nonzero tier: at 32, fixed polling completed 67 of 160 waits and backoff completed 96; at 128 and 512, all waits timed out. The effective latency sample count plus overlap equals successful observations; no successful wait lacked a commit interval. Every planned probe launched, though under load some store accepts landed beyond the 2 s observation window or remained unresolved at the drain deadline. At 32 the two strategies differ in both completion count and checkpoint reads; at 128 their in-window accept counts are similar; at 512 backoff had more in-window accepts. The results vary materially with host load and do not establish a stable policy winner.
+
+Keep the current production backoff. This synthetic setup establishes the measurement contract and a high-pressure limit, but it lacks a representative deployment waiter distribution and latency budget. Re-run with application-derived traffic before changing policy. The 0-waiter rows are control/setup observations and are not a polling comparison.
