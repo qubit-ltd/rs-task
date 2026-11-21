@@ -11,6 +11,7 @@ mod external_cancel_entry;
 mod external_cancel_flight;
 mod external_cancel_result;
 mod in_flight_guard;
+mod local_transition_action;
 mod public_lifetime;
 mod resource_fairness;
 mod service_runner;
@@ -24,6 +25,7 @@ pub(in crate::service::task_execution_service) use external_cancel_entry::Extern
 pub(in crate::service::task_execution_service) use external_cancel_flight::ExternalCancelFlight;
 pub(in crate::service::task_execution_service) use external_cancel_result::ExternalCancelResult;
 pub(in crate::service::task_execution_service) use in_flight_guard::InFlightGuard;
+pub(super) use local_transition_action::LocalTransitionAction;
 pub(in crate::service::task_execution_service) use public_lifetime::PublicLifetime;
 pub(in crate::service::task_execution_service) use service_runner::ServiceRunner;
 pub(in crate::service::task_execution_service) use shutdown_outcome::ShutdownOutcome;

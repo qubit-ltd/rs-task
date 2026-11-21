@@ -23,11 +23,15 @@ use qubit_id::IdGenerationError;
 use qubit_id::IdGenerator;
 use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
+use qubit_model_id::ModelIdBuf;
 use qubit_task::HandlerOptions;
 use qubit_task::TaskContext;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandlerDescriptor;
 use qubit_task::handler::TaskRunOutcome;
+use qubit_task::model::ResourceRequest;
+use qubit_task::model::StoredPayload;
+use qubit_task::model::StoredTaskRequest;
 use qubit_task::model::TaskRequest;
 use qubit_task::model::TaskState;
 use qubit_task::model::TransitionCommand;
@@ -89,6 +93,7 @@ struct GateStore {
     block_before_commit: bool,
     cancel_committed: AtomicBool,
     panic_next_cancel: AtomicBool,
+    empty_scan_count: AtomicU64,
 }
 
 struct OpenGateOnDrop(Arc<GateStore>);
@@ -101,7 +106,22 @@ impl Drop for OpenGateOnDrop {
 }
 
 impl TaskStore for GateStore {
-    qubit_task::delegate_task_store!(inner; except [transition_encoded, release_owner]);
+    qubit_task::delegate_task_store!(inner; except [transition_encoded, release_owner, list_ready_queued]);
+
+    fn list_ready_queued<'a>(
+        &'a self,
+        after: Option<qubit_task::model::TaskCursor>,
+        limit: std::num::NonZeroUsize,
+        now_ms: u64,
+    ) -> TaskFuture<'a, Result<qubit_task::model::TaskPage, StoreError>> {
+        Box::pin(async move {
+            let page = self.inner.list_ready_queued(after, limit, now_ms).await?;
+            if page.records.is_empty() {
+                self.empty_scan_count.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(page)
+        })
+    }
     fn transition_encoded<'a>(
         &'a self,
         command: TransitionCommand,
@@ -110,6 +130,10 @@ impl TaskStore for GateStore {
             let is_cancel_transition = command.state == TaskState::Cancelled
                 || (command.state == TaskState::Running && command.cancel_requested);
             if is_cancel_transition && self.panic_next_cancel.swap(false, Ordering::AcqRel) {
+                if self.block_before_commit {
+                    self.cancelled.notify_one();
+                    self.release.notified().await;
+                }
                 panic!("controlled cancellation transition panic");
             }
             if command.state == TaskState::Running
@@ -164,6 +188,7 @@ async fn test_blocked_task_cancel_write_keeps_store_owner_until_cas_returns() {
         block_before_commit: true,
         cancel_committed: AtomicBool::new(false),
         panic_next_cancel: AtomicBool::new(false),
+        empty_scan_count: AtomicU64::new(0),
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
@@ -246,6 +271,7 @@ async fn test_committed_running_cancel_survives_caller_abort_and_reaches_handler
         block_before_commit: false,
         cancel_committed: AtomicBool::new(false),
         panic_next_cancel: AtomicBool::new(false),
+        empty_scan_count: AtomicU64::new(0),
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
@@ -344,6 +370,7 @@ async fn test_cancellation_store_panic_is_latched_and_propagated() {
         block_before_commit: false,
         cancel_committed: AtomicBool::new(false),
         panic_next_cancel: AtomicBool::new(true),
+        empty_scan_count: AtomicU64::new(0),
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
@@ -388,6 +415,184 @@ async fn test_cancellation_store_panic_is_latched_and_propagated() {
             .expect("faulted service shutdown completes"),
         Err(TaskServiceError::StoreUnavailable(_))
     ));
+    drop(service);
+    drop(gate);
+    drop(sqlite);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn test_detached_cancellation_worker_panic_is_latched_after_caller_abort() {
+    let path = temp_db();
+    let sqlite = Arc::new(SqliteTaskStore::open(&path).expect("sqlite opens"));
+    let gate = Arc::new(GateStore {
+        inner: sqlite.clone(),
+        cancelled: Notify::new(),
+        release: Notify::new(),
+        owner_released: AtomicBool::new(false),
+        gate_used: AtomicBool::new(false),
+        conflict_next_cancel: AtomicBool::new(false),
+        block_before_commit: true,
+        cancel_committed: AtomicBool::new(false),
+        panic_next_cancel: AtomicBool::new(true),
+        empty_scan_count: AtomicU64::new(0),
+    });
+    let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
+    let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
+    let service = TaskExecutionServiceBuilder::new(gate.clone(), registry, Arc::new(Ids(AtomicU64::new(37))))
+        .build()
+        .await
+        .unwrap();
+    let accepted = service
+        .submit(TaskRequest::new(
+            "missing.handler",
+            1,
+            ValueCodecId::new("tests.cancel.codec"),
+            Payload,
+        ))
+        .await
+        .unwrap();
+    let id = accepted.summary.id;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                service.get_summary(id).await.unwrap().unwrap().state,
+                TaskState::Blocked { .. }
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("task becomes blocked");
+
+    let cancel_service = service.clone();
+    let cancel = tokio::spawn(async move { cancel_service.request_cancel(id).await });
+    tokio::time::timeout(Duration::from_secs(3), gate.cancelled.notified())
+        .await
+        .expect("detached worker pauses before its injected panic");
+    cancel.abort();
+    let _ = cancel.await;
+    gate.release.notify_one();
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), service.shutdown())
+            .await
+            .expect("shutdown waits for the detached worker"),
+        Err(TaskServiceError::StoreUnavailable(_))
+    ));
+    assert!(matches!(
+        service.request_cancel(id).await,
+        Err(TaskServiceError::StoreUnavailable(_))
+    ));
+    drop(service);
+    drop(gate);
+    drop(sqlite);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn test_resume_blocked_wakes_scheduler_after_empty_scan() {
+    let path = temp_db();
+    let sqlite = Arc::new(SqliteTaskStore::open(&path).expect("sqlite opens"));
+    let id = qubit_task::model::TaskId::from_id(Id::new(47));
+    let accepted = sqlite
+        .accept_encoded(
+            id,
+            StoredTaskRequest {
+                kind_id: "resume.test".into(),
+                category: None,
+                payload: StoredPayload {
+                    type_id: ModelIdBuf::parse("tests.CancelPayload").unwrap(),
+                    schema_version: 1,
+                    codec_id: "tests.cancel.codec".into(),
+                    bytes: vec![],
+                },
+                metadata: qubit_metadata::Metadata::new(),
+                resource_limit: ResourceRequest::default(),
+                correlation_key: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .expect("seed task");
+    let blocked = sqlite
+        .transition_encoded(TransitionCommand {
+            id,
+            expected_state_version: accepted.summary.state_version,
+            expected_attempt: accepted.summary.attempt,
+            retry_not_before_ms: None,
+            state: TaskState::Blocked {
+                reason: "temporarily unavailable".into(),
+            },
+            cancel_requested: false,
+            cancel_error: None,
+            finished_at_ms: None,
+            output: None,
+        })
+        .await
+        .expect("task becomes blocked before service starts");
+    let gate = Arc::new(GateStore {
+        inner: sqlite.clone(),
+        cancelled: Notify::new(),
+        release: Notify::new(),
+        owner_released: AtomicBool::new(false),
+        gate_used: AtomicBool::new(false),
+        conflict_next_cancel: AtomicBool::new(false),
+        block_before_commit: false,
+        cancel_committed: AtomicBool::new(false),
+        panic_next_cancel: AtomicBool::new(false),
+        empty_scan_count: AtomicU64::new(0),
+    });
+    let handler_started = Arc::new(Notify::new());
+    let handler_signal = Arc::clone(&handler_started);
+    let mut builder = TaskExecutionServiceBuilder::new(
+        gate.clone(),
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap()),
+        Arc::new(Ids(AtomicU64::new(100))),
+    );
+    builder
+        .register_handler_fn_with_options::<Payload, _, _>(
+            TaskHandlerDescriptor::for_payload::<Payload>("resume.test", 1),
+            move |_, _context: TaskContext| {
+                let started = Arc::clone(&handler_signal);
+                async move {
+                    started.notify_one();
+                    Ok(TaskRunOutcome::success())
+                }
+            },
+            HandlerOptions::new(),
+        )
+        .expect("handler registers");
+    let service = builder.build().await.expect("service starts");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while gate.empty_scan_count.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scheduler completes an empty scan before resumption");
+
+    let resumed = service.resume_blocked(&blocked).await.expect("blocked task resumes");
+    assert_eq!(resumed.state, TaskState::Queued);
+    tokio::time::timeout(Duration::from_secs(3), handler_started.notified())
+        .await
+        .expect("resumed task wakes and reaches its handler");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                service.get_summary(id).await.unwrap().unwrap().state,
+                TaskState::Succeeded
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("resumed task reaches terminal state");
+    service.shutdown().await.unwrap();
     drop(service);
     drop(gate);
     drop(sqlite);

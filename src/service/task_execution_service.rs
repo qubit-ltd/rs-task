@@ -61,6 +61,7 @@ use internal::ExternalCancelEntry;
 use internal::ExternalCancelFlight;
 use internal::ExternalCancelResult;
 use internal::InFlightGuard;
+use internal::LocalTransitionAction;
 use internal::PublicLifetime;
 use internal::ServiceRunner;
 use internal::ShutdownOutcome;
@@ -668,10 +669,17 @@ impl TaskExecutionService {
     /// Returns an error if shutdown has begun, the task is missing or changed,
     /// it is not blocked, cancellation remains pending, or the store fails
     /// the transition.
+    ///
+    /// Once the requeue is dispatched, the service completes its
+    /// compare-and-set and scheduler wake even if this caller is dropped.
+    ///
+    /// # Panics
+    ///
+    /// Resumes a store panic after latching a service fault.
     pub async fn resume_blocked(&self, observed: &TaskSummary) -> Result<TaskSummary, TaskServiceError> {
         let id = observed.id;
         let expected_state_version = observed.state_version;
-        let _admission = self.core.admission.read().await;
+        let admission = Arc::clone(&self.core.admission).read_owned().await;
         self.runner().check_fault()?;
         if self.core.shutting_down.load(Ordering::Acquire) || self.core.owner_released.load(Ordering::Acquire) {
             return Err(TaskServiceError::ShuttingDown);
@@ -691,23 +699,23 @@ impl TaskExecutionService {
         if summary.cancel_requested {
             return Err(TaskServiceError::CancellationPending);
         }
-        let resumed = self.runner().store_write_result(
-            self.core
-                .store
-                .transition_encoded(TransitionCommand {
-                    id,
-                    expected_state_version,
-                    expected_attempt: summary.attempt,
-                    state: TaskState::Queued,
-                    cancel_requested: false,
-                    cancel_error: None,
-                    retry_not_before_ms: None,
-                    finished_at_ms: None,
-                    output: None,
-                })
-                .await,
-        )?;
-        self.core.scheduler_changed.notify_one();
+        let resumed = Self::run_local_transition(
+            self.runner(),
+            admission,
+            TransitionCommand {
+                id,
+                expected_state_version,
+                expected_attempt: summary.attempt,
+                state: TaskState::Queued,
+                cancel_requested: false,
+                cancel_error: None,
+                retry_not_before_ms: None,
+                finished_at_ms: None,
+                output: None,
+            },
+            LocalTransitionAction::WakeScheduler,
+        )
+        .await?;
         Ok(resumed)
     }
 
@@ -763,7 +771,9 @@ impl TaskExecutionService {
     /// # Errors
     ///
     /// Returns an error if shutdown has begun, the task is missing, storage
-    /// fails, or an external cancellation hook fails.
+    /// fails, or an external cancellation hook fails. Once a local write is
+    /// dispatched, the service completes its compare-and-set and follow-up
+    /// scheduler wake or cooperative signal if this caller is dropped.
     ///
     /// # Panics
     ///
@@ -795,7 +805,7 @@ impl TaskExecutionService {
                     finished_at_ms: Some(now_ms()),
                     output: None,
                 },
-                false,
+                LocalTransitionAction::WakeScheduler,
             )
             .await;
         }
@@ -819,6 +829,7 @@ impl TaskExecutionService {
             }
             return Ok(CancelOutcome::CancellationRequested);
         }
+        let cancellation_key = (id, summary.attempt);
         Self::run_cancel_transition(
             self.runner(),
             _admission,
@@ -833,7 +844,11 @@ impl TaskExecutionService {
                 finished_at_ms: None,
                 output: None,
             },
-            cancellation_mode == CancellationMode::Cooperative,
+            if cancellation_mode == CancellationMode::Cooperative {
+                LocalTransitionAction::SignalCooperative(cancellation_key)
+            } else {
+                LocalTransitionAction::None
+            },
         )
         .await
     }
@@ -849,12 +864,11 @@ impl TaskExecutionService {
     /// - `admission`: Owned read guard retained until persistence and its
     ///   follow-up notification finish.
     /// - `command`: Compare-and-set transition to persist.
-    /// - `cooperative`: Whether a successful Running transition should signal
-    ///   the cooperative handler.
+    /// - `action`: Follow-up action to run after the transition is committed.
     ///
     /// # Returns
     ///
-    /// The cancellation outcome after the transition and follow-up complete.
+    /// The task summary after the transition and follow-up complete.
     ///
     /// # Errors
     ///
@@ -864,37 +878,67 @@ impl TaskExecutionService {
     /// # Panics
     ///
     /// Resumes a panic from the store after latching a service fault.
-    async fn run_cancel_transition(
+    async fn run_local_transition(
         runner: ServiceRunner,
         admission: tokio::sync::OwnedRwLockReadGuard<()>,
         command: TransitionCommand,
-        cooperative: bool,
-    ) -> Result<CancelOutcome, TaskServiceError> {
-        let runner_on_join_error = runner.clone();
-        let before_run = matches!(command.state, TaskState::Cancelled);
-        let cancellation_key = (command.id, command.expected_attempt);
+        action: LocalTransitionAction,
+    ) -> Result<TaskSummary, TaskServiceError> {
         let task = tokio::spawn(async move {
             let _admission = admission;
-            runner.store_write_result(runner.core.store.transition_encoded(command).await)?;
-            if before_run {
-                runner.core.scheduler_changed.notify_one();
-                Ok(CancelOutcome::CancelledBeforeRun)
-            } else {
-                if cooperative && let Some(state) = runner.core.cancellations.lock().get(&cancellation_key) {
-                    state.request(true);
+            let result = AssertUnwindSafe(async {
+                let summary = runner.store_write_result(runner.core.store.transition_encoded(command).await)?;
+                match action {
+                    LocalTransitionAction::WakeScheduler => runner.core.scheduler_changed.notify_one(),
+                    LocalTransitionAction::SignalCooperative(key) => {
+                        if let Some(state) = runner.core.cancellations.lock().get(&key) {
+                            state.request(true);
+                        }
+                    }
+                    LocalTransitionAction::None => {}
                 }
-                Ok(CancelOutcome::CancellationRequested)
+                Ok::<_, TaskServiceError>(summary)
+            })
+            .catch_unwind()
+            .await;
+            match result {
+                Ok(result) => result,
+                Err(panic) => {
+                    runner.latch_fault("local task transition worker panicked");
+                    resume_unwind(panic)
+                }
             }
         });
         match task.await {
             Ok(result) => result,
-            Err(error) if error.is_panic() => {
-                runner_on_join_error.latch_fault(format!("task cancellation operation failed: {error}"));
-                resume_unwind(error.into_panic())
-            }
+            Err(error) if error.is_panic() => resume_unwind(error.into_panic()),
             Err(error) => Err(TaskServiceError::SchedulerUnavailable(format!(
-                "task cancellation worker unavailable: {error}"
+                "task transition worker unavailable: {error}"
             ))),
+        }
+    }
+
+    /// Persists a cancellation transition and maps its summary to the public
+    /// outcome expected by `request_cancel`.
+    ///
+    /// # Parameters
+    ///
+    /// - `runner`: Shared service state used by the transition worker.
+    /// - `admission`: Owned admission guard moved into the worker.
+    /// - `command`: Compare-and-set state transition for the task.
+    /// - `action`: Follow-up action after a successful transition.
+    async fn run_cancel_transition(
+        runner: ServiceRunner,
+        admission: tokio::sync::OwnedRwLockReadGuard<()>,
+        command: TransitionCommand,
+        action: LocalTransitionAction,
+    ) -> Result<CancelOutcome, TaskServiceError> {
+        let before_run = matches!(command.state, TaskState::Cancelled);
+        Self::run_local_transition(runner, admission, command, action).await?;
+        if before_run {
+            Ok(CancelOutcome::CancelledBeforeRun)
+        } else {
+            Ok(CancelOutcome::CancellationRequested)
         }
     }
 
