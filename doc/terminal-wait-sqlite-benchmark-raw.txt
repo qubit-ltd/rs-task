@@ -39,3 +39,269 @@ round=4 waiters=128 strategy=fixed-25ms checkpoint_reads=512 startup_p95_us=1889
 round=4 waiters=128 strategy=current-backoff checkpoint_reads=512 startup_p95_us=17212 observation_p50_us=98719 observation_p95_us=102530 timeout=0 errors=0
 round=4 waiters=512 strategy=fixed-25ms checkpoint_reads=1427 startup_p95_us=69692 observation_p50_us=16434 observation_p95_us=28086 timeout=0 errors=0
 round=4 waiters=512 strategy=current-backoff checkpoint_reads=1509 startup_p95_us=63979 observation_p50_us=37933 observation_p95_us=51767 timeout=0 errors=0
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling libc v0.2.191
+   Compiling cfg-if v1.0.5
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.15
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.34
+   Compiling futures-io v0.3.34
+   Compiling fastrand v2.5.0
+   Compiling foldhash v0.2.0
+   Compiling thiserror v2.0.21
+   Compiling parking v2.2.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling crossbeam-utils v0.8.23
+   Compiling bitflags v2.13.2
+   Compiling rustix v1.1.6
+   Compiling serde_core v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling smallvec v1.16.5
+   Compiling slab v0.4.12
+   Compiling memchr v2.8.3
+   Compiling object v0.39.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling rand_core v0.10.1
+   Compiling getrandom v0.4.3
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling itoa v1.0.19
+   Compiling litemap v0.8.3
+   Compiling writeable v0.6.4
+   Compiling serde_json v1.0.154
+   Compiling futures-sink v0.3.34
+   Compiling utf_types v1.0.0
+   Compiling icu_properties_data v2.4.0
+   Compiling qubit-utils v0.3.5
+   Compiling async-task v4.7.1
+   Compiling icu_normalizer_data v2.4.0
+   Compiling parking_lot_core v0.9.12
+   Compiling zeroize v1.9.1
+   Compiling atomic-waker v1.1.2
+   Compiling once_cell v1.21.4
+   Compiling scopeguard v1.2.0
+   Compiling futures-task v0.3.34
+   Compiling untrusted v0.9.0
+   Compiling inventory v0.3.25
+   Compiling cpufeatures v0.3.1
+   Compiling pkg-config v0.3.34
+   Compiling vcpkg v0.2.15
+   Compiling rustls v0.23.46
+   Compiling subtle v2.6.1
+   Compiling percent-encoding v2.3.2
+   Compiling bytes v1.12.1
+   Compiling ryu v1.0.23
+   Compiling event-listener v5.4.2
+   Compiling arcstr v1.2.0
+   Compiling bit-vec v0.10.2
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling hashbrown v0.17.1
+   Compiling fnv v1.0.7
+   Compiling cc v1.11.2
+   Compiling futures-channel v0.3.34
+   Compiling quick-error v1.2.3
+   Compiling xxhash-rust v0.8.21
+   Compiling log v0.4.35
+   Compiling form_urlencoded v1.2.2
+   Compiling qubit-fast-cas v0.3.5
+   Compiling fallible-iterator v0.3.0
+   Compiling futures-lite v2.6.1
+   Compiling qubit-io v0.19.6
+   Compiling lock_api v0.4.14
+   Compiling piper v0.2.5
+   Compiling rustls-pki-types v1.16.0
+   Compiling qubit-model-id v0.2.0
+   Compiling unarray v0.1.4
+   Compiling chacha20 v0.10.2
+   Compiling rand_xorshift v0.5.0
+   Compiling regex-syntax v0.8.11
+   Compiling core_detect v1.0.0
+   Compiling qubit-progress v0.9.5
+   Compiling utf8_iter v1.1.0
+   Compiling bit-set v0.11.1
+   Compiling async-io v2.6.0
+   Compiling num-traits v0.2.19
+   Compiling event-listener-strategy v0.5.4
+   Compiling async-lock v3.5.0
+   Compiling webpki-roots v1.0.12
+   Compiling concurrent-queue v2.5.0
+   Compiling syn v3.0.10
+   Compiling async-channel v2.5.0
+   Compiling qubit-collections v0.2.7
+   Compiling hashlink v0.12.2
+   Compiling async-executor v1.14.1
+   Compiling blocking v1.7.0
+   Compiling async-fs v2.2.0
+   Compiling ring v0.17.14
+   Compiling stacker v0.1.25
+   Compiling libsqlite3-sys v0.39.1
+   Compiling getrandom v0.2.17
+   Compiling errno v0.3.15
+   Compiling socket2 v0.6.5
+   Compiling wait-timeout v0.2.1
+   Compiling fs2 v0.4.3
+   Compiling signal-hook-registry v1.4.8
+   Compiling rand v0.10.4
+   Compiling parking_lot v0.12.5
+   Compiling uuid v1.29.3
+   Compiling ar_archive_writer v0.5.5
+   Compiling synstructure v0.14.0
+   Compiling psm v0.1.32
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling thiserror-impl v2.0.21
+   Compiling zerovec-derive v0.11.7
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling futures-macro v0.3.34
+   Compiling tokio v1.54.1
+   Compiling futures-util v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.4
+   Compiling qubit-clock v0.13.7
+   Compiling qubit-spi v0.14.4
+   Compiling qubit-codec v0.17.6
+   Compiling polling v3.11.0
+   Compiling tempfile v3.27.0
+   Compiling zerovec v0.11.9
+   Compiling zerotrie v0.2.5
+   Compiling rusty-fork v0.3.1
+   Compiling qubit-budget v0.10.4
+   Compiling proptest v1.12.0
+   Compiling async-signal v0.2.14
+   Compiling async-net v2.0.0
+   Compiling smol-timeout v0.6.1
+   Compiling tinystr v0.8.5
+   Compiling potential_utf v0.1.6
+   Compiling icu_collections v2.4.0
+   Compiling async-process v2.5.0
+   Compiling icu_locale_core v2.4.0
+   Compiling qubit-retry v0.26.6
+   Compiling smol v2.0.2
+   Compiling qubit-json v0.12.5
+   Compiling qubit-id v0.7.8
+   Compiling icu_provider v2.4.0
+   Compiling qubit-event-bus v0.21.4
+   Compiling icu_normalizer v2.4.0
+   Compiling icu_properties v2.4.0
+   Compiling tokio-util v0.7.20
+   Compiling combine v4.6.9
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling qubit-redact v0.10.5
+   Compiling qubit-datatype v0.15.5
+   Compiling url v2.5.8
+   Compiling qubit-value v0.13.3
+   Compiling rustls-webpki v0.103.17
+   Compiling qubit-metadata v0.7.3
+   Compiling futures-rustls v0.26.0
+   Compiling qubit-redis v2.0.0-rc.2
+   Compiling qubit-event-bus-redis v0.7.4
+   Compiling rusqlite v0.41.1
+   Compiling qubit-task v0.12.0 (/home/starfish/.local/share/agent-worktrees/77c8cdd4-559c-4bb5-ba05-09980815b528-round-7/layout/rs-task)
+    Finished `bench` profile [optimized] target(s) in 1m 22s
+     Running benches/terminal_wait_sqlite.rs (target/release/deps/terminal_wait_sqlite-4b5a2da4ec106ff6)
+# 2026-11-21 revised run attempt 1: synthetic phase completed; service phase interrupted after waiters=32. Excluded from summary.
+sqlite=3.54.1 rounds=5 workers=2 commit_delay_ms=80 timeout_ms=400
+round=0 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=32 strategy=fixed-25ms checkpoint_reads=542 success=0 timeout=32 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=32 strategy=current-backoff checkpoint_reads=224 success=0 timeout=32 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=128 strategy=fixed-25ms checkpoint_reads=2174 success=0 timeout=128 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=128 strategy=current-backoff checkpoint_reads=896 success=0 timeout=128 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=512 strategy=fixed-25ms checkpoint_reads=4383 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=40718 observation_p50_us=9726 observation_p95_us=27690
+round=0 waiters=512 strategy=current-backoff checkpoint_reads=3584 success=0 timeout=512 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=1 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=1 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=1 waiters=32 strategy=current-backoff checkpoint_reads=224 success=0 timeout=32 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=1 waiters=32 strategy=fixed-25ms checkpoint_reads=544 success=0 timeout=32 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=1 waiters=128 strategy=current-backoff checkpoint_reads=512 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=7653 observation_p50_us=87558 observation_p95_us=92117
+round=1 waiters=128 strategy=fixed-25ms checkpoint_reads=689 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=9543 observation_p50_us=5674 observation_p95_us=27792
+round=1 waiters=512 strategy=current-backoff checkpoint_reads=2048 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=27312 observation_p50_us=89393 observation_p95_us=108490
+round=1 waiters=512 strategy=fixed-25ms checkpoint_reads=2255 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=48678 observation_p50_us=17742 observation_p95_us=29620
+round=2 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=2 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=2 waiters=32 strategy=fixed-25ms checkpoint_reads=160 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2565 observation_p50_us=13634 observation_p95_us=15095
+round=2 waiters=32 strategy=current-backoff checkpoint_reads=128 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2552 observation_p50_us=90305 observation_p95_us=91365
+round=2 waiters=128 strategy=fixed-25ms checkpoint_reads=640 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=8863 observation_p50_us=10561 observation_p95_us=14756
+round=2 waiters=128 strategy=current-backoff checkpoint_reads=512 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=6932 observation_p50_us=86599 observation_p95_us=89520
+round=2 waiters=512 strategy=fixed-25ms checkpoint_reads=2262 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=27403 observation_p50_us=15160 observation_p95_us=27178
+round=2 waiters=512 strategy=current-backoff checkpoint_reads=1894 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=19559 observation_p50_us=92931 observation_p95_us=103486
+round=3 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=3 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=3 waiters=32 strategy=current-backoff checkpoint_reads=128 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=1926 observation_p50_us=74698 observation_p95_us=75285
+round=3 waiters=32 strategy=fixed-25ms checkpoint_reads=160 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2113 observation_p50_us=14776 observation_p95_us=15607
+round=3 waiters=128 strategy=current-backoff checkpoint_reads=512 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=6552 observation_p50_us=90399 observation_p95_us=92805
+round=3 waiters=128 strategy=fixed-25ms checkpoint_reads=640 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=8155 observation_p50_us=12424 observation_p95_us=17104
+round=3 waiters=512 strategy=current-backoff checkpoint_reads=1537 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=37945 observation_p50_us=18541 observation_p95_us=30477
+round=3 waiters=512 strategy=fixed-25ms checkpoint_reads=2621 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=25524 observation_p50_us=14536 observation_p95_us=26806
+round=4 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=4 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=4 waiters=32 strategy=fixed-25ms checkpoint_reads=160 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=1529 observation_p50_us=18005 observation_p95_us=19423
+round=4 waiters=32 strategy=current-backoff checkpoint_reads=128 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2938 observation_p50_us=86734 observation_p95_us=87542
+round=4 waiters=128 strategy=fixed-25ms checkpoint_reads=640 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=7084 observation_p50_us=16140 observation_p95_us=19563
+round=4 waiters=128 strategy=current-backoff checkpoint_reads=512 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=7599 observation_p50_us=88482 observation_p95_us=91505
+round=4 waiters=512 strategy=fixed-25ms checkpoint_reads=2344 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=21541 observation_p50_us=15625 observation_p95_us=27862
+round=4 waiters=512 strategy=current-backoff checkpoint_reads=1892 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=23377 observation_p50_us=90186 observation_p95_us=101033
+real_store workload (5 rounds; target=80ms, probes=waiter count, runtime workers=2)
+real_store waiters=0 strategy=fixed-25ms reads=0 observations=0 startup_p95_us=N/A probe_startup_p95_us=N/A observation_p95_us=N/A timeout=0 errors=0 overlapping_commit=0
+real_store waiters=0 strategy=current-backoff reads=0 observations=0 startup_p95_us=N/A probe_startup_p95_us=N/A observation_p95_us=N/A timeout=0 errors=0 overlapping_commit=0
+real_store waiters=32 strategy=fixed-25ms reads=879 observations=160 startup_p95_us=47029 probe_startup_p95_us=209006 observation_p95_us=18228 timeout=0 errors=0 overlapping_commit=0
+real_store waiters=32 strategy=current-backoff reads=640 observations=160 startup_p95_us=30913 probe_startup_p95_us=225208 observation_p95_us=97911 timeout=0 errors=0 overlapping_commit=0
+# 2026-11-21 revised run attempt 2: complete synthetic and real-store run; included in summary.
+sqlite=3.54.1 rounds=5 workers=2 commit_delay_ms=80 timeout_ms=400
+round=0 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=32 strategy=fixed-25ms checkpoint_reads=475 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=23390 observation_p50_us=10879 observation_p95_us=11693
+round=0 waiters=32 strategy=current-backoff checkpoint_reads=224 success=0 timeout=32 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=0 waiters=128 strategy=fixed-25ms checkpoint_reads=635 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=11914 observation_p50_us=16295 observation_p95_us=19573
+round=0 waiters=128 strategy=current-backoff checkpoint_reads=512 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=6595 observation_p50_us=91111 observation_p95_us=93799
+round=0 waiters=512 strategy=fixed-25ms checkpoint_reads=2026 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=49410 observation_p50_us=11181 observation_p95_us=30462
+round=0 waiters=512 strategy=current-backoff checkpoint_reads=1768 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=30867 observation_p50_us=17127 observation_p95_us=101603
+round=1 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=1 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=1 waiters=32 strategy=current-backoff checkpoint_reads=128 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2525 observation_p50_us=57150 observation_p95_us=58127
+round=1 waiters=32 strategy=fixed-25ms checkpoint_reads=160 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2894 observation_p50_us=12450 observation_p95_us=13812
+round=1 waiters=128 strategy=current-backoff checkpoint_reads=512 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=8849 observation_p50_us=86906 observation_p95_us=90818
+round=1 waiters=128 strategy=fixed-25ms checkpoint_reads=640 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=7902 observation_p50_us=13411 observation_p95_us=17633
+round=1 waiters=512 strategy=current-backoff checkpoint_reads=2048 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=31494 observation_p50_us=70590 observation_p95_us=84729
+round=1 waiters=512 strategy=fixed-25ms checkpoint_reads=2512 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=26607 observation_p50_us=15242 observation_p95_us=28286
+round=2 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=2 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=2 waiters=32 strategy=fixed-25ms checkpoint_reads=192 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2624 observation_p50_us=26132 observation_p95_us=26699
+round=2 waiters=32 strategy=current-backoff checkpoint_reads=128 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=1917 observation_p50_us=84949 observation_p95_us=86019
+round=2 waiters=128 strategy=fixed-25ms checkpoint_reads=640 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=9153 observation_p50_us=16079 observation_p95_us=20753
+round=2 waiters=128 strategy=current-backoff checkpoint_reads=512 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=8300 observation_p50_us=89674 observation_p95_us=93847
+round=2 waiters=512 strategy=fixed-25ms checkpoint_reads=2155 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=33263 observation_p50_us=16207 observation_p95_us=32201
+round=2 waiters=512 strategy=current-backoff checkpoint_reads=1721 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=32868 observation_p50_us=18015 observation_p95_us=105888
+round=3 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=3 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=3 waiters=32 strategy=current-backoff checkpoint_reads=128 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2474 observation_p50_us=89242 observation_p95_us=90312
+round=3 waiters=32 strategy=fixed-25ms checkpoint_reads=160 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2406 observation_p50_us=15405 observation_p95_us=16533
+round=3 waiters=128 strategy=current-backoff checkpoint_reads=512 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=8932 observation_p50_us=82108 observation_p95_us=86382
+round=3 waiters=128 strategy=fixed-25ms checkpoint_reads=640 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=8959 observation_p50_us=21133 observation_p95_us=31569
+round=3 waiters=512 strategy=current-backoff checkpoint_reads=1537 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=51951 observation_p50_us=29642 observation_p95_us=41988
+round=3 waiters=512 strategy=fixed-25ms checkpoint_reads=2274 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=23935 observation_p50_us=12399 observation_p95_us=25366
+round=4 waiters=0 strategy=fixed-25ms checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=4 waiters=0 strategy=current-backoff checkpoint_reads=0 success=0 timeout=0 errors=0 overlapping_commit=0 observed_samples=0 startup_p95_us=N/A observation_p50_us=N/A observation_p95_us=N/A
+round=4 waiters=32 strategy=fixed-25ms checkpoint_reads=160 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=1584 observation_p50_us=18833 observation_p95_us=21008
+round=4 waiters=32 strategy=current-backoff checkpoint_reads=128 success=32 timeout=0 errors=0 overlapping_commit=0 observed_samples=32 startup_p95_us=2613 observation_p50_us=90432 observation_p95_us=91408
+round=4 waiters=128 strategy=fixed-25ms checkpoint_reads=640 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=8522 observation_p50_us=14843 observation_p95_us=18075
+round=4 waiters=128 strategy=current-backoff checkpoint_reads=480 success=128 timeout=0 errors=0 overlapping_commit=0 observed_samples=128 startup_p95_us=13598 observation_p50_us=95586 observation_p95_us=101466
+round=4 waiters=512 strategy=fixed-25ms checkpoint_reads=2270 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=32003 observation_p50_us=19186 observation_p95_us=35281
+round=4 waiters=512 strategy=current-backoff checkpoint_reads=1758 success=512 timeout=0 errors=0 overlapping_commit=0 observed_samples=512 startup_p95_us=29986 observation_p50_us=28727 observation_p95_us=108623
+real_store workload (5 rounds; target=80ms, probes=waiter count, runtime workers=2)
+real_store waiters=0 strategy=fixed-25ms reads=0 observations=0 startup_p95_us=N/A probe_startup_p95_us=N/A observation_p95_us=N/A timeout=0 errors=0 overlapping_commit=0
+real_store waiters=0 strategy=current-backoff reads=0 observations=0 startup_p95_us=N/A probe_startup_p95_us=N/A observation_p95_us=N/A timeout=0 errors=0 overlapping_commit=0
+real_store waiters=32 strategy=fixed-25ms reads=832 observations=160 startup_p95_us=39237 probe_startup_p95_us=196528 observation_p95_us=21124 timeout=0 errors=0 overlapping_commit=0
+real_store waiters=32 strategy=current-backoff reads=640 observations=160 startup_p95_us=50937 probe_startup_p95_us=210294 observation_p95_us=75619 timeout=0 errors=0 overlapping_commit=0
+real_store waiters=128 strategy=fixed-25ms reads=3298 observations=640 startup_p95_us=49674 probe_startup_p95_us=854286 observation_p95_us=30190 timeout=0 errors=0 overlapping_commit=0
+real_store waiters=128 strategy=current-backoff reads=2560 observations=640 startup_p95_us=34170 probe_startup_p95_us=945060 observation_p95_us=98974 timeout=0 errors=0 overlapping_commit=0
+real_store waiters=512 strategy=fixed-25ms reads=12433 observations=2048 startup_p95_us=254274 probe_startup_p95_us=30345974 observation_p95_us=95768 timeout=512 errors=0 overlapping_commit=0
+real_store waiters=512 strategy=current-backoff reads=10240 observations=2560 startup_p95_us=93540 probe_startup_p95_us=3489608 observation_p95_us=85844 timeout=0 errors=0 overlapping_commit=0

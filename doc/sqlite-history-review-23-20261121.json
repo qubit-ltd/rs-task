@@ -1,0 +1,333 @@
+{
+  "crate_name": "qubit-task",
+  "crate_version": "0.12.0",
+  "sqlite_version": "3.54.1",
+  "features": [
+    "sqlite"
+  ],
+  "flush_checkpoint_strategy": "after seed and after measurements: PRAGMA wal_checkpoint(TRUNCATE); latency excludes seed, checkpoint, and index construction",
+  "datasets": [
+    {
+      "rows": 10000,
+      "ready_queue_rows": 20,
+      "ready_queue_pages": 1,
+      "scheduler_queries_per_wake": 2,
+      "ready_queue_max_page": 20,
+      "ready_retry_mix": "queued rows with numeric task ID divisible by four are due; other queued rows retry at SQLite i64::MAX; scan time is i64::MAX-1",
+      "seed": "xorshift64 seed 0x6a09e667f3bcc909; deterministic padded numeric IDs; identical prefix across sizes; ready scan adds future retry deadlines to 75% of Queued rows",
+      "indexless_database_bytes": 7929856,
+      "legacy_index_build_ms": 90.663965,
+      "legacy_indexed_database_bytes": 8474624,
+      "first_store_open_and_compound_index_build_ms": 232.20179199999998,
+      "indexed_database_bytes": 10510336,
+      "indexed_wal_bytes_after_checkpoint": 0,
+      "query_samples": 25,
+      "query_warmups": 3,
+      "no_filter_page": {
+        "p50_ms": 0.249401,
+        "p95_ms": 0.860565
+      },
+      "deep_no_filter_page": {
+        "p50_ms": 0.320432,
+        "p95_ms": 2.081798
+      },
+      "deep_single_correlation_page": {
+        "p50_ms": 0.31321000000000004,
+        "p95_ms": 0.40460399999999996
+      },
+      "unfinished_recovery_page": {
+        "p50_ms": 0.29616499999999996,
+        "p95_ms": 0.429564
+      },
+      "ready_queue_scan": {
+        "p50_ms": 0.197546,
+        "p95_ms": 0.28334200000000004
+      },
+      "retry_deadline_query": {
+        "p50_ms": 0.039239,
+        "p95_ms": 0.08172
+      },
+      "legacy_or_no_index_baseline": {
+        "p50_ms": 7.627592,
+        "p95_ms": 8.238348
+      },
+      "legacy_or_baseline": {
+        "p50_ms": 0.746968,
+        "p95_ms": 0.7815749999999999
+      },
+      "count_states": {
+        "p50_ms": 0.023672,
+        "p95_ms": 0.025467
+      },
+      "ready_query_comparison": {
+        "old_sql_vm_steps": 672,
+        "split_sql_vm_steps": 911,
+        "old_sql": {
+          "p50_ms": 0.097104,
+          "p95_ms": 0.111356
+        },
+        "split_sql": {
+          "p50_ms": 0.330343,
+          "p95_ms": 0.460043
+        },
+        "old_plan": [
+          "SCAN tasks USING INDEX tasks_queued_accepted_id"
+        ],
+        "split_plan": [
+          "CO-ROUTINE page",
+          "MERGE (UNION ALL)",
+          "LEFT",
+          "CO-ROUTINE (subquery-1)",
+          "SCAN tasks USING INDEX tasks_queued_immediate_accepted_id",
+          "SCAN (subquery-1)",
+          "USE TEMP B-TREE FOR ORDER BY",
+          "RIGHT",
+          "CO-ROUTINE (subquery-3)",
+          "SEARCH tasks USING INDEX tasks_queued_retry_deadline (retry_not_before_ms>? AND retry_not_before_ms<?)",
+          "USE TEMP B-TREE FOR ORDER BY",
+          "SCAN (subquery-3)",
+          "USE TEMP B-TREE FOR ORDER BY",
+          "SCAN page",
+          "SEARCH tasks USING INDEX sqlite_autoindex_tasks_1 (id=?)"
+        ],
+        "representative_adaptive_vm_steps": 672,
+        "representative_adaptive": {
+          "p50_ms": 0.10002799999999999,
+          "p95_ms": 0.120668
+        },
+        "representative_adaptive_uses_split": false,
+        "representative_adaptive_plan": [
+          "SCAN tasks USING INDEX tasks_queued_accepted_id"
+        ],
+        "extreme_distributions": [
+          {
+            "name": "no_future_no_deadlines",
+            "rows": 10000,
+            "legacy_vm_steps": 341,
+            "optimized_vm_steps": 341,
+            "legacy": {
+              "p50_ms": 0.095488,
+              "p95_ms": 0.10320700000000001
+            },
+            "optimized": {
+              "p50_ms": 0.084805,
+              "p95_ms": 0.09262100000000001
+            },
+            "legacy_plan": [
+              "SCAN tasks USING INDEX tasks_queued_accepted_id"
+            ],
+            "optimized_plan": [
+              "SCAN tasks USING INDEX tasks_queued_accepted_id"
+            ]
+          },
+          {
+            "name": "all_future",
+            "rows": 10000,
+            "legacy_vm_steps": 70012,
+            "optimized_vm_steps": 2057,
+            "legacy": {
+              "p50_ms": 9.519392,
+              "p95_ms": 9.790979
+            },
+            "optimized": {
+              "p50_ms": 0.36130199999999996,
+              "p95_ms": 0.388238
+            },
+            "legacy_plan": [
+              "SCAN tasks USING INDEX tasks_queued_accepted_id"
+            ],
+            "optimized_plan": [
+              "CO-ROUTINE page",
+              "MERGE (UNION ALL)",
+              "LEFT",
+              "CO-ROUTINE (subquery-1)",
+              "SCAN tasks USING INDEX tasks_queued_immediate_accepted_id",
+              "SCAN (subquery-1)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "RIGHT",
+              "CO-ROUTINE (subquery-3)",
+              "SEARCH tasks USING INDEX tasks_queued_retry_deadline (retry_not_before_ms>? AND retry_not_before_ms<?)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "SCAN (subquery-3)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "SCAN page",
+              "SEARCH tasks USING INDEX sqlite_autoindex_tasks_1 (id=?)"
+            ]
+          },
+          {
+            "name": "few_ready_many_future",
+            "rows": 10000,
+            "legacy_vm_steps": 23276,
+            "optimized_vm_steps": 4138,
+            "legacy": {
+              "p50_ms": 3.513221,
+              "p95_ms": 3.651405
+            },
+            "optimized": {
+              "p50_ms": 0.574681,
+              "p95_ms": 0.589639
+            },
+            "legacy_plan": [
+              "SCAN tasks USING INDEX tasks_queued_accepted_id"
+            ],
+            "optimized_plan": [
+              "CO-ROUTINE page",
+              "MERGE (UNION ALL)",
+              "LEFT",
+              "CO-ROUTINE (subquery-1)",
+              "SCAN tasks USING INDEX tasks_queued_immediate_accepted_id",
+              "SCAN (subquery-1)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "RIGHT",
+              "CO-ROUTINE (subquery-3)",
+              "SEARCH tasks USING INDEX tasks_queued_retry_deadline (retry_not_before_ms>? AND retry_not_before_ms<?)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "SCAN (subquery-3)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "SCAN page",
+              "SEARCH tasks USING INDEX sqlite_autoindex_tasks_1 (id=?)"
+            ]
+          },
+          {
+            "name": "sparse_ready_prefix_many_future",
+            "rows": 10000,
+            "legacy_vm_steps": 70012,
+            "optimized_vm_steps": 2057,
+            "legacy": {
+              "p50_ms": 9.745583,
+              "p95_ms": 10.453743
+            },
+            "optimized": {
+              "p50_ms": 0.37635,
+              "p95_ms": 0.397758
+            },
+            "legacy_plan": [
+              "SCAN tasks USING INDEX tasks_queued_accepted_id"
+            ],
+            "optimized_plan": [
+              "CO-ROUTINE page",
+              "MERGE (UNION ALL)",
+              "LEFT",
+              "CO-ROUTINE (subquery-1)",
+              "SCAN tasks USING INDEX tasks_queued_immediate_accepted_id",
+              "SCAN (subquery-1)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "RIGHT",
+              "CO-ROUTINE (subquery-3)",
+              "SEARCH tasks USING INDEX tasks_queued_retry_deadline (retry_not_before_ms>? AND retry_not_before_ms<?)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "SCAN (subquery-3)",
+              "USE TEMP B-TREE FOR ORDER BY",
+              "SCAN page",
+              "SEARCH tasks USING INDEX sqlite_autoindex_tasks_1 (id=?)"
+            ]
+          },
+          {
+            "name": "many_due_few_future",
+            "rows": 10000,
+            "legacy_vm_steps": 428,
+            "optimized_vm_steps": 428,
+            "legacy": {
+              "p50_ms": 0.10416199999999999,
+              "p95_ms": 0.115815
+            },
+            "optimized": {
+              "p50_ms": 0.102052,
+              "p95_ms": 0.14427
+            },
+            "legacy_plan": [
+              "SCAN tasks USING INDEX tasks_queued_accepted_id"
+            ],
+            "optimized_plan": [
+              "SCAN tasks USING INDEX tasks_queued_accepted_id"
+            ]
+          }
+        ],
+        "cursor_pages": [
+          {
+            "depth_percent": 10,
+            "old_sql_vm_steps": 10484,
+            "range_sql_vm_steps": 454,
+            "old_sql": {
+              "p50_ms": 0.23729,
+              "p95_ms": 0.33791000000000004
+            },
+            "range_sql": {
+              "p50_ms": 0.094012,
+              "p95_ms": 0.104473
+            },
+            "rows_match": true,
+            "old_sql_interrupted": true,
+            "old_sql_fallback_vm_steps": 2455,
+            "range_sql_interrupted": false,
+            "range_sql_fallback_vm_steps": 454,
+            "old_sql_budget": {
+              "p50_ms": 0.19357200000000002,
+              "p95_ms": 0.196463
+            },
+            "range_sql_budget": {
+              "p50_ms": 0.103241,
+              "p95_ms": 0.122362
+            }
+          },
+          {
+            "depth_percent": 90,
+            "old_sql_vm_steps": 90484,
+            "range_sql_vm_steps": 454,
+            "old_sql": {
+              "p50_ms": 1.192582,
+              "p95_ms": 1.218772
+            },
+            "range_sql": {
+              "p50_ms": 0.09310800000000001,
+              "p95_ms": 0.104347
+            },
+            "rows_match": true,
+            "old_sql_interrupted": true,
+            "old_sql_fallback_vm_steps": 2455,
+            "range_sql_interrupted": false,
+            "range_sql_fallback_vm_steps": 454,
+            "old_sql_budget": {
+              "p50_ms": 0.09348000000000001,
+              "p95_ms": 0.20114500000000002
+            },
+            "range_sql_budget": {
+              "p50_ms": 0.10042799999999999,
+              "p95_ms": 0.10517800000000001
+            }
+          }
+        ]
+      },
+      "shutdown_samples": 5,
+      "shutdown_timing_strategy": "each sample builds a fresh service from a same-seed checkpointed DB copy before timing; build/recovery is excluded and only service.shutdown() is timed",
+      "shutdown": {
+        "p50_ms": 2.298179,
+        "p95_ms": 15.411249
+      },
+      "query_plans": {
+        "deep_no_filter": [
+          "SEARCH tasks USING INDEX tasks_accepted_id ((accepted_at,id)>(?,?))"
+        ],
+        "deep_single_correlation": [
+          "SEARCH tasks USING INDEX tasks_correlation_accepted_id (correlation_key=? AND (accepted_at,id)>(?,?))"
+        ],
+        "unfinished_recovery": [
+          "SEARCH tasks USING INDEX tasks_accepted_id ((accepted_at,id)>(?,?))"
+        ],
+        "ready_queue": [
+          "SCAN tasks USING INDEX tasks_queued_accepted_id"
+        ],
+        "retry_deadline": [
+          "SEARCH tasks USING COVERING INDEX tasks_queued_retry_deadline (retry_not_before_ms>?)"
+        ],
+        "legacy_or_no_index_baseline": [
+          "SCAN tasks",
+          "USE TEMP B-TREE FOR ORDER BY"
+        ],
+        "legacy_or_baseline": [
+          "SCAN tasks USING INDEX tasks_accepted_id"
+        ]
+      }
+    }
+  ]
+}

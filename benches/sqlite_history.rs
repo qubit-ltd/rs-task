@@ -116,7 +116,21 @@ struct ReadyCursorReport {
     range_sql: Timing,
     rows_match: bool,
     old_sql_interrupted: bool,
+    old_sql_fallback_vm_steps: i32,
+    range_sql_interrupted: bool,
+    range_sql_fallback_vm_steps: i32,
+    old_sql_budget: Timing,
+    range_sql_budget: Timing,
 }
+
+struct BudgetExecution {
+    interrupted: bool,
+    vm_steps: i32,
+    timing: Timing,
+    rows: Vec<ReadyBenchmarkRow>,
+}
+
+type BudgetAttempt = (Result<Vec<ReadyBenchmarkRow>, rusqlite::Error>, i32);
 
 type ReadyBenchmarkRow = (String, String, String);
 
@@ -850,6 +864,79 @@ fn measure_ready_cursor_pages(
         Ok((summarize(samples), rows, steps))
     }
 
+    fn execute_with_budget(
+        connection: &mut Connection,
+        sql: &str,
+        fallback_sql: &str,
+        cursor: &(i64, String),
+    ) -> Result<BudgetExecution, Box<dyn std::error::Error>> {
+        fn attempt(
+            connection: &mut Connection,
+            sql: &str,
+            cursor: &(i64, String),
+            active: &AtomicBool,
+            calls: &AtomicUsize,
+        ) -> Result<BudgetAttempt, Box<dyn std::error::Error>> {
+            calls.store(0, Ordering::Relaxed);
+            active.store(true, Ordering::Relaxed);
+            let mut statement = connection.prepare_cached(sql)?;
+            let rows = statement.query_map(
+                params![1_i64, Some(cursor.0), Some(cursor.1.clone()), PAGE_SIZE as i64 + 1],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let result = rows.collect::<Result<Vec<_>, _>>();
+            let steps = statement.reset_status(StatementStatus::VmStep);
+            active.store(false, Ordering::Relaxed);
+            Ok((result, steps))
+        }
+        let active = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_active = Arc::new(AtomicBool::new(false));
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let active_ref = Arc::clone(&callback_active);
+        let calls_ref = Arc::clone(&callback_calls);
+        connection.progress_handler(
+            1_000,
+            Some(move || active_ref.load(Ordering::Relaxed) && calls_ref.fetch_add(1, Ordering::Relaxed) + 1 >= 2),
+        )?;
+        let mut samples = Vec::with_capacity(QUERY_SAMPLES);
+        let mut interrupted = false;
+        let mut vm_steps = 0;
+        let mut result_rows = Vec::new();
+        let measured = (|| -> Result<(), Box<dyn std::error::Error>> {
+            for _ in 0..QUERY_WARMUPS {
+                let _ = attempt(connection, sql, cursor, &active, &calls)?;
+            }
+            for _ in 0..QUERY_SAMPLES {
+                let started = Instant::now();
+                let (result, steps) = attempt(connection, sql, cursor, &callback_active, &callback_calls)?;
+                match result {
+                    Ok(rows) => {
+                        vm_steps = steps;
+                        result_rows = rows;
+                    }
+                    Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::OperationInterrupted => {
+                        interrupted = true;
+                        let (rows, fallback_steps) = execute(connection, fallback_sql, cursor)?;
+                        vm_steps = steps + fallback_steps;
+                        result_rows = rows;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                samples.push(started.elapsed());
+            }
+            Ok(())
+        })();
+        connection.progress_handler(0, None::<fn() -> bool>)?;
+        measured?;
+        Ok(BudgetExecution {
+            interrupted,
+            vm_steps,
+            timing: summarize(samples),
+            rows: result_rows,
+        })
+    }
+
     connection.execute_batch(
         "CREATE TEMP TABLE ready_cursor_original AS SELECT id,state_kind,retry_not_before_ms FROM tasks; \
          CREATE UNIQUE INDEX ready_cursor_original_id ON ready_cursor_original(id); \
@@ -867,14 +954,21 @@ fn measure_ready_cursor_pages(
             )?;
             let (old_sql, old_rows, old_sql_vm_steps) = measure(connection, OLD_SQL, &cursor)?;
             let (range_sql, range_rows, range_sql_vm_steps) = measure(connection, RANGE_SQL, &cursor)?;
+            let old_budget = execute_with_budget(connection, OLD_SQL, RANGE_SQL, &cursor)?;
+            let range_budget = execute_with_budget(connection, RANGE_SQL, RANGE_SQL, &cursor)?;
             reports.push(ReadyCursorReport {
                 depth_percent,
                 old_sql_vm_steps,
                 range_sql_vm_steps,
                 old_sql,
                 range_sql,
-                rows_match: old_rows == range_rows,
-                old_sql_interrupted: old_sql_vm_steps >= 2_000,
+                rows_match: old_rows == range_rows && old_budget.rows == range_budget.rows,
+                old_sql_interrupted: old_budget.interrupted,
+                old_sql_fallback_vm_steps: old_budget.vm_steps,
+                range_sql_interrupted: range_budget.interrupted,
+                range_sql_fallback_vm_steps: range_budget.vm_steps,
+                old_sql_budget: old_budget.timing,
+                range_sql_budget: range_budget.timing,
             });
         }
         Ok(reports)
