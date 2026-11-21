@@ -790,7 +790,25 @@ impl TaskStore for FailingListStore {
         &'a self,
         command: task::model::TransitionCommand,
     ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
-        if self.conflict_next_transition.swap(false, Ordering::AcqRel) {
+        if let Some(gate) = &self.transition_gate
+            && self.conflict_next_transition.load(Ordering::Acquire)
+            && matches!(command.state, TaskState::Running)
+            && command.cancel_requested
+            && command.cancel_error.is_none()
+            && gate.armed.swap(false, Ordering::AcqRel)
+        {
+            self.conflict_next_transition.store(false, Ordering::Release);
+            let gate = Arc::clone(gate);
+            Box::pin(async move {
+                gate.reached.notify_one();
+                gate.release
+                    .acquire()
+                    .await
+                    .expect("conflict gate remains open")
+                    .forget();
+                Err(task::store::StoreError::Conflict)
+            })
+        } else if self.conflict_next_transition.swap(false, Ordering::AcqRel) {
             let advance = self.advance_revision_on_conflict.swap(false, Ordering::AcqRel);
             Box::pin(async move {
                 if advance {
@@ -3766,6 +3784,153 @@ async fn test_external_cancel_retries_failed_hook() {
         .unwrap_or_default();
     assert_eq!(reads.0, 1, "external cancel retry does not reload the payload");
     assert!(reads.1 > 0, "external cancel reconciliation reads summaries");
+}
+
+#[tokio::test]
+async fn test_external_cancel_cas_stages_fail_when_revision_does_not_advance() {
+    struct FinishOnExternalCancel(Arc<Notify>);
+    impl TaskHandler<Counter> for FinishOnExternalCancel {
+        fn run<'a>(&'a self, _value: Counter, _context: TaskContext) -> TaskFuture<'a, task::handler::TaskRunResult> {
+            let finish = Arc::clone(&self.0);
+            Box::pin(async move {
+                finish.notified().await;
+                Ok(TaskRunOutcome::Cancelled)
+            })
+        }
+    }
+
+    const STAGES: [&str; 3] = ["recording intent", "clearing diagnostic", "recording hook failure"];
+    for (stage_index, stage) in STAGES.into_iter().enumerate() {
+        let conflict_gate = (stage_index == 0).then(|| {
+            Arc::new(TransitionCasGate {
+                armed: AtomicBool::new(true),
+                reached: Notify::new(),
+                release: tokio::sync::Semaphore::new(0),
+            })
+        });
+        let inner: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new(32));
+        let store = failing_store_with_inner(inner, conflict_gate.clone());
+        let handler_finish = Arc::new(Notify::new());
+        let hook_calls = Arc::new(AtomicU64::new(0));
+        let hook_store = Arc::clone(&store);
+        let hook_call_count = Arc::clone(&hook_calls);
+        let hook: task::ExternalCancellationHook = Arc::new(move |attempt| {
+            hook_call_count.fetch_add(1, Ordering::Relaxed);
+            let store = Arc::clone(&hook_store);
+            Box::pin(async move {
+                if stage_index == 1 {
+                    let summary = store
+                        .inner
+                        .get_summary(attempt.task_id())
+                        .await
+                        .expect("summary read succeeds")
+                        .expect("task remains present");
+                    store
+                        .inner
+                        .transition_encoded(task::model::TransitionCommand {
+                            id: attempt.task_id(),
+                            expected_state_version: summary.state_version,
+                            expected_attempt: attempt.attempt(),
+                            retry_not_before_ms: None,
+                            state: TaskState::Running,
+                            cancel_requested: true,
+                            cancel_error: Some("concurrent diagnostic".into()),
+                            finished_at_ms: None,
+                            output: None,
+                        })
+                        .await
+                        .expect("concurrent diagnostic advances the revision");
+                    store.conflict_next_transition.store(true, Ordering::Release);
+                    Ok(())
+                } else if stage_index == 2 {
+                    store.conflict_next_transition.store(true, Ordering::Release);
+                    Err(TaskRunError {
+                        category: "remote".into(),
+                        message: "hook failed".into(),
+                        retryable: false,
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let mut builder = TaskExecutionServiceBuilder::new(
+            store.clone(),
+            registry(),
+            Arc::new(Ids(AtomicU64::new(8_200 + stage_index as u64))),
+        );
+        builder
+            .register_handler_with_options::<Counter, _>(
+                descriptor(CancellationMode::ExternalHook),
+                Arc::new(FinishOnExternalCancel(Arc::clone(&handler_finish))),
+                HandlerOptions::new()
+                    .with_source("test")
+                    .with_external_cancellation(move |attempt| hook(attempt)),
+            )
+            .unwrap();
+        let service = builder.build().await.unwrap();
+        let accepted = service.submit(request()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if service
+                    .get_summary(accepted.summary.id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|summary| summary.state == TaskState::Running)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handler starts before the external cancellation test");
+
+        if stage_index == 0 {
+            store.conflict_next_transition.store(true, Ordering::Release);
+        }
+        let task_id = accepted.summary.id;
+        let results = if let Some(gate) = &conflict_gate {
+            let first_service = service.clone();
+            let first = tokio::spawn(async move { first_service.request_cancel(task_id).await });
+            tokio::time::timeout(Duration::from_secs(2), gate.reached.notified())
+                .await
+                .expect("first caller enters the shared cancellation flight");
+            let second_service = service.clone();
+            let second = tokio::spawn(async move { second_service.request_cancel(task_id).await });
+            tokio::task::yield_now().await;
+            gate.release.add_permits(1);
+            vec![
+                first.await.expect("first cancellation caller joins"),
+                second.await.expect("second cancellation caller joins"),
+            ]
+        } else {
+            vec![service.request_cancel(task_id).await]
+        };
+        for result in &results {
+            assert!(
+                matches!(
+                    result,
+                    Err(task::service::TaskServiceError::StoreUnavailable(message))
+                        if message.contains(stage)
+                ),
+                "expected no-progress failure while {stage}, got {result:?}"
+            );
+        }
+        assert_eq!(results.len(), if stage_index == 0 { 2 } else { 1 });
+        assert_eq!(
+            hook_calls.load(Ordering::Relaxed),
+            u64::from(stage_index != 0),
+            "the hook only runs after cancellation intent is persisted"
+        );
+        handler_finish.notify_one();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), service.shutdown())
+                .await
+                .expect("shutdown drains the handler"),
+            Err(task::service::TaskServiceError::StoreUnavailable(_))
+        ));
+    }
 }
 
 #[derive(Clone, Copy)]
