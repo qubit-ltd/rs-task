@@ -48,6 +48,8 @@ use tokio::sync::Barrier;
 const ROUNDS: usize = 5;
 const COMMIT_DELAY: Duration = Duration::from_millis(80);
 const TIMEOUT: Duration = Duration::from_millis(400);
+const PROBE_INTERVAL: Duration = Duration::from_millis(1);
+const OBSERVATION_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 enum Strategy {
@@ -144,11 +146,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut timeouts = [0_usize; 2];
         let mut errors = [0_usize; 2];
         let mut overlaps = [0_usize; 2];
+        let mut probe_totals = [ProbeMetrics::default(), ProbeMetrics::default()];
         for round in 0..ROUNDS {
             let order = if round % 2 == 0 { [0, 1] } else { [1, 0] };
             for strategy_index in order {
                 let backoff_first = strategy_index == 1;
-                let (latency, startup, count, timeout, error, overlap) =
+                let (latency, startup, count, timeout, error, overlap, probes) =
                     runtime.block_on(run_real_store_round(&temp, round, waiters, backoff_first))?;
                 samples[strategy_index].extend(latency);
                 for (probe, duration) in startup {
@@ -162,11 +165,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 timeouts[strategy_index] += timeout;
                 errors[strategy_index] += error;
                 overlaps[strategy_index] += overlap;
+                probe_totals[strategy_index].merge(probes);
             }
         }
         for strategy_index in 0..2 {
             println!(
-                "real_store waiters={waiters} strategy={} reads={reads} observations={} startup_p95_us={} probe_startup_p95_us={} observation_p95_us={} timeout={timeouts} errors={errors} overlapping_commit={overlaps}",
+                "real_store waiters={waiters} strategy={} reads={reads} observations={} startup_p95_us={} probe_startup_p95_us={} observation_p95_us={} timeout={timeouts} errors={errors} overlapping_commit={overlaps} probes_planned={probes_planned} probes_launched={probes_launched} probes_accepted_in_window={probes_accepted} accepted_after_window={accepted_after_window} submit_failed={submit_failed} admission_unresolved={admission_unresolved} handler_started_in_window={handler_started_in_window} handler_not_started_in_window={handler_not_started_in_window} launch_lag_p95_us={launch_lag_p95_us} admission_p95_us={admission_p95_us} admission_to_handler_p95_us={admission_to_handler_p95_us} admission_handler_overlap={admission_handler_overlap}",
                 if strategy_index == 1 {
                     "current-backoff"
                 } else {
@@ -180,10 +184,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 timeouts = timeouts[strategy_index],
                 errors = errors[strategy_index],
                 overlaps = overlaps[strategy_index],
+                probes_planned = probe_totals[strategy_index].planned,
+                probes_launched = probe_totals[strategy_index].launched,
+                probes_accepted = probe_totals[strategy_index].accepted,
+                accepted_after_window = probe_totals[strategy_index].accepted_after_window,
+                submit_failed = probe_totals[strategy_index].failed,
+                admission_unresolved = probe_totals[strategy_index].unresolved,
+                handler_started_in_window = probe_totals[strategy_index].started_in_window,
+                handler_not_started_in_window = probe_totals[strategy_index].not_started_in_window,
+                launch_lag_p95_us = percentile(&probe_totals[strategy_index].launch_lag_us, 95),
+                admission_p95_us = percentile(&probe_totals[strategy_index].admission_us, 95),
+                admission_to_handler_p95_us = percentile(&probe_totals[strategy_index].admission_handler_us, 95),
+                admission_handler_overlap = probe_totals[strategy_index].interleaved,
             );
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct ProbeMetrics {
+    planned: usize,
+    launched: usize,
+    accepted: usize,
+    accepted_after_window: usize,
+    failed: usize,
+    unresolved: usize,
+    started_in_window: usize,
+    not_started_in_window: usize,
+    interleaved: usize,
+    launch_lag_us: Vec<u128>,
+    admission_us: Vec<u128>,
+    admission_handler_us: Vec<u128>,
+}
+
+impl ProbeMetrics {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.launched > self.planned
+            || self.launched != self.accepted + self.accepted_after_window + self.failed + self.unresolved
+            || self.started_in_window + self.not_started_in_window != self.accepted
+        {
+            return Err("probe counts do not reconcile");
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, mut other: Self) {
+        self.planned += other.planned;
+        self.launched += other.launched;
+        self.accepted += other.accepted;
+        self.accepted_after_window += other.accepted_after_window;
+        self.failed += other.failed;
+        self.unresolved += other.unresolved;
+        self.started_in_window += other.started_in_window;
+        self.not_started_in_window += other.not_started_in_window;
+        self.interleaved += other.interleaved;
+        self.launch_lag_us.append(&mut other.launch_lag_us);
+        self.admission_us.append(&mut other.admission_us);
+        self.admission_handler_us.append(&mut other.admission_handler_us);
+    }
 }
 
 #[derive(Clone)]
@@ -288,7 +347,7 @@ async fn run_real_store_round(
     round: usize,
     waiters: usize,
     use_backoff: bool,
-) -> Result<(Vec<u128>, Vec<(bool, u128)>, usize, usize, usize, usize), Box<dyn std::error::Error>> {
+) -> Result<(Vec<u128>, Vec<(bool, u128)>, usize, usize, usize, usize, ProbeMetrics), Box<dyn std::error::Error>> {
     let path = temp.join(format!("real-{round}-{waiters}-{use_backoff}.sqlite"));
     let inner = Arc::new(SqliteTaskStore::open(&path)?);
     let store = Arc::new(CountingStore {
@@ -298,6 +357,8 @@ async fn run_real_store_round(
         commit: Mutex::new(None),
     });
     let submitted_at = Arc::new(Mutex::new(HashMap::<u32, Instant>::new()));
+    let accepted_at = Arc::new(Mutex::new(HashMap::<u32, Instant>::new()));
+    let handler_at = Arc::new(Mutex::new(HashMap::<u32, Instant>::new()));
     let handler_startup = Arc::new(Mutex::new(Vec::<(bool, u128)>::new()));
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([
         &BENCHMARK_CODEC_REGISTRATION,
@@ -307,11 +368,13 @@ async fn run_real_store_round(
         .max_running_tasks(NonZeroUsize::new(2).expect("two workers is non-zero"));
     let handler_times = Arc::clone(&handler_startup);
     let submissions = Arc::clone(&submitted_at);
+    let handlers = Arc::clone(&handler_at);
     builder.register_handler_fn::<BenchmarkInput, _, _>(
         TaskHandlerDescriptor::for_payload::<BenchmarkInput>("terminal-wait-bench", 1),
         move |input, _context| {
             let handler_times = Arc::clone(&handler_times);
             let submissions = Arc::clone(&submissions);
+            let handlers = Arc::clone(&handlers);
             async move {
                 let started = Instant::now();
                 if let Some(submitted) = submissions.lock().expect("submission lock").get(&input.sequence) {
@@ -320,6 +383,10 @@ async fn run_real_store_round(
                         .expect("handler times lock")
                         .push((input.sequence != 0, started.duration_since(*submitted).as_micros()));
                 }
+                handlers
+                    .lock()
+                    .expect("handler timestamps lock")
+                    .insert(input.sequence, started);
                 tokio::time::sleep(Duration::from_millis(u64::from(input.duration_ms))).await;
                 Ok(TaskRunOutcome::success())
             }
@@ -350,28 +417,45 @@ async fn run_real_store_round(
                     .map(|_| Instant::now())
                     .map_err(|error| matches!(error, WaitTaskError::Timeout(_)))
             } else {
-                let deadline = Instant::now() + TIMEOUT;
-                loop {
-                    match service.get_state_checkpoint(id).await {
-                        Ok(Some(checkpoint)) if checkpoint.state.is_terminal() => return Ok(Instant::now()),
-                        Ok(Some(_)) => {}
-                        Ok(None) | Err(_) => return Err(false),
+                tokio::time::timeout(TIMEOUT, async {
+                    loop {
+                        match service.get_state_checkpoint(id).await {
+                            Ok(Some(checkpoint)) if checkpoint.state.is_terminal() => {
+                                return Ok(Instant::now());
+                            }
+                            Ok(Some(_)) => {}
+                            Ok(None) | Err(_) => return Err(false),
+                        }
+                        tokio::time::sleep(Duration::from_millis(25)).await;
                     }
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(true);
-                    }
-                    tokio::time::sleep(Duration::from_millis(25).min(deadline - now)).await;
-                }
+                })
+                .await
+                .unwrap_or(Err(true))
             }
         }));
     }
+    let probe_start = Instant::now();
+    let window_end = probe_start + OBSERVATION_WINDOW;
+    let mut probes = ProbeMetrics {
+        planned: waiters,
+        ..ProbeMetrics::default()
+    };
     for sequence in 1..=u32::try_from(waiters)? {
+        let planned_at = probe_start + PROBE_INTERVAL.saturating_mul(sequence - 1);
+        tokio::time::sleep_until(tokio::time::Instant::from_std(planned_at)).await;
+        let initiated = Instant::now();
+        if initiated >= window_end {
+            break;
+        }
+        probes.launched += 1;
+        probes
+            .launch_lag_us
+            .push(initiated.duration_since(planned_at).as_micros());
         submitted_at
             .lock()
             .expect("submission lock")
-            .insert(sequence, Instant::now());
-        let _ = service
+            .insert(sequence, initiated);
+        match service
             .submit(
                 TaskKind::<BenchmarkInput>::new("terminal-wait-bench", 1, ValueCodecId::new("example.codec")).request(
                     BenchmarkInput {
@@ -380,7 +464,23 @@ async fn run_real_store_round(
                     },
                 ),
             )
-            .await?;
+            .await
+        {
+            Ok(_) => {
+                let accepted = Instant::now();
+                accepted_at
+                    .lock()
+                    .expect("admission timestamps lock")
+                    .insert(sequence, accepted);
+                if accepted < window_end {
+                    probes.accepted += 1;
+                    probes.admission_us.push(accepted.duration_since(initiated).as_micros());
+                } else {
+                    probes.accepted_after_window += 1;
+                }
+            }
+            Err(_) => probes.failed += 1,
+        }
     }
     let mut observations = Vec::with_capacity(waiters);
     let mut timeouts = 0;
@@ -392,25 +492,69 @@ async fn run_real_store_round(
             Err(false) => errors += 1,
         }
     }
+    tokio::time::sleep_until(tokio::time::Instant::from_std(window_end)).await;
     let commit = *store.commit.lock().expect("commit lock");
     let mut overlapping = 0;
+    let commit = if observations.is_empty() {
+        None
+    } else {
+        Some(commit.ok_or("successful terminal observations have no commit interval")?)
+    };
     let observations = observations
         .into_iter()
-        .map(|observed| {
-            commit.map_or(0, |(_before, after)| {
-                if observed < after {
-                    overlapping += 1;
-                    0
-                } else {
-                    observed.duration_since(after).as_micros()
-                }
-            })
+        .filter_map(|observed| {
+            let (_before, after) = commit?;
+            if observed < after {
+                overlapping += 1;
+                None
+            } else {
+                Some(observed.duration_since(after).as_micros())
+            }
         })
         .collect();
+    let accepted = accepted_at.lock().expect("admission timestamps lock").clone();
+    let handlers = handler_at.lock().expect("handler timestamps lock").clone();
+    let submissions = submitted_at.lock().expect("submission timestamps lock").clone();
+    probes.started_in_window = handlers
+        .iter()
+        .filter(|(sequence, started)| **sequence != 0 && **started < window_end && **started >= probe_start)
+        .count();
+    probes.not_started_in_window = probes.accepted.saturating_sub(probes.started_in_window);
+    for (sequence, accepted) in accepted {
+        if accepted < window_end
+            && let Some(started) = handlers.get(&sequence)
+        {
+            if *started >= accepted {
+                probes
+                    .admission_handler_us
+                    .push(started.duration_since(accepted).as_micros());
+            } else if *started < window_end {
+                probes.interleaved += 1;
+            }
+        }
+    }
+    probes.unresolved = probes
+        .launched
+        .saturating_sub(probes.accepted + probes.accepted_after_window + probes.failed);
+    probes.validate()?;
     let reads = store.reads.load(std::sync::atomic::Ordering::Relaxed);
-    let startup = handler_startup.lock().expect("handler times lock").clone();
+    let mut startup = handler_startup
+        .lock()
+        .expect("handler times lock")
+        .iter()
+        .filter(|(is_probe, _)| !is_probe)
+        .copied()
+        .collect::<Vec<_>>();
+    startup.extend(handlers.iter().filter_map(|(sequence, started)| {
+        if *sequence == 0 || *started >= window_end {
+            return None;
+        }
+        submissions
+            .get(sequence)
+            .map(|submitted| (true, started.duration_since(*submitted).as_micros()))
+    }));
     service.shutdown().await?;
-    Ok((observations, startup, reads, timeouts, errors, overlapping))
+    Ok((observations, startup, reads, timeouts, errors, overlapping, probes))
 }
 
 struct PollResult {
@@ -497,29 +641,34 @@ async fn run_round(
         barrier.wait().await;
     }
     let mut outcome = Outcome::default();
+    let mut observed_at = Vec::with_capacity(waiters);
     for task in tasks {
         match task.await? {
-            Ok(result) => {
-                outcome.successes += 1;
-                outcome
-                    .startup_us
-                    .push(result.first_read.duration_since(common_start).as_micros());
-                if let Some((_before, after)) = *committed_at.lock().expect("commit timestamp lock") {
-                    if result.observed < after {
-                        outcome.overlapping_commit += 1;
-                        outcome.observation_us.push(0);
-                    } else {
-                        outcome
-                            .observation_us
-                            .push(result.observed.duration_since(after).as_micros());
-                    }
-                }
-            }
+            Ok(result) => observed_at.push(result),
             Err(PollError::Timeout) => outcome.timeouts += 1,
             Err(PollError::Read) => outcome.errors += 1,
         }
     }
     writer.join().map_err(|_| "writer thread panicked")??;
+    let commit = committed_at
+        .lock()
+        .expect("commit timestamp lock")
+        .ok_or("writer completed without a commit interval")?;
+    for result in observed_at {
+        outcome.successes += 1;
+        outcome
+            .startup_us
+            .push(result.first_read.duration_since(common_start).as_micros());
+        if result.observed < commit.1 {
+            outcome.overlapping_commit += 1;
+            // Keep these samples separate: assigning zero would bias the
+            // latency quantile.
+        } else {
+            outcome
+                .observation_us
+                .push(result.observed.duration_since(commit.1).as_micros());
+        }
+    }
     outcome.checkpoint_reads = read_count.load(std::sync::atomic::Ordering::Relaxed);
     Ok(outcome)
 }

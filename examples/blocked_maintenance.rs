@@ -72,7 +72,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let query = TaskQuery::default().with_category("image-processing");
         let mut pages = service.pages(query);
         loop {
-            let Some(page) = pages.next_page().await? else { break };
+            let Some(page) = pages.next_page().await? else {
+                break;
+            };
             for task in page.records {
                 println!("{} {:?}", task.id.to_padded_decimal(), task.state);
             }

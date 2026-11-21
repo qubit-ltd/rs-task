@@ -1,85 +1,49 @@
 # SQLite terminal-wait polling benchmark
 
-## Evidence search
+## Reproduction and environment
 
-The repository history contains no `doc/terminal-wait-sqlite-benchmark.md` or matching benchmark record (`git log --all -- doc/terminal-wait-sqlite-benchmark.md`; source and docs search). The earlier measurements referenced in review could not be recovered, so a controlled comparison was run.
+Run `cargo bench --locked --features sqlite --bench terminal_wait_sqlite`. The harness uses bundled SQLite 3.54.1, a two-worker Tokio runtime, a fresh WAL database per trial, an 80 ms target handler, and a 400 ms wait budget. Five rounds alternate fixed 25 ms polling with the current 25/50/100 ms backoff. It runs both a synthetic checkpoint table and the real `SqliteTaskStore` service path. The complete output from the corrected run is in [terminal-wait-sqlite-benchmark-raw.txt](terminal-wait-sqlite-benchmark-raw.txt).
 
-## Reproduction
+For the real-store trials, each requested waiter also schedules one probe at 1 ms intervals from a common start, with a shared 2 s observation window. Scheduling uses absolute due times, so slow submit calls do not shift later due times. The output distinguishes planned, launched, accepted in-window, accepted after the window, failed, unresolved, and handler-started probes. Handler startup p95 only includes handler starts observed within the common window. Probe admission and admission-to-handler p95 values have their own sample populations. Unlaunched probes are reported through the planned-versus-launched counts. The per-waiter terminal-wait timeout remains 400 ms.
 
-```sh
-cargo bench --locked --features sqlite --bench terminal_wait_sqlite
-```
+## Synthetic checkpoint results
 
-The harness creates a fresh SQLite WAL database for each trial, uses bundled SQLite 3.54.1 and a two-worker Tokio runtime, and stores one checkpoint row. Each waiter makes an immediate read, then polls until the writer changes the row to terminal after 80 ms. The timeout is 400 ms. Five rounds alternate fixed 25 ms polling and the current 25/50/100 ms exponential backoff. The benchmark measures first-read startup p95, terminal-commit-to-observation p50/p95, checkpoint reads, timeouts, and read errors. Complete per-round output is in [terminal-wait-sqlite-benchmark-raw.txt](terminal-wait-sqlite-benchmark-raw.txt).
+Medians over five rounds; latency in milliseconds. Each nonzero waiter group reconciles all 5 × waiter-count waits as success, timeout, or error. There were no timeouts or errors in this run.
 
-## Results
-
-Medians across five rounds (times in microseconds; checkpoint reads are total reads in one trial):
-
-| Waiters | Strategy | Checkpoint reads | Startup p95 | Observation p50 | Observation p95 | Observation p95 range |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 32 | Fixed 25 ms | 160 | 5,673 | 15,161 | 17,011 | 7,680–24,643 |
-| 32 | Current backoff | 128 | 5,709 | 96,205 | 97,460 | 91,151–97,742 |
-| 128 | Fixed 25 ms | 560 | 23,345 | 12,565 | 25,514 | 9,942–28,378 |
-| 128 | Current backoff | 512 | 18,025 | 96,830 | 101,904 | 97,151–103,220 |
-| 512 | Fixed 25 ms | 1,475 | 69,692 | 15,734 | 29,609 | 28,086–36,156 |
-| 512 | Current backoff | 2,048 | 73,827 | 45,856 | 60,266 | 50,890–96,104 |
-
-No timeouts or SQLite read errors occurred. Fixed 25 ms polling observed the terminal checkpoint sooner in these trials. The current strategy reduced read counts at 32 and 128 waiters, while results at 512 waiters were noisy and the median count was higher for backoff. Startup p95 rose substantially with waiter count for both strategies.
-
-## Conclusion and limits
-
-This synthetic 80 ms completion under a 400 ms budget demonstrates a latency-versus-query-load tradeoff at lower waiter counts, but results at high concurrency vary considerably. It does not establish that the current policy exceeds a deployment latency budget: no representative application budget or waiter distribution was available. It also measures a minimal SQLite checkpoint table, not `SqliteTaskStore`, task admission, handlers, or the complete service path. Therefore the current wait strategy is retained; validate with a deployment-specific task workload before changing behavior.
-
-Existing virtual-time regressions cover immediate first reads and the 40/60 ms and 90/120 ms cases. For short budgets, the quarter-budget cap and 25 ms floor constrain the backoff; these tests remain the relevant contract checks.
-
-## Corrected timing and sample accounting (2026-11-21)
-
-The revised harness opens the writer and every requested reader before starting its common monotonic clock. A connection-open failure now reports the round, strategy and participant and exits before spawning waiters. The writer uses a 2-second SQLite busy timeout; readers use the same bound. The common start is published only after preparation, the writer targets 80 ms from that start, and each reader's 400 ms budget starts immediately before its first read. Reader tasks are collected before writer completion data is summarized.
-
-The failure path is reproducible with `cargo bench --locked --features sqlite --bench terminal_wait_sqlite -- --self-test-open-failure`; this exercises reader and writer opens beneath a missing directory and checks their context. The compiled benchmark self-check completed under a 5-second process timeout.
-
-Each output row reports successful observations, timeouts, read errors, observed samples and commit-interval overlaps. A result observed during the writer's commit call is included at the lower-bound latency of zero and counted separately. Empty percentile sets print `N/A`. Across all five rounds, each nonzero waiter group satisfies `success + timeout + errors = requested waiters × 5` for each strategy. The complete corrected per-round data follows the original historical samples in [terminal-wait-sqlite-benchmark-raw.txt](terminal-wait-sqlite-benchmark-raw.txt). The first revised run's service phase was interrupted and is labeled/excluded; the next run completed both phases.
-
-For the completed synthetic run, medians across five rounds were:
-
-| Waiters | Strategy | Median checkpoint reads | Median observation p95 | Successes / timeouts / errors |
+| Waiters | Strategy | Median checkpoint reads | Median observation p95 | Success / timeout / error |
 | ---: | --- | ---: | ---: | ---: |
-| 32 | Fixed 25 ms | 160 | 16.5 ms | 160 / 0 / 0 |
-| 32 | Current backoff | 128 | 90.3 ms | 128 / 32 / 0 |
-| 128 | Fixed 25 ms | 640 | 19.6 ms | 640 / 0 / 0 |
-| 128 | Current backoff | 512 | 93.8 ms | 640 / 0 / 0 |
-| 512 | Fixed 25 ms | 2,270 | 30.5 ms | 2,560 / 0 / 0 |
-| 512 | Current backoff | 1,758 | 101.6 ms | 2,560 / 0 / 0 |
+| 32 | Fixed 25 ms | 160 | 20.3 | 160 / 0 / 0 |
+| 32 | Current backoff | 128 | 88.5 | 160 / 0 / 0 |
+| 128 | Fixed 25 ms | 640 | 24.7 | 640 / 0 / 0 |
+| 128 | Current backoff | 512 | 100.8 | 640 / 0 / 0 |
+| 512 | Fixed 25 ms | 2,163 | 31.3 | 2,560 / 0 / 0 |
+| 512 | Current backoff | 1,720 | 102.2 | 2,560 / 0 / 0 |
 
-The 32-waiter backoff group had one 32-reader timeout round; it remains in the results. At 128 and 512 waiters, backoff reduced query counts while fixed polling observed completion sooner in successful samples. This confirms the synthetic latency/query tradeoff and does not alone set a production budget.
+In this synthetic workload, fixed polling observed completion sooner, while backoff used fewer checkpoint reads. This minimal table does not establish a deployment latency budget.
 
-## Real `SqliteTaskStore` workload
+## Real `SqliteTaskStore` results
 
-The same executable now also runs the service path against a real `SqliteTaskStore`, one target task with an 80 ms handler, and one 2 ms probe per waiter. Each trial uses a fresh SQLite database and a two-worker Tokio runtime; fixed polling calls the public `get_state_checkpoint` API with an immediate first read and a 400 ms total deadline. The production group calls `wait_terminal` with the same total deadline. Five rounds interleave the two strategies at each waiter count. The delegating store counts checkpoint reads for the target and records the target terminal transition interval. Handler-start p95 is reported separately for the target and probes.
+The real-store output aggregates five trials per strategy and waiter count. Observation p95 uses successful terminal observations; overlapping writer commits are counted separately and are not inserted as zero-latency samples. Probe count fields are totals across the five rounds. `handler_started_in_window` and `handler_not_started_in_window` account for in-window admissions; accepted-after-window probes are reported separately.
 
-| Waiters | Strategy | Target startup p95 | Probe startup p95 | Target observation p95 | Target reads | Timeout / errors |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 0 | Fixed / backoff | N/A | N/A | N/A | 0 / 0 | 0 / 0 |
-| 32 | Fixed 25 ms | 39.2 ms | 196.5 ms | 21.1 ms | 832 | 0 / 0 |
-| 32 | Current backoff | 50.9 ms | 210.3 ms | 75.6 ms | 640 | 0 / 0 |
-| 128 | Fixed 25 ms | 49.7 ms | 854.3 ms | 30.2 ms | 3,298 | 0 / 0 |
-| 128 | Current backoff | 34.2 ms | 945.1 ms | 99.0 ms | 2,560 | 0 / 0 |
-| 512 | Fixed 25 ms | 254.3 ms | 30.3 s | 95.8 ms | 12,433 | 512 / 0 |
-| 512 | Current backoff | 93.5 ms | 3.49 s | 85.8 ms | 10,240 | 0 / 0 |
+| Waiters | Strategy | Target reads | Successful observations / timeouts | Observation p95 | Planned / launched / accepted in window / after window | Handler started / not started in window | Launch-lag p95 | Admission-to-handler p95 |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | Fixed 25 ms | 0 | 0 / 0 | N/A | 0 / 0 / 0 / 0 | 0 / 0 | N/A | N/A |
+| 0 | Current backoff | 0 | 0 / 0 | N/A | 0 / 0 / 0 / 0 | 0 / 0 | N/A | N/A |
+| 32 | Fixed 25 ms | 714 | 128 / 32 | 27.8 ms | 160 / 160 / 160 / 0 | 160 / 0 | 834.0 ms | 286.3 ms |
+| 32 | Current backoff | 640 | 160 / 0 | 82.8 ms | 160 / 160 / 160 / 0 | 160 / 0 | 214.3 ms | 705.1 ms |
+| 128 | Fixed 25 ms | 2,940 | 639 / 0 | 38.5 ms | 640 / 634 / 633 / 1 | 398 / 235 | 1,639.2 ms | 991.8 ms |
+| 128 | Current backoff | 2,560 | 640 / 0 | 141.0 ms | 640 / 584 / 582 / 2 | 369 / 213 | 1,653.9 ms | 1,128.9 ms |
+| 512 | Fixed 25 ms | 14,702 | 2,048 / 512 | 48.0 ms | 2,560 / 771 / 766 / 5 | 234 / 532 | 1,690.1 ms | 1,159.0 ms |
+| 512 | Current backoff | 8,756 | 1,484 / 1,076 | 100.1 ms | 2,560 / 571 / 566 / 5 | 167 / 399 | 1,725.1 ms | 1,239.4 ms |
 
-At 512 waiters the fixed-poll group had 512 timeouts among 2,560 waits, while the production backoff group had none and issued 17.6% fewer target checkpoint reads. Its p95 terminal observation was also lower in this local run. The probe startup p95 shows that serial probe admission dominates this deliberately heavy workload. These results support retaining the production strategy; they do not establish a deployment-specific latency budget or waiter distribution. Validate those against application traffic before changing policy.
+This deliberately heavy local probe workload saturates submission and handler admission at 128 and 512 waiters: many planned probes were not launched before the shared window ended, and startup p95 is therefore not a measure of the unlaunched probes. At 512 waiters both strategies timed out substantially; fixed polling completed more waits in this run but generated more reads. At 32 waiters backoff completed all waits while fixed polling timed out 32. These results do not show a stable winner across loads, and no deployment latency budget or representative waiter distribution is available. Keep the production policy and re-evaluate against deployment traffic before changing it.
 
-Reproduce the mixed benchmark with:
+## Deep-cursor fallback evidence
 
-```sh
-cargo bench --locked --features sqlite --bench terminal_wait_sqlite
-```
-
-The corrected 10,000-row deep-cursor report is saved as [sqlite-history-review-23-20261121.json](sqlite-history-review-23-20261121.json) and was generated with:
+The 10,000-row report is [sqlite-history-review-23-20261121.json](sqlite-history-review-23-20261121.json), produced by:
 
 ```sh
 cargo bench --locked --features sqlite --bench sqlite_history -- --sizes 10000 --output "$PWD/doc/sqlite-history-review-23-20261121.json"
 ```
 
-At both 10% and 90% cursor depths, rows and order matched. The old predicate was interrupted under the actual 2,000-callback SQLite VM budget and fell back; the range predicate completed without interruption. Bare SQL, budgeted timing, interruption status and total VM steps are reported separately. The `old_sql_interrupted` JSON field now reflects `OperationInterrupted`, not a VM-step threshold estimate.
+At both 10% and 90% cursor depth, the old and range query returned identical rows in the same order. The actual SQLite progress handler is invoked every 1,000 VM instructions and interrupts on its second callback (approximately 2,000 VM instructions). The old query was interrupted at both depths and completed through the same split-index fallback used by production; the range query completed without interruption. The report records bare-query VM steps, actual interruption, fallback steps, and budgeted timings separately. Warmup also follows the interrupted-query fallback path.

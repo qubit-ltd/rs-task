@@ -828,6 +828,7 @@ fn measure_ready_cursor_pages(
 ) -> Result<Vec<ReadyCursorReport>, Box<dyn std::error::Error>> {
     const OLD_SQL: &str = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4";
     const RANGE_SQL: &str = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) AND (accepted_at,id)>(?2,?3) ORDER BY accepted_at,id LIMIT ?4";
+    const SPLIT_SQL: &str = "WITH candidates(id,accepted_at) AS (SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_immediate_accepted_id WHERE state_kind='Queued' AND retry_not_before_ms IS NULL AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4) UNION ALL SELECT id,accepted_at FROM (SELECT id,accepted_at FROM tasks INDEXED BY tasks_queued_retry_deadline WHERE state_kind='Queued' AND retry_not_before_ms IS NOT NULL AND retry_not_before_ms<=?1 AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4)), page AS (SELECT id,accepted_at FROM candidates ORDER BY accepted_at,id LIMIT ?4) SELECT tasks.id,tasks.request_info_json,tasks.lifecycle_json FROM page JOIN tasks ON tasks.id=page.id ORDER BY page.accepted_at,page.id";
 
     fn execute(
         connection: &Connection,
@@ -889,8 +890,6 @@ fn measure_ready_cursor_pages(
             active.store(false, Ordering::Relaxed);
             Ok((result, steps))
         }
-        let active = Arc::new(AtomicBool::new(false));
-        let calls = Arc::new(AtomicUsize::new(0));
         let callback_active = Arc::new(AtomicBool::new(false));
         let callback_calls = Arc::new(AtomicUsize::new(0));
         let active_ref = Arc::clone(&callback_active);
@@ -905,7 +904,14 @@ fn measure_ready_cursor_pages(
         let mut result_rows = Vec::new();
         let measured = (|| -> Result<(), Box<dyn std::error::Error>> {
             for _ in 0..QUERY_WARMUPS {
-                let _ = attempt(connection, sql, cursor, &active, &calls)?;
+                let (result, _) = attempt(connection, sql, cursor, &callback_active, &callback_calls)?;
+                match result {
+                    Ok(_) => {}
+                    Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::OperationInterrupted => {
+                        let _ = execute(connection, fallback_sql, cursor)?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
             for _ in 0..QUERY_SAMPLES {
                 let started = Instant::now();
@@ -954,8 +960,9 @@ fn measure_ready_cursor_pages(
             )?;
             let (old_sql, old_rows, old_sql_vm_steps) = measure(connection, OLD_SQL, &cursor)?;
             let (range_sql, range_rows, range_sql_vm_steps) = measure(connection, RANGE_SQL, &cursor)?;
-            let old_budget = execute_with_budget(connection, OLD_SQL, RANGE_SQL, &cursor)?;
-            let range_budget = execute_with_budget(connection, RANGE_SQL, RANGE_SQL, &cursor)?;
+            // Both budgeted attempts fall back to the same production split-index query.
+            let old_budget = execute_with_budget(connection, OLD_SQL, SPLIT_SQL, &cursor)?;
+            let range_budget = execute_with_budget(connection, RANGE_SQL, SPLIT_SQL, &cursor)?;
             reports.push(ReadyCursorReport {
                 depth_percent,
                 old_sql_vm_steps,
