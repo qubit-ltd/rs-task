@@ -116,7 +116,10 @@ impl TaskStore for ControlledWaitStore {
         let future = self.inner.get_state_checkpoint(id);
         Box::pin(async move {
             let checkpoint = future.await?;
-            self.reads_at.lock().expect("read timestamp lock").push(tokio::time::Instant::now());
+            self.reads_at
+                .lock()
+                .expect("read timestamp lock")
+                .push(tokio::time::Instant::now());
             self.checkpoint_reads.add_permits(1);
             if checkpoint.as_ref().is_some_and(|item| item.state.is_terminal()) {
                 *self.observed_at.lock().expect("observation timestamp lock") = Some(tokio::time::Instant::now());
@@ -186,11 +189,7 @@ async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
     let id = accepted.summary.id;
     let waiting_service = service.clone();
     let wait_started = tokio::time::Instant::now();
-    let mut wait = tokio::spawn(async move {
-        waiting_service
-            .wait_terminal(id, Duration::from_millis(60))
-            .await
-    });
+    let mut wait = tokio::spawn(async move { waiting_service.wait_terminal(id, Duration::from_millis(60)).await });
     tokio::time::timeout(TEST_LIMIT, store.checkpoint_reads.acquire())
         .await
         .expect("first checkpoint read should start within the test deadline")
@@ -249,7 +248,6 @@ async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
     service.shutdown().await.unwrap();
 }
 
-
 #[tokio::test(start_paused = true)]
 async fn test_wait_terminal_observes_a_90ms_commit_within_a_120ms_budget() {
     const TEST_LIMIT: Duration = Duration::from_secs(2);
@@ -272,18 +270,15 @@ async fn test_wait_terminal_observes_a_90ms_commit_within_a_120ms_budget() {
     let started = Arc::clone(&handler_started);
     let release = Arc::clone(&release_handler);
     builder
-        .register_handler_fn::<Input, _, _>(
-            TaskHandlerDescriptor::for_payload::<Input>("known", 1),
-            move |_, _| {
-                let started = Arc::clone(&started);
-                let release = Arc::clone(&release);
-                async move {
-                    started.notify_one();
-                    release.notified().await;
-                    Ok(TaskRunOutcome::success())
-                }
-            },
-        )
+        .register_handler_fn::<Input, _, _>(TaskHandlerDescriptor::for_payload::<Input>("known", 1), move |_, _| {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(TaskRunOutcome::success())
+            }
+        })
         .unwrap();
     let service = builder.build().await.unwrap();
     let accepted = service
@@ -297,11 +292,7 @@ async fn test_wait_terminal_observes_a_90ms_commit_within_a_120ms_budget() {
     let id = accepted.summary.id;
     let waiting_service = service.clone();
     let wait_started = tokio::time::Instant::now();
-    let mut wait = tokio::spawn(async move {
-        waiting_service
-            .wait_terminal(id, Duration::from_millis(120))
-            .await
-    });
+    let mut wait = tokio::spawn(async move { waiting_service.wait_terminal(id, Duration::from_millis(120)).await });
     tokio::time::timeout(TEST_LIMIT, store.checkpoint_reads.acquire())
         .await
         .expect("first checkpoint read should start within the test deadline")

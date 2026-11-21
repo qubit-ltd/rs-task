@@ -495,10 +495,10 @@ impl TaskExecutionService {
     /// The store is read immediately, then polled at bounded intervals that
     /// back off from 25 ms up to 100 ms. The interval cap is also limited to
     /// one quarter of the requested timeout, with a 25 ms minimum. Read latency
-    /// and polling intervals share the timeout budget. A timeout means no terminal
-    /// checkpoint was observed before the deadline, not that the task is still
-    /// running. Memory storage can evict terminal tasks, while SQLite retains
-    /// terminal checkpoints after pruning task rows.
+    /// and polling intervals share the timeout budget. A timeout means no
+    /// terminal checkpoint was observed before the deadline, not that the
+    /// task is still running. Memory storage can evict terminal tasks,
+    /// while SQLite retains terminal checkpoints after pruning task rows.
     ///
     /// # Parameters
     ///

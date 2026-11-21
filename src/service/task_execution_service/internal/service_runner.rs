@@ -1901,11 +1901,12 @@ mod external_cancel_race_tests {
                 .await
                 .expect("flight result is bounded")
                 .expect("waiter joins");
-            assert!(matches!(
-                result,
-                Err(crate::service::TaskServiceError::StoreUnavailable(ref message))
-                    if message.contains("recording intent") && message.contains("no state-version progress")
-            ),
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::service::TaskServiceError::StoreUnavailable(ref message))
+                        if message.contains("recording intent") && message.contains("no state-version progress")
+                ),
                 "expected intent no-progress diagnostic, got {result:?}"
             );
             if let Err(crate::service::TaskServiceError::StoreUnavailable(message)) = result {
