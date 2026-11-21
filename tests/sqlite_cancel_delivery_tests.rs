@@ -94,6 +94,8 @@ struct GateStore {
     cancel_committed: AtomicBool,
     panic_next_cancel: AtomicBool,
     empty_scan_count: AtomicU64,
+    requeue_gate_target: AtomicU64,
+    requeue_gate_used: AtomicBool,
 }
 
 struct OpenGateOnDrop(Arc<GateStore>);
@@ -147,11 +149,17 @@ impl TaskStore for GateStore {
                 self.cancelled.notify_one();
                 self.release.notified().await;
             }
+            let is_gated_requeue = command.state == TaskState::Queued
+                && command.id.into_id().value() == self.requeue_gate_target.load(Ordering::Acquire);
             let result = self.inner.transition_encoded(command).await;
             if is_cancelled && result.is_ok() {
                 self.cancel_committed.store(true, Ordering::Release);
             }
             if is_cancelled && !self.block_before_commit && result.is_ok() {
+                self.cancelled.notify_one();
+                self.release.notified().await;
+            }
+            if is_gated_requeue && result.is_ok() && !self.requeue_gate_used.swap(true, Ordering::AcqRel) {
                 self.cancelled.notify_one();
                 self.release.notified().await;
             }
@@ -189,6 +197,8 @@ async fn test_blocked_task_cancel_write_keeps_store_owner_until_cas_returns() {
         cancel_committed: AtomicBool::new(false),
         panic_next_cancel: AtomicBool::new(false),
         empty_scan_count: AtomicU64::new(0),
+        requeue_gate_target: AtomicU64::new(0),
+        requeue_gate_used: AtomicBool::new(false),
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
@@ -272,6 +282,8 @@ async fn test_committed_running_cancel_survives_caller_abort_and_reaches_handler
         cancel_committed: AtomicBool::new(false),
         panic_next_cancel: AtomicBool::new(false),
         empty_scan_count: AtomicU64::new(0),
+        requeue_gate_target: AtomicU64::new(0),
+        requeue_gate_used: AtomicBool::new(false),
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
@@ -371,6 +383,8 @@ async fn test_cancellation_store_panic_is_latched_and_propagated() {
         cancel_committed: AtomicBool::new(false),
         panic_next_cancel: AtomicBool::new(true),
         empty_scan_count: AtomicU64::new(0),
+        requeue_gate_target: AtomicU64::new(0),
+        requeue_gate_used: AtomicBool::new(false),
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
@@ -436,6 +450,8 @@ async fn test_detached_cancellation_worker_panic_is_latched_after_caller_abort()
         cancel_committed: AtomicBool::new(false),
         panic_next_cancel: AtomicBool::new(true),
         empty_scan_count: AtomicU64::new(0),
+        requeue_gate_target: AtomicU64::new(0),
+        requeue_gate_used: AtomicBool::new(false),
     });
     let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap());
@@ -544,6 +560,8 @@ async fn test_resume_blocked_wakes_scheduler_after_empty_scan() {
         cancel_committed: AtomicBool::new(false),
         panic_next_cancel: AtomicBool::new(false),
         empty_scan_count: AtomicU64::new(0),
+        requeue_gate_target: AtomicU64::new(id.into_id().value()),
+        requeue_gate_used: AtomicBool::new(false),
     });
     let handler_started = Arc::new(Notify::new());
     let handler_signal = Arc::clone(&handler_started);
@@ -574,8 +592,21 @@ async fn test_resume_blocked_wakes_scheduler_after_empty_scan() {
     .await
     .expect("scheduler completes an empty scan before resumption");
 
-    let resumed = service.resume_blocked(&blocked).await.expect("blocked task resumes");
-    assert_eq!(resumed.state, TaskState::Queued);
+    let open_gate = OpenGateOnDrop(Arc::clone(&gate));
+    let resume_service = service.clone();
+    let resume_task = tokio::spawn(async move { resume_service.resume_blocked(&blocked).await });
+    tokio::time::timeout(Duration::from_secs(3), gate.cancelled.notified())
+        .await
+        .expect("the queued CAS commits before the wrapped store returns");
+    assert_eq!(
+        sqlite.get_summary(id).await.unwrap().unwrap().state,
+        TaskState::Queued,
+        "the task is queued while the caller is still waiting"
+    );
+    resume_task.abort();
+    assert!(resume_task.await.unwrap_err().is_cancelled());
+    gate.release.notify_one();
+    drop(open_gate);
     tokio::time::timeout(Duration::from_secs(3), handler_started.notified())
         .await
         .expect("resumed task wakes and reaches its handler");

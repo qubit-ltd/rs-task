@@ -145,7 +145,7 @@ service 持久化终态诊断前，会将 `Failed.category` 限制为 128 个 UT
 
 `submit` 返回 `AcceptOutcome`，其中包含原子 store 操作返回的 `TaskSummary` 和 `created` 标志。命中幂等请求时，服务返回已有摘要且 `created == false`。`submit_checked` 会先检查当前 handler、model ID、schema 版本和 codec，再执行相同的接纳写入。检查发生在生成 ID 和接受任务之前，因此严格校验失败不会写 store 或发送通知。普通 `submit` 则有意允许提交当前无法路由的请求；调度器会将它记录为 `Blocked`。编码失败以 `TaskServiceError::RequestEncoding(TaskRequestEncodeError)` 保留结构化错误。
 
-需要生命周期、metadata 和进度时调用 `get_summary(id)`；消费者只对账当前状态时使用 `get_state_checkpoint(id)`。`wait_terminal(id, timeout)` 会读取 checkpoint，直到观察到 Succeeded、Failed、Panicked 或 Cancelled。Blocked 不是终态。一个总超时覆盖读取和轮询等待；即使时长为零，也会尝试一次可立即完成的 checkpoint 读取。SQLite 清理任务行后仍保留终态 checkpoint，因此仍可读取最终状态。
+需要生命周期、metadata 和进度时调用 `get_summary(id)`；消费者只对账当前状态时使用 `get_state_checkpoint(id)`。`wait_terminal(id, timeout)` 会读取 checkpoint，直到观察到 Succeeded、Failed、Panicked 或 Cancelled。Blocked 不是终态。一个总超时覆盖读取和轮询等待；即使时长为零，也会尝试一次可立即完成的 checkpoint 读取。`Timeout` 表示截止前未观察到终态 checkpoint；`Unavailable` 表示当前没有可读 checkpoint。Memory store 的终态可能在下次轮询前被淘汰；SQLite 清理任务行后仍保留终态 checkpoint。若需超出 store 保留期限保存结果，应使用应用自己的持久业务记录。
 
 `TaskQuery::default()` 默认读取 50 条。查询字段为私有；用 `with_state`、`with_states`、`with_category`、`with_correlation_key`、`after` 和只读 getter 配置或读取条件。`page_size(n)` 只接受 1 到 256。`service.pages(query)` 创建逐页读取的 `TaskPages`，通过 `next_page()` 取下一页。存储读取失败时游标不会前进，可在修复错误后重试；最后一个非空页会先返回，再报告 `None`。
 

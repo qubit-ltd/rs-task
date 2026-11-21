@@ -303,6 +303,7 @@ struct FailingListStore {
     fail_next_start: std::sync::atomic::AtomicBool,
     fail_next_transition: std::sync::atomic::AtomicBool,
     conflict_next_transition: std::sync::atomic::AtomicBool,
+    advance_revision_on_conflict: std::sync::atomic::AtomicBool,
     fail_next_release: std::sync::atomic::AtomicBool,
     panic_next_release: std::sync::atomic::AtomicBool,
     transition_gate: Option<Arc<TransitionCasGate>>,
@@ -359,6 +360,7 @@ fn failing_store_with_inner(
         fail_next_start: std::sync::atomic::AtomicBool::new(false),
         fail_next_transition: std::sync::atomic::AtomicBool::new(false),
         conflict_next_transition: std::sync::atomic::AtomicBool::new(false),
+        advance_revision_on_conflict: std::sync::atomic::AtomicBool::new(false),
         fail_next_release: std::sync::atomic::AtomicBool::new(false),
         panic_next_release: std::sync::atomic::AtomicBool::new(false),
         transition_gate,
@@ -789,7 +791,26 @@ impl TaskStore for FailingListStore {
         command: task::model::TransitionCommand,
     ) -> TaskFuture<'a, Result<task::model::TaskSummary, task::store::StoreError>> {
         if self.conflict_next_transition.swap(false, Ordering::AcqRel) {
-            Box::pin(async { Err(task::store::StoreError::Conflict) })
+            let advance = self.advance_revision_on_conflict.swap(false, Ordering::AcqRel);
+            Box::pin(async move {
+                if advance {
+                    let summary = self.inner.get_summary(command.id).await?.expect("task remains present");
+                    self.inner
+                        .transition_encoded(task::model::TransitionCommand {
+                            id: command.id,
+                            expected_state_version: summary.state_version,
+                            expected_attempt: summary.attempt,
+                            retry_not_before_ms: None,
+                            state: TaskState::Running,
+                            cancel_requested: false,
+                            cancel_error: Some("concurrent revision".into()),
+                            finished_at_ms: None,
+                            output: None,
+                        })
+                        .await?;
+                }
+                Err(task::store::StoreError::Conflict)
+            })
         } else if let Some(gate) = &self.transition_gate
             && (command.state.is_terminal() || matches!(&command.state, TaskState::Queued))
             && gate.armed.swap(false, Ordering::AcqRel)
@@ -3708,11 +3729,16 @@ async fn test_external_cancel_retries_failed_hook() {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
     store.conflict_next_transition.store(true, Ordering::Release);
-    assert!(matches!(
-        service.request_cancel(accepted.summary.id).await,
-        Err(task::service::TaskServiceError::ExternalCancellationFailed { message, .. })
-            if message == "temporary"
-    ));
+    store.advance_revision_on_conflict.store(true, Ordering::Release);
+    let first_cancel = service.request_cancel(accepted.summary.id).await;
+    assert!(
+        matches!(
+            &first_cancel,
+            Err(task::service::TaskServiceError::ExternalCancellationFailed { message, .. })
+                if message == "temporary"
+        ),
+        "expected the injected hook failure after a progressing CAS conflict, got {first_cancel:?}"
+    );
     let summary = service.get_summary(accepted.summary.id).await.unwrap().unwrap();
     assert!(summary.cancel_requested);
     assert_eq!(summary.cancel_error.as_deref(), Some("temporary"));

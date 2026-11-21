@@ -10,7 +10,13 @@
 use crate::TaskId;
 use crate::store::StoreError;
 
-/// Explains why a terminal task checkpoint could not be obtained.
+/// Explains why a terminal task checkpoint could not be observed.
+///
+/// `Timeout` means the total deadline expired before a terminal checkpoint was
+/// observed; it does not establish the task's current state. `Unavailable`
+/// means no checkpoint could be read. A memory store may evict a terminal
+/// task before the next poll, while SQLite retains terminal checkpoints after
+/// pruning task rows.
 ///
 /// # Examples
 ///

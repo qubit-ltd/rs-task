@@ -20,7 +20,7 @@ Operation 托管任务见[接入说明](#由任务托管-operation)和 [`example
 
 `submit(request)` 返回 `AcceptOutcome { summary, created }`。`created == false` 表示幂等键命中已有请求，只说明请求已接纳，不代表 handler 已完成。`submit_checked(request)` 会先检查 handler、payload model、schema 和 codec，再进行相同的接纳过程；严格校验失败不会分配任务 ID，也不会写入 store。普通 `submit` 则允许接纳当前无法路由的请求，调度器会将其留在 `Blocked`，供配置修复后处理。编码错误通过 `TaskServiceError::RequestEncoding` 保留结构化来源。
 
-读取完整的无 payload 摘要用 `get_summary(id)`；消费者对账只需当前状态时用 `get_state_checkpoint(id)`。`wait_terminal(id, timeout)` 在单一总超时内轮询 checkpoint；Succeeded、Failed、Panicked 和 Cancelled 是终态，Blocked 不是。零超时仍会尝试一次可立即完成的读取；SQLite 清理任务行后，仍可能返回保留的终态 checkpoint。`pages(query)` 每次读取一页：`TaskQuery::default()` 默认 50 条，`page_size` 只接受 1 到 256。页读取失败时保留当前游标供重试，最后一个非空页会先返回，再报告没有更多记录。
+读取完整的无 payload 摘要用 `get_summary(id)`；消费者对账只需当前状态时用 `get_state_checkpoint(id)`。`wait_terminal(id, timeout)` 在单一总超时内轮询 checkpoint；Succeeded、Failed、Panicked 和 Cancelled 是终态，Blocked 不是。零超时仍会尝试一次可立即完成的读取。`Timeout` 表示截止前未观察到终态 checkpoint，读取延迟与轮询等待共同消耗总预算；`Unavailable` 表示当前无法读取该 checkpoint。Memory store 中的终态可能在等待者下次读取前被淘汰；SQLite 清理任务行后仍保留终态 checkpoint。若结果必须超出 store 保留期限，应使用应用自己的持久业务记录。`pages(query)` 每次读取一页：`TaskQuery::default()` 默认 50 条，`page_size` 只接受 1 到 256。页读取失败时保留当前游标供重试，最后一个非空页会先返回，再报告没有更多记录。
 
 `request_cancel(id)` 表示发出取消请求。Queued 或 Blocked 任务可返回 `CancelledBeforeRun`；运行中的 cooperative handler 返回 `CancellationRequested` 后，仍须由 handler 在安全边界检查 `TaskContext::cancellation().wait_requested().await` 或 `is_requested()` 并结束工作。该结果不表示运行中的任务已经终止。写入派发后，服务托管 compare-and-set 及后续调度唤醒或 cooperative signal；调用方被取消只会结束等待。store panic 会锁存服务故障，并向仍在等待的调用方恢复 unwind。修复配置后，把观察到的 `TaskSummary` 传给 `resume_blocked(&observed_summary)`；服务会用该快照版本进行条件更新。重排队成功后会唤醒调度器；写入派发后，即使调用方退出，服务仍会完成写入和唤醒。隔离失败通知时，将完整的 `NotificationFailure` 诊断传给 `quarantine_failed_notification(&diagnostic, reason)`，store 会原子比较任务、版本和事件标识。
 
@@ -150,7 +150,7 @@ FROM task_event_outbox;
 
 1. 读取 `notification_failure()`，记录准确的 `task_id`、`state_version`、`event_id` 和 `error`。该诊断只是当前进程中失败头部的快照，不是持久告警。
 2. 使用 `service.get_state_checkpoint(task_id).await` 核对任务权威状态，并判断应用应如何处理缺失通知。隔离前先检查已有归档记录，并遵守应用的归档/保留策略。发布失败也可能只是 provider 暂时不可用；是否隔离由操作员决定。
-3. 确认需要隔离后，使用诊断返回的精确身份及有意义的原因调用 `service.quarantine_failed_notification(&diagnostic, reason).await`。若头部已变化，操作会返回冲突；重新读取诊断后再判断。该操作会原子归档原始 outbox 行并将其从活动队列移除。
+3. 确认需要隔离后，使用诊断返回的精确身份及有意义的原因调用 `service.quarantine_failed_notification(&diagnostic, reason).await`。若头部已变化，操作会返回冲突；重新读取诊断后再判断。该操作会原子归档原始 outbox 行并将其从活动队列移除。返回 `Ok(())` 确认隔离成功。命令入队后由 service 托管，调用方退出不会撤销命令；SQLite 写入可能先提交而回复丢失。遇到 `NotificationClose`、调用方超时或回复丢失时，按 task ID、state version 和 event ID 查询归档及活动头部：归档行确认隔离；同一失败头仍活动时，重新观察后再决定是否重试；头部已变化时重新诊断。`NotificationClose` 本身不证明 owner 已释放。
 4. 在 `task_event_outbox_quarantine` 中核实归档记录，并确认下一条活动 outbox 记录可以出队和发布。归档只保存证据：隔离会有意丢失该通知，也不会自动重新发布。
 5. 消费者必须发现由此产生的 `state_version` 缺口，并从任务服务刷新权威状态。随后按消费者自己的事务和确认策略提交刷新后的状态与 checkpoint。
 

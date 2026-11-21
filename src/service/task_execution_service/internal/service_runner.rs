@@ -185,6 +185,7 @@ impl ServiceRunner {
             core: Arc::clone(&core),
         };
         let result = AssertUnwindSafe(async {
+            let mut intent_conflict_version = None;
             loop {
                 let summary = match core.store.get_summary(id).await {
                     Ok(Some(summary)) => summary,
@@ -202,6 +203,11 @@ impl ServiceRunner {
                     return ExternalCancelResult::AlreadyTerminal;
                 }
                 if !summary.cancel_requested || summary.cancel_error.is_some() {
+                    if intent_conflict_version == Some(summary.state_version) {
+                        return ExternalCancelResult::ServiceFailed(
+                            "external cancellation made no state-version progress while recording intent".into(),
+                        );
+                    }
                     match core
                         .store
                         .transition_encoded(TransitionCommand {
@@ -218,7 +224,10 @@ impl ServiceRunner {
                         .await
                     {
                         Ok(_) => {}
-                        Err(crate::store::StoreError::Conflict) => continue,
+                        Err(crate::store::StoreError::Conflict) => {
+                            intent_conflict_version = Some(summary.state_version);
+                            continue;
+                        }
                         Err(error) => {
                             return ExternalCancelResult::ServiceFailed(error.to_string());
                         }
@@ -242,49 +251,60 @@ impl ServiceRunner {
                 }
             };
             match AssertUnwindSafe(hook).catch_unwind().await {
-                Ok(Ok(())) => loop {
-                    let summary = match core.store.get_summary(id).await {
-                        Ok(Some(summary)) => summary,
-                        Ok(None) => {
+                Ok(Ok(())) => {
+                    let mut diagnostic_conflict_version = None;
+                    loop {
+                        let summary = match core.store.get_summary(id).await {
+                            Ok(Some(summary)) => summary,
+                            Ok(None) => {
+                                return ExternalCancelResult::ServiceFailed(
+                                    "task disappeared after external cancellation".into(),
+                                );
+                            }
+                            Err(error) => {
+                                return ExternalCancelResult::ServiceFailed(error.to_string());
+                            }
+                        };
+                        if summary.state.is_terminal()
+                            || summary.attempt != attempt
+                            || !matches!(summary.state, TaskState::Running)
+                        {
+                            return ExternalCancelResult::AlreadyTerminal;
+                        }
+                        if summary.cancel_error.is_none() {
+                            return ExternalCancelResult::Success;
+                        }
+                        if diagnostic_conflict_version == Some(summary.state_version) {
                             return ExternalCancelResult::ServiceFailed(
-                                "task disappeared after external cancellation".into(),
+                                "external cancellation made no state-version progress while clearing diagnostic".into(),
                             );
                         }
-                        Err(error) => {
-                            return ExternalCancelResult::ServiceFailed(error.to_string());
-                        }
-                    };
-                    if summary.state.is_terminal()
-                        || summary.attempt != attempt
-                        || !matches!(summary.state, TaskState::Running)
-                    {
-                        return ExternalCancelResult::AlreadyTerminal;
-                    }
-                    if summary.cancel_error.is_none() {
-                        return ExternalCancelResult::Success;
-                    }
-                    match core
-                        .store
-                        .transition_encoded(TransitionCommand {
-                            id,
-                            expected_state_version: summary.state_version,
-                            expected_attempt: attempt,
-                            retry_not_before_ms: None,
-                            state: TaskState::Running,
-                            cancel_requested: true,
-                            cancel_error: None,
-                            finished_at_ms: None,
-                            output: None,
-                        })
-                        .await
-                    {
-                        Ok(_) => return ExternalCancelResult::Success,
-                        Err(crate::store::StoreError::Conflict) => continue,
-                        Err(error) => {
-                            return ExternalCancelResult::ServiceFailed(error.to_string());
+                        match core
+                            .store
+                            .transition_encoded(TransitionCommand {
+                                id,
+                                expected_state_version: summary.state_version,
+                                expected_attempt: attempt,
+                                retry_not_before_ms: None,
+                                state: TaskState::Running,
+                                cancel_requested: true,
+                                cancel_error: None,
+                                finished_at_ms: None,
+                                output: None,
+                            })
+                            .await
+                        {
+                            Ok(_) => return ExternalCancelResult::Success,
+                            Err(crate::store::StoreError::Conflict) => {
+                                diagnostic_conflict_version = Some(summary.state_version);
+                                continue;
+                            }
+                            Err(error) => {
+                                return ExternalCancelResult::ServiceFailed(error.to_string());
+                            }
                         }
                     }
-                },
+                }
                 Ok(Err(error)) => Self::record_external_cancel_failure(&core, id, attempt, error.message).await,
                 Err(panic) => {
                     let message = Self::external_cancel_panic_message(panic);
@@ -650,6 +670,7 @@ impl ServiceRunner {
         message: String,
     ) -> ExternalCancelResult {
         let message = bound_diagnostic(message, crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
+        let mut failure_conflict_version = None;
         loop {
             let summary = match core.store.get_summary(id).await {
                 Ok(Some(summary)) => summary,
@@ -663,6 +684,11 @@ impl ServiceRunner {
             if summary.state.is_terminal() || summary.attempt != attempt || !matches!(summary.state, TaskState::Running)
             {
                 return ExternalCancelResult::AlreadyTerminal;
+            }
+            if failure_conflict_version == Some(summary.state_version) {
+                return ExternalCancelResult::ServiceFailed(
+                    "external cancellation made no state-version progress while recording hook failure".into(),
+                );
             }
             match core
                 .store
@@ -680,7 +706,10 @@ impl ServiceRunner {
                 .await
             {
                 Ok(_) => return ExternalCancelResult::HookFailed(message),
-                Err(crate::store::StoreError::Conflict) => continue,
+                Err(crate::store::StoreError::Conflict) => {
+                    failure_conflict_version = Some(summary.state_version);
+                    continue;
+                }
                 Err(error) => return ExternalCancelResult::ServiceFailed(error.to_string()),
             }
         }

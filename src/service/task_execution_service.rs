@@ -475,10 +475,14 @@ impl TaskExecutionService {
         TaskPages::new(self, query)
     }
 
-    /// Waits until a task reaches a terminal state or the timeout expires.
+    /// Waits until a task reaches a terminal state or the total timeout
+    /// expires.
     ///
-    /// The store is polled at bounded intervals; the returned checkpoint is
-    /// the authoritative terminal state observed by the store.
+    /// The store is polled at bounded intervals; read latency and polling
+    /// intervals share the timeout budget. A timeout means no terminal
+    /// checkpoint was observed before the deadline, not that the task is still
+    /// running. Memory storage can evict terminal tasks, while SQLite retains
+    /// terminal checkpoints after pruning task rows.
     ///
     /// # Parameters
     ///
@@ -500,6 +504,7 @@ impl TaskExecutionService {
         timeout: Duration,
     ) -> Result<crate::model::typed::TaskStateCheckpoint, WaitTaskError> {
         let wait = async {
+            let mut poll_interval = Duration::from_millis(25);
             loop {
                 let checkpoint = self
                     .core
@@ -511,7 +516,8 @@ impl TaskExecutionService {
                 if checkpoint.state.is_terminal() {
                     return Ok(checkpoint);
                 }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                tokio::time::sleep(poll_interval).await;
+                poll_interval = poll_interval.saturating_mul(2).min(Duration::from_millis(100));
             }
         };
         match tokio::time::timeout(timeout, wait).await {
@@ -604,16 +610,18 @@ impl TaskExecutionService {
     /// succeeds or the outbox head changes before the worker processes this
     /// command, the method returns `StoreError::Conflict` and leaves the event
     /// untouched. A command accepted before shutdown completes before store
-    /// ownership is released, even if this future's caller is cancelled.
+    /// ownership is released, even if this future's caller is cancelled. A
+    /// successful result confirms archival. If the caller loses the reply,
+    /// inspect the archive and active outbox head by task ID, state version,
+    /// and event ID before retrying. `NotificationClose` alone does not prove
+    /// store ownership was released.
     ///
     /// # Parameters
     ///
-    /// * `expected_task_id` - Identity of the task owning the failed
-    ///   notification.
-    /// * `expected_state_version` - Revision that must still be current.
-    /// * `expected_event_id` - Identity that must still be the failed outbox
-    ///   head.
-    /// * `reason` - Operator explanation stored with the archived event.
+    /// * `observed` - Failure snapshot identifying the task, state version,
+    ///   event, and observed error for the current outbox head.
+    /// * `reason` - Nonblank operator explanation stored with the archived
+    ///   event.
     ///
     /// # Returns
     ///
