@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let gate = Arc::new(tokio::sync::Semaphore::new(0));
             let release_gate = Arc::clone(&gate);
             let second_started = Arc::new(Mutex::new(Some(second_started)));
-            let launch = Arc::new(move |sequence, _launched_at| {
+            let launch = Arc::new(move |sequence, _planned_at, _launched_at| {
                 let gate = Arc::clone(&gate);
                 let second_started = Arc::clone(&second_started);
                 async move {
@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
             let start = Instant::now();
             let (plans, mut tasks) = launch_probe_schedule(
-                2,
+                3,
                 start,
                 Duration::from_millis(20),
                 start + Duration::from_secs(1),
@@ -130,8 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             release_gate.add_permits(1);
             while tasks.join_next().await.is_some() {}
-            if plans.len() != 2 {
-                return Err("probe schedule did not launch both planned probes".into());
+            if plans.len() != 3 {
+                return Err("probe schedule did not launch all planned probes".into());
             }
             println!("probe launch self-test passed: later due probe started while first probe remained pending");
             Ok::<(), Box<dyn std::error::Error>>(())
@@ -171,6 +171,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "terminal sample self-test passed: 639 effective + 1 overlap = 640; zero and missing interval cases checked"
         );
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--self-test-probe-timing") {
+        self_test_probe_timing()?;
+        println!("probe timing self-test passed: late submit, cutoff equality, overlap, and accounting checked");
         return Ok(());
     }
     let runtime = Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
@@ -241,7 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         for strategy_index in 0..2 {
             println!(
-                "real_store waiters={waiters} strategy={} checkpoint_requests_started={reads} checkpoint_requests_returned={read_requests_returned} checkpoint_read_errors={read_errors} successful_observations={successes} effective_latency_samples={observations} timeout={timeouts} errors={errors} overlapping_commit={overlaps} startup_p95_us={startup_p95} probe_startup_p95_us={probe_startup_p95} observation_p95_us={observation_p95} probes_planned={probes_planned} probes_launched={probes_launched} probes_accepted_in_window={probes_accepted} accepted_after_window={accepted_after_window} submit_failed={submit_failed} admission_unresolved={admission_unresolved} handler_started_in_window={handler_started_in_window} handler_not_started_in_window={handler_not_started_in_window} launch_lag_p95_us={launch_lag_p95_us} launch_to_store_accept_return_p95_us={admission_p95_us} launch_to_submit_reply_p95_us={submit_reply_p95_us} store_accept_return_to_handler_p95_us={admission_to_handler_p95_us} admission_handler_overlap={admission_handler_overlap}",
+                "real_store waiters={waiters} strategy={} checkpoint_requests_started={reads} checkpoint_requests_returned={read_requests_returned} checkpoint_read_errors={read_errors} successful_observations={successes} effective_latency_samples={observations} timeout={timeouts} errors={errors} overlapping_commit={overlaps} startup_p95_us={startup_p95} probe_startup_p95_us={probe_startup_p95} observation_p95_us={observation_p95} probes_planned={probes_planned} probes_not_dispatched={not_dispatched} probes_launched={probes_launched} probes_submitted={probes_submitted} probes_not_submitted={not_submitted} probes_accepted_in_window={probes_accepted} accepted_outside_window={accepted_outside_window} admission_window_overlap={admission_overlap} submit_failed={submit_failed} admission_unresolved={admission_unresolved} handler_started_in_window={handler_started_in_window} handler_not_started_in_window={handler_not_started_in_window} dispatch_lag_p95_us={launch_lag_p95_us} submit_lag_p95_us={submit_lag_p95_us} submit_to_store_accept_return_p95_us={admission_p95_us} submit_to_public_reply_p95_us={submit_reply_p95_us} submit_to_handler_start_p95_us={admission_to_handler_p95_us} admission_handler_overlap={admission_handler_overlap}",
                 if strategy_index == 1 {
                     "current-backoff"
                 } else {
@@ -260,17 +265,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 overlaps = overlaps[strategy_index],
                 probes_planned = probe_totals[strategy_index].planned,
                 probes_launched = probe_totals[strategy_index].launched,
+                not_dispatched = probe_totals[strategy_index].planned.saturating_sub(probe_totals[strategy_index].launched),
+                probes_submitted = probe_totals[strategy_index].submitted,
+                not_submitted = probe_totals[strategy_index].not_submitted,
                 probes_accepted = probe_totals[strategy_index].accepted,
-                accepted_after_window = probe_totals[strategy_index].accepted_after_window,
+                accepted_outside_window = probe_totals[strategy_index].accepted_outside,
+                admission_overlap = probe_totals[strategy_index].admission_overlap,
                 submit_failed = probe_totals[strategy_index].failed,
                 admission_unresolved = probe_totals[strategy_index].unresolved,
                 handler_started_in_window = probe_totals[strategy_index].started_in_window,
                 handler_not_started_in_window = probe_totals[strategy_index].not_started_in_window,
                 launch_lag_p95_us = percentile(&probe_totals[strategy_index].launch_lag_us, 95),
+                submit_lag_p95_us = percentile(&probe_totals[strategy_index].submit_lag_us, 95),
                 admission_p95_us = percentile(&probe_totals[strategy_index].admission_us, 95),
                 submit_reply_p95_us = percentile(&probe_totals[strategy_index].submit_reply_us, 95),
                 admission_to_handler_p95_us = percentile(&probe_totals[strategy_index].admission_handler_us, 95),
-                admission_handler_overlap = probe_totals[strategy_index].interleaved,
+                admission_handler_overlap = probe_totals[strategy_index].handler_admission_overlap,
             );
         }
     }
@@ -281,6 +291,72 @@ struct ProbePlan {
     sequence: u32,
     planned_at: Instant,
     launched_at: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdmissionClass {
+    ConfirmedInWindow,
+    ConfirmedOutside,
+    Overlap,
+    Failed,
+}
+
+fn is_before_window_end(at: Instant, window_end: Instant) -> bool {
+    at < window_end
+}
+
+fn classify_admission(
+    started: Instant,
+    returned: Instant,
+    succeeded: bool,
+    window_end: Instant,
+) -> AdmissionClass {
+    if !succeeded {
+        AdmissionClass::Failed
+    } else if returned < window_end {
+        AdmissionClass::ConfirmedInWindow
+    } else if started >= window_end {
+        AdmissionClass::ConfirmedOutside
+    } else {
+        AdmissionClass::Overlap
+    }
+}
+
+fn self_test_probe_timing() -> Result<(), Box<dyn std::error::Error>> {
+    let cutoff = Instant::now();
+    let before = cutoff - Duration::from_micros(1);
+    let after = cutoff + Duration::from_micros(1);
+    if is_before_window_end(cutoff, cutoff)
+        || is_before_window_end(after, cutoff)
+        || classify_admission(before, before, true, cutoff) != AdmissionClass::ConfirmedInWindow
+        || classify_admission(after, after, true, cutoff) != AdmissionClass::ConfirmedOutside
+        || classify_admission(before, cutoff, true, cutoff) != AdmissionClass::Overlap
+        || classify_admission(before, after, true, cutoff) != AdmissionClass::Overlap
+        || classify_admission(before, after, false, cutoff) != AdmissionClass::Failed
+    {
+        return Err("probe admission classifications mishandled the half-open cutoff".into());
+    }
+    let metrics = ProbeMetrics {
+        planned: 5,
+        launched: 4,
+        not_submitted: 1,
+        submitted: 3,
+        accepted: 1,
+        accepted_outside: 1,
+        admission_overlap: 1,
+        unresolved: 0,
+        started_in_window: 1,
+        not_started_in_window: 0,
+        ..ProbeMetrics::default()
+    };
+    metrics.validate()?;
+    let submit_started = cutoff - Duration::from_millis(4);
+    let store_started = cutoff - Duration::from_millis(2);
+    let store_returned = cutoff - Duration::from_millis(1);
+    if store_returned.duration_since(submit_started) <= store_returned.duration_since(store_started) {
+        return Err("submit-to-return duration must include time before the store call".into());
+    }
+    Ok(())
 }
 
 fn classify_terminal_samples(
@@ -311,7 +387,7 @@ async fn launch_probe_schedule<F, Fut>(
     launch: Arc<F>,
 ) -> (Vec<ProbePlan>, JoinSet<(u32, bool)>)
 where
-    F: Fn(u32, Instant) -> Fut + Send + Sync + 'static,
+    F: Fn(u32, Instant, Instant) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = bool> + Send + 'static,
 {
     let mut plans = Vec::with_capacity(count);
@@ -324,7 +400,7 @@ where
         if launched_at >= window_end {
             break;
         }
-        let future = launch(sequence, launched_at);
+        let future = launch(sequence, planned_at, launched_at);
         tasks.spawn(async move { (sequence, future.await) });
         plans.push(ProbePlan {
             sequence,
@@ -339,14 +415,18 @@ where
 struct ProbeMetrics {
     planned: usize,
     launched: usize,
+    submitted: usize,
     accepted: usize,
-    accepted_after_window: usize,
+    accepted_outside: usize,
+    admission_overlap: usize,
+    not_submitted: usize,
     failed: usize,
     unresolved: usize,
     started_in_window: usize,
     not_started_in_window: usize,
-    interleaved: usize,
+    handler_admission_overlap: usize,
     launch_lag_us: Vec<u128>,
+    submit_lag_us: Vec<u128>,
     admission_us: Vec<u128>,
     submit_reply_us: Vec<u128>,
     admission_handler_us: Vec<u128>,
@@ -355,7 +435,8 @@ struct ProbeMetrics {
 impl ProbeMetrics {
     fn validate(&self) -> Result<(), &'static str> {
         if self.launched > self.planned
-            || self.launched != self.accepted + self.accepted_after_window + self.failed + self.unresolved
+            || self.launched != self.not_submitted + self.submitted
+            || self.submitted != self.accepted + self.accepted_outside + self.admission_overlap + self.failed + self.unresolved
             || self.started_in_window + self.not_started_in_window != self.accepted
         {
             return Err("probe counts do not reconcile");
@@ -367,13 +448,16 @@ impl ProbeMetrics {
         self.planned += other.planned;
         self.launched += other.launched;
         self.accepted += other.accepted;
-        self.accepted_after_window += other.accepted_after_window;
+        self.submitted += other.submitted;
+        self.accepted_outside += other.accepted_outside;
+        self.admission_overlap += other.admission_overlap;
         self.failed += other.failed;
         self.unresolved += other.unresolved;
         self.started_in_window += other.started_in_window;
         self.not_started_in_window += other.not_started_in_window;
-        self.interleaved += other.interleaved;
+        self.handler_admission_overlap += other.handler_admission_overlap;
         self.launch_lag_us.append(&mut other.launch_lag_us);
+        self.submit_lag_us.append(&mut other.submit_lag_us);
         self.admission_us.append(&mut other.admission_us);
         self.submit_reply_us.append(&mut other.submit_reply_us);
         self.admission_handler_us.append(&mut other.admission_handler_us);
@@ -633,14 +717,19 @@ async fn run_real_store_round(
     let probe_service = service.clone();
     let probe_submissions = Arc::clone(&submitted_at);
     let probe_replies = Arc::clone(&submit_replies);
-    let launch = Arc::new(move |sequence, launched_at| {
-        probe_submissions
-            .lock()
-            .expect("submission lock")
-            .insert(sequence, launched_at);
+    let launch = Arc::new(move |sequence, _planned_at, _launched_at| {
         let service = probe_service.clone();
         let replies = Arc::clone(&probe_replies);
+        let submissions = Arc::clone(&probe_submissions);
         async move {
+            {
+                let mut submissions = submissions.lock().expect("submission lock");
+                let submitted_at = Instant::now();
+                if !is_before_window_end(submitted_at, window_end) {
+                    return false;
+                }
+                submissions.insert(sequence, submitted_at);
+            }
             let result = service
                 .submit(
                     TaskKind::<BenchmarkInput>::new("terminal-wait-bench", 1, ValueCodecId::new("example.codec"))
@@ -660,11 +749,6 @@ async fn run_real_store_round(
     let (plans, mut submit_tasks) =
         launch_probe_schedule(waiters, probe_start, PROBE_INTERVAL, window_end, launch).await;
     probes.launched = plans.len();
-    for plan in &plans {
-        probes
-            .launch_lag_us
-            .push(plan.launched_at.duration_since(plan.planned_at).as_micros());
-    }
     // Stop launching at the observation-window boundary, then give dispatched
     // submissions a separate bounded drain period. Missing store intervals
     // remain explicitly unresolved.
@@ -684,23 +768,29 @@ async fn run_real_store_round(
     }
     let accept_intervals = store.accept_intervals.lock().expect("accept interval lock").clone();
     let public_submit_replies = submit_replies.lock().expect("submit reply lock").clone();
+    let actual_submissions = submitted_at.lock().expect("submission lock").clone();
     for plan in &plans {
-        match accept_intervals.get(&plan.sequence) {
-            Some((_started, returned, true)) if *returned < window_end => probes.accepted += 1,
-            Some((_started, _returned, true)) => probes.accepted_after_window += 1,
-            Some((_started, _returned, false)) => probes.failed += 1,
-            None if public_submit_replies
-                .get(&plan.sequence)
-                .is_some_and(|(_, failed)| *failed) =>
-            {
-                probes.failed += 1;
+        probes.launch_lag_us.push(plan.launched_at.duration_since(plan.planned_at).as_micros());
+        if let Some(submitted_at) = actual_submissions.get(&plan.sequence) {
+            probes.submitted += 1;
+            probes.submit_lag_us.push(submitted_at.duration_since(plan.planned_at).as_micros());
+            match accept_intervals.get(&plan.sequence).map(|(started, returned, succeeded)| {
+                classify_admission(*started, *returned, *succeeded, window_end)
+            }) {
+                Some(AdmissionClass::ConfirmedInWindow) => probes.accepted += 1,
+                Some(AdmissionClass::ConfirmedOutside) => probes.accepted_outside += 1,
+                Some(AdmissionClass::Overlap) => probes.admission_overlap += 1,
+                Some(AdmissionClass::Failed) => probes.failed += 1,
+                None if public_submit_replies.get(&plan.sequence).is_some_and(|(_, failed)| *failed) => probes.failed += 1,
+                None => probes.unresolved += 1,
             }
-            None => probes.unresolved += 1,
+        } else {
+            probes.not_submitted += 1;
         }
     }
     for (sequence, (reply, _failed)) in public_submit_replies {
-        if let Some(launched) = submitted_at.lock().expect("submission lock").get(&sequence) {
-            probes.submit_reply_us.push(reply.duration_since(*launched).as_micros());
+        if let Some(submitted) = actual_submissions.get(&sequence) {
+            probes.submit_reply_us.push(reply.duration_since(*submitted).as_micros());
         }
     }
     let mut observations = Vec::with_capacity(waiters);
@@ -720,20 +810,22 @@ async fn run_real_store_round(
     let accepted = accept_intervals;
     let handlers = handler_at.lock().expect("handler timestamps lock").clone();
     let submissions = submitted_at.lock().expect("submission timestamps lock").clone();
-    for (sequence, (started, returned, ok)) in accepted {
+    for (sequence, (_started, returned, ok)) in accepted {
         if !ok {
             continue;
         }
         if returned < window_end {
-            probes.admission_us.push(returned.duration_since(started).as_micros());
+            if let Some(submitted) = actual_submissions.get(&sequence) {
+                probes.admission_us.push(returned.duration_since(*submitted).as_micros());
+            }
             if let Some(handler) = handlers.get(&sequence).filter(|at| **at < window_end) {
                 probes.started_in_window += 1;
                 if *handler >= returned {
-                    probes
-                        .admission_handler_us
-                        .push(handler.duration_since(returned).as_micros());
+                    if let Some(submitted) = actual_submissions.get(&sequence) {
+                        probes.admission_handler_us.push(handler.duration_since(*submitted).as_micros());
+                    }
                 } else {
-                    probes.interleaved += 1;
+                    probes.handler_admission_overlap += 1;
                 }
             }
         }
