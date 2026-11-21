@@ -972,6 +972,8 @@ dependencies = [
 [[package]]
 name = "qubit-event-bus-redis"
 version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7095ca61492efd79b0dd25eb98115a86e3a57b8963d2b327c9090bbbccb40dde"
 dependencies = [
  "async-io",
  "async-lock",

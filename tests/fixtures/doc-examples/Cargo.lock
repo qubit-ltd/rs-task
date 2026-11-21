@@ -262,7 +262,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -857,6 +857,8 @@ dependencies = [
 [[package]]
 name = "qubit-event-bus-redis"
 version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7095ca61492efd79b0dd25eb98115a86e3a57b8963d2b327c9090bbbccb40dde"
 dependencies = [
  "async-io",
  "async-lock",
@@ -1160,7 +1162,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
