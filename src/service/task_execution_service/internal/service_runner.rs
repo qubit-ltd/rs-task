@@ -1470,8 +1470,16 @@ mod external_cancel_race_tests {
     struct PanicTransitionStore {
         inner: Arc<MemoryTaskStore>,
         entered: tokio::sync::Notify,
-        release: tokio::sync::Notify,
+        release: Arc<tokio::sync::Notify>,
         panic_next: std::sync::atomic::AtomicBool,
+    }
+
+    struct ReleasePanicGate(Arc<tokio::sync::Notify>);
+
+    impl Drop for ReleasePanicGate {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
     }
 
     impl TaskStore for PanicTransitionStore {
@@ -1675,9 +1683,10 @@ mod external_cancel_race_tests {
         let store = Arc::new(PanicTransitionStore {
             inner: Arc::new(MemoryTaskStore::new(8)),
             entered: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
+            release: Arc::new(tokio::sync::Notify::new()),
             panic_next: std::sync::atomic::AtomicBool::new(true),
         });
+        let _release_gate = ReleasePanicGate(Arc::clone(&store.release));
         let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
         let handler_started = Arc::new(tokio::sync::Notify::new());
         let handler_release = Arc::new(tokio::sync::Notify::new());
@@ -1751,6 +1760,7 @@ mod external_cancel_race_tests {
         .await
         .expect("both callers join the same cancellation flight");
         store.release.notify_one();
+        let mut failures = Vec::with_capacity(2);
         for waiter in [first, second] {
             let result = tokio::time::timeout(TIMEOUT, waiter)
                 .await
@@ -1759,10 +1769,15 @@ mod external_cancel_race_tests {
             match result {
                 Err(crate::service::TaskServiceError::StoreUnavailable(message)) => {
                     assert!(message.len() <= crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES);
+                    failures.push(message);
                 }
                 other => panic!("expected a bounded unavailable error, got {other:?}"),
             }
         }
+        assert_eq!(
+            failures[0], failures[1],
+            "both flight subscribers receive the same failure"
+        );
         assert!(!service.core.external_cancellations.lock().contains_key(&key));
         assert!(!hook_called.load(std::sync::atomic::Ordering::Acquire));
         handler_release.notify_one();

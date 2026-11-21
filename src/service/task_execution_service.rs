@@ -127,8 +127,22 @@ impl TaskExecutionService {
         options: TypedServiceOptions,
     ) -> Result<Self, TaskServiceError> {
         let cleanup_worker = OwnerReleaseWorker::shared().map_err(TaskServiceError::SchedulerUnavailable)?;
-        let owner = store.acquire_owner().await?;
-        let mut owner_guard = OwnerReleaseGuard::new(Arc::clone(&store), owner, cleanup_worker);
+        let owner_store = Arc::clone(&store);
+        let owner_cleanup = cleanup_worker.clone();
+        let owner_result = tokio::spawn(async move {
+            let owner = owner_store.acquire_owner().await?;
+            Ok::<_, crate::store::StoreError>(OwnerReleaseGuard::new(owner_store, owner, owner_cleanup))
+        })
+        .await;
+        let mut owner_guard = match owner_result {
+            Ok(result) => result?,
+            Err(error) if error.is_panic() => resume_unwind(error.into_panic()),
+            Err(error) => {
+                return Err(TaskServiceError::SchedulerUnavailable(format!(
+                    "owner acquisition task failed: {error}"
+                )));
+            }
+        };
         #[cfg(feature = "event-bus")]
         let publisher = if let Some(bus) = options.event_bus {
             if bus.capabilities().durability() != DurabilityCapability::Durable {
@@ -478,8 +492,10 @@ impl TaskExecutionService {
     /// Waits until a task reaches a terminal state or the total timeout
     /// expires.
     ///
-    /// The store is polled at bounded intervals; read latency and polling
-    /// intervals share the timeout budget. A timeout means no terminal
+    /// The store is read immediately, then polled at bounded intervals that
+    /// back off from 25 ms up to 100 ms. The interval cap is also limited to
+    /// half the requested timeout, with a 25 ms minimum. Read latency and
+    /// polling intervals share the timeout budget. A timeout means no terminal
     /// checkpoint was observed before the deadline, not that the task is still
     /// running. Memory storage can evict terminal tasks, while SQLite retains
     /// terminal checkpoints after pruning task rows.
@@ -505,6 +521,9 @@ impl TaskExecutionService {
     ) -> Result<crate::model::typed::TaskStateCheckpoint, WaitTaskError> {
         let wait = async {
             let mut poll_interval = Duration::from_millis(25);
+            let poll_interval_cap = (timeout / 2)
+                .max(Duration::from_millis(25))
+                .min(Duration::from_millis(100));
             loop {
                 let checkpoint = self
                     .core
@@ -517,7 +536,7 @@ impl TaskExecutionService {
                     return Ok(checkpoint);
                 }
                 tokio::time::sleep(poll_interval).await;
-                poll_interval = poll_interval.saturating_mul(2).min(Duration::from_millis(100));
+                poll_interval = poll_interval.saturating_mul(2).min(poll_interval_cap);
             }
         };
         match tokio::time::timeout(timeout, wait).await {
@@ -609,12 +628,14 @@ impl TaskExecutionService {
     /// consumers should recover before calling this method. If publication
     /// succeeds or the outbox head changes before the worker processes this
     /// command, the method returns `StoreError::Conflict` and leaves the event
-    /// untouched. A command accepted before shutdown completes before store
-    /// ownership is released, even if this future's caller is cancelled. A
-    /// successful result confirms archival. If the caller loses the reply,
-    /// inspect the archive and active outbox head by task ID, state version,
-    /// and event ID before retrying. `NotificationClose` alone does not prove
-    /// store ownership was released.
+    /// untouched. After queue admission, cancelling this future does not
+    /// retract the command. The publisher remains bounded by its shutdown
+    /// deadline, so a worker stop or deadline can leave a command unexecuted
+    /// or its reply unavailable. A successful result confirms archival. On
+    /// `NotificationClose`, a timeout, or a lost reply, inspect the archive
+    /// and active outbox head by task ID, state version, and event ID before
+    /// retrying. `NotificationClose` alone confirms neither isolation nor
+    /// store ownership release.
     ///
     /// # Parameters
     ///
@@ -630,7 +651,9 @@ impl TaskExecutionService {
     ///
     /// # Errors
     ///
-    /// Returns `ShuttingDown` after shutdown begins, `StoreError::Conflict`
+    /// Returns `NotificationClose` if the publisher stops, the shutdown
+    /// deadline expires, or the command reply is lost; `ShuttingDown` after
+    /// shutdown begins, `StoreError::Conflict`
     /// when the supplied identity is no longer the failed head,
     /// `StoreError::UnsupportedCapability` when no publisher or quarantine
     /// capability is available, or `InvalidRequest` for a blank or oversized

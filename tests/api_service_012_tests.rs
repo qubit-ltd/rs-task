@@ -33,6 +33,8 @@ use qubit_task::TaskQuery;
 use qubit_task::TaskStore;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::model::TaskCursor;
+use qubit_task::model::TransitionCommand;
+use qubit_task::model::typed::TaskStateCheckpoint;
 use qubit_task::service::WaitTaskError;
 use qubit_task::store::MemoryTaskStore;
 use qubit_task::store::StoreError;
@@ -93,6 +95,119 @@ struct FailListOnceStore {
     inner: Arc<MemoryTaskStore>,
     calls: AtomicUsize,
     cursors: Mutex<Vec<Option<TaskCursor>>>,
+}
+
+struct ControlledWaitStore {
+    inner: Arc<MemoryTaskStore>,
+    checkpoint_reads: tokio::sync::Semaphore,
+    terminal_committed: tokio::sync::Semaphore,
+    commit_at: Mutex<Option<tokio::time::Instant>>,
+    observed_at: Mutex<Option<tokio::time::Instant>>,
+}
+
+impl TaskStore for ControlledWaitStore {
+    delegate_task_store!(inner; except [get_state_checkpoint, transition_encoded]);
+
+    fn get_state_checkpoint<'a>(
+        &'a self,
+        id: TaskId,
+    ) -> TaskFuture<'a, Result<Option<TaskStateCheckpoint>, StoreError>> {
+        let future = self.inner.get_state_checkpoint(id);
+        Box::pin(async move {
+            let checkpoint = future.await?;
+            self.checkpoint_reads.add_permits(1);
+            if checkpoint.as_ref().is_some_and(|item| item.state.is_terminal()) {
+                *self.observed_at.lock().expect("observation timestamp lock") = Some(tokio::time::Instant::now());
+            }
+            Ok(checkpoint)
+        })
+    }
+
+    fn transition_encoded<'a>(
+        &'a self,
+        command: TransitionCommand,
+    ) -> TaskFuture<'a, Result<qubit_task::model::typed::TaskSummary, StoreError>> {
+        let terminal = command.state.is_terminal();
+        let future = self.inner.transition_encoded(command);
+        Box::pin(async move {
+            let result = future.await?;
+            if terminal {
+                *self.commit_at.lock().expect("commit timestamp lock") = Some(tokio::time::Instant::now());
+                self.terminal_committed.add_permits(1);
+            }
+            Ok(result)
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
+    let store = Arc::new(ControlledWaitStore {
+        inner: Arc::new(MemoryTaskStore::new(16)),
+        checkpoint_reads: tokio::sync::Semaphore::new(0),
+        terminal_committed: tokio::sync::Semaphore::new(0),
+        commit_at: Mutex::new(None),
+        observed_at: Mutex::new(None),
+    });
+    let handler_started = Arc::new(tokio::sync::Notify::new());
+    let release_handler = Arc::new(tokio::sync::Notify::new());
+    let mut builder = TaskExecutionServiceBuilder::new(
+        store.clone(),
+        Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC]).unwrap()),
+        Arc::new(Ids(AtomicU64::new(1_100))),
+    );
+    let started = Arc::clone(&handler_started);
+    let release = Arc::clone(&release_handler);
+    builder
+        .register_handler_fn::<Input, _, _>(TaskHandlerDescriptor::for_payload::<Input>("known", 1), move |_, _| {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(TaskRunOutcome::success())
+            }
+        })
+        .unwrap();
+    let service = builder.build().await.unwrap();
+    let accepted = service
+        .submit(TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(40)))
+        .await
+        .unwrap();
+    handler_started.notified().await;
+
+    let id = accepted.summary.id;
+    let waiting_service = service.clone();
+    let wait_started = tokio::time::Instant::now();
+    let wait = tokio::spawn(async move { waiting_service.wait_terminal(id, Duration::from_millis(60)).await });
+    store.checkpoint_reads.acquire().await.unwrap().forget();
+    tokio::time::advance(Duration::from_millis(25)).await;
+    store.checkpoint_reads.acquire().await.unwrap().forget();
+    tokio::time::advance(Duration::from_millis(15)).await;
+    release_handler.notify_one();
+    store.terminal_committed.acquire().await.unwrap().forget();
+
+    let commit_at = store
+        .commit_at
+        .lock()
+        .unwrap()
+        .expect("target terminal transition committed");
+    assert_eq!(commit_at.duration_since(wait_started), Duration::from_millis(40));
+    tokio::time::advance(Duration::from_millis(15)).await;
+    store.checkpoint_reads.acquire().await.unwrap().forget();
+    let checkpoint = wait
+        .await
+        .unwrap()
+        .expect("terminal state observed before budget expires");
+    assert!(checkpoint.state.is_terminal());
+    let observed_at = store
+        .observed_at
+        .lock()
+        .unwrap()
+        .expect("terminal checkpoint was observed");
+    assert_eq!(observed_at.duration_since(wait_started), Duration::from_millis(55));
+    assert!(observed_at.duration_since(commit_at) <= Duration::from_millis(15));
+    service.shutdown().await.unwrap();
 }
 
 impl qubit_task::store::TaskStore for FailListOnceStore {

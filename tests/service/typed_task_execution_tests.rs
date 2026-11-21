@@ -908,12 +908,52 @@ struct BuildGateStore {
     entered: tokio::sync::Notify,
     resume: tokio::sync::Semaphore,
     first_list: std::sync::atomic::AtomicBool,
+    owner_gate: Option<Arc<OwnerAcquireGate>>,
     #[cfg(feature = "sqlite")]
     submission_gate: Option<Arc<SubmissionStoreGate>>,
     #[cfg(feature = "sqlite")]
     fail_next_accept: bool,
     #[cfg(feature = "sqlite")]
     panic_next_accept_constructor: std::sync::atomic::AtomicBool,
+}
+
+struct OwnerAcquireGate {
+    acquired: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(feature = "sqlite")]
+struct OwnerAcquireGateRelease(Arc<OwnerAcquireGate>);
+
+#[cfg(feature = "sqlite")]
+struct AbortTaskOnDrop(tokio::task::AbortHandle);
+
+#[cfg(feature = "sqlite")]
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(feature = "sqlite")]
+struct SqliteTestPath(std::path::PathBuf);
+
+#[cfg(feature = "sqlite")]
+impl Drop for SqliteTestPath {
+    fn drop(&mut self) {
+        for suffix in ["", ".owner.lock", "-wal", "-shm"] {
+            let mut path = self.0.as_os_str().to_owned();
+            path.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(path));
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl Drop for OwnerAcquireGateRelease {
+    fn drop(&mut self) {
+        self.0.release.add_permits(1);
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -1077,6 +1117,7 @@ impl BuildGateStore {
             entered: tokio::sync::Notify::new(),
             resume: tokio::sync::Semaphore::new(0),
             first_list: std::sync::atomic::AtomicBool::new(true),
+            owner_gate: None,
             #[cfg(feature = "sqlite")]
             submission_gate: None,
             #[cfg(feature = "sqlite")]
@@ -1093,6 +1134,7 @@ impl BuildGateStore {
             entered: tokio::sync::Notify::new(),
             resume: tokio::sync::Semaphore::new(0),
             first_list: std::sync::atomic::AtomicBool::new(false),
+            owner_gate: None,
             submission_gate: Some(gate),
             fail_next_accept: false,
             panic_next_accept_constructor: std::sync::atomic::AtomicBool::new(false),
@@ -1106,6 +1148,7 @@ impl BuildGateStore {
             entered: tokio::sync::Notify::new(),
             resume: tokio::sync::Semaphore::new(0),
             first_list: std::sync::atomic::AtomicBool::new(false),
+            owner_gate: None,
             submission_gate: None,
             fail_next_accept: true,
             panic_next_accept_constructor: std::sync::atomic::AtomicBool::new(false),
@@ -1301,6 +1344,20 @@ impl TaskStore for BuildGateStore {
         self.inner.prune_terminal_before(finished_before_ms, max_rows)
     }
     fn acquire_owner<'a>(&'a self) -> TaskFuture<'a, Result<task::model::OwnerEpoch, task::store::StoreError>> {
+        if let Some(gate) = &self.owner_gate {
+            let gate = Arc::clone(gate);
+            let future = self.inner.acquire_owner();
+            return Box::pin(async move {
+                let epoch = future.await?;
+                gate.acquired.notify_one();
+                gate.release
+                    .acquire()
+                    .await
+                    .map_err(|error| task::store::StoreError::Failure(error.to_string()))?
+                    .forget();
+                Ok(epoch)
+            });
+        }
         self.inner.acquire_owner()
     }
     fn release_owner<'a>(
@@ -1309,6 +1366,65 @@ impl TaskStore for BuildGateStore {
     ) -> TaskFuture<'a, Result<(), task::store::StoreError>> {
         self.inner.release_owner(epoch)
     }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_build_cancellation_after_owner_acquire_releases_sqlite_epoch() {
+    let path = std::env::temp_dir().join(format!(
+        "qubit-task-build-owner-cancel-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos()
+    ));
+    let _cleanup_path = SqliteTestPath(path.clone());
+    let inner: Arc<dyn TaskStore> = Arc::new(task::store::SqliteTaskStore::open(&path).expect("SQLite store opens"));
+    let gate = Arc::new(OwnerAcquireGate {
+        acquired: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let _release_gate = OwnerAcquireGateRelease(Arc::clone(&gate));
+    let mut wrapped = BuildGateStore::new(Arc::clone(&inner));
+    wrapped.owner_gate = Some(Arc::clone(&gate));
+    let wrapped = Arc::new(wrapped);
+    let acquired = gate.acquired.notified();
+    tokio::pin!(acquired);
+    acquired.as_mut().enable();
+    let first_store: Arc<dyn TaskStore> = wrapped;
+    let build = tokio::spawn(async move {
+        TaskExecutionServiceBuilder::new(first_store, registry(), Arc::new(Ids(AtomicU64::new(1))))
+            .build()
+            .await
+    });
+    let _abort_on_drop = AbortTaskOnDrop(build.abort_handle());
+    tokio::time::timeout(Duration::from_secs(2), acquired)
+        .await
+        .expect("owner acquired before gated return");
+    build.abort();
+    let _ = build.await;
+    gate.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match task::store::SqliteTaskStore::open(&path) {
+                Ok(second) => {
+                    let second: Arc<dyn TaskStore> = Arc::new(second);
+                    let service =
+                        TaskExecutionServiceBuilder::new(second, registry(), Arc::new(Ids(AtomicU64::new(2))))
+                            .build()
+                            .await
+                            .expect("second service builds after cleanup");
+                    service.shutdown().await.expect("second service shuts down");
+                    break;
+                }
+                Err(task::store::StoreError::OwnerConflict) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected SQLite open error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("cancelled build eventually releases the acquired SQLite epoch");
+    drop(inner);
 }
 
 #[tokio::test]
