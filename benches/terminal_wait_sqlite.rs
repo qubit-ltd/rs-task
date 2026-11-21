@@ -320,6 +320,52 @@ fn classify_admission(started: Instant, returned: Instant, succeeded: bool, wind
 }
 
 fn self_test_probe_timing() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let start = Instant::now();
+        let cutoff = start + Duration::from_millis(10);
+        let submissions = Arc::new(Mutex::new(HashMap::<u32, Instant>::new()));
+        let submit_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let launch = Arc::new({
+            let submissions = Arc::clone(&submissions);
+            let submit_calls = Arc::clone(&submit_calls);
+            move |sequence, _planned_at, _launched_at| {
+                let submissions = Arc::clone(&submissions);
+                let submit_calls = Arc::clone(&submit_calls);
+                async move {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(cutoff)).await;
+                    let now = Instant::now();
+                    let mut submissions = submissions.lock().expect("self-test submission lock");
+                    if register_probe_submission(sequence, now, cutoff, &mut submissions).is_none() {
+                        return false;
+                    }
+                    drop(submissions);
+                    submit_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    true
+                }
+            }
+        });
+        let (plans, mut tasks) = launch_probe_schedule(1, start, Duration::ZERO, cutoff, launch).await;
+        let Some(result) = tokio::time::timeout(Duration::from_millis(100), tasks.join_next()).await? else {
+            return Err("late probe task did not finish within its deadline".into());
+        };
+        result?;
+        let submitted = submissions.lock().expect("self-test submission lock").len();
+        let launched = plans.len();
+        let metrics = ProbeMetrics {
+            planned: 1,
+            launched,
+            submitted,
+            not_submitted: launched - submitted,
+            ..ProbeMetrics::default()
+        };
+        metrics.validate()?;
+        if launched != 1 || submitted != 0 || submit_calls.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+            return Err("a dispatched probe at the cutoff must not call submit".into());
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+
     let cutoff = Instant::now();
     let before = cutoff - Duration::from_micros(1);
     let after = cutoff + Duration::from_micros(1);
@@ -353,13 +399,40 @@ fn self_test_probe_timing() -> Result<(), Box<dyn std::error::Error>> {
         return Err("probe aggregation lost not-submitted probes".into());
     }
     aggregate.validate()?;
-    let submit_started = cutoff - Duration::from_millis(4);
+    let planned_at = cutoff - Duration::from_millis(10);
+    let launched_at = cutoff - Duration::from_millis(7);
+    let submitted_at = cutoff - Duration::from_millis(4);
     let store_started = cutoff - Duration::from_millis(2);
     let store_returned = cutoff - Duration::from_millis(1);
-    if store_returned.duration_since(submit_started) <= store_returned.duration_since(store_started) {
-        return Err("submit-to-return duration must include time before the store call".into());
+    if probe_submit_lag_us(planned_at, launched_at) != 3_000
+        || probe_submit_lag_us(planned_at, submitted_at) != 6_000
+        || probe_elapsed_us(submitted_at, store_returned) != 3_000
+        || probe_elapsed_us(store_started, store_returned) != 1_000
+    {
+        return Err("probe latency samples must use the planned, submitted, or store timestamp they name".into());
     }
     Ok(())
+}
+
+fn register_probe_submission(
+    sequence: u32,
+    submitted_at: Instant,
+    window_end: Instant,
+    submissions: &mut HashMap<u32, Instant>,
+) -> Option<Instant> {
+    if !is_before_window_end(submitted_at, window_end) {
+        return None;
+    }
+    submissions.insert(sequence, submitted_at);
+    Some(submitted_at)
+}
+
+fn probe_submit_lag_us(planned_at: Instant, submitted_at: Instant) -> u128 {
+    probe_elapsed_us(planned_at, submitted_at)
+}
+
+fn probe_elapsed_us(started_at: Instant, ended_at: Instant) -> u128 {
+    ended_at.duration_since(started_at).as_micros()
 }
 
 fn classify_terminal_samples(
@@ -730,10 +803,9 @@ async fn run_real_store_round(
             {
                 let mut submissions = submissions.lock().expect("submission lock");
                 let submitted_at = Instant::now();
-                if !is_before_window_end(submitted_at, window_end) {
+                if register_probe_submission(sequence, submitted_at, window_end, &mut submissions).is_none() {
                     return false;
                 }
-                submissions.insert(sequence, submitted_at);
             }
             let result = service
                 .submit(
@@ -777,12 +849,12 @@ async fn run_real_store_round(
     for plan in &plans {
         probes
             .launch_lag_us
-            .push(plan.launched_at.duration_since(plan.planned_at).as_micros());
+            .push(probe_elapsed_us(plan.planned_at, plan.launched_at));
         if let Some(submitted_at) = actual_submissions.get(&plan.sequence) {
             probes.submitted += 1;
             probes
                 .submit_lag_us
-                .push(submitted_at.duration_since(plan.planned_at).as_micros());
+                .push(probe_submit_lag_us(plan.planned_at, *submitted_at));
             match accept_intervals
                 .get(&plan.sequence)
                 .map(|(started, returned, succeeded)| classify_admission(*started, *returned, *succeeded, window_end))
@@ -805,9 +877,7 @@ async fn run_real_store_round(
     }
     for (sequence, (reply, _failed)) in public_submit_replies {
         if let Some(submitted) = actual_submissions.get(&sequence) {
-            probes
-                .submit_reply_us
-                .push(reply.duration_since(*submitted).as_micros());
+            probes.submit_reply_us.push(probe_elapsed_us(*submitted, reply));
         }
     }
     let mut observations = Vec::with_capacity(waiters);
@@ -833,17 +903,13 @@ async fn run_real_store_round(
         }
         if returned < window_end {
             if let Some(submitted) = actual_submissions.get(&sequence) {
-                probes
-                    .admission_us
-                    .push(returned.duration_since(*submitted).as_micros());
+                probes.admission_us.push(probe_elapsed_us(*submitted, returned));
             }
             if let Some(handler) = handlers.get(&sequence).filter(|at| **at < window_end) {
                 probes.started_in_window += 1;
                 if *handler >= returned {
                     if let Some(submitted) = actual_submissions.get(&sequence) {
-                        probes
-                            .admission_handler_us
-                            .push(handler.duration_since(*submitted).as_micros());
+                        probes.admission_handler_us.push(probe_elapsed_us(*submitted, *handler));
                     }
                 } else {
                     probes.handler_admission_overlap += 1;
