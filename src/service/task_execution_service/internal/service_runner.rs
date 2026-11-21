@@ -1467,22 +1467,27 @@ mod external_cancel_race_tests {
     use crate::store::TaskFuture;
     use crate::store::TaskStore;
 
-    struct PanicTransitionStore {
+    struct PausedTransitionStore {
         inner: Arc<MemoryTaskStore>,
         entered: tokio::sync::Notify,
         release: Arc<tokio::sync::Notify>,
         panic_next: std::sync::atomic::AtomicBool,
+        conflict_next: std::sync::atomic::AtomicBool,
     }
 
-    struct ReleasePanicGate(Arc<tokio::sync::Notify>);
+    struct ReleaseCancellationGates {
+        store: Arc<tokio::sync::Notify>,
+        handler: Arc<tokio::sync::Notify>,
+    }
 
-    impl Drop for ReleasePanicGate {
+    impl Drop for ReleaseCancellationGates {
         fn drop(&mut self) {
-            self.0.notify_one();
+            self.store.notify_one();
+            self.handler.notify_one();
         }
     }
 
-    impl TaskStore for PanicTransitionStore {
+    impl TaskStore for PausedTransitionStore {
         crate::delegate_task_store!(inner; except [transition_encoded]);
 
         fn transition_encoded<'a>(
@@ -1497,6 +1502,14 @@ mod external_cancel_race_tests {
                     self.entered.notify_one();
                     self.release.notified().await;
                     panic!("{}", "x".repeat(crate::model::MAX_TASK_DIAGNOSTIC_MESSAGE_BYTES + 1024));
+                }
+                if command.state == TaskState::Running
+                    && command.cancel_requested
+                    && self.conflict_next.swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    return Err(StoreError::Conflict);
                 }
                 self.inner.transition_encoded(command).await
             })
@@ -1680,16 +1693,20 @@ mod external_cancel_race_tests {
     #[tokio::test]
     async fn test_external_cancel_store_panic_completes_shared_flight() {
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-        let store = Arc::new(PanicTransitionStore {
+        let store = Arc::new(PausedTransitionStore {
             inner: Arc::new(MemoryTaskStore::new(8)),
             entered: tokio::sync::Notify::new(),
             release: Arc::new(tokio::sync::Notify::new()),
             panic_next: std::sync::atomic::AtomicBool::new(true),
+            conflict_next: std::sync::atomic::AtomicBool::new(false),
         });
-        let _release_gate = ReleasePanicGate(Arc::clone(&store.release));
         let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
         let handler_started = Arc::new(tokio::sync::Notify::new());
         let handler_release = Arc::new(tokio::sync::Notify::new());
+        let _release_gates = ReleaseCancellationGates {
+            store: Arc::clone(&store.release),
+            handler: Arc::clone(&handler_release),
+        };
         let hook_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hook_called_by_handler = Arc::clone(&hook_called);
         let mut builder = crate::service::TaskExecutionServiceBuilder::new(
@@ -1778,6 +1795,10 @@ mod external_cancel_race_tests {
             failures[0], failures[1],
             "both flight subscribers receive the same failure"
         );
+        assert!(
+            failures[0].contains(&"x".repeat(32)),
+            "panic diagnostic identifies the injected panic"
+        );
         assert!(!service.core.external_cancellations.lock().contains_key(&key));
         assert!(!hook_called.load(std::sync::atomic::Ordering::Acquire));
         handler_release.notify_one();
@@ -1786,6 +1807,121 @@ mod external_cancel_race_tests {
                 .await
                 .expect("in-flight guard is released after panic"),
             Err(crate::service::TaskServiceError::StoreUnavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_external_cancel_no_progress_conflict_completes_shared_flight() {
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+        let store = Arc::new(PausedTransitionStore {
+            inner: Arc::new(MemoryTaskStore::new(8)),
+            entered: tokio::sync::Notify::new(),
+            release: Arc::new(tokio::sync::Notify::new()),
+            panic_next: std::sync::atomic::AtomicBool::new(false),
+            conflict_next: std::sync::atomic::AtomicBool::new(true),
+        });
+        let registry = Arc::new(ValueBytesCodecRegistry::from_registrations([&CODEC_REGISTRATION]).unwrap());
+        let handler_release = Arc::new(tokio::sync::Notify::new());
+        let _release_gates = ReleaseCancellationGates {
+            store: Arc::clone(&store.release),
+            handler: Arc::clone(&handler_release),
+        };
+        let hook_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let hook_count = Arc::clone(&hook_calls);
+        let mut builder = crate::service::TaskExecutionServiceBuilder::new(
+            store.clone(),
+            registry,
+            Arc::new(TestIds(AtomicU64::new(812))),
+        )
+        .max_running_tasks(NonZeroUsize::new(1).unwrap());
+        builder
+            .register_handler_with_options::<Payload, _>(
+                TaskHandlerDescriptor::for_payload::<Payload>("test.external-cancel-conflict", 1),
+                Arc::new(FinishWhenGateReached(Arc::clone(&handler_release))),
+                crate::handler::HandlerOptions::new()
+                    .with_source("unit-test")
+                    .with_external_cancellation(move |_| {
+                        hook_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Box::pin(async { Ok(()) })
+                    }),
+            )
+            .unwrap();
+        let service = builder.build().await.expect("service starts");
+        let accepted = service
+            .submit(TaskRequest::new(
+                "test.external-cancel-conflict",
+                1,
+                ValueCodecId::new("test.external_cancel_race.codec"),
+                Payload,
+            ))
+            .await
+            .expect("task submits");
+        let task_id = accepted.summary.id;
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                if service
+                    .get_summary(task_id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|summary| summary.state == TaskState::Running)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handler starts");
+        let first_service = service.clone();
+        let first = tokio::spawn(async move { first_service.request_cancel(task_id).await });
+        tokio::time::timeout(TIMEOUT, store.entered.notified())
+            .await
+            .expect("intent transition reaches the paused store");
+        let second_service = service.clone();
+        let second = tokio::spawn(async move { second_service.request_cancel(task_id).await });
+        let key = (task_id, 1);
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                let receivers = match service.core.external_cancellations.lock().get(&key) {
+                    Some(ExternalCancelEntry::InFlight(flight)) => flight.result.receiver_count(),
+                    _ => 0,
+                };
+                if receivers == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both callers subscribe to one flight");
+        store.release.notify_one();
+        let mut failures = Vec::with_capacity(2);
+        for waiter in [first, second] {
+            let result = tokio::time::timeout(TIMEOUT, waiter)
+                .await
+                .expect("flight result is bounded")
+                .expect("waiter joins");
+            assert!(matches!(
+                result,
+                Err(crate::service::TaskServiceError::StoreUnavailable(ref message))
+                    if message.contains("recording intent") && message.contains("no state-version progress")
+            ),
+                "expected intent no-progress diagnostic, got {result:?}"
+            );
+            if let Err(crate::service::TaskServiceError::StoreUnavailable(message)) = result {
+                failures.push(message);
+            }
+        }
+        assert_eq!(failures[0], failures[1], "both receivers observe the same flight error");
+        assert!(!service.core.external_cancellations.lock().contains_key(&key));
+        assert_eq!(hook_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        handler_release.notify_one();
+        assert!(matches!(
+            tokio::time::timeout(TIMEOUT, service.shutdown())
+                .await
+                .expect("shutdown is bounded"),
+            Err(crate::service::TaskServiceError::StoreUnavailable(message))
+                if message.contains("recording intent")
         ));
     }
 }
