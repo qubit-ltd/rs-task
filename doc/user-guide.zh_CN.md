@@ -22,11 +22,11 @@ Operation 托管任务见[接入说明](#由任务托管-operation)和 [`example
 
 读取完整的无 payload 摘要用 `get_summary(id)`；消费者对账只需当前状态时用 `get_state_checkpoint(id)`。`wait_terminal(id, timeout)` 在单一总超时内轮询 checkpoint；Succeeded、Failed、Panicked 和 Cancelled 是终态，Blocked 不是。零超时仍会尝试一次可立即完成的读取；SQLite 清理任务行后，仍可能返回保留的终态 checkpoint。`pages(query)` 每次读取一页：`TaskQuery::default()` 默认 50 条，`page_size` 只接受 1 到 256。页读取失败时保留当前游标供重试，最后一个非空页会先返回，再报告没有更多记录。
 
-`request_cancel(id)` 表示发出取消请求。Queued 或 Blocked 任务可返回 `CancelledBeforeRun`；运行中的 cooperative handler 返回 `CancellationRequested` 后，仍须由 handler 在安全边界检查 `TaskContext::cancellation().wait_requested().await` 或 `is_requested()` 并结束工作。该结果不表示运行中的任务已经终止。修复配置后，把观察到的 `TaskSummary` 传给 `resume_blocked(&observed_summary)`；服务会用该快照版本进行条件更新。隔离失败通知时，将完整的 `NotificationFailure` 诊断传给 `quarantine_failed_notification(&diagnostic, reason)`，store 会原子比较任务、版本和事件标识。
+`request_cancel(id)` 表示发出取消请求。Queued 或 Blocked 任务可返回 `CancelledBeforeRun`；运行中的 cooperative handler 返回 `CancellationRequested` 后，仍须由 handler 在安全边界检查 `TaskContext::cancellation().wait_requested().await` 或 `is_requested()` 并结束工作。该结果不表示运行中的任务已经终止。写入派发后，服务托管 compare-and-set 及后续调度唤醒或 cooperative signal；调用方被取消只会结束等待。store panic 会锁存服务故障，并向仍在等待的调用方恢复 unwind。修复配置后，把观察到的 `TaskSummary` 传给 `resume_blocked(&observed_summary)`；服务会用该快照版本进行条件更新。重排队成功后会唤醒调度器；写入派发后，即使调用方退出，服务仍会完成写入和唤醒。隔离失败通知时，将完整的 `NotificationFailure` 诊断传给 `quarantine_failed_notification(&diagnostic, reason)`，store 会原子比较任务、版本和事件标识。
 
 ## 由任务托管 operation
 
-运行受控集成示例：`cargo run --locked --features operation --example operation_task`。它从 task handler 启动受管理的 operation；外部取消 hook 观察到请求后会输出“已请求停止”。任务结果可能早于 operation 输入释放；handler 会依次等待父级结果、输入释放、领域结算和清理完成后才返回。示例按此顺序打开门闩，并在关停完成后确认 manager 没有活跃、排队、未确认、清理或恢复中的工作。
+运行受控集成示例：`cargo run --locked --features operation --example operation_task`。锁文件使用 registry `qubit-event-bus-redis` 0.7.4，不需要同级 Redis checkout。task handler 等待 cooperative cancellation request，再用 `request_stop(UserCancelled)` 请求父 operation 停止。operation 报告已观察到停止请求时，示例输出“已请求停止”；这只表示请求阶段，不表示父 operation 已有最终结果或任务已进入终态。示例先观察父结果，再释放托管输入；输入释放后输出“输入已释放”。handler 仍会持有执行配额，直到领域结算和资源清理完成，之后才返回并由 service 持久化任务终态。关停先等待 `TaskExecutionService`，再关闭 `AsyncOperationManager`，并确认 manager 没有活跃、排队、未确认、清理或恢复中的工作。
 
 该示例使用受控的本地 Tokio 作业来说明生命周期所有权和资源释放证据，不是生产 provider 适配器。若服务无法证实外部资源已释放，生产 provider 需要自己的对账和处置机制。关停顺序为：停止应用入口、排空 `TaskExecutionService`，再请求并等待 `AsyncOperationManager` 关闭。manager 集成需要 `operation` feature；任务取消等待 API 本身仍可在不启用该 feature 时使用。
 
