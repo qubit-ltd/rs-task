@@ -104,7 +104,21 @@ struct ReadyQueryComparison {
     representative_adaptive_uses_split: bool,
     representative_adaptive_plan: Vec<String>,
     extreme_distributions: Vec<ReadyDistributionReport>,
+    cursor_pages: Vec<ReadyCursorReport>,
 }
+
+#[derive(Serialize)]
+struct ReadyCursorReport {
+    depth_percent: usize,
+    old_sql_vm_steps: i32,
+    range_sql_vm_steps: i32,
+    old_sql: Timing,
+    range_sql: Timing,
+    rows_match: bool,
+    old_sql_interrupted: bool,
+}
+
+type ReadyBenchmarkRow = (String, String, String);
 
 #[derive(Serialize)]
 struct ReadyDistributionReport {
@@ -770,6 +784,7 @@ fn compare_ready_queries(connection: &mut Connection) -> Result<ReadyQueryCompar
     )?;
     let (old_sql, old_sql_vm_steps) = run(connection, OLD_SQL)?;
     let (split_sql, split_sql_vm_steps) = run(connection, SPLIT_SQL)?;
+    let cursor_pages = measure_ready_cursor_pages(connection)?;
     Ok(ReadyQueryComparison {
         old_sql_vm_steps,
         split_sql_vm_steps,
@@ -790,7 +805,87 @@ fn compare_ready_queries(connection: &mut Connection) -> Result<ReadyQueryCompar
         representative_adaptive_uses_split,
         representative_adaptive_plan,
         extreme_distributions,
+        cursor_pages,
     })
+}
+
+fn measure_ready_cursor_pages(
+    connection: &mut Connection,
+) -> Result<Vec<ReadyCursorReport>, Box<dyn std::error::Error>> {
+    const OLD_SQL: &str = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4";
+    const RANGE_SQL: &str = "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) AND (accepted_at,id)>(?2,?3) ORDER BY accepted_at,id LIMIT ?4";
+
+    fn execute(
+        connection: &Connection,
+        sql: &str,
+        cursor: &(i64, String),
+    ) -> Result<(Vec<ReadyBenchmarkRow>, i32), Box<dyn std::error::Error>> {
+        let mut statement = connection.prepare_cached(sql)?;
+        let rows = statement.query_map(params![1_i64, cursor.0, cursor.1, PAGE_SIZE as i64 + 1], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok((rows, statement.reset_status(StatementStatus::VmStep)))
+    }
+
+    fn measure(
+        connection: &Connection,
+        sql: &str,
+        cursor: &(i64, String),
+    ) -> Result<(Timing, Vec<ReadyBenchmarkRow>, i32), Box<dyn std::error::Error>> {
+        for _ in 0..QUERY_WARMUPS {
+            execute(connection, sql, cursor)?;
+        }
+        let mut samples = Vec::with_capacity(QUERY_SAMPLES);
+        for _ in 0..QUERY_SAMPLES {
+            let start = Instant::now();
+            execute(connection, sql, cursor)?;
+            samples.push(start.elapsed());
+        }
+        let (rows, steps) = execute(connection, sql, cursor)?;
+        Ok((summarize(samples), rows, steps))
+    }
+
+    connection.execute_batch(
+        "CREATE TEMP TABLE ready_cursor_original AS SELECT id,state_kind,retry_not_before_ms FROM tasks; \
+         CREATE UNIQUE INDEX ready_cursor_original_id ON ready_cursor_original(id); \
+         UPDATE tasks SET state_kind='Queued',retry_not_before_ms=NULL;",
+    )?;
+    let result = (|| -> Result<Vec<ReadyCursorReport>, Box<dyn std::error::Error>> {
+        let rows: i64 = connection.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
+        let mut reports = Vec::new();
+        for depth_percent in [10_usize, 90] {
+            let offset = rows * i64::try_from(depth_percent)? / 100;
+            let cursor: (i64, String) = connection.query_row(
+                "SELECT accepted_at,id FROM tasks ORDER BY accepted_at,id LIMIT 1 OFFSET ?1",
+                [offset],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let (old_sql, old_rows, old_sql_vm_steps) = measure(connection, OLD_SQL, &cursor)?;
+            let (range_sql, range_rows, range_sql_vm_steps) = measure(connection, RANGE_SQL, &cursor)?;
+            reports.push(ReadyCursorReport {
+                depth_percent,
+                old_sql_vm_steps,
+                range_sql_vm_steps,
+                old_sql,
+                range_sql,
+                rows_match: old_rows == range_rows,
+                old_sql_interrupted: old_sql_vm_steps >= 2_000,
+            });
+        }
+        Ok(reports)
+    })();
+    connection.execute_batch(
+        "UPDATE tasks AS task SET \
+             state_kind=(SELECT original.state_kind FROM ready_cursor_original AS original WHERE original.id=task.id), \
+             retry_not_before_ms=(SELECT original.retry_not_before_ms FROM ready_cursor_original AS original WHERE original.id=task.id); \
+         DROP TABLE ready_cursor_original;",
+    )?;
+    result
 }
 
 fn explain<P: Params>(

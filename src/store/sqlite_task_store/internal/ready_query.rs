@@ -90,10 +90,15 @@ impl ReadyQuery {
     }
 }
 
-const READY_ACCEPTANCE_QUERY: &str = concat!(
+const READY_ACCEPTANCE_FIRST_PAGE_QUERY: &str = concat!(
     "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id ",
     "WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ",
-    "AND (?2 IS NULL OR (accepted_at,id)>(?2,?3)) ORDER BY accepted_at,id LIMIT ?4"
+    "ORDER BY accepted_at,id LIMIT ?2"
+);
+const READY_ACCEPTANCE_AFTER_CURSOR_QUERY: &str = concat!(
+    "SELECT id,request_info_json,lifecycle_json FROM tasks INDEXED BY tasks_queued_accepted_id ",
+    "WHERE state_kind='Queued' AND (retry_not_before_ms IS NULL OR retry_not_before_ms<=?1) ",
+    "AND (accepted_at,id)>(?2,?3) ORDER BY accepted_at,id LIMIT ?4"
 );
 
 /// Lists queued task summaries in acceptance order when their retry deadline
@@ -198,14 +203,13 @@ fn query_snapshot(
 ) -> Result<TaskPage, StoreError> {
     let fetch =
         i64::try_from(page_size + 1).map_err(|_| StoreError::InvalidRequest("ready task page limit is too large"))?;
-    let (accepted, id) = cursor.map_or((None, None), |(accepted, id)| (Some(*accepted), Some(id.as_str())));
     budget.start();
-    let acceptance_result = query_acceptance_rows(connection, now, accepted, id, fetch);
+    let acceptance_result = query_acceptance_rows(connection, cursor, now, fetch);
     budget.stop();
     let page_rows = match acceptance_result {
         Ok(rows) => rows,
         Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::OperationInterrupted => {
-            query_split_rows(connection, now, accepted, id, fetch)?
+            query_split_rows(connection, cursor, now, fetch)?
         }
         Err(error) => return Err(failure(error)),
     };
@@ -227,21 +231,34 @@ fn query_snapshot(
 /// The ordered page rows, or a SQLite error including VM-budget interruption.
 fn query_acceptance_rows(
     connection: &Connection,
+    cursor: Option<&(i64, String)>,
     now: i64,
-    accepted: Option<i64>,
-    id: Option<&str>,
     fetch: i64,
 ) -> Result<Vec<(String, String, String)>, rusqlite::Error> {
-    connection
-        .prepare_cached(READY_ACCEPTANCE_QUERY)?
-        .query_map(params![now, accepted, id, fetch], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()
+    let mut statement = match cursor {
+        Some(_) => connection.prepare_cached(READY_ACCEPTANCE_AFTER_CURSOR_QUERY)?,
+        None => connection.prepare_cached(READY_ACCEPTANCE_FIRST_PAGE_QUERY)?,
+    };
+    match cursor {
+        Some((accepted, id)) => statement
+            .query_map(params![now, accepted, id, fetch], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>(),
+        None => statement
+            .query_map(params![now, fetch], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>(),
+    }
 }
 
 /// Reads the same ready page through disjoint immediate and due indexes.
@@ -259,11 +276,11 @@ fn query_acceptance_rows(
 /// Ready rows in acceptance order, or a storage error.
 fn query_split_rows(
     connection: &Connection,
+    cursor: Option<&(i64, String)>,
     now: i64,
-    accepted: Option<i64>,
-    id: Option<&str>,
     fetch: i64,
 ) -> Result<Vec<(String, String, String)>, StoreError> {
+    let (accepted, id) = cursor.map_or((None, None), |(accepted, id)| (Some(*accepted), Some(id.as_str())));
     connection
         .prepare_cached(concat!(
             "WITH candidates(id,accepted_at) AS (",
@@ -592,6 +609,35 @@ mod tests {
 
         let page = list_ready_queued(&mut connection, None, NonZeroUsize::new(32).unwrap(), 1).unwrap();
         assert_eq!(page.records.len(), 32);
+    }
+
+    #[test]
+    fn test_deep_ready_cursor_uses_bounded_acceptance_range() {
+        let mut connection = connection();
+        for index in 0..10_000_u64 {
+            add_task(&connection, index, index / 2, None, "Queued");
+        }
+
+        let budget = ReadyQuery::install(&mut connection).unwrap();
+        let cursor = TaskCursor::new(4_500, TaskId::from_id(Id::new(9_000)));
+        let page = list_ready_queued_with_budget(
+            &mut connection,
+            Some(cursor),
+            NonZeroUsize::new(16).unwrap(),
+            0,
+            &budget,
+        )
+        .unwrap();
+
+        assert_eq!(
+            page.records
+                .iter()
+                .map(|summary| summary.id.to_string().parse::<u64>().unwrap())
+                .collect::<Vec<_>>(),
+            (9_001..=9_016).collect::<Vec<_>>()
+        );
+        assert_eq!(page.next, Some(TaskCursor::from(page.records.last().unwrap())));
+        assert_eq!(budget.progress_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
