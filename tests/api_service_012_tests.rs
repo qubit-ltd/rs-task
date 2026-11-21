@@ -101,6 +101,7 @@ struct ControlledWaitStore {
     inner: Arc<MemoryTaskStore>,
     checkpoint_reads: tokio::sync::Semaphore,
     terminal_committed: tokio::sync::Semaphore,
+    reads_at: Mutex<Vec<tokio::time::Instant>>,
     commit_at: Mutex<Option<tokio::time::Instant>>,
     observed_at: Mutex<Option<tokio::time::Instant>>,
 }
@@ -115,6 +116,7 @@ impl TaskStore for ControlledWaitStore {
         let future = self.inner.get_state_checkpoint(id);
         Box::pin(async move {
             let checkpoint = future.await?;
+            self.reads_at.lock().expect("read timestamp lock").push(tokio::time::Instant::now());
             self.checkpoint_reads.add_permits(1);
             if checkpoint.as_ref().is_some_and(|item| item.state.is_terminal()) {
                 *self.observed_at.lock().expect("observation timestamp lock") = Some(tokio::time::Instant::now());
@@ -142,10 +144,13 @@ impl TaskStore for ControlledWaitStore {
 
 #[tokio::test(start_paused = true)]
 async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
+    const TEST_LIMIT: Duration = Duration::from_secs(2);
+
     let store = Arc::new(ControlledWaitStore {
         inner: Arc::new(MemoryTaskStore::new(16)),
         checkpoint_reads: tokio::sync::Semaphore::new(0),
         terminal_committed: tokio::sync::Semaphore::new(0),
+        reads_at: Mutex::new(Vec::new()),
         commit_at: Mutex::new(None),
         observed_at: Mutex::new(None),
     });
@@ -174,18 +179,36 @@ async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
         .submit(TaskKind::<Input>::new("known", 1, ValueCodecId::new("example.codec")).request(Input(40)))
         .await
         .unwrap();
-    handler_started.notified().await;
+    tokio::time::timeout(TEST_LIMIT, handler_started.notified())
+        .await
+        .expect("handler startup should complete within the test deadline");
 
     let id = accepted.summary.id;
     let waiting_service = service.clone();
     let wait_started = tokio::time::Instant::now();
-    let wait = tokio::spawn(async move { waiting_service.wait_terminal(id, Duration::from_millis(60)).await });
-    store.checkpoint_reads.acquire().await.unwrap().forget();
+    let mut wait = tokio::spawn(async move {
+        waiting_service
+            .wait_terminal(id, Duration::from_millis(60))
+            .await
+    });
+    tokio::time::timeout(TEST_LIMIT, store.checkpoint_reads.acquire())
+        .await
+        .expect("first checkpoint read should start within the test deadline")
+        .expect("checkpoint read semaphore remains open")
+        .forget();
     tokio::time::advance(Duration::from_millis(25)).await;
-    store.checkpoint_reads.acquire().await.unwrap().forget();
+    tokio::time::timeout(TEST_LIMIT, store.checkpoint_reads.acquire())
+        .await
+        .expect("second checkpoint read should start within the test deadline")
+        .expect("checkpoint read semaphore remains open")
+        .forget();
     tokio::time::advance(Duration::from_millis(15)).await;
     release_handler.notify_one();
-    store.terminal_committed.acquire().await.unwrap().forget();
+    tokio::time::timeout(TEST_LIMIT, store.terminal_committed.acquire())
+        .await
+        .expect("terminal commit should complete within the test deadline")
+        .expect("terminal commit semaphore remains open")
+        .forget();
 
     let commit_at = store
         .commit_at
@@ -193,12 +216,27 @@ async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
         .unwrap()
         .expect("target terminal transition committed");
     assert_eq!(commit_at.duration_since(wait_started), Duration::from_millis(40));
+    assert_eq!(
+        store.reads_at.lock().unwrap()[0].duration_since(wait_started),
+        Duration::ZERO,
+        "the first checkpoint read should happen immediately",
+    );
     tokio::time::advance(Duration::from_millis(15)).await;
-    store.checkpoint_reads.acquire().await.unwrap().forget();
-    let checkpoint = wait
-        .await
-        .unwrap()
-        .expect("terminal state observed before budget expires");
+    let result = match tokio::time::timeout(TEST_LIMIT, &mut wait).await {
+        Ok(result) => result.expect("wait_terminal task should join successfully"),
+        Err(_) => {
+            wait.abort();
+            let _ = wait.await;
+            panic!("wait_terminal task did not finish within the outer test deadline");
+        }
+    };
+    let checkpoint = match result {
+        Ok(checkpoint) => checkpoint,
+        Err(WaitTaskError::Timeout(_)) => {
+            panic!("wait_terminal returned Timeout despite the 40ms terminal commit")
+        }
+        Err(error) => panic!("wait_terminal returned an unexpected error: {error:?}"),
+    };
     assert!(checkpoint.state.is_terminal());
     let observed_at = store
         .observed_at
@@ -206,6 +244,7 @@ async fn test_wait_terminal_observes_a_40ms_commit_within_a_60ms_budget() {
         .unwrap()
         .expect("terminal checkpoint was observed");
     assert_eq!(observed_at.duration_since(wait_started), Duration::from_millis(55));
+    assert!(observed_at.duration_since(wait_started) <= Duration::from_millis(60));
     assert!(observed_at.duration_since(commit_at) <= Duration::from_millis(15));
     service.shutdown().await.unwrap();
 }
