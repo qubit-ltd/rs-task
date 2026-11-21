@@ -108,3 +108,8 @@ tokio = { version = "^1.54", features = ["macros", "rt-multi-thread", "time", "t
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "^0.61", features = ["Win32_Storage_FileSystem"] }
+
+[[bench]]
+name = "terminal_wait_sqlite"
+harness = false
+required-features = ["sqlite"]
